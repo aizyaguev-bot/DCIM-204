@@ -1,0 +1,25 @@
+node_modules/
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+build/
+*.log
+# Database — contains encrypted credentials; create fresh on each deployment
+backend/lab_manager.db
+backend/*.db
+# Build output copied to backend (use frontend/dist instead)
+backend/static/
+# Debug scripts
+probe_kvm*.py
+# JSON runtime state files — machine-specific, generated at runtime
+backend/rack_positions.json
+backend/rack_slots.json
+backend/switch_assignments.json
+backend/rack_items.json

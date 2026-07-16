@@ -1,0 +1,915 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lab Manager — Mockup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            nv: {
+              50:  "#f2fbe6",
+              100: "#dff7c2",
+              300: "#9fe040",
+              400: "#76b900", // NVIDIA green
+              500: "#5e9300",
+              600: "#467000",
+            },
+          },
+          fontFamily: {
+            mono: ["JetBrains Mono", "Consolas", "ui-monospace", "monospace"],
+          },
+        },
+      },
+    };
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="./mock-data.js"></script>
+  <style>
+    html, body, #root { height: 100%; }
+    body {
+      background: radial-gradient(circle at 15% 0%, #1a2a14 0%, #0a0a0c 35%, #0a0a0c 100%);
+      color: #e7e7ea;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    /* Faux KVM screen styles */
+    .screen { font-family: "JetBrains Mono", Consolas, ui-monospace, monospace; overflow: hidden; position: relative; }
+    .screen::after {
+      content: ""; position: absolute; inset: 0;
+      background: repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 3px);
+      pointer-events: none;
+    }
+    .screen.linux-term { background: #0a0a0a; color: #c8f779; }
+    .screen.gpu-monitor { background: #001a0e; color: #7af7d2; }
+    .screen.nvidia-smi { background: #0a0a0a; color: #76b900; }
+    .screen.bios { background: #00007a; color: #d8d8e0; }
+    .screen.win-login { background: linear-gradient(135deg, #1a4080 0%, #2a5fb0 100%); color: #fff; }
+    .screen.blank { background: #0a0a0a; color: #333; }
+    .cursor::after { content: "▍"; animation: blink 1s steps(2) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    /* Scrollbar polish */
+    *::-webkit-scrollbar { width: 8px; height: 8px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: #2a2a2e; border-radius: 4px; }
+    *::-webkit-scrollbar-thumb:hover { background: #3a3a3e; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useMemo, useCallback, useRef, Fragment } = React;
+
+    // ------------------------------------------------------------------
+    // Persistent state hook — uses localStorage so edits survive refresh
+    // ------------------------------------------------------------------
+    function useLocalState(key, initial) {
+      const [val, setVal] = useState(() => {
+        try {
+          const raw = localStorage.getItem(key);
+          return raw ? JSON.parse(raw) : initial;
+        } catch { return initial; }
+      });
+      useEffect(() => {
+        try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+      }, [key, val]);
+      return [val, setVal];
+    }
+
+    // ------------------------------------------------------------------
+    // Top-level app
+    // ------------------------------------------------------------------
+    function App() {
+      const [pdus, setPdus] = useLocalState("lm.pdus", window.MOCK_DATA.pdus);
+      const [kvms, setKvms] = useLocalState("lm.kvms", window.MOCK_DATA.kvms);
+      const [view, setView] = useState({ kind: "dashboard" });
+      const [filter, setFilter] = useState("all"); // all | pdus | kvms
+      const [rackFilter, setRackFilter] = useState("all");
+      const [search, setSearch] = useState("");
+      const [addOpen, setAddOpen] = useState(false);
+      const [viewer, setViewer] = useState(null); // { kvm, port }
+
+      const racks = useMemo(() => {
+        const s = new Set();
+        [...pdus, ...kvms].forEach(d => d.rack && s.add(d.rack));
+        return [...s].sort();
+      }, [pdus, kvms]);
+
+      const stats = useMemo(() => {
+        const outletsOn = pdus.reduce((a, p) => a + p.outlets.filter(o => o.state === "on").length, 0);
+        const outletsTotal = pdus.reduce((a, p) => a + p.outlets.length, 0);
+        const watts = pdus.reduce((a, p) => a + p.outlets.reduce((s, o) => s + (o.watts || 0), 0), 0);
+        const portsTotal = kvms.reduce((a, k) => a + k.portCount, 0);
+        const portsActive = kvms.reduce((a, k) => a + k.ports.filter(p => p.status === "active").length, 0);
+        const alerts = pdus.filter(p => p.status !== "online" || (p.alerts && p.alerts.length)).length;
+        return { outletsOn, outletsTotal, watts, portsTotal, portsActive, alerts, deviceCount: pdus.length + kvms.length };
+      }, [pdus, kvms]);
+
+      const setOutlet = (pduId, outletId, patch) => {
+        setPdus(pdus.map(p => p.id === pduId
+          ? { ...p, outlets: p.outlets.map(o => o.id === outletId ? { ...o, ...patch } : o) }
+          : p));
+      };
+
+      const matchesSearch = (d) => {
+        if (!search.trim()) return true;
+        const s = search.toLowerCase();
+        return d.name.toLowerCase().includes(s)
+          || d.ip.toLowerCase().includes(s)
+          || (d.rack || "").toLowerCase().includes(s)
+          || (d.outlets || []).some(o => o.label.toLowerCase().includes(s))
+          || (d.ports || []).some(p => p.label.toLowerCase().includes(s));
+      };
+
+      const matchesRack = (d) => rackFilter === "all" || d.rack === rackFilter;
+
+      const visiblePdus = pdus.filter(p => matchesSearch(p) && matchesRack(p));
+      const visibleKvms = kvms.filter(k => matchesSearch(k) && matchesRack(k));
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          <Header
+            search={search} setSearch={setSearch}
+            onAdd={() => setAddOpen(true)}
+            onHome={() => setView({ kind: "dashboard" })}
+          />
+          <StatsBar stats={stats} />
+
+          {view.kind === "dashboard" && (
+            <main className="flex-1 px-6 py-5 max-w-[1600px] w-full mx-auto">
+              <Toolbar
+                filter={filter} setFilter={setFilter}
+                rackFilter={rackFilter} setRackFilter={setRackFilter}
+                racks={racks}
+              />
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-5">
+                {(filter === "all" || filter === "pdus") && visiblePdus.map(p =>
+                  <PduCard key={p.id} pdu={p}
+                    onOpen={() => setView({ kind: "pdu", id: p.id })}
+                    onOutletAction={(o, action) => handleOutletAction(p, o, action, setOutlet)}
+                  />
+                )}
+                {(filter === "all" || filter === "kvms") && visibleKvms.map(k =>
+                  <KvmCard key={k.id} kvm={k}
+                    onOpen={() => setView({ kind: "kvm", id: k.id })}
+                    onPortClick={(port) => setViewer({ kvm: k, port })}
+                  />
+                )}
+                {visiblePdus.length === 0 && visibleKvms.length === 0 && (
+                  <div className="col-span-full text-center text-zinc-500 py-16">
+                    No devices match your filters.
+                  </div>
+                )}
+              </div>
+            </main>
+          )}
+
+          {view.kind === "pdu" && (
+            <PduDetail
+              pdu={pdus.find(p => p.id === view.id)}
+              onBack={() => setView({ kind: "dashboard" })}
+              onOutletAction={(o, action) => {
+                const pdu = pdus.find(p => p.id === view.id);
+                handleOutletAction(pdu, o, action, setOutlet);
+              }}
+              onRenameOutlet={(o, name) => setOutlet(view.id, o.id, { label: name })}
+            />
+          )}
+
+          {view.kind === "kvm" && (
+            <KvmDetail
+              kvm={kvms.find(k => k.id === view.id)}
+              onBack={() => setView({ kind: "dashboard" })}
+              onPortClick={(port) => setViewer({ kvm: kvms.find(k => k.id === view.id), port })}
+            />
+          )}
+
+          {viewer && <KvmViewerModal kvm={viewer.kvm} port={viewer.port} onClose={() => setViewer(null)} />}
+          {addOpen && (
+            <AddDeviceModal
+              racks={racks}
+              onClose={() => setAddOpen(false)}
+              onAdd={(dev) => {
+                if (dev.kind === "pdu") setPdus([...pdus, dev.payload]);
+                else setKvms([...kvms, dev.payload]);
+                setAddOpen(false);
+              }}
+            />
+          )}
+
+          <Footer />
+        </div>
+      );
+    }
+
+    function handleOutletAction(pdu, outlet, action, setOutlet) {
+      if (action === "on") setOutlet(pdu.id, outlet.id, { state: "on", watts: 50 + Math.floor(Math.random() * 300) });
+      else if (action === "off") {
+        if (!confirm(`Power OFF outlet ${outlet.number} (${outlet.label}) on ${pdu.name}?`)) return;
+        setOutlet(pdu.id, outlet.id, { state: "off", watts: 0 });
+      } else if (action === "cycle") {
+        if (!confirm(`Power CYCLE outlet ${outlet.number} (${outlet.label}) on ${pdu.name}? This will reboot the connected device.`)) return;
+        setOutlet(pdu.id, outlet.id, { state: "off", watts: 0 });
+        setTimeout(() => setOutlet(pdu.id, outlet.id, { state: "on", watts: 50 + Math.floor(Math.random() * 300) }), 1500);
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Header / stats / toolbar
+    // ------------------------------------------------------------------
+    function Header({ search, setSearch, onAdd, onHome }) {
+      return (
+        <header className="border-b border-zinc-800/80 bg-zinc-950/70 backdrop-blur sticky top-0 z-30">
+          <div className="max-w-[1600px] mx-auto px-6 py-3 flex items-center gap-4">
+            <button onClick={onHome} className="flex items-center gap-2 group">
+              <div className="w-8 h-8 rounded-md bg-nv-400/20 border border-nv-400/40 flex items-center justify-center">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#76b900" strokeWidth="2.5">
+                  <path d="M3 12h3l2-7 4 14 2-7h7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <div className="leading-tight text-left">
+                <div className="font-semibold tracking-tight group-hover:text-nv-400 transition">Lab Manager</div>
+                <div className="text-[11px] text-zinc-500 -mt-0.5">Raritan PDU + KVM control</div>
+              </div>
+            </button>
+
+            <div className="flex-1 max-w-xl mx-auto">
+              <div className="relative">
+                <svg className="absolute left-3 top-2.5 text-zinc-500" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="11" cy="11" r="7"/><path d="m21 21-3.5-3.5"/>
+                </svg>
+                <input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search devices, outlets, ports, IPs, racks…"
+                  className="w-full bg-zinc-900/70 border border-zinc-800 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-nv-400/60 placeholder:text-zinc-500"
+                />
+              </div>
+            </div>
+
+            <button onClick={onAdd} className="bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium text-sm px-3.5 py-2 rounded-lg shadow-sm transition flex items-center gap-1.5">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 5v14M5 12h14"/></svg>
+              Add Device
+            </button>
+          </div>
+        </header>
+      );
+    }
+
+    function StatsBar({ stats }) {
+      const items = [
+        { label: "Devices", value: stats.deviceCount },
+        { label: "Outlets on", value: `${stats.outletsOn} / ${stats.outletsTotal}` },
+        { label: "Total draw", value: `${(stats.watts / 1000).toFixed(2)} kW` },
+        { label: "KVM ports active", value: `${stats.portsActive} / ${stats.portsTotal}` },
+        { label: "Alerts", value: stats.alerts, danger: stats.alerts > 0 },
+      ];
+      return (
+        <div className="border-b border-zinc-800/80 bg-zinc-950/40">
+          <div className="max-w-[1600px] mx-auto px-6 py-3 flex flex-wrap gap-x-8 gap-y-2">
+            {items.map(it => (
+              <div key={it.label} className="flex items-baseline gap-2">
+                <span className={`text-lg font-semibold tabular-nums ${it.danger ? "text-rose-400" : "text-zinc-100"}`}>{it.value}</span>
+                <span className="text-xs uppercase tracking-wider text-zinc-500">{it.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function Toolbar({ filter, setFilter, rackFilter, setRackFilter, racks }) {
+      const Btn = ({ v, label }) => (
+        <button onClick={() => setFilter(v)}
+          className={`px-3 py-1.5 rounded-md text-sm transition ${filter === v ? "bg-zinc-100 text-zinc-900 font-medium" : "bg-zinc-900 text-zinc-300 hover:bg-zinc-800 border border-zinc-800"}`}>
+          {label}
+        </button>
+      );
+      return (
+        <div className="flex flex-wrap items-center gap-2">
+          <Btn v="all" label="All" />
+          <Btn v="pdus" label="PDUs" />
+          <Btn v="kvms" label="KVMs" />
+          <div className="w-px h-6 bg-zinc-800 mx-2" />
+          <span className="text-xs text-zinc-500">Rack:</span>
+          <select value={rackFilter} onChange={e => setRackFilter(e.target.value)}
+            className="bg-zinc-900 border border-zinc-800 rounded-md text-sm px-2 py-1.5 focus:outline-none focus:border-nv-400/60">
+            <option value="all">All racks</option>
+            {racks.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </div>
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // Cards
+    // ------------------------------------------------------------------
+    function StatusDot({ status }) {
+      const map = {
+        online:  "bg-emerald-400 shadow-[0_0_8px_#34d399]",
+        warning: "bg-amber-400 shadow-[0_0_8px_#fbbf24]",
+        offline: "bg-rose-500 shadow-[0_0_8px_#f43f5e]",
+        active:  "bg-emerald-400 shadow-[0_0_8px_#34d399]",
+        idle:    "bg-zinc-500",
+        empty:   "bg-zinc-700",
+      };
+      return <span className={`inline-block w-2 h-2 rounded-full ${map[status] || "bg-zinc-500"}`} />;
+    }
+
+    function CardShell({ title, sub, status, icon, onOpen, alert, children, footer }) {
+      return (
+        <div className="bg-zinc-900/70 border border-zinc-800 hover:border-zinc-700 rounded-xl overflow-hidden transition">
+          <div className="px-4 py-3 flex items-center gap-3 border-b border-zinc-800/80">
+            <div className="w-9 h-9 rounded-md bg-zinc-800/70 border border-zinc-700 flex items-center justify-center text-zinc-300">
+              {icon}
+            </div>
+            <button onClick={onOpen} className="flex-1 text-left group">
+              <div className="flex items-center gap-2">
+                <span className="font-medium group-hover:text-nv-400 transition">{title}</span>
+                <StatusDot status={status} />
+              </div>
+              <div className="text-xs text-zinc-500 mt-0.5">{sub}</div>
+            </button>
+            <button onClick={onOpen} className="text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded">
+              Details →
+            </button>
+          </div>
+          {alert && (
+            <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs">
+              ⚠ {alert}
+            </div>
+          )}
+          <div className="p-4">{children}</div>
+          {footer && <div className="px-4 py-2.5 border-t border-zinc-800/80 bg-zinc-950/40 text-xs text-zinc-400">{footer}</div>}
+        </div>
+      );
+    }
+
+    const PduIcon = () => (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="8" width="18" height="8" rx="1.5"/>
+        <circle cx="8" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="16" cy="12" r="1"/>
+      </svg>
+    );
+    const KvmIcon = () => (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="2.5" y="4" width="19" height="13" rx="1.5"/>
+        <path d="M8 21h8M12 17v4"/>
+      </svg>
+    );
+
+    function PduCard({ pdu, onOpen, onOutletAction }) {
+      const totalW = pdu.outlets.reduce((s, o) => s + (o.watts || 0), 0);
+      const on = pdu.outlets.filter(o => o.state === "on").length;
+      return (
+        <CardShell
+          title={pdu.name}
+          sub={`${pdu.model} • ${pdu.ip} • ${pdu.rack}`}
+          status={pdu.status}
+          icon={<PduIcon />}
+          onOpen={onOpen}
+          alert={pdu.alerts && pdu.alerts[0]}
+          footer={
+            <div className="flex justify-between">
+              <span>{on} of {pdu.outlets.length} outlets active</span>
+              <span className="tabular-nums text-zinc-200">{(totalW/1000).toFixed(2)} kW</span>
+            </div>
+          }
+        >
+          <div className="grid grid-cols-12 gap-1.5">
+            {pdu.outlets.map(o => <OutletCell key={o.id} outlet={o} onAction={(a) => onOutletAction(o, a)} />)}
+          </div>
+        </CardShell>
+      );
+    }
+
+    function OutletCell({ outlet, onAction, large }) {
+      const [open, setOpen] = useState(false);
+      const isOn = outlet.state === "on";
+      const warn = outlet.severity === "warning";
+      const cls = isOn
+        ? (warn ? "bg-amber-500/20 border-amber-500/50 text-amber-200" : "bg-nv-400/15 border-nv-400/40 text-nv-300")
+        : "bg-zinc-800/70 border-zinc-700 text-zinc-500";
+      return (
+        <div className="relative">
+          <button
+            onClick={() => setOpen(o => !o)}
+            title={`${outlet.label}\n${isOn ? `${outlet.watts}W` : "off"}`}
+            className={`w-full aspect-square rounded border ${cls} hover:brightness-125 transition text-[10px] font-mono tabular-nums flex items-center justify-center ${large ? "text-base aspect-auto py-3" : ""}`}>
+            {outlet.number}
+          </button>
+          {open && (
+            <>
+              <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+              <div className="absolute z-30 top-full left-1/2 -translate-x-1/2 mt-1 w-56 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl p-2 text-sm">
+                <div className="px-2 py-1.5 border-b border-zinc-800 mb-1">
+                  <div className="font-medium truncate">{outlet.label}</div>
+                  <div className="text-xs text-zinc-500">Outlet {outlet.number} • {isOn ? `${outlet.watts} W / ${outlet.current} A` : "off"}</div>
+                </div>
+                {isOn ? (
+                  <>
+                    <MenuItem onClick={() => { onAction("cycle"); setOpen(false); }} icon="↻" label="Power cycle" />
+                    <MenuItem onClick={() => { onAction("off"); setOpen(false); }} icon="⏻" label="Turn off" danger />
+                  </>
+                ) : (
+                  <MenuItem onClick={() => { onAction("on"); setOpen(false); }} icon="⏻" label="Turn on" success />
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    function MenuItem({ onClick, icon, label, danger, success }) {
+      const cls = danger ? "hover:bg-rose-500/15 text-rose-300" : success ? "hover:bg-nv-400/15 text-nv-300" : "hover:bg-zinc-800 text-zinc-200";
+      return (
+        <button onClick={onClick} className={`w-full text-left px-2 py-1.5 rounded ${cls} flex items-center gap-2`}>
+          <span className="w-4 text-center">{icon}</span>
+          <span>{label}</span>
+        </button>
+      );
+    }
+
+    function KvmCard({ kvm, onOpen, onPortClick }) {
+      const active = kvm.ports.filter(p => p.status === "active").length;
+      return (
+        <CardShell
+          title={kvm.name}
+          sub={`${kvm.shortModel} • ${kvm.ip} • ${kvm.rack}`}
+          status={kvm.status}
+          icon={<KvmIcon />}
+          onOpen={onOpen}
+          alert={kvm.notes && kvm.shortModel === "LX II" ? "Legacy unit — viewer may open in new tab" : null}
+          footer={<div className="flex justify-between"><span>{active} of {kvm.portCount} ports active</span><span className="text-zinc-200">{kvm.shortModel}</span></div>}
+        >
+          <div className={`grid gap-1.5 ${kvm.portCount > 8 ? "grid-cols-4" : "grid-cols-4"}`}>
+            {kvm.ports.map(p => (
+              <PortThumb key={p.id} port={p} onClick={() => onPortClick(p)} />
+            ))}
+          </div>
+        </CardShell>
+      );
+    }
+
+    function PortThumb({ port, onClick, large }) {
+      const active = port.status === "active";
+      return (
+        <button
+          onClick={onClick}
+          disabled={!active}
+          className={`group relative rounded border ${active ? "border-zinc-700 hover:border-nv-400/60" : "border-zinc-800"} overflow-hidden bg-black aspect-[4/3] text-left transition disabled:cursor-not-allowed`}
+          title={port.label}
+        >
+          <FakeScreen type={port.screenType} compact={!large} />
+          <div className="absolute inset-x-0 bottom-0 px-1.5 py-1 bg-gradient-to-t from-black/90 to-transparent">
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] font-mono text-zinc-400">P{port.number}</span>
+              <span className="text-[10px] text-zinc-200 truncate flex-1">{active ? port.label : "—"}</span>
+            </div>
+          </div>
+          {active && (
+            <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
+          )}
+        </button>
+      );
+    }
+
+    function FakeScreen({ type, compact }) {
+      const lines = {
+        "linux-term": [
+          "user@dgx-01:~$ nvidia-smi",
+          "+----------------------------+",
+          "| H100 80GB  |  47C  142W   |",
+          "| H100 80GB  |  52C  168W   |",
+          "+----------------------------+",
+          "user@dgx-01:~$ ▍"
+        ],
+        "gpu-monitor": [
+          "nvtop 1.2.2",
+          "GPU0 H100  98%  72C 410W",
+          "GPU1 H100  96%  70C 405W",
+          "GPU2 H100  99%  74C 412W",
+          "GPU3 H100  95%  69C 398W",
+          "[#######...] training step 4128"
+        ],
+        "nvidia-smi": [
+          "Tue Mar 04 14:22:18 2026",
+          "NVIDIA-SMI 565.57.01  CUDA 12.7",
+          "8x H100 80GB HBM3",
+          "Utilization: 97%   Mem: 78GB/80GB",
+          "Power: 3.2 kW / 3.5 kW",
+          "▍"
+        ],
+        "bios": [
+          "AMI BIOS Setup Utility",
+          "v5.27.04 ",
+          "F1=Help  F2=Save  ESC=Exit",
+          "> Boot Sequence",
+          "> CPU Configuration",
+          "> Memory Configuration",
+        ],
+        "win-login": [
+          "",
+          "    🔒",
+          "  Administrator",
+          "  [enter password]",
+          ""
+        ],
+        "blank": [],
+      };
+      const content = lines[type] || lines.blank;
+      return (
+        <div className={`screen ${type} absolute inset-0 ${compact ? "text-[7px] leading-[10px] p-1.5 pb-4" : "text-xs leading-[16px] p-3 pb-8"}`}>
+          {content.length === 0
+            ? <div className="absolute inset-0 flex items-center justify-center text-zinc-700 text-[10px]">no signal</div>
+            : content.map((l, i) => <div key={i} className="truncate">{l}</div>)
+          }
+        </div>
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // Detail views
+    // ------------------------------------------------------------------
+    function PduDetail({ pdu, onBack, onOutletAction, onRenameOutlet }) {
+      const [editing, setEditing] = useState(null);
+      const [tmpName, setTmpName] = useState("");
+      if (!pdu) return null;
+      const totalW = pdu.outlets.reduce((s, o) => s + (o.watts || 0), 0);
+      const on = pdu.outlets.filter(o => o.state === "on").length;
+
+      return (
+        <main className="flex-1 px-6 py-5 max-w-[1600px] w-full mx-auto">
+          <BackBar onBack={onBack} crumbs={["Dashboard", pdu.name]} />
+          <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <section className="lg:col-span-2 bg-zinc-900/70 border border-zinc-800 rounded-xl">
+              <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
+                <div>
+                  <div className="text-lg font-semibold">{pdu.name}</div>
+                  <div className="text-xs text-zinc-500">{pdu.model} • FW {pdu.firmware} • {pdu.ip}</div>
+                </div>
+                <a className="text-xs text-zinc-400 hover:text-nv-400" href={`https://${pdu.ip}/`} target="_blank" rel="noreferrer">
+                  Open native UI ↗
+                </a>
+              </div>
+              <div className="p-4">
+                <div className="text-xs uppercase tracking-wider text-zinc-500 mb-3">Outlets</div>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                  {pdu.outlets.map(o => (
+                    <div key={o.id} className={`flex items-center gap-3 p-2.5 rounded-lg border ${o.state === "on" ? (o.severity === "warning" ? "border-amber-500/50 bg-amber-500/5" : "border-zinc-700 bg-zinc-800/40") : "border-zinc-800 bg-zinc-900/40"}`}>
+                      <div className="w-9 text-center font-mono text-zinc-400 text-sm">{o.number}</div>
+                      <div className="flex-1 min-w-0">
+                        {editing === o.id ? (
+                          <input autoFocus value={tmpName} onChange={e => setTmpName(e.target.value)}
+                            onBlur={() => { onRenameOutlet(o, tmpName); setEditing(null); }}
+                            onKeyDown={e => { if (e.key === "Enter") { onRenameOutlet(o, tmpName); setEditing(null); } if (e.key === "Escape") setEditing(null); }}
+                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-0.5 text-sm" />
+                        ) : (
+                          <div className="truncate text-sm font-medium cursor-text" onDoubleClick={() => { setEditing(o.id); setTmpName(o.label); }} title="double-click to rename">{o.label}</div>
+                        )}
+                        <div className="text-[11px] text-zinc-500 tabular-nums">
+                          {o.state === "on" ? `${o.watts} W • ${o.current} A` : "off"}
+                        </div>
+                      </div>
+                      <PowerToggle outlet={o} onAction={(a) => onOutletAction(o, a)} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <aside className="space-y-4">
+              <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4">
+                <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Summary</div>
+                <Row label="Status"><StatusDot status={pdu.status} /> <span className="ml-1.5 capitalize">{pdu.status}</span></Row>
+                <Row label="Rack" v={pdu.rack} />
+                <Row label="Inlet voltage" v={`${pdu.inletVoltage} V`} />
+                <Row label="Active outlets" v={`${on} / ${pdu.outlets.length}`} />
+                <Row label="Current draw" v={`${(totalW/1000).toFixed(2)} kW`} />
+              </div>
+
+              {pdu.alerts && pdu.alerts.length > 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4">
+                  <div className="text-xs uppercase tracking-wider text-amber-300 mb-2">Alerts</div>
+                  {pdu.alerts.map((a, i) => <div key={i} className="text-sm text-amber-200">⚠ {a}</div>)}
+                </div>
+              )}
+
+              <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4">
+                <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Quick actions</div>
+                <button className="w-full text-left text-sm px-3 py-2 rounded hover:bg-zinc-800 text-zinc-200 mb-1"
+                  onClick={() => alert("Mockup: would call PX4 JSON-RPC to turn ON all configured outlets.")}>
+                  ⏻ Turn on all outlets
+                </button>
+                <button className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/15 text-rose-300"
+                  onClick={() => { if (confirm("Turn OFF all outlets on this PDU? Affects connected devices.")) alert("Mockup: would issue bulk OFF via JSON-RPC."); }}>
+                  ⏻ Turn off all outlets
+                </button>
+              </div>
+            </aside>
+          </div>
+        </main>
+      );
+    }
+
+    function PowerToggle({ outlet, onAction }) {
+      const on = outlet.state === "on";
+      return (
+        <div className="flex items-center gap-1">
+          {on ? (
+            <>
+              <button onClick={() => onAction("cycle")} title="Power cycle"
+                className="w-7 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-sm">↻</button>
+              <button onClick={() => onAction("off")} title="Turn off"
+                className="w-7 h-7 rounded border border-zinc-700 hover:border-rose-500/60 hover:bg-rose-500/10 text-zinc-300 text-sm">⏻</button>
+            </>
+          ) : (
+            <button onClick={() => onAction("on")} title="Turn on"
+              className="px-2 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-xs">turn on</button>
+          )}
+        </div>
+      );
+    }
+
+    function KvmDetail({ kvm, onBack, onPortClick }) {
+      if (!kvm) return null;
+      return (
+        <main className="flex-1 px-6 py-5 max-w-[1600px] w-full mx-auto">
+          <BackBar onBack={onBack} crumbs={["Dashboard", kvm.name]} />
+          <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <section className="lg:col-span-2 bg-zinc-900/70 border border-zinc-800 rounded-xl">
+              <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
+                <div>
+                  <div className="text-lg font-semibold">{kvm.name}</div>
+                  <div className="text-xs text-zinc-500">{kvm.model} • FW {kvm.firmware} • {kvm.ip}</div>
+                </div>
+                <a className="text-xs text-zinc-400 hover:text-nv-400" href={`https://${kvm.ip}/`} target="_blank" rel="noreferrer">
+                  Open native UI ↗
+                </a>
+              </div>
+              <div className="p-4">
+                <div className="text-xs uppercase tracking-wider text-zinc-500 mb-3">Ports</div>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  {kvm.ports.map(p => (
+                    <div key={p.id} className="space-y-1">
+                      <PortThumb port={p} onClick={() => onPortClick(p)} large />
+                      <div className="text-xs flex items-center gap-1.5 px-0.5">
+                        <span className="font-mono text-zinc-500">P{p.number}</span>
+                        <StatusDot status={p.status} />
+                        <span className="truncate flex-1 text-zinc-200">{p.label}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <aside className="space-y-4">
+              <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4">
+                <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Summary</div>
+                <Row label="Status"><StatusDot status={kvm.status} /> <span className="ml-1.5 capitalize">{kvm.status}</span></Row>
+                <Row label="Rack" v={kvm.rack} />
+                <Row label="Model" v={kvm.shortModel} />
+                <Row label="Ports" v={`${kvm.ports.filter(p => p.status === "active").length} / ${kvm.portCount} active`} />
+              </div>
+              {kvm.notes && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-xs text-amber-200">
+                  ⓘ {kvm.notes}
+                </div>
+              )}
+            </aside>
+          </div>
+        </main>
+      );
+    }
+
+    function Row({ label, v, children }) {
+      return (
+        <div className="flex items-center justify-between text-sm py-1.5 border-b border-zinc-800/50 last:border-0">
+          <span className="text-zinc-500">{label}</span>
+          <span className="text-zinc-200">{children ?? v}</span>
+        </div>
+      );
+    }
+
+    function BackBar({ onBack, crumbs }) {
+      return (
+        <div className="flex items-center gap-3 text-sm">
+          <button onClick={onBack} className="text-zinc-400 hover:text-nv-400 flex items-center gap-1">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m15 18-6-6 6-6"/></svg>
+            Back
+          </button>
+          <div className="text-zinc-600">/</div>
+          {crumbs.map((c, i) => (
+            <Fragment key={i}>
+              <span className={i === crumbs.length - 1 ? "text-zinc-200" : "text-zinc-500"}>{c}</span>
+              {i < crumbs.length - 1 && <span className="text-zinc-700">/</span>}
+            </Fragment>
+          ))}
+        </div>
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // KVM viewer modal — embeds a placeholder iframe simulating the live HTML5 viewer
+    // ------------------------------------------------------------------
+    function KvmViewerModal({ kvm, port, onClose }) {
+      const [fullscreen, setFullscreen] = useState(false);
+      const targetUrl = `https://${kvm.ip}/dom_kvm/connect?port=${port.number}`; // shape of real Raritan deep-link
+      const supportsEmbed = kvm.shortModel === "KX III";
+
+      // Build a self-contained srcDoc that mimics what a real KVM session looks like.
+      const fakeStream = `
+<!doctype html><html><head><meta charset=utf-8><style>
+  html,body{margin:0;height:100%;background:#000;color:#c8f779;font-family:Consolas,"JetBrains Mono",monospace;}
+  .wrap{padding:18px 22px;line-height:1.55;font-size:13px;}
+  .bar{position:fixed;top:0;left:0;right:0;background:#111;color:#aaa;padding:6px 10px;font-size:11px;border-bottom:1px solid #222;}
+  .bar b{color:#76b900;}
+  .cur{animation:bl 1s steps(2) infinite}
+  @keyframes bl{50%{opacity:0}}
+</style></head><body>
+<div class="bar">⦿ Live KVM stream — <b>${kvm.name}</b> · port ${port.number} (${port.label}) · ${kvm.ip}</div>
+<div class="wrap" style="margin-top:30px;">
+[ ${new Date().toLocaleString()} ]  ${port.label} login: <b>root</b><br/>
+Last login: Tue Mar 04 09:14:01 2026 on tty1<br/>
+<br/>
+root@${port.label.toLowerCase()}:~# <span style="color:#fff">uname -a</span><br/>
+Linux ${port.label.toLowerCase()} 5.15.0-nvidia #1 SMP x86_64 GNU/Linux<br/>
+<br/>
+root@${port.label.toLowerCase()}:~# <span style="color:#fff">nvidia-smi --query-gpu=index,name,temperature.gpu,utilization.gpu,power.draw --format=csv</span><br/>
+index, name, temperature.gpu, utilization.gpu, power.draw [W]<br/>
+0, NVIDIA H100 80GB HBM3, 71, 98 %, 412.34<br/>
+1, NVIDIA H100 80GB HBM3, 69, 96 %, 405.12<br/>
+2, NVIDIA H100 80GB HBM3, 72, 99 %, 418.55<br/>
+3, NVIDIA H100 80GB HBM3, 68, 95 %, 398.07<br/>
+<br/>
+root@${port.label.toLowerCase()}:~# <span class="cur">▍</span>
+</div>
+</body></html>`;
+
+      return (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
+          <div onClick={e => e.stopPropagation()}
+            className={`bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden ${fullscreen ? "w-full h-full" : "w-full max-w-5xl h-[80vh]"} flex flex-col`}>
+            <div className="px-4 py-2.5 border-b border-zinc-800 flex items-center gap-3 bg-zinc-900/50">
+              <StatusDot status="active" />
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-sm truncate">{kvm.name} · Port {port.number} · {port.label}</div>
+                <div className="text-[11px] text-zinc-500 font-mono truncate">{targetUrl}</div>
+              </div>
+              <button onClick={() => setFullscreen(!fullscreen)} className="text-xs px-2 py-1 rounded hover:bg-zinc-800 text-zinc-400">
+                {fullscreen ? "Restore" : "Fullscreen"}
+              </button>
+              <a href={targetUrl} target="_blank" rel="noreferrer" className="text-xs px-2 py-1 rounded hover:bg-zinc-800 text-zinc-400">
+                Open in new tab ↗
+              </a>
+              <button onClick={onClose} className="text-zinc-400 hover:text-zinc-100 w-7 h-7 rounded hover:bg-zinc-800">✕</button>
+            </div>
+            <div className="flex-1 relative bg-black">
+              {supportsEmbed ? (
+                <iframe title="kvm-viewer" srcDoc={fakeStream} className="w-full h-full bg-black" />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-8">
+                  <div className="text-amber-400 text-4xl mb-3">⚠</div>
+                  <div className="text-lg font-medium mb-1">{kvm.shortModel} cannot embed</div>
+                  <div className="text-zinc-400 text-sm mb-4 max-w-md">
+                    Dominion {kvm.shortModel} uses a Java-era viewer that browsers no longer support inline.
+                    The dashboard will instead deep-link straight into the native viewer in a new tab with credentials auto-filled.
+                  </div>
+                  <a href={targetUrl} target="_blank" rel="noreferrer" className="bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium text-sm px-4 py-2 rounded-lg">
+                    Launch native viewer ↗
+                  </a>
+                </div>
+              )}
+            </div>
+            <div className="px-4 py-2 border-t border-zinc-800 bg-zinc-900/50 text-[11px] text-zinc-500 flex items-center justify-between">
+              <span>Mockup: real backend will inject a one-shot Raritan SSO token into this iframe URL.</span>
+              <span>Esc to close</span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // Add device modal
+    // ------------------------------------------------------------------
+    function AddDeviceModal({ onClose, onAdd, racks }) {
+      const [kind, setKind] = useState("pdu");
+      const [form, setForm] = useState({ name: "", ip: "", rack: racks[0] || "Rack-A1", model: "Raritan PX4-5874", username: "admin", password: "" });
+      const upd = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
+      const submit = () => {
+        if (!form.name || !form.ip) { alert("Name and IP are required."); return; }
+        if (kind === "pdu") {
+          onAdd({ kind: "pdu", payload: {
+            id: `pdu-${Date.now()}`,
+            name: form.name, ip: form.ip, rack: form.rack,
+            model: form.model || "Raritan PX4",
+            status: "online",
+            firmware: "n/a (pending backend)",
+            inletVoltage: 208,
+            outlets: Array.from({ length: 24 }, (_, i) => ({
+              id: `new-${Date.now()}-o${i+1}`, number: i+1, label: `Outlet ${i+1}`,
+              state: "off", watts: 0, current: 0, severity: "off",
+            })),
+          }});
+        } else {
+          onAdd({ kind: "kvm", payload: {
+            id: `kvm-${Date.now()}`,
+            name: form.name, ip: form.ip, rack: form.rack,
+            model: form.model || "Raritan Dominion KX III",
+            shortModel: form.model.includes("LX") ? "LX II" : "KX III",
+            status: "online", firmware: "n/a (pending backend)",
+            portCount: 16,
+            ports: Array.from({ length: 16 }, (_, i) => ({
+              id: `p${i+1}`, number: i+1, label: `Port ${i+1}`, status: "empty", screenType: "blank",
+            })),
+          }});
+        }
+      };
+
+      const FieldRow = ({ label, children }) => (
+        <label className="block mb-3">
+          <div className="text-xs text-zinc-400 mb-1">{label}</div>
+          {children}
+        </label>
+      );
+      const inp = "w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-nv-400/60";
+
+      return (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
+          <div onClick={e => e.stopPropagation()} className="bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl w-full max-w-md">
+            <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between">
+              <div className="font-medium">Add device</div>
+              <button onClick={onClose} className="text-zinc-400 hover:text-zinc-100 w-7 h-7 rounded hover:bg-zinc-800">✕</button>
+            </div>
+            <div className="p-5">
+              <div className="flex gap-1 mb-4 p-1 bg-zinc-900 rounded-md">
+                {["pdu","kvm"].map(k => (
+                  <button key={k} onClick={() => { setKind(k); setForm({ ...form, model: k === "pdu" ? "Raritan PX4-5874" : "Raritan Dominion KX III" }); }}
+                    className={`flex-1 text-sm py-1.5 rounded ${kind === k ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:text-zinc-200"}`}>
+                    {k === "pdu" ? "PDU" : "KVM"}
+                  </button>
+                ))}
+              </div>
+              <FieldRow label="Display name"><input className={inp} value={form.name} onChange={upd("name")} placeholder="PDU-Rack-C2-Top" /></FieldRow>
+              <FieldRow label="IP address / hostname"><input className={inp} value={form.ip} onChange={upd("ip")} placeholder="10.10.20.50" /></FieldRow>
+              <FieldRow label="Model">
+                <select className={inp} value={form.model} onChange={upd("model")}>
+                  {kind === "pdu"
+                    ? <>
+                        <option>Raritan PX4-5874</option>
+                        <option>Raritan PX4-5848</option>
+                        <option>Raritan PX4-5836</option>
+                      </>
+                    : <>
+                        <option>Raritan Dominion KX III</option>
+                        <option>Raritan Dominion LX II</option>
+                      </>}
+                </select>
+              </FieldRow>
+              <FieldRow label="Rack">
+                <select className={inp} value={form.rack} onChange={upd("rack")}>
+                  {racks.map(r => <option key={r}>{r}</option>)}
+                  <option>Rack-D1</option><option>Rack-D2</option>
+                </select>
+              </FieldRow>
+              <div className="grid grid-cols-2 gap-3">
+                <FieldRow label="Username"><input className={inp} value={form.username} onChange={upd("username")} /></FieldRow>
+                <FieldRow label="Password"><input type="password" className={inp} value={form.password} onChange={upd("password")} placeholder="••••••••" /></FieldRow>
+              </div>
+              <div className="text-[11px] text-zinc-500 -mt-1 mb-1">
+                Credentials are encrypted with the host's master key before storage. Plaintext is never persisted.
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-zinc-800 flex justify-end gap-2">
+              <button onClick={onClose} className="text-sm px-3 py-1.5 rounded hover:bg-zinc-800 text-zinc-300">Cancel</button>
+              <button onClick={submit} className="text-sm px-3.5 py-1.5 rounded bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium">Add device</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function Footer() {
+      return (
+        <footer className="border-t border-zinc-800/80 bg-zinc-950/70 mt-auto">
+          <div className="max-w-[1600px] mx-auto px-6 py-3 text-[11px] text-zinc-500 flex items-center justify-between">
+            <span>Lab Manager · Mockup build · No backend wired up yet</span>
+            <span>Phase 1 of 2 · FastAPI + Postgres backend next</span>
+          </div>
+        </footer>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
