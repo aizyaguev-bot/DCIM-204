@@ -1,13 +1,13 @@
 import { useState, useEffect } from "react";
 
 export default function Header({ search, setSearch, onAdd, onHome }) {
-  const [version, setVersion] = useState("…");
+  const [version, setVersion] = useState("");
 
   useEffect(() => {
     fetch("/api/version")
       .then(r => r.json())
-      .then(d => setVersion(d.version || "—"))
-      .catch(() => setVersion("—"));
+      .then(d => setVersion(d.version))
+      .catch(() => {});
   }, []);
 
   return (
@@ -24,7 +24,6 @@ export default function Header({ search, setSearch, onAdd, onHome }) {
             <div className="text-[11px] text-zinc-500 -mt-0.5">Raritan PDU + KVM control</div>
           </div>
         </button>
-
         <div className="flex-1 max-w-xl mx-auto relative">
           <svg className="absolute left-3 top-2.5 text-zinc-500" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="11" cy="11" r="7"/><path d="m21 21-3.5-3.5"/>
@@ -33,19 +32,15 @@ export default function Header({ search, setSearch, onAdd, onHome }) {
             placeholder="Search devices, outlets, ports, IPs…"
             className="w-full bg-zinc-900/70 border border-zinc-800 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-nv-400/60 placeholder:text-zinc-500" />
         </div>
-
         <button onClick={onAdd} className="bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium text-sm px-3.5 py-2 rounded-lg flex items-center gap-1.5">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 5v14M5 12h14"/></svg>
           Add Device
         </button>
-
-        {/* version badge — live from /api/version, no rebuild needed */}
-        <span
-          className="text-[11px] font-mono px-2 py-0.5 rounded-md border bg-nv-400/10 text-nv-400 border-nv-400/30 whitespace-nowrap select-none"
-          data-testid="version-badge"
-        >
-          {version}
-        </span>
+        {version && (
+          <span className="text-[11px] text-zinc-600 whitespace-nowrap font-mono" title="deployed commit">
+            {version}
+          </span>
+        )}
       </div>
     </header>
   );
