@@ -2,6 +2,13 @@
 
 ---
 
+## v2.4.0 — 2026-07-19
+
+### Changed
+- **Rack grid layout** — overview racks now use a responsive CSS grid (`auto-fill, minmax(280px, 1fr)`) instead of a horizontal scroll row. All racks are visible on screen without scrolling; they wrap to the next row on smaller screens.
+
+---
+
 ## v2.3.0 — 2026-07-16
 
 ### Changed
