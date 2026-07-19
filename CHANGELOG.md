@@ -2,6 +2,14 @@
 
 ---
 
+## v2.14.0 — 2026-07-19
+
+### Added
+- **Edit Rack** — hover over any rack card in the DCIM overview to reveal a pencil icon. Click it to open the Edit Rack modal where you can rename the rack and switch between Compute/Storage type. Changes are saved to all devices in that rack.
+- **Delete Rack** — the Edit Rack modal has a "Delete Rack" button. Clicking it shows a confirmation step. For racks with PDUs, a warning is shown that PDU devices will also be removed. Confirms before deleting.
+
+---
+
 ## v2.13.0 — 2026-07-19
 
 ### Fixed

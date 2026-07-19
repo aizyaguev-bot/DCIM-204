@@ -32,6 +32,7 @@ const Icon = {
   plus:  <I d="M12 5v14M5 12h14" size={12}/>,
   grip:  <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor"><circle cx="3" cy="2" r="1.3"/><circle cx="7" cy="2" r="1.3"/><circle cx="3" cy="7" r="1.3"/><circle cx="7" cy="7" r="1.3"/><circle cx="3" cy="12" r="1.3"/><circle cx="7" cy="12" r="1.3"/></svg>,
   edit:  <I d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" size={11}/>,
+  trash: <I d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" size={11}/>,
 };
 const Spinner = () => (
   <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -308,7 +309,7 @@ function SortableURow({ u, items, switchAssignments, onSelectServer, onSelectCus
 }
 
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
-function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, width = 400, fixed = false, external = false, externalActiveId = null }) {
+function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, width = 400, fixed = false, external = false, externalActiveId = null }) {
   const [localActiveId, setLocalActiveId] = useState(null);
   const containerRef = useRef(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
@@ -362,7 +363,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   return (
     <div ref={containerRef} className={fixed ? "flex-shrink-0" : "w-full min-w-0"} style={fixed ? { width } : undefined}>
       {/* label plate */}
-      <div className={`mb-0 rounded-t-xl border-2 border-b-0 px-4 py-2.5 bg-zinc-900
+      <div className={`mb-0 rounded-t-xl border-2 border-b-0 px-4 py-2.5 bg-zinc-900 group/header
         ${pduOnline ? "border-zinc-700" : r.pdus.length ? "border-red-900/60" : "border-zinc-800"}`}>
         <div className="flex items-center justify-between gap-2">
           <button onClick={onHeaderClick} className="flex items-center gap-1.5 min-w-0 group/rh">
@@ -370,6 +371,12 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
             {onHeaderClick && <span className="text-[10px] text-zinc-600 group-hover/rh:text-nv-400 transition">↗</span>}
           </button>
           <div className="flex items-center gap-2 flex-shrink-0">
+            {onEdit && (
+              <button onClick={e => { e.stopPropagation(); onEdit(); }}
+                className="text-zinc-700 hover:text-zinc-300 transition p-0.5 opacity-0 group-hover/header:opacity-100">
+                {Icon.edit}
+              </button>
+            )}
             <div className="flex items-center gap-1">
               {isStorage
               ? <span className="text-[9px] font-mono font-bold text-cyan-400 bg-cyan-950/60 border border-cyan-800/40 px-1.5 py-0.5 rounded">STORAGE</span>
@@ -1100,6 +1107,113 @@ function AddRackModal({ onClose, onSave }) {
   );
 }
 
+// ─── EDIT RACK MODAL ──────────────────────────────────────────────────────────
+function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
+  useEscClose(onClose);
+  const [name,       setName]       = useState(rackName);
+  const [type,       setType]       = useState(rackType === "storage" ? "Storage" : "Compute");
+  const [saving,     setSaving]     = useState(false);
+  const [deleting,   setDeleting]   = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [err,        setErr]        = useState("");
+
+  async function handleSave() {
+    if (!name.trim()) { setErr("Rack name is required."); return; }
+    setSaving(true); setErr("");
+    try {
+      await Promise.all(rackDevs.map(d =>
+        fetch(`/api/devices/${d.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...d, rack: name.trim(), model: d.kind === "rack" ? type : d.model }),
+        }).then(r => { if (!r.ok) throw new Error(`Failed to update ${d.name}`); })
+      ));
+      await onSave();
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Save failed.");
+    } finally { setSaving(false); }
+  }
+
+  async function handleDelete() {
+    setDeleting(true); setErr("");
+    try {
+      await Promise.all(rackDevs.map(d =>
+        fetch(`/api/devices/${d.id}`, { method: "DELETE" })
+          .then(r => { if (!r.ok) throw new Error(`Failed to delete ${d.name}`); })
+      ));
+      await onSave();
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Delete failed.");
+    } finally { setDeleting(false); setConfirmDel(false); }
+  }
+
+  const hasPdus = rackDevs.some(d => d.kind === "pdu");
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50">
+          <span className="text-sm font-bold text-zinc-100">Edit Rack — {rackName}</span>
+          <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition">{Icon.x}</button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-1 block">Rack Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="e.g. Rack-09"
+              onKeyDown={e => e.key === "Enter" && handleSave()}/>
+          </div>
+          <div>
+            <label className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-1.5 block">Type</label>
+            <div className="flex gap-2">
+              {["Compute", "Storage"].map(t => (
+                <button key={t} onClick={() => setType(t)}
+                  className={`flex-1 py-2 text-sm rounded-xl border transition ${type === t
+                    ? (t === "Storage" ? "border-cyan-500/60 text-cyan-400 bg-cyan-950/30" : "border-nv-400/60 text-nv-400 bg-nv-400/10")
+                    : "border-zinc-800 text-zinc-500 hover:border-zinc-600"}`}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          {err && <div className="text-xs text-red-400">{err}</div>}
+        </div>
+        <div className="px-5 pb-2">
+          {!confirmDel ? (
+            <button onClick={() => setConfirmDel(true)}
+              className="w-full flex items-center justify-center gap-1.5 py-2 text-sm text-red-500 border border-red-900/40 hover:border-red-700/60 hover:bg-red-950/20 rounded-xl transition">
+              {Icon.trash} Delete Rack
+            </button>
+          ) : (
+            <div className="bg-red-950/20 border border-red-900/50 rounded-xl p-3 space-y-2">
+              <div className="text-xs text-red-400">
+                {hasPdus
+                  ? `This will permanently delete ${rackDevs.length} device(s) including PDU(s). Cannot be undone.`
+                  : "Delete this rack permanently? Cannot be undone."}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => setConfirmDel(false)} className="flex-1 py-1.5 text-xs text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-lg transition">Cancel</button>
+                <button onClick={handleDelete} disabled={deleting}
+                  className="flex-1 py-1.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-600 rounded-lg transition disabled:opacity-50">
+                  {deleting ? "Deleting…" : "Confirm Delete"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="flex gap-2 px-5 py-4">
+          <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-xl transition">Cancel</button>
+          <button onClick={handleSave} disabled={saving}
+            className="flex-1 py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-xl transition disabled:opacity-50">
+            {saving ? "Saving…" : "Save Changes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── CROSS-RACK MOVE MODAL ────────────────────────────────────────────────────
 function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClose }) {
   useEscClose(onClose);
@@ -1165,13 +1279,14 @@ function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClo
 }
 
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
-function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus }) {
-  const [selectedRack, setSelectedRack] = useState(null);
-  const [addOptFor,    setAddOptFor]    = useState(null);
-  const [addEquipFor,  setAddEquipFor]  = useState(null);
-  const [addRackOpen,  setAddRackOpen]  = useState(false);
-  const [activeId,     setActiveId]     = useState(null);
-  const [pendingMove,  setPendingMove]  = useState(null);
+function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus, rackDevices }) {
+  const [selectedRack,   setSelectedRack]   = useState(null);
+  const [addOptFor,      setAddOptFor]      = useState(null);
+  const [addEquipFor,    setAddEquipFor]    = useState(null);
+  const [addRackOpen,    setAddRackOpen]    = useState(false);
+  const [editRackTarget, setEditRackTarget] = useState(null); // rack name string
+  const [activeId,       setActiveId]       = useState(null);
+  const [pendingMove,    setPendingMove]    = useState(null);
 
   const r = selectedRack ? rackStats.find(r => r.rack === selectedRack) : null;
 
@@ -1267,6 +1382,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
                   onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
                   onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
                   onHeaderClick={() => setSelectedRack(rs.rack)}
+                  onEdit={() => setEditRackTarget(rs.rack)}
                   external externalActiveId={activeId}/>
               ))}
             </div>
@@ -1298,6 +1414,20 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
           <AddRackModal onClose={() => setAddRackOpen(false)} onSave={async () => { await onRefresh?.(); }}/>
         </Portal>
       )}
+      {editRackTarget && (() => {
+        const rs = rackStats.find(r => r.rack === editRackTarget);
+        const devs = (rackDevices || []).filter(d => d.rack === editRackTarget);
+        return rs ? (
+          <Portal>
+            <EditRackModal
+              rackName={editRackTarget}
+              rackType={rs.rackType}
+              rackDevs={devs}
+              onClose={() => setEditRackTarget(null)}
+              onSave={async () => { await onRefresh?.(); setSelectedRack(null); }}/>
+          </Portal>
+        ) : null;
+      })()}
       {pendingMove && (
         <Portal>
           <CrossRackMoveModal
@@ -1583,7 +1713,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onLabelChange={onLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
           onCustomItemsChange={setCustomItems} onRefresh={onRefresh}
-          pdus={pdus}/>
+          pdus={pdus} rackDevices={rackDevices}/>
       )}
       {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}
