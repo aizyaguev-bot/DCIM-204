@@ -2,6 +2,13 @@
 
 ---
 
+## v2.13.0 — 2026-07-19
+
+### Fixed
+- **"Move to rack" missing new DCIM racks** — the move dropdown in the OPT edit panel was built from `pdus` (kind="pdu" only), so racks added via "+ Add Rack" (kind="rack") were invisible. Now passes `rackDevices` (includes both kinds) through `ServerEditPanel` → `MoveOptSection`, so all racks appear in the dropdown.
+
+---
+
 ## v2.8.0 — 2026-07-19
 
 ### Fixed

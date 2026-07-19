@@ -661,8 +661,9 @@ function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelet
 }
 
 // ─── MOVE OPT SECTION (inside ServerEditPanel) ────────────────────────────────
-function MoveOptSection({ server, pdu, pdus, onLabelChange, onClose }) {
-  const allRacks = [...new Set(pdus.map(p => p.rack).filter(Boolean))].sort();
+function MoveOptSection({ server, pdu, pdus, rackDevices, onLabelChange, onClose }) {
+  // rackDevices includes kind="pdu" + kind="rack" (DCIM-only racks)
+  const allRacks = [...new Set((rackDevices || pdus).map(p => p.rack).filter(Boolean))].sort();
   const [targetRack,   setTargetRack]   = useState("");
   const [targetPduId,  setTargetPduId]  = useState("");
   const [targetOutlet, setTargetOutlet] = useState("");
@@ -727,7 +728,7 @@ function MoveOptSection({ server, pdu, pdus, onLabelChange, onClose }) {
 }
 
 // ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-function ServerEditPanel({ server, pdus, rackSlots, switchAssignments, onClose, onOutletAction, onLabelChange, onSlotsChange, onSwitchChange }) {
+function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, onClose, onOutletAction, onLabelChange, onSlotsChange, onSwitchChange }) {
   useEscClose(onClose);
   const pdu   = pdus.find(p => p.id === server.pduId);
   const curU  = (rackSlots[server.rack] || {})[server.id];
@@ -844,7 +845,7 @@ function ServerEditPanel({ server, pdus, rackSlots, switchAssignments, onClose, 
             </div>
           </div>
 
-          <MoveOptSection server={server} pdu={pdu} pdus={pdus} onLabelChange={onLabelChange} onClose={onClose}/>
+          <MoveOptSection server={server} pdu={pdu} pdus={pdus} rackDevices={rackDevices} onLabelChange={onLabelChange} onClose={onClose}/>
         </div>
 
         <div className="px-5 py-4 border-t border-zinc-800/40 bg-zinc-900/30">
@@ -1590,7 +1591,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
 
       {selectedServer&&(
         <Portal>
-          <ServerEditPanel server={selectedServer} pdus={pdus} rackSlots={rackSlots}
+          <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
             switchAssignments={switchAssignments} onClose={()=>setSelectedServerId(null)}
             onOutletAction={onOutletAction} onLabelChange={onLabelChange}
             onSlotsChange={setRackSlots} onSwitchChange={setSwitchAssignments}/>
