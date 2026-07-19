@@ -2,6 +2,13 @@
 
 ---
 
+## v2.6.0 — 2026-07-19
+
+### Added
+- **Rack-08** — new empty rack added to DCIM. Use the VDI `curl` command to register it, then add OPTs via the UI. IP placeholder `10.7.30.203` — update when known.
+
+---
+
 ## v2.5.0 — 2026-07-19
 
 ### Changed

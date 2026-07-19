@@ -50,6 +50,11 @@ DEVICES = [
         ip="10.7.30.202", rack="Rack-07",          # ← update IP when known
         labels={9: "Optn29", 14: "Optn149"},
     ),
+    dict(
+        id="pdu-rack08", kind="pdu", name="PDU-Rack-08", model="Raritan PDU",
+        ip="10.7.30.203", rack="Rack-08",          # ← update IP when known
+        labels={},
+    ),
     # ---- KVMs ----
     dict(
         id="kvm-unit1", kind="kvm", name="KVM-Unit-1",
