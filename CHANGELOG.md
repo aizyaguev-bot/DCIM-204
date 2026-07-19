@@ -2,6 +2,14 @@
 
 ---
 
+## v2.8.0 — 2026-07-19
+
+### Fixed
+- **Add Rack modal typing bug** — `Field` was defined inside the component, so React unmounted/remounted the input on every keystroke (losing focus after 1 letter). Moved input class to a module-level constant and inlined inputs directly.
+- **Add Rack simplified** — only rack name is required now. PDU name/IP/credentials removed; a placeholder PDU is auto-created. You can edit PDU details later via Add Device.
+
+---
+
 ## v2.7.0 — 2026-07-19
 
 ### Added

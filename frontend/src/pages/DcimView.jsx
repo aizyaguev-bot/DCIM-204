@@ -892,34 +892,29 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
 }
 
 // ─── ADD RACK MODAL ───────────────────────────────────────────────────────────
+const inputCls = "w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700";
+
 function AddRackModal({ onClose, onSave }) {
   const [rackName, setRackName] = useState("");
-  const [pduName,  setPduName]  = useState("");
-  const [pduIp,    setPduIp]    = useState("");
-  const [pduUser,  setPduUser]  = useState("");
-  const [pduPass,  setPduPass]  = useState("");
   const [saving,   setSaving]   = useState(false);
   const [err,      setErr]      = useState("");
   useEscClose(onClose);
 
   async function handleSave() {
-    if (!rackName.trim() || !pduName.trim() || !pduIp.trim()) {
-      setErr("Rack name, PDU name and IP are required.");
-      return;
-    }
+    if (!rackName.trim()) { setErr("Rack name is required."); return; }
     setSaving(true); setErr("");
     try {
       const res = await fetch("/api/devices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: pduName.trim(),
+          name: `PDU-${rackName.trim()}`,
           kind: "pdu",
           model: "Raritan PDU",
-          ip: pduIp.trim(),
+          ip: "0.0.0.0",
           rack: rackName.trim(),
-          username: pduUser.trim(),
-          password: pduPass,
+          username: "",
+          password: "",
         }),
       });
       if (!res.ok) { const t = await res.text(); throw new Error(t || res.status); }
@@ -932,28 +927,19 @@ function AddRackModal({ onClose, onSave }) {
     }
   }
 
-  const Field = ({ label, value, onChange, placeholder, type = "text" }) => (
-    <div>
-      <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-1">{label}</div>
-      <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
-    </div>
-  );
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
+      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-xs" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50">
           <span className="text-sm font-bold text-zinc-100">Add Rack</span>
           <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition">{Icon.x}</button>
         </div>
         <div className="px-5 py-4 space-y-3">
-          <Field label="Rack name" value={rackName} onChange={setRackName} placeholder="e.g. Rack-08"/>
-          <Field label="PDU name" value={pduName} onChange={setPduName} placeholder="e.g. PDU-Rack-08"/>
-          <Field label="PDU IP address" value={pduIp} onChange={setPduIp} placeholder="e.g. 10.7.30.203"/>
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="PDU username" value={pduUser} onChange={setPduUser} placeholder="optional"/>
-            <Field label="PDU password" value={pduPass} onChange={setPduPass} placeholder="optional" type="password"/>
+          <div>
+            <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-1">Rack name</div>
+            <input autoFocus value={rackName} onChange={e => setRackName(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleSave()}
+              placeholder="e.g. Rack-08" className={inputCls}/>
           </div>
           {err && <div className="text-xs text-red-400 bg-red-950/30 border border-red-900/40 rounded-lg px-3 py-2">{err}</div>}
         </div>
