@@ -310,6 +310,7 @@ function SortableURow({ u, items, switchAssignments, onSelectServer, onSelectCus
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
 function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, width = 400 }) {
   const [activeId, setActiveId] = useState(null);
+  const containerRef = useRef(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const { rows, uMap, sorted } = useMemo(
@@ -331,7 +332,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   }
 
   return (
-    <div className="flex-shrink-0" style={{ width }}>
+    <div ref={containerRef} className="w-full min-w-0">
       {/* label plate */}
       <div className={`mb-0 rounded-t-xl border-2 border-b-0 px-4 py-2.5 bg-zinc-900
         ${pduOnline ? "border-zinc-700" : r.pdus.length ? "border-red-900/60" : "border-zinc-800"}`}>
@@ -396,7 +397,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
           </SortableContext>
           <DragOverlay dropAnimation={null}>
             {activeServer && (
-              <div style={{ width: width - 8, background: "#0d0d0d", border: "1px solid #76b90040" }}
+              <div style={{ width: (containerRef.current?.offsetWidth || width) - 8, background: "#0d0d0d", border: "1px solid #76b90040" }}
                 className="rounded shadow-xl opacity-90 overflow-hidden">
                 <ServerCell server={activeServer} sw={switchAssignments[activeServer.id]}/>
               </div>
@@ -929,7 +930,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
       ) : (
         <>
           <div className="text-[10px] text-zinc-700 mb-4">Click rack name ↗ to open · drag grip to reorder · double-click name to rename</div>
-          <div className="flex gap-5 overflow-x-auto pb-4">
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
             {rackStats.map(rs => (
               <RackDiagram key={rs.rack} r={rs}
                 rackSlots={rackSlots} rackOrder={rackOrder}
