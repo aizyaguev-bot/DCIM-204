@@ -323,9 +323,12 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   const activeId     = external ? externalActiveId : localActiveId;
   const activeServer = sorted.find(s => s.id === activeId);
   const pduOnline    = r.pduOnline;
+  const isStorage    = r.rackType === "storage";
   const capPct       = r.maxWatts > 0 ? Math.min(100, r.totalWatts / r.maxWatts * 100) : 0;
-  const capColor     = capPct > 80 ? "#ef4444" : capPct > 55 ? "#f59e0b" : "#76b900";
-  const borderCls    = pduOnline ? "border-zinc-700" : r.pdus.length ? "border-zinc-800" : "border-zinc-900";
+  const capColor     = capPct > 80 ? "#ef4444" : capPct > 55 ? "#f59e0b" : isStorage ? "#22d3ee" : "#76b900";
+  const borderCls    = isStorage
+    ? (pduOnline ? "border-cyan-800/60" : r.pdus.length ? "border-cyan-900/30" : "border-cyan-900/20")
+    : (pduOnline ? "border-zinc-700" : r.pdus.length ? "border-zinc-800" : "border-zinc-900");
 
   function handleDragEnd({ active, over }) {
     setLocalActiveId(null);
@@ -368,10 +371,15 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
           </button>
           <div className="flex items-center gap-2 flex-shrink-0">
             <div className="flex items-center gap-1">
-              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${pduOnline ? "bg-nv-400 shadow-[0_0_6px_#76b900]" : r.pdus.length ? "bg-red-600" : "bg-zinc-700"}`}/>
-              <span className={`text-[9px] font-mono font-bold ${pduOnline ? "text-nv-400" : r.pdus.length ? "text-red-500" : "text-zinc-600"}`}>
-                {pduOnline ? "ONLINE" : r.pdus.length ? "OFFLINE" : "NO PDU"}
-              </span>
+              {isStorage
+              ? <span className="text-[9px] font-mono font-bold text-cyan-400 bg-cyan-950/60 border border-cyan-800/40 px-1.5 py-0.5 rounded">STORAGE</span>
+              : <>
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${pduOnline ? "bg-nv-400 shadow-[0_0_6px_#76b900]" : r.pdus.length ? "bg-red-600" : "bg-zinc-700"}`}/>
+                  <span className={`text-[9px] font-mono font-bold ${pduOnline ? "text-nv-400" : r.pdus.length ? "text-red-500" : "text-zinc-600"}`}>
+                    {pduOnline ? "ONLINE" : r.pdus.length ? "OFFLINE" : "NO PDU"}
+                  </span>
+                </>
+            }
             </div>
           </div>
         </div>
@@ -995,13 +1003,14 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
 const inputCls = "w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700";
 
 function AddRackModal({ onClose, onSave }) {
-  const [rackName, setRackName] = useState("");
-  const [pduName,  setPduName]  = useState("");
-  const [pduIp,    setPduIp]    = useState("");
-  const [pduUser,  setPduUser]  = useState("");
-  const [pduPass,  setPduPass]  = useState("");
-  const [saving,   setSaving]   = useState(false);
-  const [err,      setErr]      = useState("");
+  const [rackName,  setRackName]  = useState("");
+  const [rackType,  setRackType]  = useState("Compute");
+  const [pduName,   setPduName]   = useState("");
+  const [pduIp,     setPduIp]     = useState("");
+  const [pduUser,   setPduUser]   = useState("");
+  const [pduPass,   setPduPass]   = useState("");
+  const [saving,    setSaving]    = useState(false);
+  const [err,       setErr]       = useState("");
   useEscClose(onClose);
 
   async function handleSave() {
@@ -1012,9 +1021,9 @@ function AddRackModal({ onClose, onSave }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name:     pduName.trim() || `PDU-${rackName.trim()}`,
-          kind:     "pdu",
-          model:    "Raritan PDU",
+          name:     pduName.trim() || `${rackType}-${rackName.trim()}`,
+          kind:     "rack",          // DCIM-only — never shows on Dashboard
+          model:    rackType,        // "Compute" or "Storage"
           ip:       pduIp.trim()   || "0.0.0.0",
           rack:     rackName.trim(),
           username: pduUser.trim(),
@@ -1045,13 +1054,29 @@ function AddRackModal({ onClose, onSave }) {
               onKeyDown={e => e.key === "Enter" && handleSave()}
               placeholder="e.g. Rack-08" className={inputCls}/>
           </div>
+          <div>
+            <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-2">Rack type</div>
+            <div className="grid grid-cols-2 gap-2">
+              {["Compute", "Storage"].map(t => (
+                <button key={t} onClick={() => setRackType(t)}
+                  className={`py-2 text-sm font-semibold rounded-xl border transition
+                    ${rackType === t
+                      ? t === "Storage"
+                        ? "bg-cyan-900/40 border-cyan-600/60 text-cyan-300"
+                        : "bg-nv-400/15 border-nv-400/60 text-nv-400"
+                      : "border-zinc-800 text-zinc-600 hover:border-zinc-600 hover:text-zinc-400"}`}>
+                  {t === "Compute" ? "⚡ Compute" : "💾 Storage"}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="pt-1 border-t border-zinc-800/40">
             <div className="text-[10px] text-zinc-700 mb-2">PDU — optional</div>
             <div className="space-y-2">
               <input value={pduName} onChange={e => setPduName(e.target.value)}
-                placeholder="PDU name (e.g. PDU-Rack-08)" className={inputCls}/>
+                placeholder="PDU name" className={inputCls}/>
               <input value={pduIp} onChange={e => setPduIp(e.target.value)}
-                placeholder="PDU IP (e.g. 10.7.30.203)" className={inputCls}/>
+                placeholder="PDU IP" className={inputCls}/>
               <div className="grid grid-cols-2 gap-2">
                 <input value={pduUser} onChange={e => setPduUser(e.target.value)}
                   placeholder="Username" className={inputCls}/>
@@ -1426,8 +1451,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     });
   },[]);
 
-  const pdus  = devices.filter(d=>d.kind==="pdu");
-  const racks = useMemo(()=>[...new Set(devices.map(d=>d.rack).filter(Boolean))].sort(),[devices]);
+  const pdus       = devices.filter(d=>d.kind==="pdu");
+  // kind="rack" = DCIM-only racks (added via DCIM, never shown on Dashboard)
+  const rackDevices = devices.filter(d=>d.kind==="pdu"||d.kind==="rack");
+  const racks = useMemo(()=>[...new Set(rackDevices.map(d=>d.rack).filter(Boolean))].sort(),[rackDevices]);
 
   const servers = useMemo(()=>{
     const map=new Map();
@@ -1448,7 +1475,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   },[pdus,pduStatuses]);
 
   const rackStats = useMemo(()=>racks.map(rn=>{
-    const rPdus=pdus.filter(p=>p.rack===rn);
+    const rPdus=rackDevices.filter(p=>p.rack===rn);
     let totalWatts=0,outletsOn=0,outletsTotal=0;
     rPdus.forEach(pdu=>{const st=pduStatuses[pdu.id];if(st?.outlets){outletsOn+=st.outlets.filter(o=>o.state==="on").length;outletsTotal+=st.outlets.length;totalWatts+=st.total_watts||0;}});
     const rServers=servers.filter(s=>s.rack===rn);
@@ -1458,7 +1485,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       const st = pduStatuses[pdu.id];
       return acc + (st?.inlet_voltage > 0 ? 16 * st.inlet_voltage : 16 * 208);
     }, 0) || outletsTotal * 150;
-    return {rack:rn,pdus:rPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts,pduOnline};
+    const rackType = rPdus[0]?.model==="Storage" ? "storage" : "compute";
+    return {rack:rn,pdus:rPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
   }),[racks,pdus,pduStatuses,servers]);
 
   const handleReorder = useCallback((rackName,newIds)=>{
