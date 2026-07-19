@@ -558,19 +558,28 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
 }
 
 // ─── EDIT EQUIPMENT PANEL (custom items) ──────────────────────────────────────
-function EditEquipmentPanel({ item, rackName, onClose, onSave, onDelete }) {
+function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelete, onMove }) {
   useEscClose(onClose);
-  const [name,  setName]  = useState(item.name);
-  const [type,  setType]  = useState(item.type || "other");
-  const [u,     setU]     = useState(item.u ? String(item.u) : "");
-  const [notes, setNotes] = useState(item.notes || "");
-  const [busy,  setBusy]  = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [name,      setName]      = useState(item.name);
+  const [type,      setType]      = useState(item.type || "other");
+  const [u,         setU]         = useState(item.u ? String(item.u) : "");
+  const [notes,     setNotes]     = useState(item.notes || "");
+  const [busy,      setBusy]      = useState(false);
+  const [saved,     setSaved]     = useState(false);
+  const [moveRack,  setMoveRack]  = useState("");
+  const [moving,    setMoving]    = useState(false);
 
   async function submit() {
     setBusy(true);
     try { await onSave({ ...item, name: name.trim(), type, u: parseInt(u,10)||item.u, notes: notes.trim() }); setSaved(true); setTimeout(()=>setSaved(false),2000); }
     finally { setBusy(false); }
+  }
+
+  async function doMove() {
+    if (!moveRack) return;
+    setMoving(true);
+    try { await onMove(item, moveRack); onClose(); }
+    finally { setMoving(false); }
   }
 
   return (
@@ -603,6 +612,21 @@ function EditEquipmentPanel({ item, rackName, onClose, onSave, onDelete }) {
             <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 resize-none"/>
           </div>
+          {allRacks && allRacks.filter(r => r !== rackName).length > 0 && (
+            <div><SL>Move to rack</SL>
+              <div className="flex gap-2">
+                <select value={moveRack} onChange={e => setMoveRack(e.target.value)}
+                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50">
+                  <option value="">Select rack…</option>
+                  {allRacks.filter(r => r !== rackName).map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <button onClick={doMove} disabled={moving || !moveRack}
+                  className="px-3 py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-lg transition disabled:opacity-40">
+                  {moving ? "…" : "Move"}
+                </button>
+              </div>
+            </div>
+          )}
           <button onClick={submit} disabled={busy || !name.trim()}
             className={`w-full py-2 text-sm font-bold rounded-lg transition flex items-center justify-center gap-2
               ${saved?"bg-emerald-900/50 text-emerald-400 border border-emerald-800/50":"bg-nv-400 text-zinc-950 disabled:opacity-40"}`}>
@@ -615,6 +639,72 @@ function EditEquipmentPanel({ item, rackName, onClose, onSave, onDelete }) {
             Delete from rack
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MOVE OPT SECTION (inside ServerEditPanel) ────────────────────────────────
+function MoveOptSection({ server, pdu, pdus, onLabelChange, onClose }) {
+  const allRacks = [...new Set(pdus.map(p => p.rack).filter(Boolean))].sort();
+  const [targetRack,   setTargetRack]   = useState("");
+  const [targetPduId,  setTargetPduId]  = useState("");
+  const [targetOutlet, setTargetOutlet] = useState("");
+  const [moving,       setMoving]       = useState(false);
+  const [err,          setErr]          = useState("");
+
+  const rackPdus = targetRack ? pdus.filter(p => p.rack === targetRack) : [];
+
+  async function move() {
+    if (!targetPduId || !targetOutlet) { setErr("Select a PDU and outlet."); return; }
+    const tPdu = pdus.find(p => p.id === targetPduId);
+    if (!tPdu) return;
+    setMoving(true); setErr("");
+    try {
+      // clear current outlet
+      if (pdu && server.outlet != null) {
+        const cur = { ...pdu.labels }; delete cur[String(server.outlet)];
+        await onLabelChange(server.pduId, cur);
+      }
+      // set in target PDU
+      await onLabelChange(targetPduId, { ...tPdu.labels, [String(targetOutlet)]: server.name });
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Move failed.");
+    } finally {
+      setMoving(false);
+    }
+  }
+
+  const sel = "w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50";
+
+  return (
+    <div>
+      <SL>Move to rack</SL>
+      <div className="space-y-2">
+        <select value={targetRack} onChange={e => { setTargetRack(e.target.value); setTargetPduId(""); setTargetOutlet(""); setErr(""); }} className={sel}>
+          <option value="">Select rack…</option>
+          {allRacks.filter(r => r !== server.rack).map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        {rackPdus.length > 0 && (
+          <select value={targetPduId} onChange={e => { setTargetPduId(e.target.value); setErr(""); }} className={sel}>
+            <option value="">Select PDU…</option>
+            {rackPdus.map(p => <option key={p.id} value={p.id}>{p.name} ({p.ip})</option>)}
+          </select>
+        )}
+        {targetPduId && (
+          <input type="number" min="1" max="48" value={targetOutlet}
+            onChange={e => { setTargetOutlet(e.target.value); setErr(""); }}
+            placeholder="Outlet number (1–48)"
+            className={sel + " placeholder:text-zinc-700"}/>
+        )}
+        {err && <div className="text-xs text-red-400">{err}</div>}
+        {targetPduId && (
+          <button onClick={move} disabled={moving || !targetOutlet}
+            className="w-full py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-lg transition disabled:opacity-40">
+            {moving ? "Moving…" : `Move to ${targetRack}`}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -737,6 +827,8 @@ function ServerEditPanel({ server, pdus, rackSlots, switchAssignments, onClose, 
               ))}
             </div>
           </div>
+
+          <MoveOptSection server={server} pdu={pdu} pdus={pdus} onLabelChange={onLabelChange} onClose={onClose}/>
         </div>
 
         <div className="px-5 py-4 border-t border-zinc-800/40 bg-zinc-900/30">
@@ -1231,7 +1323,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     rPdus.forEach(pdu=>{const st=pduStatuses[pdu.id];if(st?.outlets){outletsOn+=st.outlets.filter(o=>o.state==="on").length;outletsTotal+=st.outlets.length;totalWatts+=st.total_watts||0;}});
     const rServers=servers.filter(s=>s.rack===rn);
     const pduOnline=rPdus.length>0?(pduStatuses[rPdus[0].id]?.reachable!==false&&!!pduStatuses[rPdus[0].id]):false;
-    return {rack:rn,pdus:rPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts:outletsTotal*150,pduOnline};
+    // 16A × 208V ≈ 3328W per PDU circuit; PDU rated at 16A total
+    const maxWatts = rPdus.reduce((acc, pdu) => {
+      const st = pduStatuses[pdu.id];
+      return acc + (st?.inlet_voltage > 0 ? 16 * st.inlet_voltage : 16 * 208);
+    }, 0) || outletsTotal * 150;
+    return {rack:rn,pdus:rPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts,pduOnline};
   }),[racks,pdus,pduStatuses,servers]);
 
   const handleReorder = useCallback((rackName,newIds)=>{
@@ -1271,6 +1368,19 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
     if (!rackName) return;
     const updated = { ...customItems, [rackName]: customItems[rackName].filter(i => i.id !== item.id) };
+    setCustomItems(updated);
+    await fetch("/api/rack-items",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
+  }, [customItems]);
+
+  // Move custom item to a different rack
+  const handleMoveCustom = useCallback(async (item, targetRack) => {
+    const srcRack = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
+    if (!srcRack || srcRack === targetRack) return;
+    const updated = {
+      ...customItems,
+      [srcRack]: customItems[srcRack].filter(i => i.id !== item.id),
+      [targetRack]: [...(customItems[targetRack] || []), { ...item, u: null }],
+    };
     setCustomItems(updated);
     await fetch("/api/rack-items",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
   }, [customItems]);
@@ -1331,8 +1441,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       {selectedCustom&&selectedCustomRack&&(
         <Portal>
           <EditEquipmentPanel item={selectedCustom} rackName={selectedCustomRack}
-            onClose={()=>setSelectedCustom(null)}
-            onSave={handleSaveCustom} onDelete={handleDeleteCustom}/>
+            allRacks={racks} onClose={()=>setSelectedCustom(null)}
+            onSave={handleSaveCustom} onDelete={handleDeleteCustom} onMove={handleMoveCustom}/>
         </Portal>
       )}
     </main>
