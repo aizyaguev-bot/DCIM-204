@@ -6,7 +6,7 @@ function Portal({ children }) {
 }
 import {
   DndContext, closestCenter, PointerSensor,
-  useSensor, useSensors, DragOverlay,
+  useSensor, useSensors, DragOverlay, useDroppable,
 } from "@dnd-kit/core";
 import {
   SortableContext, verticalListSortingStrategy,
@@ -308,10 +308,11 @@ function SortableURow({ u, items, switchAssignments, onSelectServer, onSelectCus
 }
 
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
-function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, width = 400, fixed = false }) {
-  const [activeId, setActiveId] = useState(null);
+function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, width = 400, fixed = false, external = false, externalActiveId = null }) {
+  const [localActiveId, setLocalActiveId] = useState(null);
   const containerRef = useRef(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  const { setNodeRef: setDropRef, isOver } = useDroppable({ id: "rack:" + r.rack });
 
   const { rows, uMap, sorted } = useMemo(
     () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems),
@@ -319,6 +320,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   );
 
   const serverIds    = sorted.map(s => s.id);
+  const activeId     = external ? externalActiveId : localActiveId;
   const activeServer = sorted.find(s => s.id === activeId);
   const pduOnline    = r.pduOnline;
   const capPct       = r.maxWatts > 0 ? Math.min(100, r.totalWatts / r.maxWatts * 100) : 0;
@@ -326,10 +328,33 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   const borderCls    = pduOnline ? "border-zinc-700" : r.pdus.length ? "border-zinc-800" : "border-zinc-900";
 
   function handleDragEnd({ active, over }) {
-    setActiveId(null);
+    setLocalActiveId(null);
     if (!active || !over || active.id === over.id) return;
     onReorder(r.rack, arrayMove(serverIds, serverIds.indexOf(active.id), serverIds.indexOf(over.id)));
   }
+
+  const sortableRows = (
+    <SortableContext items={serverIds} strategy={verticalListSortingStrategy}>
+      {rows.map(({ u, items }) => {
+        const serverItem = items.find(i => i.kind === "server");
+        if (serverItem) {
+          return (
+            <SortableURow key={`u${u}`} u={u} items={items}
+              switchAssignments={switchAssignments}
+              onSelectServer={onSelect} onSelectCustom={onSelectCustom}
+              onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
+              isDragging={serverItem.data.id === activeId}/>
+          );
+        }
+        return (
+          <USlotGroup key={`u${u}`} u={u} items={items}
+            switchAssignments={switchAssignments}
+            onSelectServer={onSelect} onSelectCustom={onSelectCustom}
+            onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
+        );
+      })}
+    </SortableContext>
+  );
 
   return (
     <div ref={containerRef} className={fixed ? "flex-shrink-0" : "w-full min-w-0"} style={fixed ? { width } : undefined}>
@@ -359,7 +384,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
       </div>
 
       {/* chassis body */}
-      <div className={`border-l-4 border-r-4 bg-zinc-950 ${borderCls}`}>
+      <div ref={external ? setDropRef : undefined} className={`border-l-4 border-r-4 bg-zinc-950 ${borderCls}${external && isOver ? " ring-2 ring-nv-400/40 ring-inset" : ""}`}>
         {/* top cap bar with screw dots */}
         <div className="bg-zinc-900 border-b border-zinc-800/80 h-3 flex items-center justify-between px-2">
           <div className="flex gap-1">
@@ -371,39 +396,22 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
             <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
           </div>
         </div>
-        <DndContext sensors={sensors} collisionDetection={closestCenter}
-          onDragStart={e => setActiveId(e.active.id)}
-          onDragEnd={handleDragEnd}
-          onDragCancel={() => setActiveId(null)}>
-          <SortableContext items={serverIds} strategy={verticalListSortingStrategy}>
-            {rows.map(({ u, items }) => {
-              const serverItem = items.find(i => i.kind === "server");
-              if (serverItem) {
-                return (
-                  <SortableURow key={`u${u}`} u={u} items={items}
-                    switchAssignments={switchAssignments}
-                    onSelectServer={onSelect} onSelectCustom={onSelectCustom}
-                    onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
-                    isDragging={serverItem.data.id === activeId}/>
-                );
-              }
-              return (
-                <USlotGroup key={`u${u}`} u={u} items={items}
-                  switchAssignments={switchAssignments}
-                  onSelectServer={onSelect} onSelectCustom={onSelectCustom}
-                  onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
-              );
-            })}
-          </SortableContext>
-          <DragOverlay dropAnimation={null}>
-            {activeServer && (
-              <div style={{ width: (containerRef.current?.offsetWidth || width) - 8, background: "#0d0d0d", border: "1px solid #76b90040" }}
-                className="rounded shadow-xl opacity-90 overflow-hidden">
-                <ServerCell server={activeServer} sw={switchAssignments[activeServer.id]}/>
-              </div>
-            )}
-          </DragOverlay>
-        </DndContext>
+        {external ? sortableRows : (
+          <DndContext sensors={sensors} collisionDetection={closestCenter}
+            onDragStart={e => setLocalActiveId(e.active.id)}
+            onDragEnd={handleDragEnd}
+            onDragCancel={() => setLocalActiveId(null)}>
+            {sortableRows}
+            <DragOverlay dropAnimation={null}>
+              {activeServer && (
+                <div style={{ width: (containerRef.current?.offsetWidth || width) - 8, background: "#0d0d0d", border: "1px solid #76b90040" }}
+                  className="rounded shadow-xl opacity-90 overflow-hidden">
+                  <ServerCell server={activeServer} sw={switchAssignments[activeServer.id]}/>
+                </div>
+              )}
+            </DragOverlay>
+          </DndContext>
+        )}
         {/* bottom cap bar with screw dots */}
         <div className="bg-zinc-900 border-t border-zinc-800/80 h-3 flex items-center justify-between px-2">
           <div className="flex gap-1">
@@ -1000,7 +1008,7 @@ function AddRackModal({ onClose, onSave }) {
     if (!rackName.trim()) { setErr("Rack name is required."); return; }
     setSaving(true); setErr("");
     try {
-      const res = await fetch("/api/devices", {
+      const res = await fetch("/api/devices/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1066,14 +1074,113 @@ function AddRackModal({ onClose, onSave }) {
   );
 }
 
+// ─── CROSS-RACK MOVE MODAL ────────────────────────────────────────────────────
+function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClose }) {
+  useEscClose(onClose);
+  const rackPdus = targetRackStat.pdus;
+  const [pduId, setPduId] = useState(rackPdus[0]?.id || "");
+  const [outlet, setOutlet] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function doMove() {
+    if (!pduId || !outlet) { setErr("Select PDU and outlet."); return; }
+    const srcPdu = pdus.find(p => p.id === server.pduId);
+    const tgtPdu = pdus.find(p => p.id === pduId);
+    if (!tgtPdu) return;
+    setSaving(true); setErr("");
+    try {
+      if (srcPdu && server.outlet != null) {
+        const cur = { ...srcPdu.labels }; delete cur[String(server.outlet)];
+        await onLabelChange(server.pduId, cur);
+      }
+      await onLabelChange(pduId, { ...tgtPdu.labels, [String(outlet)]: server.name });
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Move failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const sel = "w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-xs" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50">
+          <span className="text-sm font-bold text-zinc-100">Move to {targetRackStat.rack}</span>
+          <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition">{Icon.x}</button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="text-xs text-zinc-500">Moving <span className="text-zinc-200 font-mono">{server.name}</span> from <span className="text-zinc-400">{server.rack}</span></div>
+          {rackPdus.length > 1 && (
+            <select value={pduId} onChange={e => setPduId(e.target.value)} className={sel}>
+              {rackPdus.map(p => <option key={p.id} value={p.id}>{p.name} ({p.ip})</option>)}
+            </select>
+          )}
+          {rackPdus.length === 1 && <div className="text-xs text-zinc-600 font-mono">{rackPdus[0].name} · {rackPdus[0].ip}</div>}
+          {rackPdus.length === 0 && <div className="text-xs text-amber-600">This rack has no PDU attached.</div>}
+          <input type="number" min="1" max="48" value={outlet} onChange={e => setOutlet(e.target.value)}
+            placeholder="Outlet number (1–48)" className={sel + " placeholder:text-zinc-700"}
+            onKeyDown={e => e.key === "Enter" && doMove()}/>
+          {err && <div className="text-xs text-red-400">{err}</div>}
+        </div>
+        <div className="flex gap-2 px-5 pb-4">
+          <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-xl transition">Cancel</button>
+          <button onClick={doMove} disabled={saving || !outlet || rackPdus.length === 0}
+            className="flex-1 py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-xl transition disabled:opacity-40">
+            {saving ? "Moving…" : "Move"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
-function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh }) {
+function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus }) {
   const [selectedRack, setSelectedRack] = useState(null);
   const [addOptFor,    setAddOptFor]    = useState(null);
   const [addEquipFor,  setAddEquipFor]  = useState(null);
   const [addRackOpen,  setAddRackOpen]  = useState(false);
+  const [activeId,     setActiveId]     = useState(null);
+  const [pendingMove,  setPendingMove]  = useState(null);
 
   const r = selectedRack ? rackStats.find(r => r.rack === selectedRack) : null;
+
+  const serverRackMap = useMemo(() => {
+    const m = {};
+    rackStats.forEach(rs => rs.servers.forEach(s => { m[s.id] = rs.rack; }));
+    return m;
+  }, [rackStats]);
+
+  const rackServerIds = useMemo(() => {
+    const m = {};
+    rackStats.forEach(rs => { m[rs.rack] = rs.servers.map(s => s.id); });
+    return m;
+  }, [rackStats]);
+
+  const crossSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  const activeServer = activeId ? rackStats.flatMap(rs => rs.servers).find(s => s.id === activeId) : null;
+
+  function handleCrossRackDragEnd({ active, over }) {
+    setActiveId(null);
+    if (!active || !over || active.id === over.id) return;
+    const sourceRack = serverRackMap[active.id];
+    const targetRack = over.id.startsWith("rack:") ? over.id.slice(5) : serverRackMap[over.id];
+    if (!sourceRack || !targetRack) return;
+    if (sourceRack === targetRack) {
+      const ids = rackServerIds[sourceRack] || [];
+      const oldIdx = ids.indexOf(active.id);
+      const newIdx = ids.indexOf(over.id);
+      if (oldIdx !== -1 && newIdx !== -1) onReorder(sourceRack, arrayMove(ids, oldIdx, newIdx));
+    } else {
+      const server = rackStats.flatMap(rs => rs.servers).find(s => s.id === active.id);
+      const targetRackStat = rackStats.find(rs => rs.rack === targetRack);
+      if (server && targetRackStat) setPendingMove({ server, targetRackStat });
+    }
+  }
 
   async function handleSaveOpt(pduId, outlet, name, existing) {
     try { await onLabelChange(pduId, { ...existing, [String(outlet)]: name }); }
@@ -1116,22 +1223,35 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
       ) : (
         <>
           <div className="flex items-center justify-between mb-4">
-            <div className="text-[10px] text-zinc-700">Click rack name ↗ to open · drag grip to reorder · double-click name to rename</div>
+            <div className="text-[10px] text-zinc-700">Click rack name ↗ to open · drag grip to reorder · double-click name to rename · drag OPT across racks to move</div>
             <button onClick={() => setAddRackOpen(true)}
               className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-3 py-1.5 rounded-xl transition flex-shrink-0">
               {Icon.plus} Add Rack
             </button>
           </div>
-          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
-            {rackStats.map(rs => (
-              <RackDiagram key={rs.rack} r={rs}
-                rackSlots={rackSlots} rackOrder={rackOrder}
-                switchAssignments={switchAssignments} customItems={customItems}
-                onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
-                onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
-                onHeaderClick={() => setSelectedRack(rs.rack)}/>
-            ))}
-          </div>
+          <DndContext sensors={crossSensors} collisionDetection={closestCenter}
+            onDragStart={e => setActiveId(e.active.id)}
+            onDragEnd={handleCrossRackDragEnd}
+            onDragCancel={() => setActiveId(null)}>
+            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
+              {rackStats.map(rs => (
+                <RackDiagram key={rs.rack} r={rs}
+                  rackSlots={rackSlots} rackOrder={rackOrder}
+                  switchAssignments={switchAssignments} customItems={customItems}
+                  onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
+                  onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
+                  onHeaderClick={() => setSelectedRack(rs.rack)}
+                  external externalActiveId={activeId}/>
+              ))}
+            </div>
+            <DragOverlay dropAnimation={null}>
+              {activeServer && (
+                <div style={{ opacity: 0.9 }}>
+                  <ServerCell server={activeServer} sw={switchAssignments[activeServer.id]}/>
+                </div>
+              )}
+            </DragOverlay>
+          </DndContext>
         </>
       )}
 
@@ -1150,6 +1270,16 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
       {addRackOpen && (
         <Portal>
           <AddRackModal onClose={() => setAddRackOpen(false)} onSave={async () => { await onRefresh?.(); }}/>
+        </Portal>
+      )}
+      {pendingMove && (
+        <Portal>
+          <CrossRackMoveModal
+            server={pendingMove.server}
+            targetRackStat={pendingMove.targetRackStat}
+            pdus={pdus}
+            onLabelChange={onLabelChange}
+            onClose={() => setPendingMove(null)}/>
         </Portal>
       )}
     </div>
@@ -1423,7 +1553,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onSelect={s => setSelectedServerId(s.id)} onSelectCustom={setSelectedCustom}
           onLabelChange={onLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
-          onCustomItemsChange={setCustomItems} onRefresh={onRefresh}/>
+          onCustomItemsChange={setCustomItems} onRefresh={onRefresh}
+          pdus={pdus}/>
       )}
       {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}
