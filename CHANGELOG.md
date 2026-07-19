@@ -2,6 +2,18 @@
 
 ---
 
+## v2.5.0 — 2026-07-19
+
+### Changed
+- **Rack detail right panel redesign** — cleaner, more readable layout:
+  - Action buttons (+ Equipment, + OPT) moved to the top as full-height buttons instead of being squeezed next to the rack name
+  - Stats grid now uses 2-column layout with larger text (`text-lg font-bold`) and monospace uppercase labels — easier to scan at a glance
+  - Added "Status" tile (Online / Offline / No PDU) so rack health is immediately visible
+  - PDU section is now its own card with a green glow dot for online PDUs
+  - Removed the previous cramped info card that mixed rack name, buttons, stats, and PDU info in a single block
+
+---
+
 ## v2.4.0 — 2026-07-19
 
 ### Changed

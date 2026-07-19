@@ -783,44 +783,50 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
 
         {/* Right panel */}
         <div className="flex-1 min-w-0 space-y-4">
-          {/* Rack info card */}
-          <div className="bg-zinc-900/50 border border-zinc-800/60 rounded-2xl p-4">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-bold text-zinc-100">{r.rack}</span>
-              <div className="flex gap-2">
-                <button onClick={() => onRequestAddEquip(r.rack)}
-                  className="flex items-center gap-1 text-[11px] font-semibold text-zinc-400 border border-zinc-700/50 hover:border-zinc-600 hover:text-zinc-200 px-2.5 py-1 rounded-lg transition">
-                  {Icon.plus} Equipment
-                </button>
-                {r.pdus.length > 0 && (
-                  <button onClick={() => onRequestAddOpt(r)}
-                    className="flex items-center gap-1 text-[11px] font-semibold text-nv-400 border border-nv-400/30 hover:border-nv-400/60 hover:bg-nv-400/8 px-2.5 py-1 rounded-lg transition">
-                    {Icon.plus} OPT
-                  </button>
-                )}
+          {/* Action buttons */}
+          <div className="flex gap-2">
+            <button onClick={() => onRequestAddEquip(r.rack)}
+              className="flex items-center gap-1.5 text-sm font-semibold text-zinc-300 border border-zinc-700/50 hover:border-zinc-500 hover:text-zinc-100 px-4 py-2 rounded-xl transition">
+              {Icon.plus} Equipment
+            </button>
+            {r.pdus.length > 0 && (
+              <button onClick={() => onRequestAddOpt(r)}
+                className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-4 py-2 rounded-xl transition">
+                {Icon.plus} OPT
+              </button>
+            )}
+          </div>
+
+          {/* Stats */}
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              ["OPTs", r.servers.length],
+              ["Equipment", (customItems[r.rack]||[]).length],
+              ["Power draw", r.totalWatts > 0 ? `${r.totalWatts.toFixed(0)} W` : "—"],
+              ["PDU capacity", `${capPct.toFixed(0)}%`],
+              ["Outlets on", `${r.outletsOn} / ${r.outletsTotal}`],
+              ["Status", pduOnline ? "Online" : r.pdus.length ? "Offline" : "No PDU"],
+            ].map(([k, v]) => (
+              <div key={k} className="bg-zinc-900/60 border border-zinc-800/50 rounded-xl px-4 py-3">
+                <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-1">{k}</div>
+                <div className="text-lg font-bold text-zinc-100">{v}</div>
               </div>
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {[["OPTs",r.servers.length],["Equipment",(customItems[r.rack]||[]).length],["Power",r.totalWatts>0?`${r.totalWatts.toFixed(0)} W`:"—"],["PDU cap",`${capPct.toFixed(0)}%`],["Outlets",`${r.outletsOn}/${r.outletsTotal}`]].map(([k,v])=>(
-                <div key={k} className="bg-zinc-900/60 border border-zinc-800/40 rounded-lg px-3 py-2">
-                  <div className="text-[9px] text-zinc-600 mb-0.5">{k}</div>
-                  <div className="text-sm font-bold text-zinc-200">{v}</div>
+            ))}
+          </div>
+
+          {/* PDUs */}
+          {r.pdus.length > 0 && (
+            <div className="bg-zinc-900/50 border border-zinc-800/60 rounded-xl px-4 py-3">
+              <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-2">PDUs</div>
+              {r.pdus.map(p => (
+                <div key={p.id} className="flex items-center gap-3 py-1.5 border-b border-zinc-800/30 last:border-0">
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${pduOnline ? "bg-nv-400 shadow-[0_0_4px_#76b900]" : "bg-zinc-600"}`}/>
+                  <span className="text-sm font-semibold text-zinc-200">{p.name}</span>
+                  <span className="text-xs font-mono text-zinc-500 ml-auto">{p.ip}</span>
                 </div>
               ))}
             </div>
-            {r.pdus.length>0&&(
-              <div className="mt-3 pt-3 border-t border-zinc-800/40">
-                <SL>PDUs</SL>
-                {r.pdus.map(p=>(
-                  <div key={p.id} className="flex items-center gap-2 mb-1">
-                    <span className={`w-1.5 h-1.5 rounded-full ${pduOnline?"bg-nv-400":"bg-zinc-600"}`}/>
-                    <span className="text-[11px] font-semibold text-zinc-300">{p.name}</span>
-                    <span className="text-[11px] font-mono text-zinc-600">{p.ip}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          )}
 
           {/* Server table */}
           <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
