@@ -1111,24 +1111,43 @@ function AddRackModal({ onClose, onSave }) {
 // ─── EDIT RACK MODAL ──────────────────────────────────────────────────────────
 function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
   useEscClose(onClose);
+  const pdus = rackDevs.filter(d => d.kind === "pdu");
+
   const [name,       setName]       = useState(rackName);
   const [type,       setType]       = useState(rackType === "storage" ? "Storage" : "Compute");
+  // pduEdits: { [id]: { name, ip, username, password } }
+  const [pduEdits,   setPduEdits]   = useState(() =>
+    Object.fromEntries(pdus.map(p => [p.id, { name: p.name, ip: p.ip, username: "", password: "" }]))
+  );
   const [saving,     setSaving]     = useState(false);
   const [deleting,   setDeleting]   = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const [err,        setErr]        = useState("");
 
+  function setPduField(id, field, val) {
+    setPduEdits(prev => ({ ...prev, [id]: { ...prev[id], [field]: val } }));
+  }
+
   async function handleSave() {
     if (!name.trim()) { setErr("Rack name is required."); return; }
     setSaving(true); setErr("");
     try {
-      await Promise.all(rackDevs.map(d =>
-        fetch(`/api/devices/${d.id}`, {
+      await Promise.all(rackDevs.map(d => {
+        const e = pduEdits[d.id];
+        const body = {
+          ...d,
+          rack:  name.trim(),
+          model: d.kind === "rack" ? type : d.model,
+          ...(e ? { name: e.name.trim() || d.name, ip: e.ip.trim() || d.ip } : {}),
+          ...(e?.username ? { username: e.username } : {}),
+          ...(e?.password ? { password: e.password } : {}),
+        };
+        return fetch(`/api/devices/${d.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...d, rack: name.trim(), model: d.kind === "rack" ? type : d.model }),
-        }).then(r => { if (!r.ok) throw new Error(`Failed to update ${d.name}`); })
-      ));
+          body: JSON.stringify(body),
+        }).then(r => { if (!r.ok) throw new Error(`Failed to update ${d.name}`); });
+      }));
       await onSave();
       onClose();
     } catch (e) {
@@ -1150,15 +1169,15 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
     } finally { setDeleting(false); setConfirmDel(false); }
   }
 
-  const hasPdus = rackDevs.some(d => d.kind === "pdu");
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50">
+      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50 sticky top-0 bg-zinc-950 z-10">
           <span className="text-sm font-bold text-zinc-100">Edit Rack — {rackName}</span>
           <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition">{Icon.x}</button>
         </div>
+
+        {/* Rack fields */}
         <div className="px-5 py-4 space-y-4">
           <div>
             <label className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-1 block">Rack Name</label>
@@ -1178,8 +1197,43 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
               ))}
             </div>
           </div>
-          {err && <div className="text-xs text-red-400">{err}</div>}
         </div>
+
+        {/* PDU section */}
+        {pdus.length > 0 && (
+          <div className="border-t border-zinc-800/50">
+            {pdus.map((p, i) => {
+              const e = pduEdits[p.id] || {};
+              return (
+                <div key={p.id} className="px-5 py-4 space-y-3">
+                  <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
+                    PDU{pdus.length > 1 ? ` ${i + 1}` : ""}
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-600 mb-1 block">Name</label>
+                    <input value={e.name} onChange={ev => setPduField(p.id, "name", ev.target.value)} className={inputCls} placeholder={p.name}/>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-600 mb-1 block">IP Address</label>
+                    <input value={e.ip} onChange={ev => setPduField(p.id, "ip", ev.target.value)} className={inputCls} placeholder={p.ip}/>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-600 mb-1 block">Username <span className="text-zinc-700">(leave blank to keep current)</span></label>
+                    <input value={e.username} onChange={ev => setPduField(p.id, "username", ev.target.value)} className={inputCls} placeholder="unchanged" autoComplete="off"/>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-600 mb-1 block">Password <span className="text-zinc-700">(leave blank to keep current)</span></label>
+                    <input type="password" value={e.password} onChange={ev => setPduField(p.id, "password", ev.target.value)} className={inputCls} placeholder="unchanged" autoComplete="new-password"/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {err && <div className="px-5 pb-2 text-xs text-red-400">{err}</div>}
+
+        {/* Delete */}
         <div className="px-5 pb-2">
           {!confirmDel ? (
             <button onClick={() => setConfirmDel(true)}
@@ -1189,7 +1243,7 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
           ) : (
             <div className="bg-red-950/20 border border-red-900/50 rounded-xl p-3 space-y-2">
               <div className="text-xs text-red-400">
-                {hasPdus
+                {pdus.length
                   ? `This will permanently delete ${rackDevs.length} device(s) including PDU(s). Cannot be undone.`
                   : "Delete this rack permanently? Cannot be undone."}
               </div>
@@ -1203,6 +1257,7 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
             </div>
           )}
         </div>
+
         <div className="flex gap-2 px-5 py-4">
           <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-xl transition">Cancel</button>
           <button onClick={handleSave} disabled={saving}

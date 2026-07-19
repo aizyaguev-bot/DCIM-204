@@ -2,6 +2,13 @@
 
 ---
 
+## v2.15.0 — 2026-07-19
+
+### Added
+- **Edit PDU from DCIM** — the Edit Rack modal (pencil icon on rack card) now includes a PDU section for each PDU in the rack. You can update PDU name, IP address, username, and password. Leave credentials blank to keep existing values.
+
+---
+
 ## v2.14.0 — 2026-07-19
 
 ### Added
