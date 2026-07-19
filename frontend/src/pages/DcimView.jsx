@@ -308,7 +308,7 @@ function SortableURow({ u, items, switchAssignments, onSelectServer, onSelectCus
 }
 
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
-function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, width = 400 }) {
+function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, width = 400, fixed = false }) {
   const [activeId, setActiveId] = useState(null);
   const containerRef = useRef(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
@@ -332,7 +332,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   }
 
   return (
-    <div ref={containerRef} className="w-full min-w-0">
+    <div ref={containerRef} className={fixed ? "flex-shrink-0" : "w-full min-w-0"} style={fixed ? { width } : undefined}>
       {/* label plate */}
       <div className={`mb-0 rounded-t-xl border-2 border-b-0 px-4 py-2.5 bg-zinc-900
         ${pduOnline ? "border-zinc-700" : r.pdus.length ? "border-red-900/60" : "border-zinc-800"}`}>
@@ -773,13 +773,13 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
         <Pill color={pduOnline?"nv":r.pdus.length?"red":"zinc"} sm>{pduOnline?"online":r.pdus.length?"offline":"no PDU"}</Pill>
       </div>
 
-      <div className="flex gap-6 items-start">
+      <div className="flex gap-6 items-start min-w-0 overflow-x-auto">
         {/* Large rack diagram */}
         <RackDiagram r={r} rackSlots={rackSlots} switchAssignments={switchAssignments}
           rackOrder={rackOrder} customItems={customItems}
           onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
           onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
-          width={520}/>
+          width={480} fixed/>
 
         {/* Right panel */}
         <div className="flex-1 min-w-0 space-y-4">
@@ -891,11 +891,90 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
   );
 }
 
+// ─── ADD RACK MODAL ───────────────────────────────────────────────────────────
+function AddRackModal({ onClose, onSave }) {
+  const [rackName, setRackName] = useState("");
+  const [pduName,  setPduName]  = useState("");
+  const [pduIp,    setPduIp]    = useState("");
+  const [pduUser,  setPduUser]  = useState("");
+  const [pduPass,  setPduPass]  = useState("");
+  const [saving,   setSaving]   = useState(false);
+  const [err,      setErr]      = useState("");
+  useEscClose(onClose);
+
+  async function handleSave() {
+    if (!rackName.trim() || !pduName.trim() || !pduIp.trim()) {
+      setErr("Rack name, PDU name and IP are required.");
+      return;
+    }
+    setSaving(true); setErr("");
+    try {
+      const res = await fetch("/api/devices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: pduName.trim(),
+          kind: "pdu",
+          model: "Raritan PDU",
+          ip: pduIp.trim(),
+          rack: rackName.trim(),
+          username: pduUser.trim(),
+          password: pduPass,
+        }),
+      });
+      if (!res.ok) { const t = await res.text(); throw new Error(t || res.status); }
+      await onSave();
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Failed to add rack.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const Field = ({ label, value, onChange, placeholder, type = "text" }) => (
+    <div>
+      <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-1">{label}</div>
+      <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50">
+          <span className="text-sm font-bold text-zinc-100">Add Rack</span>
+          <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition">{Icon.x}</button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <Field label="Rack name" value={rackName} onChange={setRackName} placeholder="e.g. Rack-08"/>
+          <Field label="PDU name" value={pduName} onChange={setPduName} placeholder="e.g. PDU-Rack-08"/>
+          <Field label="PDU IP address" value={pduIp} onChange={setPduIp} placeholder="e.g. 10.7.30.203"/>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="PDU username" value={pduUser} onChange={setPduUser} placeholder="optional"/>
+            <Field label="PDU password" value={pduPass} onChange={setPduPass} placeholder="optional" type="password"/>
+          </div>
+          {err && <div className="text-xs text-red-400 bg-red-950/30 border border-red-900/40 rounded-lg px-3 py-2">{err}</div>}
+        </div>
+        <div className="flex gap-2 px-5 pb-4">
+          <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-xl transition">Cancel</button>
+          <button onClick={handleSave} disabled={saving}
+            className="flex-1 py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-xl transition disabled:opacity-50">
+            {saving ? "Adding…" : "Add Rack"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
-function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange }) {
+function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh }) {
   const [selectedRack, setSelectedRack] = useState(null);
   const [addOptFor,    setAddOptFor]    = useState(null);
   const [addEquipFor,  setAddEquipFor]  = useState(null);
+  const [addRackOpen,  setAddRackOpen]  = useState(false);
 
   const r = selectedRack ? rackStats.find(r => r.rack === selectedRack) : null;
 
@@ -919,6 +998,10 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
   if (!rackStats.length) return (
     <div className="flex flex-col items-center justify-center py-32 gap-3 text-zinc-600">
       <div className="text-sm">No racks discovered yet.</div>
+      <button onClick={() => setAddRackOpen(true)}
+        className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-4 py-2 rounded-xl transition">
+        {Icon.plus} Add Rack
+      </button>
     </div>
   );
 
@@ -935,7 +1018,13 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
           onRequestAddEquip={setAddEquipFor}/>
       ) : (
         <>
-          <div className="text-[10px] text-zinc-700 mb-4">Click rack name ↗ to open · drag grip to reorder · double-click name to rename</div>
+          <div className="flex items-center justify-between mb-4">
+            <div className="text-[10px] text-zinc-700">Click rack name ↗ to open · drag grip to reorder · double-click name to rename</div>
+            <button onClick={() => setAddRackOpen(true)}
+              className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-3 py-1.5 rounded-xl transition flex-shrink-0">
+              {Icon.plus} Add Rack
+            </button>
+          </div>
           <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
             {rackStats.map(rs => (
               <RackDiagram key={rs.rack} r={rs}
@@ -959,6 +1048,11 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
         <Portal>
           <AddEquipmentModal rackName={addEquipFor} onClose={() => setAddEquipFor(null)}
             onSave={item => handleSaveEquip(addEquipFor, item)}/>
+        </Portal>
+      )}
+      {addRackOpen && (
+        <Portal>
+          <AddRackModal onClose={() => setAddRackOpen(false)} onSave={async () => { await onRefresh?.(); }}/>
         </Portal>
       )}
     </div>
@@ -1085,7 +1179,7 @@ function KpiBar({servers,rackStats,pdus,pduStatuses}) {
 }
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange}) {
+export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRefresh}) {
   const [section,           setSection]           = useState("racks");
   const [rackOrder,         setRackOrder]         = useState({});
   const [rackSlots,         setRackSlots]         = useState({});
@@ -1214,7 +1308,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onSelect={s => setSelectedServerId(s.id)} onSelectCustom={setSelectedCustom}
           onLabelChange={onLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
-          onCustomItemsChange={setCustomItems}/>
+          onCustomItemsChange={setCustomItems} onRefresh={onRefresh}/>
       )}
       {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}

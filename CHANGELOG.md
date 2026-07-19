@@ -2,6 +2,16 @@
 
 ---
 
+## v2.7.0 — 2026-07-19
+
+### Added
+- **Add Rack button** in DCIM overview — "+ Add Rack" button top-right of the rack grid. Opens a modal to enter Rack name, PDU name, PDU IP, and optional username/password. Saves directly to the database; rack appears immediately without page reload.
+
+### Fixed
+- **Rack detail right panel too narrow** — rack diagram was using `w-full` and expanding to fill the entire container, pushing the right panel to ~150px. Fixed with `fixed` prop (`flex-shrink-0` + `width: 480px`) on the detail view diagram, leaving the right panel the space it needs.
+
+---
+
 ## v2.6.0 — 2026-07-19
 
 ### Added
