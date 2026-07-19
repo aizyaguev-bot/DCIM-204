@@ -363,7 +363,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   return (
     <div ref={containerRef} className={fixed ? "flex-shrink-0" : "w-full min-w-0"} style={fixed ? { width } : undefined}>
       {/* label plate */}
-      <div className={`mb-0 rounded-t-xl border-2 border-b-0 px-4 py-2.5 bg-zinc-900 group/header
+      <div className={`mb-0 rounded-t-xl border-2 border-b-0 px-4 py-2.5 bg-zinc-900
         ${pduOnline ? "border-zinc-700" : r.pdus.length ? "border-red-900/60" : "border-zinc-800"}`}>
         <div className="flex items-center justify-between gap-2">
           <button onClick={onHeaderClick} className="flex items-center gap-1.5 min-w-0 group/rh">
@@ -373,7 +373,8 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
           <div className="flex items-center gap-2 flex-shrink-0">
             {onEdit && (
               <button onClick={e => { e.stopPropagation(); onEdit(); }}
-                className="text-zinc-700 hover:text-zinc-300 transition p-0.5 opacity-0 group-hover/header:opacity-100">
+                title="Edit rack"
+                className="text-zinc-600 hover:text-nv-400 transition p-0.5">
                 {Icon.edit}
               </button>
             )}
