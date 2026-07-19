@@ -1119,6 +1119,8 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
   const [pduEdits,   setPduEdits]   = useState(() =>
     Object.fromEntries(pdus.map(p => [p.id, { name: p.name, ip: p.ip, username: "", password: "" }]))
   );
+  // new PDU fields (only used when rack has no PDU yet)
+  const [newPdu, setNewPdu] = useState({ name: "", ip: "", username: "", password: "" });
   const [saving,     setSaving]     = useState(false);
   const [deleting,   setDeleting]   = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
@@ -1132,6 +1134,7 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
     if (!name.trim()) { setErr("Rack name is required."); return; }
     setSaving(true); setErr("");
     try {
+      // Update existing devices
       await Promise.all(rackDevs.map(d => {
         const e = pduEdits[d.id];
         const body = {
@@ -1148,6 +1151,23 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
           body: JSON.stringify(body),
         }).then(r => { if (!r.ok) throw new Error(`Failed to update ${d.name}`); });
       }));
+      // Create new PDU if fields filled (rack has no PDU yet)
+      if (pdus.length === 0 && newPdu.ip.trim()) {
+        const res = await fetch("/api/devices/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name:     newPdu.name.trim() || `PDU-${name.trim()}`,
+            kind:     "pdu",
+            model:    "Raritan PDU",
+            ip:       newPdu.ip.trim(),
+            rack:     name.trim(),
+            username: newPdu.username || "",
+            password: newPdu.password || "",
+          }),
+        });
+        if (!res.ok) throw new Error("Failed to create PDU.");
+      }
       await onSave();
       onClose();
     } catch (e) {
@@ -1199,7 +1219,30 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
           </div>
         </div>
 
-        {/* PDU section */}
+        {/* PDU section — add PDU when none exists */}
+        {pdus.length === 0 && (
+          <div className="border-t border-zinc-800/50 px-5 py-4 space-y-3">
+            <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">Add PDU <span className="text-zinc-700 normal-case tracking-normal">(optional)</span></div>
+            <div>
+              <label className="text-[10px] text-zinc-600 mb-1 block">PDU Name</label>
+              <input value={newPdu.name} onChange={e => setNewPdu(p => ({ ...p, name: e.target.value }))} className={inputCls} placeholder={`PDU-${name || rackName}`}/>
+            </div>
+            <div>
+              <label className="text-[10px] text-zinc-600 mb-1 block">IP Address</label>
+              <input value={newPdu.ip} onChange={e => setNewPdu(p => ({ ...p, ip: e.target.value }))} className={inputCls} placeholder="e.g. 10.7.30.200"/>
+            </div>
+            <div>
+              <label className="text-[10px] text-zinc-600 mb-1 block">Username <span className="text-zinc-700">(optional)</span></label>
+              <input value={newPdu.username} onChange={e => setNewPdu(p => ({ ...p, username: e.target.value }))} className={inputCls} placeholder="ftlab" autoComplete="off"/>
+            </div>
+            <div>
+              <label className="text-[10px] text-zinc-600 mb-1 block">Password <span className="text-zinc-700">(optional)</span></label>
+              <input type="password" value={newPdu.password} onChange={e => setNewPdu(p => ({ ...p, password: e.target.value }))} className={inputCls} placeholder="optional" autoComplete="new-password"/>
+            </div>
+          </div>
+        )}
+
+        {/* PDU section — edit existing PDUs */}
         {pdus.length > 0 && (
           <div className="border-t border-zinc-800/50">
             {pdus.map((p, i) => {
