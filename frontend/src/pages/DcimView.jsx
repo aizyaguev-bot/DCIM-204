@@ -1706,17 +1706,23 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
 
   const rackStats = useMemo(()=>racks.map(rn=>{
     const rPdus=rackDevices.filter(p=>p.rack===rn);
+    // Include PDUs from other racks that declare this rack as a shared target via notes="shared:RackName"
+    const sharedPdus=rackDevices.filter(p=>
+      p.kind==="pdu" && p.rack!==rn &&
+      (p.notes||"").split(",").map(s=>s.trim()).includes(`shared:${rn}`)
+    );
+    const allPdus=[...rPdus, ...sharedPdus];
     let totalWatts=0,outletsOn=0,outletsTotal=0;
-    rPdus.forEach(pdu=>{const st=pduStatuses[pdu.id];if(st?.outlets){outletsOn+=st.outlets.filter(o=>o.state==="on").length;outletsTotal+=st.outlets.length;totalWatts+=st.total_watts||0;}});
+    allPdus.forEach(pdu=>{const st=pduStatuses[pdu.id];if(st?.outlets){outletsOn+=st.outlets.filter(o=>o.state==="on").length;outletsTotal+=st.outlets.length;totalWatts+=st.total_watts||0;}});
     const rServers=servers.filter(s=>s.rack===rn);
-    const pduOnline=rPdus.length>0?(pduStatuses[rPdus[0].id]?.reachable!==false&&!!pduStatuses[rPdus[0].id]):false;
+    const pduOnline=allPdus.length>0?(pduStatuses[allPdus[0].id]?.reachable!==false&&!!pduStatuses[allPdus[0].id]):false;
     // 16A × 208V ≈ 3328W per PDU circuit; PDU rated at 16A total
-    const maxWatts = rPdus.reduce((acc, pdu) => {
+    const maxWatts = allPdus.reduce((acc, pdu) => {
       const st = pduStatuses[pdu.id];
       return acc + (st?.inlet_voltage > 0 ? 16 * st.inlet_voltage : 16 * 208);
     }, 0) || outletsTotal * 150;
     const rackType = rPdus[0]?.model==="Storage" ? "storage" : "compute";
-    return {rack:rn,pdus:rPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
+    return {rack:rn,pdus:allPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
   }),[racks,pdus,pduStatuses,servers]);
 
   const handleReorder = useCallback((rackName,newIds)=>{
