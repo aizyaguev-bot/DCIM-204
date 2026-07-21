@@ -77,7 +77,7 @@ function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
   const usedByCustom = new Set(custom.map(c => c.u).filter(Boolean));
   sorted.forEach(s => {
     if (uMap[s.id] == null) {
-      while (Object.values(uMap).includes(next)) next++;
+      while (Object.values(uMap).includes(next) || usedByCustom.has(next)) next++;
       uMap[s.id] = next++;
     }
   });
@@ -1416,12 +1416,6 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
     return m;
   }, [rackStats]);
 
-  const rackServerIds = useMemo(() => {
-    const m = {};
-    rackStats.forEach(rs => { m[rs.rack] = rs.servers.map(s => s.id); });
-    return m;
-  }, [rackStats]);
-
   const crossSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const activeServer = activeId ? rackStats.flatMap(rs => rs.servers).find(s => s.id === activeId) : null;
 
@@ -1432,7 +1426,15 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
     const targetRack = over.id.startsWith("rack:") ? over.id.slice(5) : serverRackMap[over.id];
     if (!sourceRack || !targetRack) return;
     if (sourceRack === targetRack) {
-      const ids = rackServerIds[sourceRack] || [];
+      // Sort by visual rackOrder (same logic as buildRackRows) to avoid mix-ups
+      const sourceStat = rackStats.find(rs => rs.rack === sourceRack);
+      const order = rackOrder[sourceRack] || [];
+      const ids = [...(sourceStat?.servers || [])].sort((a, b) => {
+        const ai = order.indexOf(a.id), bi = order.indexOf(b.id);
+        if (ai === -1 && bi === -1) return a.name.localeCompare(b.name);
+        if (ai === -1) return 1; if (bi === -1) return -1;
+        return ai - bi;
+      }).map(s => s.id);
       const oldIdx = ids.indexOf(active.id);
       const newIdx = ids.indexOf(over.id);
       if (oldIdx !== -1 && newIdx !== -1) onReorder(sourceRack, arrayMove(ids, oldIdx, newIdx));
