@@ -776,6 +776,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   const curSw = switchAssignments[server.id] || {};
 
   const [name,   setName]   = useState(server.name);
+  const [outlet, setOutlet] = useState(server.outlet != null ? String(server.outlet) : "");
   const [uSlot,  setUSlot]  = useState(curU != null ? String(curU) : "");
   const [swName, setSwName] = useState(curSw.switch || "");
   const [swPort, setSwPort] = useState(curSw.port != null ? String(curSw.port) : "");
@@ -788,6 +789,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
 
   async function power(a){if(!onOutletAction)return;setDoing(a);try{await onOutletAction(server.pduId,server.outlet,a);}finally{setDoing(null);}}
   async function saveName(){if(!name.trim()||!pdu||!onLabelChange)return;setDoing("name");await onLabelChange(server.pduId,{...pdu.labels,[String(server.outlet)]:name.trim()});setDoing(null);tick("name");}
+  async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;setDoing("outlet");const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await onLabelChange(server.pduId,updated);setDoing(null);tick("outlet");}
   async function saveSlot(){const u=parseInt(uSlot,10);if(isNaN(u)||u<1)return;setDoing("slot");const up={...rackSlots,[server.rack]:{...(rackSlots[server.rack]||{}),[server.id]:u}};onSlotsChange(up);await fetch("/api/rack-slots",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("slot");}
   async function saveSw(){setDoing("sw");const up={...switchAssignments};if(swName.trim()||swPort)up[server.id]={switch:swName.trim(),port:swPort?parseInt(swPort,10):null};else delete up[server.id];onSwitchChange(up);await fetch("/api/switch-assignments",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("sw");}
   async function remove(){if(!pdu||!onLabelChange)return;if(!confirm(`Remove "${server.name}" from DCIM?`))return;const l={...pdu.labels};delete l[String(server.outlet)];await onLabelChange(server.pduId,l);onClose();}
@@ -844,20 +846,36 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
             </div>
           )}
 
-          <div><SL>Rename</SL>
-            <div className="flex gap-2">
-              <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveName()}
-                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
-              <SetBtn id="name" onClick={saveName} disabled={!name.trim()}/>
+          <div><SL>Name</SL>
+            <div className="relative">
+              <input value={name} onChange={e=>setName(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveName()}
+                onBlur={saveName}
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
+              {saved==="name"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
             </div>
           </div>
 
+          <div><SL>PDU outlet</SL>
+            <div className="relative">
+              <input type="number" min="1" max="48" value={outlet} onChange={e=>setOutlet(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveOutlet()}
+                onBlur={saveOutlet}
+                placeholder="Outlet number"
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
+              {saved==="outlet"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
+            </div>
+            <div className="mt-1 text-[10px] text-zinc-700">Saves immediately on change</div>
+          </div>
+
           <div><SL>Rack unit (U)</SL>
-            <div className="flex gap-2">
+            <div className="relative">
               <input type="number" min="1" max="42" value={uSlot} onChange={e=>setUSlot(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveSlot()}
+                onBlur={saveSlot}
                 placeholder={curU!=null?`U${curU}`:"auto"}
-                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
-              <SetBtn id="slot" onClick={saveSlot} disabled={!uSlot}/>
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
+              {saved==="slot"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
             </div>
             <div className="mt-1 text-[10px] text-zinc-700">{curU!=null?`Currently U${curU}`:"Auto-assigned"}</div>
           </div>
@@ -865,11 +883,14 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
           <div><SL>Network switch</SL>
             <div className="space-y-2">
               <input value={swName} onChange={e=>setSwName(e.target.value)} placeholder="Switch name"
+                onBlur={saveSw}
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-cyan-700/50 placeholder:text-zinc-700"/>
-              <div className="flex gap-2">
+              <div className="relative">
                 <input type="number" min="1" max="96" value={swPort} onChange={e=>setSwPort(e.target.value)} placeholder="Port"
-                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-cyan-700/50 placeholder:text-zinc-700"/>
-                <SetBtn id="sw" onClick={saveSw}/>
+                  onKeyDown={e=>e.key==="Enter"&&saveSw()}
+                  onBlur={saveSw}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-cyan-700/50 placeholder:text-zinc-700"/>
+                {saved==="sw"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
               </div>
               {curSw.switch&&<div className="text-[10px] text-cyan-700">{curSw.switch}{curSw.port?` · port ${curSw.port}`:""}</div>}
             </div>
