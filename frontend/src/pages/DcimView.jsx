@@ -669,36 +669,52 @@ function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelet
 }
 
 // ─── MOVE OPT SECTION (inside ServerEditPanel) ────────────────────────────────
-function MoveOptSection({ server, pdu, pdus, rackDevices, onLabelChange, onClose }) {
-  // rackDevices includes kind="pdu" + kind="rack" (DCIM-only racks)
+function MoveOptSection({ server, pdu, pdus, rackDevices, rackOverrides, onRackOverrideChange, onLabelChange, onClose }) {
   const allRacks = [...new Set((rackDevices || pdus).map(p => p.rack).filter(Boolean))].sort();
   const [targetRack,   setTargetRack]   = useState("");
   const [targetPduId,  setTargetPduId]  = useState("");
-  const [targetOutlet, setTargetOutlet] = useState("");
+  const [targetOutlet, setTargetOutlet] = useState(server.outlet != null ? String(server.outlet) : "");
   const [moving,       setMoving]       = useState(false);
   const [err,          setErr]          = useState("");
 
-  const rackPdus = targetRack ? pdus.filter(p => p.rack === targetRack) : [];
+  // Include PDUs native to target rack + PDUs shared with target rack via notes
+  const rackPdus = targetRack ? pdus.filter(p =>
+    p.rack === targetRack ||
+    (p.notes || "").split(",").map(s => s.trim()).includes(`shared:${targetRack}`)
+  ) : [];
+
+  // Auto-select PDU if only one option
+  const effectivePduId = targetPduId || (rackPdus.length === 1 ? rackPdus[0].id : "");
 
   async function move() {
-    if (!targetPduId || !targetOutlet) { setErr("Select a PDU and outlet."); return; }
-    const tPdu = pdus.find(p => p.id === targetPduId);
+    if (!targetRack) { setErr("Select a target rack."); return; }
+    if (!effectivePduId) { setErr("Select a PDU."); return; }
+    if (!targetOutlet) { setErr("Enter an outlet number."); return; }
+    const tPdu = pdus.find(p => p.id === effectivePduId);
     if (!tPdu) return;
     setMoving(true); setErr("");
     try {
-      // clear current outlet
-      if (pdu && server.outlet != null) {
-        const cur = { ...pdu.labels }; delete cur[String(server.outlet)];
-        await onLabelChange(server.pduId, cur);
+      if (effectivePduId !== server.pduId) {
+        // Different PDU: clear old label, set new label
+        if (pdu && server.outlet != null) {
+          const cur = { ...pdu.labels }; delete cur[String(server.outlet)];
+          await onLabelChange(server.pduId, cur);
+        }
+        await onLabelChange(effectivePduId, { ...tPdu.labels, [String(targetOutlet)]: server.name });
+      } else if (String(targetOutlet) !== String(server.outlet)) {
+        // Same PDU, different outlet
+        const updated = { ...tPdu.labels };
+        delete updated[String(server.outlet)];
+        updated[String(targetOutlet)] = server.name;
+        await onLabelChange(effectivePduId, updated);
       }
-      // set in target PDU
-      await onLabelChange(targetPduId, { ...tPdu.labels, [String(targetOutlet)]: server.name });
+      // Always set rack override so OPT displays under target rack
+      const updated = { ...(rackOverrides || {}), [server.id]: targetRack };
+      await onRackOverrideChange(updated);
       onClose();
     } catch (e) {
       setErr(e.message || "Move failed.");
-    } finally {
-      setMoving(false);
-    }
+    } finally { setMoving(false); }
   }
 
   const sel = "w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50";
@@ -707,24 +723,27 @@ function MoveOptSection({ server, pdu, pdus, rackDevices, onLabelChange, onClose
     <div>
       <SL>Move to rack</SL>
       <div className="space-y-2">
-        <select value={targetRack} onChange={e => { setTargetRack(e.target.value); setTargetPduId(""); setTargetOutlet(""); setErr(""); }} className={sel}>
+        <select value={targetRack} onChange={e => { setTargetRack(e.target.value); setTargetPduId(""); setErr(""); }} className={sel}>
           <option value="">Select rack…</option>
           {allRacks.filter(r => r !== server.rack).map(r => <option key={r} value={r}>{r}</option>)}
         </select>
-        {rackPdus.length > 0 && (
+        {targetRack && rackPdus.length === 0 && (
+          <div className="text-xs text-amber-500">No PDU found for {targetRack}.</div>
+        )}
+        {rackPdus.length > 1 && (
           <select value={targetPduId} onChange={e => { setTargetPduId(e.target.value); setErr(""); }} className={sel}>
             <option value="">Select PDU…</option>
             {rackPdus.map(p => <option key={p.id} value={p.id}>{p.name} ({p.ip})</option>)}
           </select>
         )}
-        {targetPduId && (
+        {effectivePduId && (
           <input type="number" min="1" max="48" value={targetOutlet}
             onChange={e => { setTargetOutlet(e.target.value); setErr(""); }}
             placeholder="Outlet number (1–48)"
             className={sel + " placeholder:text-zinc-700"}/>
         )}
         {err && <div className="text-xs text-red-400">{err}</div>}
-        {targetPduId && (
+        {targetRack && effectivePduId && (
           <button onClick={move} disabled={moving || !targetOutlet}
             className="w-full py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-lg transition disabled:opacity-40">
             {moving ? "Moving…" : `Move to ${targetRack}`}
@@ -736,7 +755,7 @@ function MoveOptSection({ server, pdu, pdus, rackDevices, onLabelChange, onClose
 }
 
 // ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, onClose, onOutletAction, onLabelChange, onSlotsChange, onSwitchChange }) {
+function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, rackOverrides, onRackOverrideChange, onClose, onOutletAction, onLabelChange, onSlotsChange, onSwitchChange }) {
   useEscClose(onClose);
   const pdu   = pdus.find(p => p.id === server.pduId);
   const curU  = (rackSlots[server.rack] || {})[server.id];
@@ -853,7 +872,9 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
             </div>
           </div>
 
-          <MoveOptSection server={server} pdu={pdu} pdus={pdus} rackDevices={rackDevices} onLabelChange={onLabelChange} onClose={onClose}/>
+          <MoveOptSection server={server} pdu={pdu} pdus={pdus} rackDevices={rackDevices}
+            rackOverrides={rackOverrides} onRackOverrideChange={onRackOverrideChange}
+            onLabelChange={onLabelChange} onClose={onClose}/>
         </div>
 
         <div className="px-5 py-4 border-t border-zinc-800/40 bg-zinc-900/30">
@@ -1667,6 +1688,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [rackSlots,         setRackSlots]         = useState({});
   const [switchAssignments, setSwitchAssignments] = useState({});
   const [customItems,       setCustomItems]       = useState({});
+  const [rackOverrides,     setRackOverrides]     = useState({});
   const [selectedServerId,  setSelectedServerId]  = useState(null);
   const [selectedCustom,    setSelectedCustom]    = useState(null);
 
@@ -1676,8 +1698,9 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       fetch("/api/rack-slots").then(r=>r.json()).catch(()=>({})),
       fetch("/api/switch-assignments").then(r=>r.json()).catch(()=>({})),
       fetch("/api/rack-items").then(r=>r.json()).catch(()=>({})),
-    ]).then(([order,slots,sw,items])=>{
-      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});
+      fetch("/api/rack-overrides").then(r=>r.json()).catch(()=>({})),
+    ]).then(([order,slots,sw,items,overrides])=>{
+      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});
     });
   },[]);
 
@@ -1693,16 +1716,16 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       const liveByN=Object.fromEntries(live.map(o=>[String(o.number),o]));
       Object.entries(stored).forEach(([num,label])=>{
         if(isDefaultOutletLabel(label))return;const key=label.trim().toLowerCase();if(map.has(key))return;
-        const lo=liveByN[num];map.set(key,{id:key,name:label.trim(),rack:pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:lo?.state??"unknown",watts:lo?.watts??0});
+        const lo=liveByN[num];map.set(key,{id:key,name:label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:lo?.state??"unknown",watts:lo?.watts??0});
       });
       live.forEach(o=>{
         if(isDefaultOutletLabel(o.label))return;const key=o.label.trim().toLowerCase();
         if(map.has(key)){const e=map.get(key);e.state=o.state;e.watts=o.watts||0;return;}
-        map.set(key,{id:key,name:o.label.trim(),rack:pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts||0});
+        map.set(key,{id:key,name:o.label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts||0});
       });
     });
     return [...map.values()].sort((a,b)=>a.name.localeCompare(b.name));
-  },[pdus,pduStatuses]);
+  },[pdus,pduStatuses,rackOverrides]);
 
   const rackStats = useMemo(()=>racks.map(rn=>{
     const rPdus=rackDevices.filter(p=>p.rack===rn);
@@ -1827,7 +1850,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       {selectedServer&&(
         <Portal>
           <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
-            switchAssignments={switchAssignments} onClose={()=>setSelectedServerId(null)}
+            switchAssignments={switchAssignments} rackOverrides={rackOverrides}
+            onRackOverrideChange={async upd => {
+              setRackOverrides(upd);
+              await fetch("/api/rack-overrides",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(upd)}).catch(()=>{});
+            }}
+            onClose={()=>setSelectedServerId(null)}
             onOutletAction={onOutletAction} onLabelChange={onLabelChange}
             onSlotsChange={setRackSlots} onSwitchChange={setSwitchAssignments}/>
         </Portal>
