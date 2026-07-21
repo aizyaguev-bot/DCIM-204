@@ -58,7 +58,7 @@ export function isDefaultOutletLabel(label) {
 }
 function genId() { return `ci-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`; }
 
-function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems, switchAssignments) {
+function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
   const order  = rackOrder[rackName] || [];
   const slots  = rackSlots[rackName] || {};
   const custom = customItems[rackName] || [];
@@ -70,21 +70,13 @@ function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems, swi
     return ai - bi;
   });
 
-  // Build set of switch names that are linked to a server in this rack
-  const linkedSwitchNames = new Set(
-    sorted.map(s => (switchAssignments || {})[s.id]?.switch).filter(Boolean)
-  );
-
-  // Assign U slots to servers — skip U slots used by non-linked custom items only
+  // Assign U slots to servers (custom items no longer block server slots)
   const uMap = {};
   sorted.forEach(s => { if (slots[s.id] != null) uMap[s.id] = Number(slots[s.id]); });
   let next = 1;
-  const usedByCustom = new Set(
-    custom.filter(c => !linkedSwitchNames.has(c.name)).map(c => c.u).filter(Boolean)
-  );
   sorted.forEach(s => {
     if (uMap[s.id] == null) {
-      while (Object.values(uMap).includes(next) || usedByCustom.has(next)) next++;
+      while (Object.values(uMap).includes(next)) next++;
       uMap[s.id] = next++;
     }
   });
@@ -96,18 +88,25 @@ function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems, swi
     if (!groups.has(u)) groups.set(u, []);
     groups.get(u).push({ kind: "server", data: s });
   });
+
+  // Place each custom item next to the nearest server; if no servers, keep own U
+  const serverUList = sorted.map(s => ({ id: s.id, u: uMap[s.id] }));
   custom.forEach(item => {
-    // Linked switch items go to the same U as their server
-    if (linkedSwitchNames.has(item.name)) {
-      const linkedServer = sorted.find(s => (switchAssignments || {})[s.id]?.switch === item.name);
-      const u = linkedServer ? uMap[linkedServer.id] : (item.u || 99);
-      if (!groups.has(u)) groups.set(u, []);
-      groups.get(u).push({ kind: "custom", data: item });
+    let u;
+    if (serverUList.length === 0) {
+      u = item.u || 99;
     } else {
-      const u = item.u || 99;
-      if (!groups.has(u)) groups.set(u, []);
-      groups.get(u).push({ kind: "custom", data: item });
+      const itemU = item.u || 1;
+      let nearestU = serverUList[0].u;
+      let minDist = Math.abs(nearestU - itemU);
+      for (const sv of serverUList) {
+        const d = Math.abs(sv.u - itemU);
+        if (d < minDist) { minDist = d; nearestU = sv.u; }
+      }
+      u = nearestU;
     }
+    if (!groups.has(u)) groups.set(u, []);
+    groups.get(u).push({ kind: "custom", data: item });
   });
 
   const maxU   = groups.size ? Math.max(...groups.keys()) : 0;
@@ -331,8 +330,8 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   const { setNodeRef: setDropRef, isOver } = useDroppable({ id: "rack:" + r.rack });
 
   const { rows, uMap, sorted } = useMemo(
-    () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems, switchAssignments),
-    [r.servers, r.rack, rackOrder, rackSlots, customItems, switchAssignments]
+    () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems),
+    [r.servers, r.rack, rackOrder, rackSlots, customItems]
   );
 
   const serverIds    = sorted.map(s => s.id);
@@ -905,8 +904,8 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
 // ─── RACK DETAIL VIEW ─────────────────────────────────────────────────────────
 function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItems, onBack, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onRequestAddOpt, onRequestAddEquip }) {
   const { rows, uMap, sorted } = useMemo(
-    () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems, switchAssignments),
-    [r.servers, r.rack, rackOrder, rackSlots, customItems, switchAssignments]
+    () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems),
+    [r.servers, r.rack, rackOrder, rackSlots, customItems]
   );
   const pduOnline = r.pduOnline;
   const capPct    = r.maxWatts > 0 ? Math.min(100, r.totalWatts/r.maxWatts*100) : 0;
