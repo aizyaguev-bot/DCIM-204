@@ -2,6 +2,13 @@
 
 ---
 
+## v2.20.0 — 2026-07-21
+
+### Changed
+- **Switch stays with server** — in the DCIM rack diagram, the switch assignment for a server now renders as a dedicated cyan cell at the same U level as the server. When the server is reordered, the switch cell follows automatically. The small inline badge inside the server row has been removed.
+
+---
+
 ## v2.15.0 — 2026-07-19
 
 ### Added

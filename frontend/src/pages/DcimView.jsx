@@ -202,15 +202,29 @@ function ServerCell({ server, sw, onSelect, onRename }) {
           <InlineName value={server.name} onRename={onRename}
             className={`text-[11px] font-mono font-bold leading-tight block truncate
               ${isOn ? "text-zinc-100" : isOff ? "text-zinc-500" : "text-zinc-600"}`}/>
-          {(sw?.switch || server.watts > 0) && (
+          {server.watts > 0 && (
             <div className="flex items-center gap-1 mt-0.5">
-              {sw?.switch && <span className="text-[7px] font-mono text-cyan-400/70 bg-cyan-950/60 px-1 rounded border border-cyan-900/40 leading-tight truncate max-w-[80px]">{sw.switch}{sw.port ? `·${sw.port}` : ""}</span>}
-              {server.watts > 0 && <span className={`text-[8px] font-mono tabular-nums leading-tight ${isOn ? "text-nv-400/80" : "text-zinc-600"}`}>{server.watts.toFixed(0)}W</span>}
+              <span className={`text-[8px] font-mono tabular-nums leading-tight ${isOn ? "text-nv-400/80" : "text-zinc-600"}`}>{server.watts.toFixed(0)}W</span>
             </div>
           )}
         </div>
         {isOn  && <span className="text-[7px] font-bold text-nv-400/60 uppercase tracking-widest flex-shrink-0 pr-1">ON</span>}
         {isOff && <span className="text-[7px] font-bold text-red-900/80 uppercase tracking-widest flex-shrink-0 pr-1">OFF</span>}
+      </div>
+    </div>
+  );
+}
+
+// Switch assignment cell — always rendered at the same U as its server
+function SwitchCell({ sw }) {
+  return (
+    <div className="flex-shrink-0 flex items-stretch rounded overflow-hidden border border-cyan-900/50"
+      style={{ minHeight: SLOT_H - 6, width: 88 }}>
+      <div className="w-1 flex-shrink-0 bg-cyan-700/60"/>
+      <div className="flex-1 flex flex-col justify-center px-1.5 bg-cyan-950/40">
+        <span className="text-[7px] font-bold uppercase tracking-widest text-cyan-400/50 leading-tight">SW</span>
+        <span className="text-[9px] font-mono text-cyan-300/80 leading-tight truncate">{sw.switch}</span>
+        {sw.port && <span className="text-[7px] font-mono text-cyan-400/50 leading-tight">port {sw.port}</span>}
       </div>
     </div>
   );
@@ -279,6 +293,9 @@ function USlotGroup({ u, items, switchAssignments, onSelectServer, onSelectCusto
             sw={switchAssignments[serverItem.data.id]}
             onSelect={onSelectServer}
             onRename={v => onRenameServer?.(serverItem.data, v)}/>
+        )}
+        {serverItem && switchAssignments?.[serverItem.data.id]?.switch && (
+          <SwitchCell sw={switchAssignments[serverItem.data.id]}/>
         )}
         {equipItems.map(({ data }) => (
           <EquipCell key={data.id} item={data}
