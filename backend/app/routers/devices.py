@@ -117,11 +117,14 @@ async def update_labels(
     dev.labels_json = json.dumps(new_labels)
 
     if renames:
+        # Case-insensitive lookup so "opt207" matches rename of "Opt207"
+        renames_ci = {old.lower(): new for old, new in renames.items()}
+
         # Cascade label renames to all other PDUs and KVMs
         result = await db.execute(select(Device).where(Device.id != device_id))
         for other in result.scalars().all():
             other_labels = json.loads(other.labels_json) if other.labels_json else {}
-            updated = {p: renames.get(v, v) for p, v in other_labels.items()}
+            updated = {p: renames_ci.get(v.lower(), v) for p, v in other_labels.items()}
             if updated != other_labels:
                 other.labels_json = json.dumps(updated)
 
