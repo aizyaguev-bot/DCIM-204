@@ -92,6 +92,13 @@ export default function App() {
     } catch {}
   }
 
+  async function refreshAllStatuses() {
+    await Promise.all([
+      ...pdus.map(p => loadPduStatus(p.id)),
+      ...kvms.map(k => loadKvmStatus(k.id)),
+    ]);
+  }
+
   async function handleMarkKvmFree(id) {
     try {
       await api.markKvmFree(id);
@@ -212,7 +219,7 @@ export default function App() {
           onLabelChange={async (pduId, newLabels) => {
             await api.updateLabels(pduId, newLabels);
             await loadDevices();
-            await loadPduStatus(pduId);
+            await refreshAllStatuses();
           }}
           onRefresh={loadDevices}
         />
@@ -257,7 +264,7 @@ export default function App() {
           onLabelsSave={async (labels) => {
             await api.updateLabels(view.id, labels);
             await loadDevices();
-            await loadPduStatus(view.id);
+            await refreshAllStatuses();
           }}
         />
       )}
@@ -273,7 +280,7 @@ export default function App() {
           onLabelsSave={async (labels) => {
             await api.updateLabels(view.id, labels);
             await loadDevices();
-            await loadKvmStatus(view.id);
+            await refreshAllStatuses();
           }}
         />
       )}

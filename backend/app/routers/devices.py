@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-import uuid, json
+import uuid, json, pathlib
 
 from ..database import get_db
 from ..models import Device
@@ -9,6 +9,45 @@ from ..schemas import DeviceCreate, DeviceOut
 from ..crypto import encrypt, decrypt
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+
+_BACKEND_DIR = pathlib.Path(__file__).parent.parent.parent
+
+
+def _rename_server_ids_in_file(path: pathlib.Path, id_renames: dict[str, str]) -> None:
+    """Rename server IDs inside rack_positions / rack_slots / switch_assignments JSON files."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    changed = False
+    name = path.name
+
+    if name == "rack_positions.json":
+        # { rack: [server_id, ...] }
+        for rack, ids in data.items():
+            new_ids = [id_renames.get(sid, sid) for sid in ids]
+            if new_ids != ids:
+                data[rack] = new_ids
+                changed = True
+
+    elif name == "rack_slots.json":
+        # { rack: { server_id: u_slot } }
+        for rack, slots in data.items():
+            new_slots = {id_renames.get(k, k): v for k, v in slots.items()}
+            if new_slots != slots:
+                data[rack] = new_slots
+                changed = True
+
+    elif name == "switch_assignments.json":
+        # { server_id: { switch, port } }
+        new_data = {id_renames.get(k, k): v for k, v in data.items()}
+        if new_data != data:
+            data = new_data
+            changed = True
+
+    if changed:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 @router.get("/", response_model=list[DeviceOut])
@@ -77,14 +116,19 @@ async def update_labels(
 
     dev.labels_json = json.dumps(new_labels)
 
-    # Cascade renames to all other devices (PDUs and KVMs)
     if renames:
+        # Cascade label renames to all other PDUs and KVMs
         result = await db.execute(select(Device).where(Device.id != device_id))
         for other in result.scalars().all():
             other_labels = json.loads(other.labels_json) if other.labels_json else {}
             updated = {p: renames.get(v, v) for p, v in other_labels.items()}
             if updated != other_labels:
                 other.labels_json = json.dumps(updated)
+
+        # Also rename server IDs in DCIM runtime JSON files so rack positions/slots stay intact
+        id_renames = {old.lower(): new.lower() for old, new in renames.items()}
+        for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json"):
+            _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames)
 
     await db.commit()
     return {"ok": True, "synced": list(renames.keys())}
