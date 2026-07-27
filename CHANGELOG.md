@@ -2,6 +2,35 @@
 
 ---
 
+## v2.20.0 — 2026-07-21
+
+### Changed
+- **Switch stays with server** — in the DCIM rack diagram, the switch assignment for a server now renders as a dedicated cyan cell at the same U level as the server. When the server is reordered, the switch cell follows automatically. The small inline badge inside the server row has been removed.
+
+---
+
+## v2.15.0 — 2026-07-19
+
+### Added
+- **Edit PDU from DCIM** — the Edit Rack modal (pencil icon on rack card) now includes a PDU section for each PDU in the rack. You can update PDU name, IP address, username, and password. Leave credentials blank to keep existing values.
+
+---
+
+## v2.14.0 — 2026-07-19
+
+### Added
+- **Edit Rack** — hover over any rack card in the DCIM overview to reveal a pencil icon. Click it to open the Edit Rack modal where you can rename the rack and switch between Compute/Storage type. Changes are saved to all devices in that rack.
+- **Delete Rack** — the Edit Rack modal has a "Delete Rack" button. Clicking it shows a confirmation step. For racks with PDUs, a warning is shown that PDU devices will also be removed. Confirms before deleting.
+
+---
+
+## v2.13.0 — 2026-07-19
+
+### Fixed
+- **"Move to rack" missing new DCIM racks** — the move dropdown in the OPT edit panel was built from `pdus` (kind="pdu" only), so racks added via "+ Add Rack" (kind="rack") were invisible. Now passes `rackDevices` (includes both kinds) through `ServerEditPanel` → `MoveOptSection`, so all racks appear in the dropdown.
+
+---
+
 ## v2.8.0 — 2026-07-19
 
 ### Fixed

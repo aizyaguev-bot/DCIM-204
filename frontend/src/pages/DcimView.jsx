@@ -32,6 +32,7 @@ const Icon = {
   plus:  <I d="M12 5v14M5 12h14" size={12}/>,
   grip:  <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor"><circle cx="3" cy="2" r="1.3"/><circle cx="7" cy="2" r="1.3"/><circle cx="3" cy="7" r="1.3"/><circle cx="7" cy="7" r="1.3"/><circle cx="3" cy="12" r="1.3"/><circle cx="7" cy="12" r="1.3"/></svg>,
   edit:  <I d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" size={11}/>,
+  trash: <I d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" size={11}/>,
 };
 const Spinner = () => (
   <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -69,11 +70,10 @@ function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
     return ai - bi;
   });
 
-  // Assign U slots to servers
+  // Assign U slots to servers (custom items no longer block server slots)
   const uMap = {};
   sorted.forEach(s => { if (slots[s.id] != null) uMap[s.id] = Number(slots[s.id]); });
   let next = 1;
-  const usedByCustom = new Set(custom.map(c => c.u).filter(Boolean));
   sorted.forEach(s => {
     if (uMap[s.id] == null) {
       while (Object.values(uMap).includes(next)) next++;
@@ -88,8 +88,23 @@ function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
     if (!groups.has(u)) groups.set(u, []);
     groups.get(u).push({ kind: "server", data: s });
   });
+
+  // Place each custom item next to the nearest server; if no servers, keep own U
+  const serverUList = sorted.map(s => ({ id: s.id, u: uMap[s.id] }));
   custom.forEach(item => {
-    const u = item.u || 99;
+    let u;
+    if (serverUList.length === 0) {
+      u = item.u || 99;
+    } else {
+      const itemU = item.u || 1;
+      let nearestU = serverUList[0].u;
+      let minDist = Math.abs(nearestU - itemU);
+      for (const sv of serverUList) {
+        const d = Math.abs(sv.u - itemU);
+        if (d < minDist) { minDist = d; nearestU = sv.u; }
+      }
+      u = nearestU;
+    }
     if (!groups.has(u)) groups.set(u, []);
     groups.get(u).push({ kind: "custom", data: item });
   });
@@ -308,7 +323,7 @@ function SortableURow({ u, items, switchAssignments, onSelectServer, onSelectCus
 }
 
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
-function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, width = 400, fixed = false, external = false, externalActiveId = null }) {
+function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, width = 400, fixed = false, external = false, externalActiveId = null }) {
   const [localActiveId, setLocalActiveId] = useState(null);
   const containerRef = useRef(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
@@ -370,6 +385,13 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
             {onHeaderClick && <span className="text-[10px] text-zinc-600 group-hover/rh:text-nv-400 transition">↗</span>}
           </button>
           <div className="flex items-center gap-2 flex-shrink-0">
+            {onEdit && (
+              <button onClick={e => { e.stopPropagation(); onEdit(); }}
+                title="Edit rack"
+                className="text-zinc-600 hover:text-nv-400 transition p-0.5">
+                {Icon.edit}
+              </button>
+            )}
             <div className="flex items-center gap-1">
               {isStorage
               ? <span className="text-[9px] font-mono font-bold text-cyan-400 bg-cyan-950/60 border border-cyan-800/40 px-1.5 py-0.5 rounded">STORAGE</span>
@@ -661,35 +683,52 @@ function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelet
 }
 
 // ─── MOVE OPT SECTION (inside ServerEditPanel) ────────────────────────────────
-function MoveOptSection({ server, pdu, pdus, onLabelChange, onClose }) {
-  const allRacks = [...new Set(pdus.map(p => p.rack).filter(Boolean))].sort();
+function MoveOptSection({ server, pdu, pdus, rackDevices, rackOverrides, onRackOverrideChange, onLabelChange, onClose }) {
+  const allRacks = [...new Set((rackDevices || pdus).map(p => p.rack).filter(Boolean))].sort();
   const [targetRack,   setTargetRack]   = useState("");
   const [targetPduId,  setTargetPduId]  = useState("");
-  const [targetOutlet, setTargetOutlet] = useState("");
+  const [targetOutlet, setTargetOutlet] = useState(server.outlet != null ? String(server.outlet) : "");
   const [moving,       setMoving]       = useState(false);
   const [err,          setErr]          = useState("");
 
-  const rackPdus = targetRack ? pdus.filter(p => p.rack === targetRack) : [];
+  // Include PDUs native to target rack + PDUs shared with target rack via notes
+  const rackPdus = targetRack ? pdus.filter(p =>
+    p.rack === targetRack ||
+    (p.notes || "").split(",").map(s => s.trim()).includes(`shared:${targetRack}`)
+  ) : [];
+
+  // Auto-select PDU if only one option
+  const effectivePduId = targetPduId || (rackPdus.length === 1 ? rackPdus[0].id : "");
 
   async function move() {
-    if (!targetPduId || !targetOutlet) { setErr("Select a PDU and outlet."); return; }
-    const tPdu = pdus.find(p => p.id === targetPduId);
+    if (!targetRack) { setErr("Select a target rack."); return; }
+    if (!effectivePduId) { setErr("Select a PDU."); return; }
+    if (!targetOutlet) { setErr("Enter an outlet number."); return; }
+    const tPdu = pdus.find(p => p.id === effectivePduId);
     if (!tPdu) return;
     setMoving(true); setErr("");
     try {
-      // clear current outlet
-      if (pdu && server.outlet != null) {
-        const cur = { ...pdu.labels }; delete cur[String(server.outlet)];
-        await onLabelChange(server.pduId, cur);
+      if (effectivePduId !== server.pduId) {
+        // Different PDU: clear old label, set new label
+        if (pdu && server.outlet != null) {
+          const cur = { ...pdu.labels }; delete cur[String(server.outlet)];
+          await onLabelChange(server.pduId, cur);
+        }
+        await onLabelChange(effectivePduId, { ...tPdu.labels, [String(targetOutlet)]: server.name });
+      } else if (String(targetOutlet) !== String(server.outlet)) {
+        // Same PDU, different outlet
+        const updated = { ...tPdu.labels };
+        delete updated[String(server.outlet)];
+        updated[String(targetOutlet)] = server.name;
+        await onLabelChange(effectivePduId, updated);
       }
-      // set in target PDU
-      await onLabelChange(targetPduId, { ...tPdu.labels, [String(targetOutlet)]: server.name });
+      // Always set rack override so OPT displays under target rack
+      const updated = { ...(rackOverrides || {}), [server.id]: targetRack };
+      await onRackOverrideChange(updated);
       onClose();
     } catch (e) {
       setErr(e.message || "Move failed.");
-    } finally {
-      setMoving(false);
-    }
+    } finally { setMoving(false); }
   }
 
   const sel = "w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50";
@@ -698,24 +737,27 @@ function MoveOptSection({ server, pdu, pdus, onLabelChange, onClose }) {
     <div>
       <SL>Move to rack</SL>
       <div className="space-y-2">
-        <select value={targetRack} onChange={e => { setTargetRack(e.target.value); setTargetPduId(""); setTargetOutlet(""); setErr(""); }} className={sel}>
+        <select value={targetRack} onChange={e => { setTargetRack(e.target.value); setTargetPduId(""); setErr(""); }} className={sel}>
           <option value="">Select rack…</option>
           {allRacks.filter(r => r !== server.rack).map(r => <option key={r} value={r}>{r}</option>)}
         </select>
-        {rackPdus.length > 0 && (
+        {targetRack && rackPdus.length === 0 && (
+          <div className="text-xs text-amber-500">No PDU found for {targetRack}.</div>
+        )}
+        {rackPdus.length > 1 && (
           <select value={targetPduId} onChange={e => { setTargetPduId(e.target.value); setErr(""); }} className={sel}>
             <option value="">Select PDU…</option>
             {rackPdus.map(p => <option key={p.id} value={p.id}>{p.name} ({p.ip})</option>)}
           </select>
         )}
-        {targetPduId && (
+        {effectivePduId && (
           <input type="number" min="1" max="48" value={targetOutlet}
             onChange={e => { setTargetOutlet(e.target.value); setErr(""); }}
             placeholder="Outlet number (1–48)"
             className={sel + " placeholder:text-zinc-700"}/>
         )}
         {err && <div className="text-xs text-red-400">{err}</div>}
-        {targetPduId && (
+        {targetRack && effectivePduId && (
           <button onClick={move} disabled={moving || !targetOutlet}
             className="w-full py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-lg transition disabled:opacity-40">
             {moving ? "Moving…" : `Move to ${targetRack}`}
@@ -727,13 +769,14 @@ function MoveOptSection({ server, pdu, pdus, onLabelChange, onClose }) {
 }
 
 // ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-function ServerEditPanel({ server, pdus, rackSlots, switchAssignments, onClose, onOutletAction, onLabelChange, onSlotsChange, onSwitchChange }) {
+function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, rackOverrides, onRackOverrideChange, onClose, onOutletAction, onLabelChange, onSlotsChange, onSwitchChange }) {
   useEscClose(onClose);
   const pdu   = pdus.find(p => p.id === server.pduId);
   const curU  = (rackSlots[server.rack] || {})[server.id];
   const curSw = switchAssignments[server.id] || {};
 
   const [name,   setName]   = useState(server.name);
+  const [outlet, setOutlet] = useState(server.outlet != null ? String(server.outlet) : "");
   const [uSlot,  setUSlot]  = useState(curU != null ? String(curU) : "");
   const [swName, setSwName] = useState(curSw.switch || "");
   const [swPort, setSwPort] = useState(curSw.port != null ? String(curSw.port) : "");
@@ -746,6 +789,7 @@ function ServerEditPanel({ server, pdus, rackSlots, switchAssignments, onClose, 
 
   async function power(a){if(!onOutletAction)return;setDoing(a);try{await onOutletAction(server.pduId,server.outlet,a);}finally{setDoing(null);}}
   async function saveName(){if(!name.trim()||!pdu||!onLabelChange)return;setDoing("name");await onLabelChange(server.pduId,{...pdu.labels,[String(server.outlet)]:name.trim()});setDoing(null);tick("name");}
+  async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;setDoing("outlet");const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await onLabelChange(server.pduId,updated);setDoing(null);tick("outlet");}
   async function saveSlot(){const u=parseInt(uSlot,10);if(isNaN(u)||u<1)return;setDoing("slot");const up={...rackSlots,[server.rack]:{...(rackSlots[server.rack]||{}),[server.id]:u}};onSlotsChange(up);await fetch("/api/rack-slots",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("slot");}
   async function saveSw(){setDoing("sw");const up={...switchAssignments};if(swName.trim()||swPort)up[server.id]={switch:swName.trim(),port:swPort?parseInt(swPort,10):null};else delete up[server.id];onSwitchChange(up);await fetch("/api/switch-assignments",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("sw");}
   async function remove(){if(!pdu||!onLabelChange)return;if(!confirm(`Remove "${server.name}" from DCIM?`))return;const l={...pdu.labels};delete l[String(server.outlet)];await onLabelChange(server.pduId,l);onClose();}
@@ -802,20 +846,36 @@ function ServerEditPanel({ server, pdus, rackSlots, switchAssignments, onClose, 
             </div>
           )}
 
-          <div><SL>Rename</SL>
-            <div className="flex gap-2">
-              <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveName()}
-                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
-              <SetBtn id="name" onClick={saveName} disabled={!name.trim()}/>
+          <div><SL>Name</SL>
+            <div className="relative">
+              <input value={name} onChange={e=>setName(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveName()}
+                onBlur={saveName}
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
+              {saved==="name"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
             </div>
           </div>
 
+          <div><SL>PDU outlet</SL>
+            <div className="relative">
+              <input type="number" min="1" max="48" value={outlet} onChange={e=>setOutlet(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveOutlet()}
+                onBlur={saveOutlet}
+                placeholder="Outlet number"
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
+              {saved==="outlet"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
+            </div>
+            <div className="mt-1 text-[10px] text-zinc-700">Saves immediately on change</div>
+          </div>
+
           <div><SL>Rack unit (U)</SL>
-            <div className="flex gap-2">
+            <div className="relative">
               <input type="number" min="1" max="42" value={uSlot} onChange={e=>setUSlot(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveSlot()}
+                onBlur={saveSlot}
                 placeholder={curU!=null?`U${curU}`:"auto"}
-                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
-              <SetBtn id="slot" onClick={saveSlot} disabled={!uSlot}/>
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
+              {saved==="slot"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
             </div>
             <div className="mt-1 text-[10px] text-zinc-700">{curU!=null?`Currently U${curU}`:"Auto-assigned"}</div>
           </div>
@@ -823,11 +883,14 @@ function ServerEditPanel({ server, pdus, rackSlots, switchAssignments, onClose, 
           <div><SL>Network switch</SL>
             <div className="space-y-2">
               <input value={swName} onChange={e=>setSwName(e.target.value)} placeholder="Switch name"
+                onBlur={saveSw}
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-cyan-700/50 placeholder:text-zinc-700"/>
-              <div className="flex gap-2">
+              <div className="relative">
                 <input type="number" min="1" max="96" value={swPort} onChange={e=>setSwPort(e.target.value)} placeholder="Port"
-                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-cyan-700/50 placeholder:text-zinc-700"/>
-                <SetBtn id="sw" onClick={saveSw}/>
+                  onKeyDown={e=>e.key==="Enter"&&saveSw()}
+                  onBlur={saveSw}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-cyan-700/50 placeholder:text-zinc-700"/>
+                {saved==="sw"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
               </div>
               {curSw.switch&&<div className="text-[10px] text-cyan-700">{curSw.switch}{curSw.port?` · port ${curSw.port}`:""}</div>}
             </div>
@@ -844,7 +907,9 @@ function ServerEditPanel({ server, pdus, rackSlots, switchAssignments, onClose, 
             </div>
           </div>
 
-          <MoveOptSection server={server} pdu={pdu} pdus={pdus} onLabelChange={onLabelChange} onClose={onClose}/>
+          <MoveOptSection server={server} pdu={pdu} pdus={pdus} rackDevices={rackDevices}
+            rackOverrides={rackOverrides} onRackOverrideChange={onRackOverrideChange}
+            onLabelChange={onLabelChange} onClose={onClose}/>
         </div>
 
         <div className="px-5 py-4 border-t border-zinc-800/40 bg-zinc-900/30">
@@ -1099,6 +1164,211 @@ function AddRackModal({ onClose, onSave }) {
   );
 }
 
+// ─── EDIT RACK MODAL ──────────────────────────────────────────────────────────
+function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
+  useEscClose(onClose);
+  const pdus = rackDevs.filter(d => d.kind === "pdu");
+
+  const [name,       setName]       = useState(rackName);
+  const [type,       setType]       = useState(rackType === "storage" ? "Storage" : "Compute");
+  // pduEdits: { [id]: { name, ip, username, password } }
+  const [pduEdits,   setPduEdits]   = useState(() =>
+    Object.fromEntries(pdus.map(p => [p.id, { name: p.name, ip: p.ip, username: "", password: "" }]))
+  );
+  // new PDU fields (only used when rack has no PDU yet)
+  const [newPdu, setNewPdu] = useState({ name: "", ip: "", username: "", password: "" });
+  const [saving,     setSaving]     = useState(false);
+  const [deleting,   setDeleting]   = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [err,        setErr]        = useState("");
+
+  function setPduField(id, field, val) {
+    setPduEdits(prev => ({ ...prev, [id]: { ...prev[id], [field]: val } }));
+  }
+
+  async function handleSave() {
+    if (!name.trim()) { setErr("Rack name is required."); return; }
+    setSaving(true); setErr("");
+    try {
+      // Update existing devices
+      await Promise.all(rackDevs.map(d => {
+        const e = pduEdits[d.id];
+        const body = {
+          ...d,
+          rack:  name.trim(),
+          model: d.kind === "rack" ? type : d.model,
+          ...(e ? { name: e.name.trim() || d.name, ip: e.ip.trim() || d.ip } : {}),
+          ...(e?.username ? { username: e.username } : {}),
+          ...(e?.password ? { password: e.password } : {}),
+        };
+        return fetch(`/api/devices/${d.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }).then(r => { if (!r.ok) throw new Error(`Failed to update ${d.name}`); });
+      }));
+      // Create new PDU if fields filled (rack has no PDU yet)
+      if (pdus.length === 0 && newPdu.ip.trim()) {
+        const res = await fetch("/api/devices/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name:     newPdu.name.trim() || `PDU-${name.trim()}`,
+            kind:     "pdu",
+            model:    "Raritan PDU",
+            ip:       newPdu.ip.trim(),
+            rack:     name.trim(),
+            username: newPdu.username || "",
+            password: newPdu.password || "",
+          }),
+        });
+        if (!res.ok) throw new Error("Failed to create PDU.");
+      }
+      await onSave();
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Save failed.");
+    } finally { setSaving(false); }
+  }
+
+  async function handleDelete() {
+    setDeleting(true); setErr("");
+    try {
+      await Promise.all(rackDevs.map(d =>
+        fetch(`/api/devices/${d.id}`, { method: "DELETE" })
+          .then(r => { if (!r.ok) throw new Error(`Failed to delete ${d.name}`); })
+      ));
+      await onSave();
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Delete failed.");
+    } finally { setDeleting(false); setConfirmDel(false); }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50 sticky top-0 bg-zinc-950 z-10">
+          <span className="text-sm font-bold text-zinc-100">Edit Rack — {rackName}</span>
+          <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition">{Icon.x}</button>
+        </div>
+
+        {/* Rack fields */}
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-1 block">Rack Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="e.g. Rack-09"
+              onKeyDown={e => e.key === "Enter" && handleSave()}/>
+          </div>
+          <div>
+            <label className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-1.5 block">Type</label>
+            <div className="flex gap-2">
+              {["Compute", "Storage"].map(t => (
+                <button key={t} onClick={() => setType(t)}
+                  className={`flex-1 py-2 text-sm rounded-xl border transition ${type === t
+                    ? (t === "Storage" ? "border-cyan-500/60 text-cyan-400 bg-cyan-950/30" : "border-nv-400/60 text-nv-400 bg-nv-400/10")
+                    : "border-zinc-800 text-zinc-500 hover:border-zinc-600"}`}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* PDU section — add PDU when none exists */}
+        {pdus.length === 0 && (
+          <div className="border-t border-zinc-800/50 px-5 py-4 space-y-3">
+            <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">Add PDU <span className="text-zinc-700 normal-case tracking-normal">(optional)</span></div>
+            <div>
+              <label className="text-[10px] text-zinc-600 mb-1 block">PDU Name</label>
+              <input value={newPdu.name} onChange={e => setNewPdu(p => ({ ...p, name: e.target.value }))} className={inputCls} placeholder={`PDU-${name || rackName}`}/>
+            </div>
+            <div>
+              <label className="text-[10px] text-zinc-600 mb-1 block">IP Address</label>
+              <input value={newPdu.ip} onChange={e => setNewPdu(p => ({ ...p, ip: e.target.value }))} className={inputCls} placeholder="e.g. 10.7.30.200"/>
+            </div>
+            <div>
+              <label className="text-[10px] text-zinc-600 mb-1 block">Username <span className="text-zinc-700">(optional)</span></label>
+              <input value={newPdu.username} onChange={e => setNewPdu(p => ({ ...p, username: e.target.value }))} className={inputCls} placeholder="ftlab" autoComplete="off"/>
+            </div>
+            <div>
+              <label className="text-[10px] text-zinc-600 mb-1 block">Password <span className="text-zinc-700">(optional)</span></label>
+              <input type="password" value={newPdu.password} onChange={e => setNewPdu(p => ({ ...p, password: e.target.value }))} className={inputCls} placeholder="optional" autoComplete="new-password"/>
+            </div>
+          </div>
+        )}
+
+        {/* PDU section — edit existing PDUs */}
+        {pdus.length > 0 && (
+          <div className="border-t border-zinc-800/50">
+            {pdus.map((p, i) => {
+              const e = pduEdits[p.id] || {};
+              return (
+                <div key={p.id} className="px-5 py-4 space-y-3">
+                  <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
+                    PDU{pdus.length > 1 ? ` ${i + 1}` : ""}
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-600 mb-1 block">Name</label>
+                    <input value={e.name} onChange={ev => setPduField(p.id, "name", ev.target.value)} className={inputCls} placeholder={p.name}/>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-600 mb-1 block">IP Address</label>
+                    <input value={e.ip} onChange={ev => setPduField(p.id, "ip", ev.target.value)} className={inputCls} placeholder={p.ip}/>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-600 mb-1 block">Username <span className="text-zinc-700">(leave blank to keep current)</span></label>
+                    <input value={e.username} onChange={ev => setPduField(p.id, "username", ev.target.value)} className={inputCls} placeholder="unchanged" autoComplete="off"/>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-600 mb-1 block">Password <span className="text-zinc-700">(leave blank to keep current)</span></label>
+                    <input type="password" value={e.password} onChange={ev => setPduField(p.id, "password", ev.target.value)} className={inputCls} placeholder="unchanged" autoComplete="new-password"/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {err && <div className="px-5 pb-2 text-xs text-red-400">{err}</div>}
+
+        {/* Delete */}
+        <div className="px-5 pb-2">
+          {!confirmDel ? (
+            <button onClick={() => setConfirmDel(true)}
+              className="w-full flex items-center justify-center gap-1.5 py-2 text-sm text-red-500 border border-red-900/40 hover:border-red-700/60 hover:bg-red-950/20 rounded-xl transition">
+              {Icon.trash} Delete Rack
+            </button>
+          ) : (
+            <div className="bg-red-950/20 border border-red-900/50 rounded-xl p-3 space-y-2">
+              <div className="text-xs text-red-400">
+                {pdus.length
+                  ? `This will permanently delete ${rackDevs.length} device(s) including PDU(s). Cannot be undone.`
+                  : "Delete this rack permanently? Cannot be undone."}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => setConfirmDel(false)} className="flex-1 py-1.5 text-xs text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-lg transition">Cancel</button>
+                <button onClick={handleDelete} disabled={deleting}
+                  className="flex-1 py-1.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-600 rounded-lg transition disabled:opacity-50">
+                  {deleting ? "Deleting…" : "Confirm Delete"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex gap-2 px-5 py-4">
+          <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-xl transition">Cancel</button>
+          <button onClick={handleSave} disabled={saving}
+            className="flex-1 py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-xl transition disabled:opacity-50">
+            {saving ? "Saving…" : "Save Changes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── CROSS-RACK MOVE MODAL ────────────────────────────────────────────────────
 function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClose }) {
   useEscClose(onClose);
@@ -1164,25 +1434,20 @@ function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClo
 }
 
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
-function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus }) {
-  const [selectedRack, setSelectedRack] = useState(null);
-  const [addOptFor,    setAddOptFor]    = useState(null);
-  const [addEquipFor,  setAddEquipFor]  = useState(null);
-  const [addRackOpen,  setAddRackOpen]  = useState(false);
-  const [activeId,     setActiveId]     = useState(null);
-  const [pendingMove,  setPendingMove]  = useState(null);
+function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus, rackDevices }) {
+  const [selectedRack,   setSelectedRack]   = useState(null);
+  const [addOptFor,      setAddOptFor]      = useState(null);
+  const [addEquipFor,    setAddEquipFor]    = useState(null);
+  const [addRackOpen,    setAddRackOpen]    = useState(false);
+  const [editRackTarget, setEditRackTarget] = useState(null); // rack name string
+  const [activeId,       setActiveId]       = useState(null);
+  const [pendingMove,    setPendingMove]    = useState(null);
 
   const r = selectedRack ? rackStats.find(r => r.rack === selectedRack) : null;
 
   const serverRackMap = useMemo(() => {
     const m = {};
     rackStats.forEach(rs => rs.servers.forEach(s => { m[s.id] = rs.rack; }));
-    return m;
-  }, [rackStats]);
-
-  const rackServerIds = useMemo(() => {
-    const m = {};
-    rackStats.forEach(rs => { m[rs.rack] = rs.servers.map(s => s.id); });
     return m;
   }, [rackStats]);
 
@@ -1196,7 +1461,15 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
     const targetRack = over.id.startsWith("rack:") ? over.id.slice(5) : serverRackMap[over.id];
     if (!sourceRack || !targetRack) return;
     if (sourceRack === targetRack) {
-      const ids = rackServerIds[sourceRack] || [];
+      // Sort by visual rackOrder (same logic as buildRackRows) to avoid mix-ups
+      const sourceStat = rackStats.find(rs => rs.rack === sourceRack);
+      const order = rackOrder[sourceRack] || [];
+      const ids = [...(sourceStat?.servers || [])].sort((a, b) => {
+        const ai = order.indexOf(a.id), bi = order.indexOf(b.id);
+        if (ai === -1 && bi === -1) return a.name.localeCompare(b.name);
+        if (ai === -1) return 1; if (bi === -1) return -1;
+        return ai - bi;
+      }).map(s => s.id);
       const oldIdx = ids.indexOf(active.id);
       const newIdx = ids.indexOf(over.id);
       if (oldIdx !== -1 && newIdx !== -1) onReorder(sourceRack, arrayMove(ids, oldIdx, newIdx));
@@ -1266,6 +1539,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
                   onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
                   onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
                   onHeaderClick={() => setSelectedRack(rs.rack)}
+                  onEdit={() => setEditRackTarget(rs.rack)}
                   external externalActiveId={activeId}/>
               ))}
             </div>
@@ -1297,6 +1571,20 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
           <AddRackModal onClose={() => setAddRackOpen(false)} onSave={async () => { await onRefresh?.(); }}/>
         </Portal>
       )}
+      {editRackTarget && (() => {
+        const rs = rackStats.find(r => r.rack === editRackTarget);
+        const devs = (rackDevices || []).filter(d => d.rack === editRackTarget);
+        return rs ? (
+          <Portal>
+            <EditRackModal
+              rackName={editRackTarget}
+              rackType={rs.rackType}
+              rackDevs={devs}
+              onClose={() => setEditRackTarget(null)}
+              onSave={async () => { await onRefresh?.(); setSelectedRack(null); }}/>
+          </Portal>
+        ) : null;
+      })()}
       {pendingMove && (
         <Portal>
           <CrossRackMoveModal
@@ -1437,6 +1725,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [rackSlots,         setRackSlots]         = useState({});
   const [switchAssignments, setSwitchAssignments] = useState({});
   const [customItems,       setCustomItems]       = useState({});
+  const [rackOverrides,     setRackOverrides]     = useState({});
   const [selectedServerId,  setSelectedServerId]  = useState(null);
   const [selectedCustom,    setSelectedCustom]    = useState(null);
 
@@ -1446,8 +1735,9 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       fetch("/api/rack-slots").then(r=>r.json()).catch(()=>({})),
       fetch("/api/switch-assignments").then(r=>r.json()).catch(()=>({})),
       fetch("/api/rack-items").then(r=>r.json()).catch(()=>({})),
-    ]).then(([order,slots,sw,items])=>{
-      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});
+      fetch("/api/rack-overrides").then(r=>r.json()).catch(()=>({})),
+    ]).then(([order,slots,sw,items,overrides])=>{
+      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});
     });
   },[]);
 
@@ -1463,30 +1753,36 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       const liveByN=Object.fromEntries(live.map(o=>[String(o.number),o]));
       Object.entries(stored).forEach(([num,label])=>{
         if(isDefaultOutletLabel(label))return;const key=label.trim().toLowerCase();if(map.has(key))return;
-        const lo=liveByN[num];map.set(key,{id:key,name:label.trim(),rack:pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:lo?.state??"unknown",watts:lo?.watts??0});
+        const lo=liveByN[num];map.set(key,{id:key,name:label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:lo?.state??"unknown",watts:lo?.watts??0});
       });
       live.forEach(o=>{
         if(isDefaultOutletLabel(o.label))return;const key=o.label.trim().toLowerCase();
         if(map.has(key)){const e=map.get(key);e.state=o.state;e.watts=o.watts||0;return;}
-        map.set(key,{id:key,name:o.label.trim(),rack:pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts||0});
+        map.set(key,{id:key,name:o.label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts||0});
       });
     });
     return [...map.values()].sort((a,b)=>a.name.localeCompare(b.name));
-  },[pdus,pduStatuses]);
+  },[pdus,pduStatuses,rackOverrides]);
 
   const rackStats = useMemo(()=>racks.map(rn=>{
     const rPdus=rackDevices.filter(p=>p.rack===rn);
+    // Include PDUs from other racks that declare this rack as a shared target via notes="shared:RackName"
+    const sharedPdus=rackDevices.filter(p=>
+      p.kind==="pdu" && p.rack!==rn &&
+      (p.notes||"").split(",").map(s=>s.trim()).includes(`shared:${rn}`)
+    );
+    const allPdus=[...rPdus, ...sharedPdus];
     let totalWatts=0,outletsOn=0,outletsTotal=0;
-    rPdus.forEach(pdu=>{const st=pduStatuses[pdu.id];if(st?.outlets){outletsOn+=st.outlets.filter(o=>o.state==="on").length;outletsTotal+=st.outlets.length;totalWatts+=st.total_watts||0;}});
+    allPdus.forEach(pdu=>{const st=pduStatuses[pdu.id];if(st?.outlets){outletsOn+=st.outlets.filter(o=>o.state==="on").length;outletsTotal+=st.outlets.length;totalWatts+=st.total_watts||0;}});
     const rServers=servers.filter(s=>s.rack===rn);
-    const pduOnline=rPdus.length>0?(pduStatuses[rPdus[0].id]?.reachable!==false&&!!pduStatuses[rPdus[0].id]):false;
+    const pduOnline=allPdus.length>0?(pduStatuses[allPdus[0].id]?.reachable!==false&&!!pduStatuses[allPdus[0].id]):false;
     // 16A × 208V ≈ 3328W per PDU circuit; PDU rated at 16A total
-    const maxWatts = rPdus.reduce((acc, pdu) => {
+    const maxWatts = allPdus.reduce((acc, pdu) => {
       const st = pduStatuses[pdu.id];
       return acc + (st?.inlet_voltage > 0 ? 16 * st.inlet_voltage : 16 * 208);
     }, 0) || outletsTotal * 150;
     const rackType = rPdus[0]?.model==="Storage" ? "storage" : "compute";
-    return {rack:rn,pdus:rPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
+    return {rack:rn,pdus:allPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
   }),[racks,pdus,pduStatuses,servers]);
 
   const handleReorder = useCallback((rackName,newIds)=>{
@@ -1582,7 +1878,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onLabelChange={onLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
           onCustomItemsChange={setCustomItems} onRefresh={onRefresh}
-          pdus={pdus}/>
+          pdus={pdus} rackDevices={rackDevices}/>
       )}
       {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}
@@ -1590,8 +1886,13 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
 
       {selectedServer&&(
         <Portal>
-          <ServerEditPanel server={selectedServer} pdus={pdus} rackSlots={rackSlots}
-            switchAssignments={switchAssignments} onClose={()=>setSelectedServerId(null)}
+          <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
+            switchAssignments={switchAssignments} rackOverrides={rackOverrides}
+            onRackOverrideChange={async upd => {
+              setRackOverrides(upd);
+              await fetch("/api/rack-overrides",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(upd)}).catch(()=>{});
+            }}
+            onClose={()=>setSelectedServerId(null)}
             onOutletAction={onOutletAction} onLabelChange={onLabelChange}
             onSlotsChange={setRackSlots} onSwitchChange={setSwitchAssignments}/>
         </Portal>

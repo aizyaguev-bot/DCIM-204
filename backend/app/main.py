@@ -23,6 +23,7 @@ _RACK_POSITIONS_FILE = pathlib.Path(__file__).parent.parent / "rack_positions.js
 _RACK_SLOTS_FILE     = pathlib.Path(__file__).parent.parent / "rack_slots.json"
 _SWITCH_ASSIGN_FILE  = pathlib.Path(__file__).parent.parent / "switch_assignments.json"
 _RACK_ITEMS_FILE     = pathlib.Path(__file__).parent.parent / "rack_items.json"
+_RACK_OVERRIDES_FILE = pathlib.Path(__file__).parent.parent / "rack_overrides.json"
 
 
 async def _warm_cache():
@@ -55,7 +56,7 @@ async def basic_auth(request: Request, call_next):
     password = get_settings().lab_manager_password
     if not password:
         return await call_next(request)
-    if request.url.path in ("/api/version", "/api/changelog", "/api/rack-positions", "/api/rack-slots", "/api/switch-assignments", "/api/rack-items"):  # public endpoints
+    if request.url.path in ("/api/version", "/api/changelog", "/api/rack-positions", "/api/rack-slots", "/api/switch-assignments", "/api/rack-items", "/api/rack-overrides"):  # public endpoints
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
@@ -163,6 +164,22 @@ async def get_rack_items():
 async def save_rack_items(payload: dict):
     try:
         _RACK_ITEMS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.get("/api/rack-overrides")
+async def get_rack_overrides():
+    try:
+        return json.loads(_RACK_OVERRIDES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+@app.put("/api/rack-overrides")
+async def save_rack_overrides(payload: dict):
+    try:
+        _RACK_OVERRIDES_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception:
         pass
     return {"ok": True}
