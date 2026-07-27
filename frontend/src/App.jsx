@@ -92,6 +92,12 @@ export default function App() {
     } catch {}
   }
 
+  async function handleRenameOpt(oldName, newName) {
+    await api.renameOpt(oldName, newName);
+    await loadDevices();
+    await refreshAllStatuses();
+  }
+
   async function refreshAllStatuses() {
     await Promise.all([
       ...pdus.map(p => loadPduStatus(p.id)),
@@ -221,6 +227,7 @@ export default function App() {
             await loadDevices();
             await refreshAllStatuses();
           }}
+          onRenameOpt={handleRenameOpt}
           onRefresh={loadDevices}
         />
       )}

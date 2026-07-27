@@ -769,7 +769,7 @@ function MoveOptSection({ server, pdu, pdus, rackDevices, rackOverrides, onRackO
 }
 
 // ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, rackOverrides, onRackOverrideChange, onClose, onOutletAction, onLabelChange, onSlotsChange, onSwitchChange }) {
+function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, rackOverrides, onRackOverrideChange, onClose, onOutletAction, onLabelChange, onRenameOpt, onSlotsChange, onSwitchChange }) {
   useEscClose(onClose);
   const pdu   = pdus.find(p => p.id === server.pduId);
   const curU  = (rackSlots[server.rack] || {})[server.id];
@@ -788,7 +788,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   function tick(k){setSaved(k);setTimeout(()=>setSaved(s=>s===k?null:s),2000);}
 
   async function power(a){if(!onOutletAction)return;setDoing(a);try{await onOutletAction(server.pduId,server.outlet,a);}finally{setDoing(null);}}
-  async function saveName(){if(!name.trim()||!pdu||!onLabelChange)return;setDoing("name");await onLabelChange(server.pduId,{...pdu.labels,[String(server.outlet)]:name.trim()});setDoing(null);tick("name");}
+  async function saveName(){if(!name.trim())return;setDoing("name");if(onRenameOpt&&name.trim()!==server.name){await onRenameOpt(server.name,name.trim());}else if(pdu&&onLabelChange){await onLabelChange(server.pduId,{...pdu.labels,[String(server.outlet)]:name.trim()});}setDoing(null);tick("name");}
   async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;setDoing("outlet");const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await onLabelChange(server.pduId,updated);setDoing(null);tick("outlet");}
   async function saveSlot(){const u=parseInt(uSlot,10);if(isNaN(u)||u<1)return;setDoing("slot");const up={...rackSlots,[server.rack]:{...(rackSlots[server.rack]||{}),[server.id]:u}};onSlotsChange(up);await fetch("/api/rack-slots",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("slot");}
   async function saveSw(){setDoing("sw");const up={...switchAssignments};if(swName.trim()||swPort)up[server.id]={switch:swName.trim(),port:swPort?parseInt(swPort,10):null};else delete up[server.id];onSwitchChange(up);await fetch("/api/switch-assignments",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("sw");}
@@ -1719,7 +1719,7 @@ function KpiBar({servers,rackStats,pdus,pduStatuses}) {
 }
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRefresh}) {
+export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh}) {
   const [section,           setSection]           = useState("racks");
   const [rackOrder,         setRackOrder]         = useState({});
   const [rackSlots,         setRackSlots]         = useState({});
@@ -1790,10 +1790,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     fetch("/api/rack-positions",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(n)}).catch(()=>{});
   },[rackOrder]);
 
-  // Wrapper: after any label change, reload position/slot/switch data so renamed
-  // server IDs (id = label.toLowerCase()) stay in their correct rack positions.
-  const handleLabelChange = useCallback(async (pduId, newLabels) => {
-    await onLabelChange(pduId, newLabels);
+  async function _reloadPositions() {
     const [positions, slots, switches] = await Promise.all([
       fetch("/api/rack-positions").then(r => r.json()).catch(() => ({})),
       fetch("/api/rack-slots").then(r => r.json()).catch(() => ({})),
@@ -1802,7 +1799,20 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     setRackOrder(positions);
     setRackSlots(slots);
     setSwitchAssignments(switches);
+  }
+
+  // After any label change reload positions so renamed IDs stay in place
+  const handleLabelChange = useCallback(async (pduId, newLabels) => {
+    await onLabelChange(pduId, newLabels);
+    await _reloadPositions();
   }, [onLabelChange]);
+
+  // Global rename via dedicated endpoint — one call updates all PDUs, KVMs and DCIM files
+  const handleRenameOpt = useCallback(async (oldName, newName) => {
+    if (!onRenameOpt) return;
+    await onRenameOpt(oldName, newName);
+    await _reloadPositions();
+  }, [onRenameOpt]);
 
   // Inline rename server (double-click in rack)
   const handleRenameServer = useCallback(async (server, newName) => {
@@ -1907,7 +1917,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
               await fetch("/api/rack-overrides",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(upd)}).catch(()=>{});
             }}
             onClose={()=>setSelectedServerId(null)}
-            onOutletAction={onOutletAction} onLabelChange={handleLabelChange}
+            onOutletAction={onOutletAction} onLabelChange={handleLabelChange} onRenameOpt={handleRenameOpt}
             onSlotsChange={setRackSlots} onSwitchChange={setSwitchAssignments}/>
         </Portal>
       )}

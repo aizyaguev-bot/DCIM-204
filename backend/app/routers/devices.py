@@ -137,6 +137,33 @@ async def update_labels(
     return {"ok": True, "synced": list(renames.keys())}
 
 
+@router.post("/rename-opt", status_code=200)
+async def rename_opt(body: dict, db: AsyncSession = Depends(get_db)):
+    """Rename an OPT globally across all PDUs, KVMs, and DCIM position files."""
+    old_name = (body.get("old_name") or "").strip()
+    new_name = (body.get("new_name") or "").strip()
+    if not old_name or not new_name:
+        raise HTTPException(status_code=400, detail="old_name and new_name required")
+    if old_name.lower() == new_name.lower():
+        raise HTTPException(status_code=400, detail="Names are identical")
+
+    result = await db.execute(select(Device))
+    updated = []
+    for dev in result.scalars().all():
+        labels = json.loads(dev.labels_json) if dev.labels_json else {}
+        new_labels = {p: (new_name if v.lower() == old_name.lower() else v) for p, v in labels.items()}
+        if new_labels != labels:
+            dev.labels_json = json.dumps(new_labels)
+            updated.append(dev.name)
+
+    id_renames = {old_name.lower(): new_name.lower()}
+    for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json"):
+        _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames)
+
+    await db.commit()
+    return {"ok": True, "updated_devices": updated}
+
+
 @router.delete("/{device_id}", status_code=204)
 async def delete_device(device_id: str, db: AsyncSession = Depends(get_db)):
     dev = await _get_or_404(device_id, db)

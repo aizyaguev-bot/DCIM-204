@@ -20,6 +20,7 @@ export const api = {
   createDevice: (d)           => req("POST",   "/api/devices/", d),
   updateDevice: (id, d)       => req("PUT",    `/api/devices/${id}`, d),
   updateLabels: (id, labels)  => req("PATCH",  `/api/devices/${id}/labels`, labels),
+  renameOpt:   (oldName, newName) => req("POST", "/api/devices/rename-opt", { old_name: oldName, new_name: newName }),
   deleteDevice: (id)          => req("DELETE", `/api/devices/${id}`),
 
   // PDU
