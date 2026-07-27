@@ -1790,12 +1790,26 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     fetch("/api/rack-positions",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(n)}).catch(()=>{});
   },[rackOrder]);
 
+  // Wrapper: after any label change, reload position/slot/switch data so renamed
+  // server IDs (id = label.toLowerCase()) stay in their correct rack positions.
+  const handleLabelChange = useCallback(async (pduId, newLabels) => {
+    await onLabelChange(pduId, newLabels);
+    const [positions, slots, switches] = await Promise.all([
+      fetch("/api/rack-positions").then(r => r.json()).catch(() => ({})),
+      fetch("/api/rack-slots").then(r => r.json()).catch(() => ({})),
+      fetch("/api/switch-assignments").then(r => r.json()).catch(() => ({})),
+    ]);
+    setRackOrder(positions);
+    setRackSlots(slots);
+    setSwitchAssignments(switches);
+  }, [onLabelChange]);
+
   // Inline rename server (double-click in rack)
   const handleRenameServer = useCallback(async (server, newName) => {
     const pdu = pdus.find(p => p.id === server.pduId);
-    if (!pdu || !onLabelChange) return;
-    await onLabelChange(server.pduId, { ...pdu.labels, [String(server.outlet)]: newName });
-  }, [pdus, onLabelChange]);
+    if (!pdu) return;
+    await handleLabelChange(server.pduId, { ...pdu.labels, [String(server.outlet)]: newName });
+  }, [pdus, handleLabelChange]);
 
   // Inline rename custom item
   const handleRenameCustom = useCallback(async (item, newName) => {
@@ -1875,7 +1889,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           switchAssignments={switchAssignments} customItems={customItems}
           onReorder={handleReorder}
           onSelect={s => setSelectedServerId(s.id)} onSelectCustom={setSelectedCustom}
-          onLabelChange={onLabelChange} onSlotsChange={setRackSlots}
+          onLabelChange={handleLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
           onCustomItemsChange={setCustomItems} onRefresh={onRefresh}
           pdus={pdus} rackDevices={rackDevices}/>
@@ -1893,7 +1907,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
               await fetch("/api/rack-overrides",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(upd)}).catch(()=>{});
             }}
             onClose={()=>setSelectedServerId(null)}
-            onOutletAction={onOutletAction} onLabelChange={onLabelChange}
+            onOutletAction={onOutletAction} onLabelChange={handleLabelChange}
             onSlotsChange={setRackSlots} onSwitchChange={setSwitchAssignments}/>
         </Portal>
       )}
