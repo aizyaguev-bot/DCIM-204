@@ -2,6 +2,13 @@
 
 ---
 
+## v2.27.0 — 2026-07-29
+
+### Added
+- **Amps per rack card** — each rack card in Racks view now shows current draw (A) in the footer next to watts, and in the info line below the rack name; rack detail panel stats grid shows "Current" tile alongside "Power draw"
+
+---
+
 ## v2.26.0 — 2026-07-29
 
 ### Added

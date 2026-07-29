@@ -409,6 +409,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
           <span className="text-zinc-500">{r.servers.length} OPT{r.servers.length!==1?"s":""}</span>
           {(customItems[r.rack]||[]).length > 0 && <span className="text-zinc-600">{(customItems[r.rack]||[]).length} equip</span>}
           {r.totalWatts > 0 && <span className="text-zinc-500">{r.totalWatts.toFixed(0)} W</span>}
+          {r.totalAmps > 0 && <span className="text-purple-500/70">{r.totalAmps.toFixed(1)} A</span>}
           {r.pdus.map(p => <span key={p.id} className="text-zinc-700">{p.ip}</span>)}
         </div>
       </div>
@@ -461,9 +462,12 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
           <>
             <div className="flex justify-between items-center text-[9px] font-mono mb-1.5">
               <span className="text-zinc-600 font-bold uppercase tracking-widest">Power</span>
-              <span style={{ color: capColor }} className="font-bold">
-                {r.totalWatts > 0 ? `${r.totalWatts.toFixed(0)} W · ${capPct.toFixed(0)}%` : "offline"}
-              </span>
+              <div className="flex items-center gap-2">
+                {r.totalAmps > 0 && <span className="text-purple-400/80 font-bold">{r.totalAmps.toFixed(1)} A</span>}
+                <span style={{ color: capColor }} className="font-bold">
+                  {r.totalWatts > 0 ? `${r.totalWatts.toFixed(0)} W · ${capPct.toFixed(0)}%` : "offline"}
+                </span>
+              </div>
             </div>
             <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
               <div className="h-full rounded-full transition-all duration-700" style={{ width: `${capPct}%`, background: capColor }}/>
@@ -994,6 +998,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
               ["OPTs", r.servers.length],
               ["Equipment", (customItems[r.rack]||[]).length],
               ["Power draw", r.totalWatts > 0 ? `${r.totalWatts.toFixed(0)} W` : "—"],
+              ["Current", r.totalAmps > 0 ? `${r.totalAmps.toFixed(1)} A` : "—"],
               ["PDU capacity", `${capPct.toFixed(0)}%`],
               ["Outlets on", `${r.outletsOn} / ${r.outletsTotal}`],
               ["Status", pduOnline ? "Online" : r.pdus.length ? "Offline" : "No PDU"],
