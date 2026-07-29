@@ -2,6 +2,18 @@
 
 ---
 
+## v2.26.0 — 2026-07-29
+
+### Added
+- **Owner / Engineer assignment** — every OPT can have an assigned owner (engineer name):
+  - Inventory table: new "Owner" column; click any cell to edit inline with autocomplete from existing names; click away or press Enter to save instantly; shows purple "+ assign" when unset
+  - Server edit panel: "Owner / Engineer" field with autocomplete; saves on blur or Enter
+  - Stored in `backend/opt_owners.json` via new `/api/opt-owners` GET+PUT endpoint; search in Inventory also filters by owner name
+- **Amperage in PDU detail** — the Summary panel now shows "Current (A)" row alongside Total draw when inlet voltage is available
+- **Changelog fix** — fixed path bug that caused Changelog tab to show "not found"
+
+---
+
 ## v2.25.0 — 2026-07-29
 
 ### Added

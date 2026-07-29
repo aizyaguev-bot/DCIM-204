@@ -125,6 +125,12 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
             <Row label="Inlet voltage" v={status ? `${status.inlet_voltage} V` : "—"} />
             <Row label="Active outlets" v={outlets.length ? `${on} / ${outlets.length}` : "—"} />
             <Row label="Total draw" v={status ? `${(status.total_watts/1000).toFixed(2)} kW` : "—"} />
+            {status?.inlet_voltage > 0 && status?.total_watts > 0 && (
+              <Row label="Current">
+                <span className="tabular-nums">{(status.total_watts / status.inlet_voltage).toFixed(1)} A</span>
+                <span className="text-zinc-600 text-xs ml-1">/ 16 A</span>
+              </Row>
+            )}
           </div>
           <EnvSensorsPanel status={status} />
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4 space-y-1">

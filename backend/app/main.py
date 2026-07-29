@@ -18,12 +18,13 @@ from sqlalchemy import select
 FRONTEND_DIST = pathlib.Path(__file__).parent.parent.parent / "frontend" / "dist"
 
 _VERSION_FILE        = pathlib.Path(__file__).parent.parent / "version.txt"
-_CHANGELOG_FILE      = pathlib.Path(__file__).parent.parent.parent.parent / "CHANGELOG.md"
+_CHANGELOG_FILE      = pathlib.Path(__file__).parent.parent.parent / "CHANGELOG.md"
 _RACK_POSITIONS_FILE = pathlib.Path(__file__).parent.parent / "rack_positions.json"
 _RACK_SLOTS_FILE     = pathlib.Path(__file__).parent.parent / "rack_slots.json"
 _SWITCH_ASSIGN_FILE  = pathlib.Path(__file__).parent.parent / "switch_assignments.json"
 _RACK_ITEMS_FILE     = pathlib.Path(__file__).parent.parent / "rack_items.json"
 _RACK_OVERRIDES_FILE = pathlib.Path(__file__).parent.parent / "rack_overrides.json"
+_OPT_OWNERS_FILE     = pathlib.Path(__file__).parent.parent / "opt_owners.json"
 
 
 async def _warm_cache():
@@ -56,7 +57,7 @@ async def basic_auth(request: Request, call_next):
     password = get_settings().lab_manager_password
     if not password:
         return await call_next(request)
-    if request.url.path in ("/api/version", "/api/changelog", "/api/rack-positions", "/api/rack-slots", "/api/switch-assignments", "/api/rack-items", "/api/rack-overrides"):  # public endpoints
+    if request.url.path in ("/api/version", "/api/changelog", "/api/rack-positions", "/api/rack-slots", "/api/switch-assignments", "/api/rack-items", "/api/rack-overrides", "/api/opt-owners"):  # public endpoints
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
@@ -180,6 +181,22 @@ async def get_rack_overrides():
 async def save_rack_overrides(payload: dict):
     try:
         _RACK_OVERRIDES_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.get("/api/opt-owners")
+async def get_opt_owners():
+    try:
+        return json.loads(_OPT_OWNERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+@app.put("/api/opt-owners")
+async def save_opt_owners(payload: dict):
+    try:
+        _OPT_OWNERS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception:
         pass
     return {"ok": True}

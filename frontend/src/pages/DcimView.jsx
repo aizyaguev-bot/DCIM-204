@@ -769,7 +769,7 @@ function MoveOptSection({ server, pdu, pdus, rackDevices, rackOverrides, onRackO
 }
 
 // ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, rackOverrides, onRackOverrideChange, onClose, onOutletAction, onLabelChange, onRenameOpt, onSlotsChange, onSwitchChange }) {
+function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, rackOverrides, optOwners, onOwnerChange, onRackOverrideChange, onClose, onOutletAction, onLabelChange, onRenameOpt, onSlotsChange, onSwitchChange }) {
   useEscClose(onClose);
   const pdu   = pdus.find(p => p.id === server.pduId);
   const curU  = (rackSlots[server.rack] || {})[server.id];
@@ -780,6 +780,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   const [uSlot,  setUSlot]  = useState(curU != null ? String(curU) : "");
   const [swName, setSwName] = useState(curSw.switch || "");
   const [swPort, setSwPort] = useState(curSw.port != null ? String(curSw.port) : "");
+  const [owner,  setOwner]  = useState(optOwners?.[server.id] || "");
   const [doing,  setDoing]  = useState(null);
   const [saved,  setSaved]  = useState(null);
 
@@ -792,6 +793,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;setDoing("outlet");const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await onLabelChange(server.pduId,updated);setDoing(null);tick("outlet");}
   async function saveSlot(){const u=parseInt(uSlot,10);if(isNaN(u)||u<1)return;setDoing("slot");const up={...rackSlots,[server.rack]:{...(rackSlots[server.rack]||{}),[server.id]:u}};onSlotsChange(up);await fetch("/api/rack-slots",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("slot");}
   async function saveSw(){setDoing("sw");const up={...switchAssignments};if(swName.trim()||swPort)up[server.id]={switch:swName.trim(),port:swPort?parseInt(swPort,10):null};else delete up[server.id];onSwitchChange(up);await fetch("/api/switch-assignments",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("sw");}
+  async function saveOwner(){if(onOwnerChange){await onOwnerChange(server.id,owner.trim());tick("owner");}}
   async function remove(){if(!pdu||!onLabelChange)return;if(!confirm(`Remove "${server.name}" from DCIM?`))return;const l={...pdu.labels};delete l[String(server.outlet)];await onLabelChange(server.pduId,l);onClose();}
 
   const SetBtn=({id,onClick,disabled})=>(
@@ -905,6 +907,22 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
                 </div>
               ))}
             </div>
+          </div>
+
+          <div><SL>Owner / Engineer</SL>
+            <div className="relative">
+              <input value={owner} onChange={e=>setOwner(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveOwner()}
+                onBlur={saveOwner}
+                placeholder="Engineer name"
+                list="owner-suggestions"
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-purple-700/50 placeholder:text-zinc-700"/>
+              <datalist id="owner-suggestions">
+                {[...new Set(Object.values(optOwners||{}).filter(Boolean))].map(n=><option key={n} value={n}/>)}
+              </datalist>
+              {saved==="owner"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
+            </div>
+            {optOwners?.[server.id]&&<div className="mt-1 text-[10px] text-purple-600">{optOwners[server.id]}</div>}
           </div>
 
           <MoveOptSection server={server} pdu={pdu} pdus={pdus} rackDevices={rackDevices}
@@ -1600,20 +1618,27 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
 }
 
 // ─── INVENTORY VIEW ───────────────────────────────────────────────────────────
-function InventoryView({ servers, switchAssignments, rackSlots, customItems }) {
+function InventoryView({ servers, switchAssignments, rackSlots, customItems, optOwners, onOwnerChange }) {
   const [rack,  setRack]  = useState("all");
   const [state, setState] = useState("all");
   const [q, setQ]         = useState("");
   const [sk, setSk]       = useState("rack");
   const [sd, setSd]       = useState(1);
+  const [editingOwner, setEditingOwner] = useState(null); // serverId being edited
+  const [ownerDraft,   setOwnerDraft]   = useState("");
   const racks = useMemo(()=>[...new Set(servers.map(s=>s.rack))].sort(),[servers]);
+  const ownerSuggestions = useMemo(()=>[...new Set(Object.values(optOwners||{}).filter(Boolean))].sort(),[optOwners]);
   const rows  = useMemo(()=>{
     let list=servers;
     if(rack!=="all")list=list.filter(s=>s.rack===rack);
     if(state!=="all")list=list.filter(s=>s.state===state);
-    if(q.trim()){const lq=q.toLowerCase();list=list.filter(s=>s.name.toLowerCase().includes(lq)||(s.rack||"").toLowerCase().includes(lq)||(switchAssignments[s.id]?.switch||"").toLowerCase().includes(lq));}
+    if(q.trim()){const lq=q.toLowerCase();list=list.filter(s=>s.name.toLowerCase().includes(lq)||(s.rack||"").toLowerCase().includes(lq)||(switchAssignments[s.id]?.switch||"").toLowerCase().includes(lq)||(optOwners?.[s.id]||"").toLowerCase().includes(lq));}
     return [...list].sort((a,b)=>{const av=a[sk]??"",bv=b[sk]??"";return typeof av==="number"?sd*(av-bv):sd*String(av).localeCompare(String(bv));});
-  },[servers,rack,state,q,sk,sd,switchAssignments]);
+  },[servers,rack,state,q,sk,sd,switchAssignments,optOwners]);
+
+  function startOwnerEdit(s){setEditingOwner(s.id);setOwnerDraft(optOwners?.[s.id]||"");}
+  async function commitOwner(){if(onOwnerChange&&editingOwner!=null)await onOwnerChange(editingOwner,ownerDraft.trim());setEditingOwner(null);}
+
   const Th=({k,label,right})=>(<th onClick={()=>{if(sk===k)setSd(d=>-d);else{setSk(k);setSd(1);}}} className={`text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 whitespace-nowrap select-none cursor-pointer hover:text-zinc-300 transition ${right?"text-right":"text-left"} text-zinc-600`}>{label}{sk===k&&<span className="ml-0.5 opacity-50">{sd>0?"↑":"↓"}</span>}</th>);
   return (
     <div>
@@ -1624,14 +1649,15 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems }) {
         <select value={state} onChange={e=>setState(e.target.value)} className="bg-zinc-900 border border-zinc-800 rounded-lg text-sm px-2.5 py-1.5 focus:outline-none focus:border-nv-400/50"><option value="all">All states</option><option value="on">On</option><option value="off">Off</option><option value="unknown">Unknown</option></select>
         <span className="ml-auto text-[10px] text-zinc-700">{rows.length} / {servers.length}</span>
       </div>
+      <datalist id="inv-owner-list">{ownerSuggestions.map(n=><option key={n} value={n}/>)}</datalist>
       <div className="border border-zinc-800/60 rounded-xl overflow-hidden bg-zinc-900/30">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="border-b border-zinc-800 bg-zinc-900/70">
-              <tr><Th k="name" label="Asset"/><Th k="rack" label="Rack"/><Th k="state" label="State"/><Th k="watts" label="W" right/><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600 text-right">U</th><Th k="outlet" label="Outlet" right/><Th k="pduName" label="PDU"/><Th k="pduIp" label="PDU IP"/><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600">Switch</th></tr>
+              <tr><Th k="name" label="Asset"/><Th k="rack" label="Rack"/><Th k="state" label="State"/><Th k="watts" label="W" right/><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600 text-right">U</th><Th k="outlet" label="Outlet" right/><Th k="pduName" label="PDU"/><Th k="pduIp" label="PDU IP"/><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600">Switch</th><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600">Owner</th></tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/30">
-              {rows.map(s=>{const isOn=s.state==="on",isOff=s.state==="off",sw=switchAssignments[s.id],u=(rackSlots[s.rack]||{})[s.id];return(
+              {rows.map(s=>{const isOn=s.state==="on",isOff=s.state==="off",sw=switchAssignments[s.id],u=(rackSlots[s.rack]||{})[s.id],ow=optOwners?.[s.id];return(
                 <tr key={s.id} className={`hover:bg-zinc-800/20 transition-colors ${isOn?"hover:bg-nv-400/4":""}`}>
                   <td className="px-3 py-2"><div className="flex items-center gap-2"><div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isOn?"bg-emerald-400 shadow-[0_0_3px_#34d399]":isOff?"bg-red-700":"bg-zinc-800"}`}/><span className="font-mono text-[11px] font-semibold text-zinc-200">{s.name}</span></div></td>
                   <td className="px-3 py-2 text-xs text-zinc-500 font-mono">{s.rack||"—"}</td>
@@ -1642,9 +1668,23 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems }) {
                   <td className="px-3 py-2 text-xs text-zinc-500">{s.pduName||"—"}</td>
                   <td className="px-3 py-2 font-mono text-xs text-zinc-700">{s.pduIp||"—"}</td>
                   <td className="px-3 py-2 text-xs">{sw?.switch?<Pill color="cyan" sm>{sw.switch}{sw.port?`·${sw.port}`:""}</Pill>:<span className="text-zinc-800">—</span>}</td>
+                  <td className="px-3 py-2 text-xs min-w-[110px]">
+                    {editingOwner===s.id?(
+                      <input autoFocus value={ownerDraft} onChange={e=>setOwnerDraft(e.target.value)}
+                        onKeyDown={e=>{if(e.key==="Enter")commitOwner();if(e.key==="Escape")setEditingOwner(null);}}
+                        onBlur={commitOwner}
+                        list="inv-owner-list"
+                        className="w-full bg-zinc-800 border border-purple-700/60 rounded px-2 py-0.5 text-xs text-zinc-200 focus:outline-none"/>
+                    ):(
+                      <button onClick={()=>startOwnerEdit(s)}
+                        className={`text-left w-full rounded px-1.5 py-0.5 hover:bg-zinc-800 transition ${ow?"text-purple-400":"text-zinc-700 hover:text-zinc-500"}`}>
+                        {ow||"+ assign"}
+                      </button>
+                    )}
+                  </td>
                 </tr>
               );})}
-              {rows.length===0&&<tr><td colSpan={9} className="px-3 py-10 text-center text-zinc-700 text-sm">No matching assets</td></tr>}
+              {rows.length===0&&<tr><td colSpan={10} className="px-3 py-10 text-center text-zinc-700 text-sm">No matching assets</td></tr>}
             </tbody>
           </table>
         </div>
@@ -1770,6 +1810,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [switchAssignments, setSwitchAssignments] = useState({});
   const [customItems,       setCustomItems]       = useState({});
   const [rackOverrides,     setRackOverrides]     = useState({});
+  const [optOwners,         setOptOwners]         = useState({});
   const [selectedServerId,  setSelectedServerId]  = useState(null);
   const [selectedCustom,    setSelectedCustom]    = useState(null);
 
@@ -1780,10 +1821,18 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       fetch("/api/switch-assignments").then(r=>r.json()).catch(()=>({})),
       fetch("/api/rack-items").then(r=>r.json()).catch(()=>({})),
       fetch("/api/rack-overrides").then(r=>r.json()).catch(()=>({})),
-    ]).then(([order,slots,sw,items,overrides])=>{
-      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});
+      fetch("/api/opt-owners").then(r=>r.json()).catch(()=>({})),
+    ]).then(([order,slots,sw,items,overrides,owners])=>{
+      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});setOptOwners(owners||{});
     });
   },[]);
+
+  const handleOwnerChange = useCallback(async (serverId, owner) => {
+    const upd = {...optOwners, [serverId]: owner};
+    if(!owner) delete upd[serverId];
+    setOptOwners(upd);
+    await fetch("/api/opt-owners",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(upd)}).catch(()=>{});
+  },[optOwners]);
 
   const pdus       = devices.filter(d=>d.kind==="pdu");
   // kind="rack" = DCIM-only racks (added via DCIM, never shown on Dashboard)
@@ -1959,14 +2008,14 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onCustomItemsChange={setCustomItems} onRefresh={onRefresh}
           pdus={pdus} rackDevices={rackDevices}/>
       )}
-      {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems}/>}
+      {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems} optOwners={optOwners} onOwnerChange={handleOwnerChange}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}
       {section==="changelog"&&<ChangelogView/>}
 
       {selectedServer&&(
         <Portal>
           <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
-            switchAssignments={switchAssignments} rackOverrides={rackOverrides}
+            switchAssignments={switchAssignments} rackOverrides={rackOverrides} optOwners={optOwners} onOwnerChange={handleOwnerChange}
             onRackOverrideChange={async upd => {
               setRackOverrides(upd);
               await fetch("/api/rack-overrides",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(upd)}).catch(()=>{});
