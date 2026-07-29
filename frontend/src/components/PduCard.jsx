@@ -40,9 +40,12 @@ export default function PduCard({ device, status, onOpen, onOutletAction }) {
           </div>
         )}
       </div>
-      <div className="px-4 py-2.5 border-t border-zinc-800/80 bg-zinc-950/40 text-xs text-zinc-400 flex justify-between">
+      <div className="px-4 py-2.5 border-t border-zinc-800/80 bg-zinc-950/40 text-xs text-zinc-400 flex items-center justify-between gap-2">
         <span>{outlets.length > 0 ? `${on} of ${outlets.length} outlets active` : "—"}</span>
-        <span className="tabular-nums text-zinc-200">{outlets.length > 0 ? `${(totalW / 1000).toFixed(2)} kW` : "—"}</span>
+        <div className="flex items-center gap-1.5">
+          <EnvBadges status={status} />
+          <span className="tabular-nums text-zinc-200">{outlets.length > 0 ? `${(totalW / 1000).toFixed(2)} kW` : "—"}</span>
+        </div>
       </div>
     </div>
   );
@@ -134,6 +137,20 @@ function MI({ onClick, icon, label, danger, success }) {
     <button onClick={onClick} className={`w-full text-left px-2 py-1.5 rounded ${c} flex items-center gap-2`}>
       <span className="w-4 text-center">{icon}</span>{label}
     </button>
+  );
+}
+
+function EnvBadges({ status }) {
+  if (!status) return null;
+  const { temperature, humidity, leak_detected } = status;
+  if (temperature == null && humidity == null && leak_detected == null) return null;
+  return (
+    <div className="flex items-center gap-1">
+      {temperature != null && <span title="Temperature" className="tabular-nums text-zinc-500">🌡{temperature}°C</span>}
+      {humidity != null && <span title="Humidity" className="tabular-nums text-zinc-500">💧{humidity}%</span>}
+      {leak_detected && <span className="font-medium text-rose-400">⚠ Leak</span>}
+      <span className="text-zinc-700">·</span>
+    </div>
   );
 }
 

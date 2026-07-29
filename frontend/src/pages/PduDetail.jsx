@@ -126,6 +126,7 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
             <Row label="Active outlets" v={outlets.length ? `${on} / ${outlets.length}` : "—"} />
             <Row label="Total draw" v={status ? `${(status.total_watts/1000).toFixed(2)} kW` : "—"} />
           </div>
+          <EnvSensorsPanel status={status} />
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4 space-y-1">
             <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Quick actions</div>
             <button className="w-full text-left text-sm px-3 py-2 rounded hover:bg-zinc-800 text-zinc-200"
@@ -144,6 +145,43 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
         </aside>
       </div>
     </main>
+  );
+}
+
+function EnvSensorsPanel({ status }) {
+  const { temperature, humidity, leak_detected } = status || {};
+  if (temperature == null && humidity == null && leak_detected == null) return null;
+  return (
+    <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4 mt-4">
+      <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Environment</div>
+      {temperature != null && (
+        <div className="flex items-center justify-between text-sm py-1.5 border-b border-zinc-800/50">
+          <span className="text-zinc-500 flex items-center gap-1.5">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+            Temperature
+          </span>
+          <span className={`tabular-nums font-medium ${temperature > 35 ? "text-rose-400" : temperature > 28 ? "text-amber-400" : "text-zinc-200"}`}>{temperature}°C</span>
+        </div>
+      )}
+      {humidity != null && (
+        <div className="flex items-center justify-between text-sm py-1.5 border-b border-zinc-800/50">
+          <span className="text-zinc-500 flex items-center gap-1.5">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+            Humidity
+          </span>
+          <span className={`tabular-nums font-medium ${humidity > 70 ? "text-amber-400" : "text-zinc-200"}`}>{humidity}%</span>
+        </div>
+      )}
+      {leak_detected != null && (
+        <div className="flex items-center justify-between text-sm py-1.5">
+          <span className="text-zinc-500 flex items-center gap-1.5">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10a8 8 0 0 0-16 0c0 6 8 10 8 10z"/></svg>
+            Leak detection
+          </span>
+          {leak_detected ? <span className="font-medium text-rose-400">⚠ Leak detected</span> : <span className="text-emerald-500 font-medium">Clear</span>}
+        </div>
+      )}
+    </div>
   );
 }
 

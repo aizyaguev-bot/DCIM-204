@@ -1656,16 +1656,58 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems }) {
 // ─── POWER VIEW ───────────────────────────────────────────────────────────────
 function PowerView({ rackStats }) {
   const total=rackStats.reduce((a,r)=>a+r.totalWatts,0);
+  const totalA=rackStats.reduce((a,r)=>a+(r.totalAmps||0),0);
+  const allPdus=rackStats.flatMap(r=>r.pduData||[]);
   const maxR=Math.max(...rackStats.map(r=>r.totalWatts),1);
   const sorted=[...rackStats].sort((a,b)=>b.totalWatts-a.totalWatts);
   const top=rackStats.flatMap(r=>r.servers).filter(s=>s.watts>0).sort((a,b)=>b.watts-a.watts).slice(0,10);
   if(!rackStats.length)return<div className="text-zinc-600 text-sm py-24 text-center">No power data.</div>;
   const Tile=({label,val,sub,hi})=>(<div className="bg-zinc-900/50 border border-zinc-800/60 rounded-xl px-4 py-3"><div className={`text-lg font-bold tabular-nums ${hi?"text-nv-400":"text-zinc-100"}`}>{val}</div><div className="text-[10px] text-zinc-600 mt-0.5">{label}</div>{sub&&<div className="text-[9px] text-zinc-700 mt-0.5">{sub}</div>}</div>);
+  const aCol=(p)=>p>80?"#ef4444":p>55?"#f59e0b":"#76b900";
+  const aCls=(p)=>p>80?"text-rose-400":p>55?"text-amber-400":"text-zinc-200";
+  const recs=[...allPdus].filter(p=>p.reachable!==false&&p.outletsTotal>0).sort((a,b)=>b.headroomAmps-a.headroomAmps).slice(0,8);
   return(
     <div className="space-y-6">
-      <div className="flex flex-wrap gap-3"><Tile label="Total draw" val={`${(total/1000).toFixed(2)} kW`} sub={`${total.toFixed(0)} W`} hi/><Tile label="Online racks" val={rackStats.filter(r=>r.pduOnline).length} sub={`of ${rackStats.length}`}/><Tile label="Peak rack" val={sorted[0]?.totalWatts>0?`${sorted[0].totalWatts.toFixed(0)} W`:"—"} sub={sorted[0]?.rack}/><Tile label="Outlets on" val={`${rackStats.reduce((a,r)=>a+r.outletsOn,0)}/${rackStats.reduce((a,r)=>a+r.outletsTotal,0)}`}/></div>
-      <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden"><div className="px-5 py-3 border-b border-zinc-800/50 text-sm font-semibold text-zinc-200 flex justify-between"><span>Power per rack</span><span className="text-[10px] text-zinc-600 font-normal">highest first</span></div>
-        <div className="p-5 space-y-3">{sorted.map(r=>{const cap=r.maxWatts>0?Math.min(100,r.totalWatts/r.maxWatts*100):0;const col=cap>80?"#ef4444":cap>55?"#f59e0b":"#76b900";return(<div key={r.rack}><div className="flex items-center justify-between mb-1"><div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${r.pduOnline?"bg-nv-400":"bg-zinc-700"}`}/><span className="text-xs font-mono text-zinc-300 w-20 truncate">{r.rack}</span><Pill color={r.pduOnline?"nv":r.pdus.length?"red":"zinc"} sm>{r.pduOnline?"online":r.pdus.length?"offline":"no PDU"}</Pill></div><span className="text-xs font-mono text-zinc-400">{r.totalWatts>0?`${r.totalWatts.toFixed(0)} W`:<span className="text-zinc-700">—</span>}</span></div><div className="relative h-3.5 bg-zinc-800/50 rounded overflow-hidden"><div className="h-full rounded transition-all duration-700" style={{width:`${(r.totalWatts/maxR)*100}%`,background:col}}/>{r.totalWatts>0&&<span className="absolute inset-0 flex items-center pl-2 text-[8px] font-semibold text-zinc-950">{(r.totalWatts/1000).toFixed(2)} kW · {cap.toFixed(0)}%</span>}</div></div>);})}</div></div>
+      <div className="flex flex-wrap gap-3">
+        <Tile label="Floor draw" val={`${(total/1000).toFixed(2)} kW`} sub={`${total.toFixed(0)} W`} hi/>
+        <Tile label="Floor current" val={totalA>0?`${totalA.toFixed(1)} A`:"—"} sub="sum of all PDUs"/>
+        <Tile label="Online racks" val={rackStats.filter(r=>r.pduOnline).length} sub={`of ${rackStats.length}`}/>
+        <Tile label="Peak rack" val={sorted[0]?.totalWatts>0?`${sorted[0].totalWatts.toFixed(0)} W`:"—"} sub={sorted[0]?.rack}/>
+        <Tile label="Outlets on" val={`${rackStats.reduce((a,r)=>a+r.outletsOn,0)}/${rackStats.reduce((a,r)=>a+r.outletsTotal,0)}`}/>
+      </div>
+      <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
+        <div className="px-5 py-3 border-b border-zinc-800/50 text-sm font-semibold text-zinc-200 flex justify-between"><span>Per rack</span><span className="text-[10px] text-zinc-600 font-normal">highest draw first</span></div>
+        <div className="p-5 space-y-3">{sorted.map(r=>{const cap=r.maxWatts>0?Math.min(100,r.totalWatts/r.maxWatts*100):0;const col=aCol(cap);const rA=r.totalAmps||0;return(<div key={r.rack}><div className="flex items-center justify-between mb-1"><div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${r.pduOnline?"bg-nv-400":"bg-zinc-700"}`}/><span className="text-xs font-mono text-zinc-300 w-20 truncate">{r.rack}</span><Pill color={r.pduOnline?"nv":r.pdus.length?"red":"zinc"} sm>{r.pduOnline?"online":r.pdus.length?"offline":"no PDU"}</Pill></div><div className="flex items-center gap-4 text-xs font-mono">{rA>0&&<span className="text-zinc-500">{rA.toFixed(1)} A</span>}<span className="text-zinc-400">{r.totalWatts>0?`${r.totalWatts.toFixed(0)} W`:<span className="text-zinc-700">—</span>}</span></div></div><div className="relative h-3.5 bg-zinc-800/50 rounded overflow-hidden"><div className="h-full rounded transition-all duration-700" style={{width:`${(r.totalWatts/maxR)*100}%`,background:col}}/>{r.totalWatts>0&&<span className="absolute inset-0 flex items-center pl-2 text-[8px] font-semibold text-zinc-950">{(r.totalWatts/1000).toFixed(2)} kW · {cap.toFixed(0)}%</span>}</div></div>);})}</div>
+      </div>
+      {allPdus.length>0&&<div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
+        <div className="px-5 py-3 border-b border-zinc-800/50 flex items-baseline justify-between"><span className="text-sm font-semibold text-zinc-200">Amperage per PDU</span><span className="text-[10px] text-zinc-600">rated 16 A per circuit</span></div>
+        <div className="overflow-x-auto"><table className="w-full text-xs">
+          <thead><tr className="border-b border-zinc-800/40 text-[9px] uppercase tracking-widest text-zinc-600">
+            <th className="px-5 py-2 text-left font-medium">PDU</th><th className="px-3 py-2 text-left font-medium">Rack</th><th className="px-3 py-2 text-right font-medium">V</th><th className="px-3 py-2 text-right font-medium">Current</th><th className="px-5 py-2 text-right font-medium">Load</th><th className="px-5 py-2 text-right font-medium">Free outlets</th>
+          </tr></thead>
+          <tbody>{allPdus.map(p=>{const pct=p.ratedAmps>0?Math.min(100,p.amps/p.ratedAmps*100):0;return(
+            <tr key={p.id} className="border-b border-zinc-800/20 hover:bg-zinc-800/20">
+              <td className="px-5 py-2.5"><div className="flex items-center gap-1.5"><span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.reachable?"bg-nv-400":"bg-zinc-600"}`}/><span className="font-mono text-zinc-300">{p.name}</span></div></td>
+              <td className="px-3 py-2.5 text-zinc-500 font-mono">{p.rack}</td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-zinc-500">{p.voltage.toFixed(0)} V</td>
+              <td className="px-3 py-2.5 text-right tabular-nums"><span className={aCls(pct)}>{p.amps.toFixed(1)} A</span><span className="text-zinc-700 text-[9px] ml-1">/ {p.ratedAmps} A</span></td>
+              <td className="px-5 py-2.5"><div className="flex items-center justify-end gap-2"><div className="w-16 h-1.5 bg-zinc-800 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{width:`${pct}%`,background:aCol(pct)}}/></div><span className={`text-[10px] tabular-nums w-8 text-right ${aCls(pct)}`}>{pct.toFixed(0)}%</span></div></td>
+              <td className="px-5 py-2.5 text-right tabular-nums"><span className={p.freeOutlets>0?"text-nv-400":"text-zinc-700"}>{p.freeOutlets}</span>{p.outletsTotal>0&&<span className="text-zinc-700 text-[9px] ml-1">/ {p.outletsTotal}</span>}</td>
+            </tr>);})}</tbody>
+        </table></div>
+      </div>}
+      {recs.length>0&&<div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
+        <div className="px-5 py-3 border-b border-zinc-800/50"><div className="text-sm font-semibold text-zinc-200">Where to connect new units</div><div className="text-[10px] text-zinc-600 mt-0.5">Sorted by available amperage headroom · assumes 16 A rated PDU</div></div>
+        <div className="p-4 space-y-2">{recs.map((p,i)=>{const pct=p.ratedAmps>0?Math.min(100,p.amps/p.ratedAmps*100):0;const tag=pct<40?{t:"Plenty of room",c:"text-nv-400 bg-nv-400/8 border-nv-400/25"}:pct<70?{t:"Some room",c:"text-amber-400 bg-amber-400/8 border-amber-400/25"}:{t:"Near capacity",c:"text-rose-400 bg-rose-400/8 border-rose-400/25"};const maxLoad=p.headroomAmps*p.voltage;return(
+          <div key={p.id} className="flex items-center gap-3 p-3 bg-zinc-900/50 border border-zinc-800/40 rounded-xl">
+            <span className="text-[9px] font-mono text-zinc-700 w-4 shrink-0 text-right">{i+1}</span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap mb-0.5"><span className="text-xs font-mono text-zinc-200">{p.name}</span><span className="text-[9px] text-zinc-600 font-mono">{p.rack}</span><span className={`text-[9px] font-medium px-1.5 py-px rounded border ${tag.c}`}>{tag.t}</span></div>
+              <div className="text-[10px] text-zinc-600 tabular-nums">{p.headroomAmps.toFixed(1)} A headroom · max new load ≈ {(maxLoad/1000).toFixed(1)} kW · {p.freeOutlets} free outlet{p.freeOutlets!==1?"s":""}</div>
+            </div>
+            <div className="shrink-0 text-right"><div className="text-[10px] font-mono tabular-nums text-zinc-400">{p.amps.toFixed(1)} / {p.ratedAmps} A</div><div className="w-20 h-1.5 bg-zinc-800 rounded-full overflow-hidden mt-1 ml-auto"><div className="h-full rounded-full" style={{width:`${pct}%`,background:aCol(pct)}}/></div></div>
+          </div>);})}</div>
+      </div>}
       {top.length>0&&<div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden"><div className="px-5 py-3 border-b border-zinc-800/50 text-sm font-semibold text-zinc-200">Top consumers</div><div className="p-5 space-y-2">{top.map((s,i)=>(<div key={s.id} className="flex items-center gap-3"><span className="text-[9px] font-mono text-zinc-700 w-4 text-right">{i+1}</span><div className={`w-1.5 h-1.5 rounded-full ${s.state==="on"?"bg-emerald-400":"bg-zinc-600"}`}/><span className="text-[11px] font-mono text-zinc-300 flex-1 truncate">{s.name}</span><Pill color="zinc" sm>{s.rack}</Pill><div className="w-24 h-1 bg-zinc-800 rounded-full overflow-hidden"><div className="h-full bg-nv-400 rounded-full" style={{width:`${(s.watts/top[0].watts)*100}%`}}/></div><span className="text-[11px] font-mono text-nv-400 w-12 text-right">{s.watts.toFixed(0)} W</span></div>))}</div></div>}
     </div>
   );
@@ -1704,12 +1746,14 @@ function ChangelogView() {
 // ─── KPI BAR ──────────────────────────────────────────────────────────────────
 function KpiBar({servers,rackStats,pdus,pduStatuses}) {
   const totalW=rackStats.reduce((a,r)=>a+r.totalWatts,0);
+  const totalA=rackStats.reduce((a,r)=>a+(r.totalAmps||0),0);
   const on=servers.filter(s=>s.state==="on").length;
   const alerts=pdus.filter(p=>pduStatuses[p.id]&&pduStatuses[p.id].reachable===false).length;
   const Kpi=({label,value,sub,hi})=>(<div className="flex flex-col min-w-[100px]"><div className={`text-lg font-bold tabular-nums leading-none ${hi?"text-nv-400":"text-zinc-100"}`}>{value}</div><div className="text-[10px] text-zinc-600 mt-px">{label}</div>{sub&&<div className="text-[9px] text-zinc-700 mt-px">{sub}</div>}</div>);
   return(
     <div className="flex flex-wrap items-center gap-x-8 gap-y-3 mb-6 px-5 py-3.5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
       <Kpi label="Total draw" value={totalW>0?`${(totalW/1000).toFixed(2)} kW`:"—"} hi/>
+      <Kpi label="Floor current" value={totalA>0?`${totalA.toFixed(1)} A`:"—"} sub="all PDUs"/>
       <div className="w-px h-8 bg-zinc-800 hidden sm:block"/>
       <Kpi label="Servers on" value={`${on}/${servers.length}`} sub={`${servers.length-on} off or unknown`}/>
       <Kpi label="Racks" value={rackStats.length} sub={`${rackStats.filter(r=>r.pduOnline).length} online`}/>
@@ -1766,24 +1810,35 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
 
   const rackStats = useMemo(()=>racks.map(rn=>{
     const rPdus=rackDevices.filter(p=>p.rack===rn);
-    // Include PDUs from other racks that declare this rack as a shared target via notes="shared:RackName"
     const sharedPdus=rackDevices.filter(p=>
       p.kind==="pdu" && p.rack!==rn &&
       (p.notes||"").split(",").map(s=>s.trim()).includes(`shared:${rn}`)
     );
     const allPdus=[...rPdus, ...sharedPdus];
+    const pduData=allPdus.filter(p=>p.kind==="pdu").map(pdu=>{
+      const st=pduStatuses[pdu.id];
+      const voltage=st?.inlet_voltage>0?st.inlet_voltage:208;
+      const watts=st?.total_watts||0;
+      const amps=parseFloat((voltage>0?watts/voltage:0).toFixed(2));
+      const ratedAmps=16;
+      const outlets=st?.outlets||[];
+      const onCount=outlets.filter(o=>o.state==="on").length;
+      const freeOutlets=outlets.filter(o=>isDefaultOutletLabel(o.label)).length;
+      return{id:pdu.id,name:pdu.name,ip:pdu.ip,rack:rn,reachable:st?.reachable??null,
+        watts,voltage,amps,ratedAmps,maxWatts:ratedAmps*voltage,
+        outletsOn:onCount,outletsTotal:outlets.length,freeOutlets,
+        headroomAmps:parseFloat(Math.max(0,ratedAmps-amps).toFixed(2)),
+        headroomPct:Math.max(0,1-amps/ratedAmps)};
+    });
     let totalWatts=0,outletsOn=0,outletsTotal=0;
-    allPdus.forEach(pdu=>{const st=pduStatuses[pdu.id];if(st?.outlets){outletsOn+=st.outlets.filter(o=>o.state==="on").length;outletsTotal+=st.outlets.length;totalWatts+=st.total_watts||0;}});
+    pduData.forEach(p=>{totalWatts+=p.watts;outletsOn+=p.outletsOn;outletsTotal+=p.outletsTotal;});
+    const totalAmps=parseFloat(pduData.reduce((a,p)=>a+p.amps,0).toFixed(2));
     const rServers=servers.filter(s=>s.rack===rn);
     const pduOnline=allPdus.length>0?(pduStatuses[allPdus[0].id]?.reachable!==false&&!!pduStatuses[allPdus[0].id]):false;
-    // 16A × 208V ≈ 3328W per PDU circuit; PDU rated at 16A total
-    const maxWatts = allPdus.reduce((acc, pdu) => {
-      const st = pduStatuses[pdu.id];
-      return acc + (st?.inlet_voltage > 0 ? 16 * st.inlet_voltage : 16 * 208);
-    }, 0) || outletsTotal * 150;
-    const rackType = rPdus[0]?.model==="Storage" ? "storage" : "compute";
-    return {rack:rn,pdus:allPdus,servers:rServers,totalWatts,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
-  }),[racks,pdus,pduStatuses,servers]);
+    const maxWatts=pduData.reduce((a,p)=>a+p.maxWatts,0)||outletsTotal*150;
+    const rackType=rPdus[0]?.model==="Storage"?"storage":"compute";
+    return{rack:rn,pdus:allPdus,pduData,servers:rServers,totalWatts,totalAmps,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
+  }),[racks,rackDevices,pduStatuses,servers]);
 
   const handleReorder = useCallback((rackName,newIds)=>{
     const n={...rackOrder,[rackName]:newIds};setRackOrder(n);

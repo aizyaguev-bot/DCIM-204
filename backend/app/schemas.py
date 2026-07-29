@@ -36,6 +36,9 @@ class PduStatus(BaseModel):
     total_watts: float = 0.0
     outlets: list[OutletState] = []
     error: Optional[str] = None
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    leak_detected: Optional[bool] = None
 
 class KvmPort(BaseModel):
     number: int

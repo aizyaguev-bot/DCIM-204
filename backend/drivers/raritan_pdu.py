@@ -172,6 +172,39 @@ class RaritanPduDriver:
             raise ValueError(f"Unknown action: {action}")
         return True
 
+    async def get_env_sensors(self) -> dict:
+        """Returns PDU-level environmental sensors: temperature (°C), humidity (%), leak_detected (bool)."""
+        result: dict = {}
+        try:
+            sensors = await self._rpc(PDU_PATH, "getSensors")
+            if not sensors:
+                return result
+
+            async def _read(sname: str):
+                sinfo = (sensors or {}).get(sname)
+                if sinfo and sinfo.get("rid"):
+                    try:
+                        r = await self._rpc(sinfo["rid"], "getReading")
+                        return (r or {})
+                    except Exception:
+                        pass
+                return None
+
+            temp_r, hum_r, leak_r = await asyncio.gather(
+                _read("temperature"),
+                _read("humidity"),
+                _read("leakDetector"),
+            )
+            if temp_r is not None and temp_r.get("value") is not None:
+                result["temperature"] = round(float(temp_r["value"]), 1)
+            if hum_r is not None and hum_r.get("value") is not None:
+                result["humidity"] = round(float(hum_r["value"]), 1)
+            if leak_r is not None and leak_r.get("value") is not None:
+                result["leak_detected"] = int(leak_r["value"]) > 0
+        except RaritanPduError:
+            pass
+        return result
+
     async def get_inlet(self) -> dict:
         """Returns inlet voltage/current/power summary."""
         inlet_rids = await self._get_inlet_rids()

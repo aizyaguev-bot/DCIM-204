@@ -2,6 +2,20 @@
 
 ---
 
+## v2.25.0 — 2026-07-29
+
+### Added
+- **PDU environmental sensors** — temperature, humidity, and leak detection from Raritan PDUs shown in UI for PDUs with sensors; hidden when none connected
+  - PduCard footer: compact badges (🌡 temp, 💧 humidity, ⚠ Leak)
+  - PduDetail sidebar: "Environment" card with color-coded thresholds (temp red >35°C, amber >28°C; humidity amber >70%)
+- **Amperage tracking** — current draw visible at floor, rack, and PDU level
+  - KPI bar: "Floor current" tile (total amps across all PDUs)
+  - Power tab per-rack: amps shown alongside watts on each bar
+  - Power tab "Amperage per PDU" table: voltage, current, load % bar, free outlets; color-coded
+  - Power tab "Where to connect" panel: PDUs ranked by available headroom with tag (Plenty of room / Some room / Near capacity)
+
+---
+
 ## v2.20.0 — 2026-07-21
 
 ### Changed

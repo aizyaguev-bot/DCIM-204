@@ -1,4 +1,4 @@
-import json, time
+import asyncio, json, time
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -31,8 +31,11 @@ async def _fetch_status(device_id: str, dev: Device) -> PduStatus:
     username, password = get_creds(dev)
     driver = RaritanPduDriver(dev.ip, username, password)
     try:
-        outlets_raw = await driver.get_outlets()
-        inlet = await driver.get_inlet()
+        outlets_raw, inlet, env = await asyncio.gather(
+            driver.get_outlets(),
+            driver.get_inlet(),
+            driver.get_env_sensors(),
+        )
         labels = json.loads(dev.labels_json or "{}")
         for o in outlets_raw:
             key = str(o["number"])
@@ -46,6 +49,9 @@ async def _fetch_status(device_id: str, dev: Device) -> PduStatus:
             inlet_voltage=inlet.get("voltage", 0.0),
             total_watts=total_watts,
             outlets=outlets,
+            temperature=env.get("temperature"),
+            humidity=env.get("humidity"),
+            leak_detected=env.get("leak_detected"),
         )
     except Exception as e:
         return PduStatus(device_id=device_id, reachable=False, error=str(e))
