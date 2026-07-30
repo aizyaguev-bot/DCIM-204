@@ -2,6 +2,15 @@
 
 ---
 
+## v2.29.0 — 2026-07-30
+
+### Changed
+- **Chiller — simplified drag** — removed SVG pipe visualization; chillers are now dragged directly onto a rack card to assign; assigned chillers appear as cyan badges in the rack footer; unassign via ✕ button on the chiller card in the Cooling panel
+- **Rack cards wider** — grid minimum width 280→340px for more breathing room
+- **Owner visible in rack** — each server row now shows the owner name as a purple label directly in the rack diagram, no need to open Inventory
+
+---
+
 ## v2.28.0 — 2026-07-30
 
 ### Added
