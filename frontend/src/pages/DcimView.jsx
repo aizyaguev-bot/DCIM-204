@@ -251,7 +251,7 @@ function EquipCell({ item, onSelect, onRename }) {
 }
 
 // One U row — server + equipment side by side, or just equipment, or empty
-function USlotGroup({ u, items, switchAssignments, optOwners, chillerAtU, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, dragHandleProps }) {
+function USlotGroup({ u, items, switchAssignments, optOwners, chillerAtU, onChillerUnassign, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, dragHandleProps }) {
   const serverItem = items.find(i => i.kind === "server");
   const equipItems = items.filter(i => i.kind === "custom");
 
@@ -302,22 +302,21 @@ function USlotGroup({ u, items, switchAssignments, optOwners, chillerAtU, onSele
       {/* chiller slot — right side of row */}
       <div className="w-14 flex-shrink-0 flex items-center justify-center border-l border-zinc-800/40 pr-1">
         {chillerAtU ? (
-          <div className="flex flex-col items-center gap-0.5">
+          <button onClick={() => onChillerUnassign?.(chillerAtU.id)}
+            title="לחץ לניתוק צ'ילר"
+            className="flex flex-col items-center gap-0.5 group/ch hover:opacity-70 transition cursor-pointer">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
             <span className="text-[7px] font-mono text-cyan-500 leading-tight truncate max-w-[48px]">{chillerAtU.name}</span>
-          </div>
-        ) : (
-          <div className="w-8 h-8 rounded border border-dashed border-zinc-800/40 flex items-center justify-center opacity-0 group-hover/row:opacity-100 transition">
-            <span className="text-[8px] text-zinc-800">❄</span>
-          </div>
-        )}
+            <span className="text-[6px] text-rose-700 opacity-0 group-hover/ch:opacity-100 transition leading-none">✕ נתק</span>
+          </button>
+        ) : null}
       </div>
     </div>
   );
 }
 
 // Sortable wrapper — applies DnD to the server in a U group
-function SortableURow({ u, items, switchAssignments, optOwners, chillerAtU, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, isDragging }) {
+function SortableURow({ u, items, switchAssignments, optOwners, chillerAtU, onChillerUnassign, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, isDragging }) {
   const serverId = items.find(i => i.kind === "server")?.data.id;
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: serverId || "noop" });
   const dragHandleProps = serverId ? { ...listeners, ...attributes } : {};
@@ -326,7 +325,7 @@ function SortableURow({ u, items, switchAssignments, optOwners, chillerAtU, onSe
     <div ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={isDragging ? "opacity-30" : ""}>
-      <USlotGroup u={u} items={items} switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU}
+      <USlotGroup u={u} items={items} switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU} onChillerUnassign={onChillerUnassign}
         onSelectServer={onSelectServer} onSelectCustom={onSelectCustom}
         onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
         dragHandleProps={dragHandleProps}/>
@@ -434,7 +433,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
         if (serverItem) {
           return (
             <SortableURow key={`u${u}`} u={u} items={items}
-              switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU}
+              switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU} onChillerUnassign={onChillerUnassign}
               onSelectServer={onSelect} onSelectCustom={onSelectCustom}
               onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
               isDragging={serverItem.data.id === activeId}/>
@@ -442,7 +441,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
         }
         return (
           <USlotGroup key={`u${u}`} u={u} items={items}
-            switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU}
+            switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU} onChillerUnassign={onChillerUnassign}
             onSelectServer={onSelect} onSelectCustom={onSelectCustom}
             onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
         );
