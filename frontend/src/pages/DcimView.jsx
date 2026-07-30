@@ -429,7 +429,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
     <SortableContext items={serverIds} strategy={verticalListSortingStrategy}>
       {rows.map(({ u, items }) => {
         const serverItem = items.find(i => i.kind === "server");
-        const chillerAtU = chillerByU[u]?.[0] ?? null;
+        const chillerAtU = isStorage ? null : (chillerByU[u]?.[0] ?? null);
         if (serverItem) {
           return (
             <SortableURow key={`u${u}`} u={u} items={items}
@@ -518,8 +518,8 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
             </DragOverlay>
           </DndContext>
         )}
-        {/* unassigned chillers — draggable from within rack */}
-        {(rackChillers||[]).filter(c=>c.u==null).length > 0 && (
+        {/* unassigned chillers — draggable from within rack (not for storage racks) */}
+        {!isStorage && (rackChillers||[]).filter(c=>c.u==null).length > 0 && (
           <div className="border-t border-cyan-900/30 bg-cyan-950/15 px-2 py-1.5 flex flex-wrap gap-1.5">
             <span className="text-[8px] font-mono text-cyan-800 uppercase tracking-widest self-center mr-1">❄ drag to shelf →</span>
             {(rackChillers||[]).filter(c=>c.u==null).map(ch => (
@@ -1554,7 +1554,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
   // Auto-seed chillers — only after API load completes (prevents overwriting saved data)
   useEffect(() => {
     if (!chillersLoaded || !onChillersChange || !chillers || (chillers.units||[]).length > 0 || rackStats.length === 0) return;
-    const units = rackStats.flatMap(rs => {
+    const units = rackStats.filter(rs => rs.rackType !== "storage").flatMap(rs => {
       const count = rs.rack === "Rack-04" ? 2 : 1;
       return Array.from({length: count}, (_,i) => ({
         id: `ch-${rs.rack}-${i+1}`, name: `Chiller-${i+1}`, rack: rs.rack,
