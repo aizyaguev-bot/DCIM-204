@@ -328,15 +328,27 @@ function SortableURow({ u, items, switchAssignments, optOwners, onSelectServer, 
 function DraggableChiller({ chiller, onAssign, onUnassign }) {
   const [dragging, setDragging] = useState(false);
   const [pos, setPos] = useState({ x: 0, y: 0 });
+  const [hoverU, setHoverU] = useState(null);
 
   useEffect(() => {
     if (!dragging) return;
-    const move = e => setPos({ x: e.clientX, y: e.clientY });
+    const move = e => {
+      setPos({ x: e.clientX, y: e.clientY });
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const uEl = el?.closest('[data-u-slot]');
+      setHoverU(uEl ? parseInt(uEl.dataset.uSlot) : null);
+    };
     const up = e => {
       setDragging(false);
+      setHoverU(null);
       const el = document.elementFromPoint(e.clientX, e.clientY);
-      const rackEl = el?.closest('[data-rack-id]');
-      if (rackEl) onAssign(chiller.id, rackEl.dataset.rackId);
+      const uEl   = el?.closest('[data-u-slot]');
+      const rackEl = uEl?.closest('[data-rack-id]') || el?.closest('[data-rack-id]');
+      if (rackEl) {
+        const rack = rackEl.dataset.rackId;
+        const u = uEl ? parseInt(uEl.dataset.uSlot) : null;
+        onAssign(chiller.id, rack, u);
+      }
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
@@ -351,16 +363,16 @@ function DraggableChiller({ chiller, onAssign, onUnassign }) {
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
         {chiller.name}
         {chiller.rack
-          ? <><span className="text-[9px] text-cyan-700">→ {chiller.rack}</span>
+          ? <><span className="text-[9px] text-cyan-700">→ {chiller.rack}{chiller.u != null ? ` / U${String(chiller.u).padStart(2,'0')}` : ""}</span>
               <button onMouseDown={e=>e.stopPropagation()} onClick={()=>onUnassign(chiller.id)}
                 className="ml-0.5 text-[9px] text-zinc-700 hover:text-rose-400 transition">✕</button></>
-          : <span className="text-[9px] text-cyan-800">drag to rack</span>
+          : <span className="text-[9px] text-cyan-800">גרור לשורה ברack</span>
         }
       </div>
       {dragging && createPortal(
         <div style={{position:'fixed',left:pos.x-50,top:pos.y-14,pointerEvents:'none',zIndex:50}}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-900/95 border border-cyan-500/60 rounded-lg text-cyan-200 text-[11px] font-mono shadow-2xl">
-          ❄ {chiller.name}
+          ❄ {chiller.name}{hoverU != null ? ` → U${String(hoverU).padStart(2,'0')}` : ""}
         </div>,
         document.body
       )}
@@ -397,24 +409,45 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
     onReorder(r.rack, arrayMove(serverIds, serverIds.indexOf(active.id), serverIds.indexOf(over.id)));
   }
 
+  const chillerByU = {};
+  (rackChillers || []).forEach(ch => {
+    if (ch.u != null) { if (!chillerByU[ch.u]) chillerByU[ch.u] = []; chillerByU[ch.u].push(ch); }
+  });
+
   const sortableRows = (
     <SortableContext items={serverIds} strategy={verticalListSortingStrategy}>
       {rows.map(({ u, items }) => {
         const serverItem = items.find(i => i.kind === "server");
-        if (serverItem) {
-          return (
-            <SortableURow key={`u${u}`} u={u} items={items}
-              switchAssignments={switchAssignments} optOwners={optOwners}
-              onSelectServer={onSelect} onSelectCustom={onSelectCustom}
-              onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
-              isDragging={serverItem.data.id === activeId}/>
-          );
-        }
+        const chillersHere = chillerByU[u] || [];
         return (
-          <USlotGroup key={`u${u}`} u={u} items={items}
-            switchAssignments={switchAssignments} optOwners={optOwners}
-            onSelectServer={onSelect} onSelectCustom={onSelectCustom}
-            onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
+          <div key={`u${u}`}>
+            {serverItem ? (
+              <SortableURow u={u} items={items}
+                switchAssignments={switchAssignments} optOwners={optOwners}
+                onSelectServer={onSelect} onSelectCustom={onSelectCustom}
+                onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
+                isDragging={serverItem.data.id === activeId}/>
+            ) : (
+              <USlotGroup u={u} items={items}
+                switchAssignments={switchAssignments} optOwners={optOwners}
+                onSelectServer={onSelect} onSelectCustom={onSelectCustom}
+                onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
+            )}
+            {chillersHere.map(ch => (
+              <div key={ch.id} style={{height:24}} className="flex items-center gap-0 border-b border-cyan-900/30 bg-cyan-950/40">
+                <div className="w-10 flex-shrink-0 bg-zinc-900/60 border-r border-zinc-800/50 flex items-center justify-center h-full">
+                  <span className="text-[7px] font-mono text-cyan-800">❄</span>
+                </div>
+                <div className="w-5 flex-shrink-0"/>
+                <div className="flex items-center gap-1.5 px-2">
+                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                  <span className="text-[10px] font-mono text-cyan-400">{ch.name}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })}
         );
       })}
     </SortableContext>
@@ -1535,8 +1568,8 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
     onChillersChange({ units, connections: [] });
   }, [rackStats, chillers, onChillersChange]);
 
-  function handleAssignChiller(chillerId, rack) {
-    const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, rack} : c)};
+  function handleAssignChiller(chillerId, rack, u) {
+    const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, rack, u: u ?? null} : c)};
     onChillersChange?.(updated);
   }
   function handleUnassignChiller(chillerId) {

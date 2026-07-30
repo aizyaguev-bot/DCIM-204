@@ -2,6 +2,13 @@
 
 ---
 
+## v2.30.0 — 2026-07-30
+
+### Changed
+- **Chiller — U-slot assignment** — drag a chiller card onto a specific row (U-level) in the rack diagram; the ghost label shows "→ U03" while hovering; chiller appears as a cyan ❄ row at exactly that U position in the rack; Cooling panel shows "→ Rack / U03" assignment
+
+---
+
 ## v2.29.0 — 2026-07-30
 
 ### Changed
