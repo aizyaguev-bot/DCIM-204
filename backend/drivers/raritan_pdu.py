@@ -302,23 +302,42 @@ class RaritanPduDriver:
         return result
 
     async def list_sensors(self) -> dict:
-        """Debug: try REST API + JSON-RPC to find peripheral sensor data."""
+        """Debug: try eventservice channel for peripheral sensor discovery."""
         out: dict = {}
-
-        # ── Try Raritan REST API endpoints (v1.0 and v1) ─────────────
         client = await self._client_ctx()
-        for path in ("/api/v1.0/peripherals", "/api/v1.0/sensors",
-                     "/api/v1.0/peripherals/1/sensors",
-                     "/api/v1/peripherals", "/api/v1/sensors",
-                     "/api/v1/peripherals/1/sensors"):
+
+        # 1. Try to create/open a channel via eventservice
+        for method in ("newChannel", "createChannel", "openChannel", "open"):
             try:
-                resp = await client.get(f"{self.base_url}{path}")
-                if resp.status_code not in (404, 301, 302):
-                    out[f"REST:{path}:{resp.status_code}"] = resp.text[:500]
-            except Exception:
-                pass
-        if out:
-            return out
+                r = await self._rpc("/eventservice", method)
+                if r is not None:
+                    out[f"evtsvc.{method}"] = r
+            except Exception as e:
+                out[f"evtsvc.{method}"] = str(e)
+
+        # 2. Try calling subscribe/getReadings on eventservice directly
+        for method in ("subscribe", "getReadings", "getSensorReadings",
+                       "getPeripheralReadings", "getAllReadings"):
+            try:
+                r = await self._rpc("/eventservice", method)
+                if r is not None:
+                    out[f"evtsvc.{method}"] = r
+            except Exception as e:
+                out[f"evtsvc.{method}"] = str(e)
+
+        # 3. Try pollEvents on a new channel with a generated ID
+        import random
+        chan_id = random.randint(100000000, 999999999)
+        chan_url = f"/eventservice/channel-{chan_id}"
+        for method in ("pollEvents", "subscribe", "getReadings", "getAll"):
+            try:
+                r = await self._rpc(chan_url, method)
+                if r is not None:
+                    out[f"chan.{method}"] = r
+            except Exception as e:
+                out[f"chan.{method}"] = str(e)
+
+        return out
 
 
         # From debug we know: port = portsensor0, chain position 1
