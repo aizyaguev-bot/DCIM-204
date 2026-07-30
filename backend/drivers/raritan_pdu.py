@@ -172,53 +172,51 @@ class RaritanPduDriver:
             raise ValueError(f"Unknown action: {action}")
         return True
 
-    _TEMP_KEYS  = {"temperature", "temp", "ambienttemperature", "inlettemperature", "temperature1"}
-    _HUM_KEYS   = {"humidity", "relativehumidity", "rh", "humidity1"}
-    _LEAK_KEYS  = {"leakdetector", "leak", "waterdetection", "flood", "water", "leaksensor"}
-
     async def get_env_sensors(self) -> dict:
         """Returns PDU-level environmental sensors: temperature (°C), humidity (%), leak_detected (bool).
-        Searches all sensors returned by the PDU using keyword matching — handles different Raritan models."""
+        Uses keyword matching — never raises, returns empty dict on any failure."""
         result: dict = {}
         try:
             sensors = await self._rpc(PDU_PATH, "getSensors")
-            if not sensors:
+            if not sensors or not isinstance(sensors, dict):
                 return result
 
-            async def _read_rid(rid: str):
+            TEMP_KEYS = {"temperature", "temp", "ambienttemperature", "inlettemperature"}
+            HUM_KEYS  = {"humidity", "relativehumidity", "rh"}
+            LEAK_KEYS = {"leakdetector", "leak", "waterdetection", "flood"}
+
+            temp_rid = hum_rid = leak_rid = None
+            for name, sinfo in sensors.items():
+                if not isinstance(sinfo, dict) or not sinfo.get("rid"):
+                    continue
+                lname = name.lower()
+                if temp_rid is None and any(k in lname for k in TEMP_KEYS):
+                    temp_rid = sinfo["rid"]
+                elif hum_rid is None and any(k in lname for k in HUM_KEYS):
+                    hum_rid = sinfo["rid"]
+                elif leak_rid is None and any(k in lname for k in LEAK_KEYS):
+                    leak_rid = sinfo["rid"]
+
+            async def _safe_read(rid):
+                if not rid:
+                    return None
                 try:
                     r = await self._rpc(rid, "getReading")
-                    return (r or {})
+                    return r if isinstance(r, dict) else None
                 except Exception:
                     return None
 
-            # Find sensor RIDs by keyword matching on lowercased sensor name
-            temp_rid = hum_rid = leak_rid = None
-            for name, sinfo in sensors.items():
-                if not (sinfo and sinfo.get("rid")):
-                    continue
-                lname = name.lower()
-                if temp_rid is None and any(k in lname for k in self._TEMP_KEYS):
-                    temp_rid = sinfo["rid"]
-                elif hum_rid is None and any(k in lname for k in self._HUM_KEYS):
-                    hum_rid = sinfo["rid"]
-                elif leak_rid is None and any(k in lname for k in self._LEAK_KEYS):
-                    leak_rid = sinfo["rid"]
+            temp_r = await _safe_read(temp_rid)
+            hum_r  = await _safe_read(hum_rid)
+            leak_r = await _safe_read(leak_rid)
 
-            tasks = [
-                _read_rid(temp_rid) if temp_rid else asyncio.sleep(0, result=None),
-                _read_rid(hum_rid)  if hum_rid  else asyncio.sleep(0, result=None),
-                _read_rid(leak_rid) if leak_rid  else asyncio.sleep(0, result=None),
-            ]
-            temp_r, hum_r, leak_r = await asyncio.gather(*tasks)
-
-            if temp_r is not None and temp_r.get("value") is not None:
+            if temp_r and temp_r.get("value") is not None:
                 result["temperature"] = round(float(temp_r["value"]), 1)
-            if hum_r is not None and hum_r.get("value") is not None:
+            if hum_r and hum_r.get("value") is not None:
                 result["humidity"] = round(float(hum_r["value"]), 1)
-            if leak_r is not None and leak_r.get("value") is not None:
+            if leak_r and leak_r.get("value") is not None:
                 result["leak_detected"] = int(leak_r["value"]) > 0
-        except RaritanPduError:
+        except Exception:
             pass
         return result
 
