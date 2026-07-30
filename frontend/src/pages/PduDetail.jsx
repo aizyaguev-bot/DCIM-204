@@ -166,7 +166,7 @@ function EnvSensorsPanel({ status }) {
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
             Temperature
           </span>
-          <span className={`tabular-nums font-medium ${temperature > 35 ? "text-rose-400" : temperature > 28 ? "text-amber-400" : "text-zinc-200"}`}>{temperature}°C</span>
+          <span className={`tabular-nums font-medium ${temperature > 35 ? "text-rose-400" : temperature > 24 ? "text-amber-400" : "text-zinc-200"}`}>{temperature}°C</span>
         </div>
       )}
       {humidity != null && (

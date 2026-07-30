@@ -15,7 +15,7 @@ export default function StatsBar({ stats }) {
     : `${stats.humMin}–${stats.humMax}%`;
 
   const tempDanger = stats.tempMax != null && stats.tempMax > 35;
-  const tempWarn   = !tempDanger && stats.tempMax != null && stats.tempMax > 28;
+  const tempWarn   = !tempDanger && stats.tempMax != null && stats.tempMax > 24;
   const humWarn    = stats.humMax != null && stats.humMax > 70;
 
   return (
