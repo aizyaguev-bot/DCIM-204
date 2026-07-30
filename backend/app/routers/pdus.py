@@ -122,5 +122,19 @@ async def outlet_power(
         return {"ok": success, "outlet": outlet_number, "action": body.action}
     except (RaritanPduError, ValueError) as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/{device_id}/sensors-debug")
+async def sensors_debug(device_id: str, db: AsyncSession = Depends(get_db)):
+    """Returns all raw sensor names the PDU exposes — useful for diagnosing missing sensor data."""
+    dev = await _get_pdu_or_404(device_id, db)
+    username, password = get_creds(dev)
+    driver = RaritanPduDriver(dev.ip, username, password)
+    try:
+        return await driver.list_sensors()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    finally:
+        await driver.close()
     finally:
         await driver.close()
