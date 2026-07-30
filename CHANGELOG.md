@@ -2,6 +2,14 @@
 
 ---
 
+## v2.32.0 — 2026-07-30
+
+### Changed
+- **Chiller — drag from within rack** — removed external cooling panel entirely; unassigned chillers appear at the bottom of their rack chassis (inside the rack body); drag from there to a specific U-row → chiller gets assigned to that U
+- **Chiller right-column** — every OPT row has a right-side slot (14px column) showing ❄ and chiller name when a chiller is assigned to that U; empty slot is invisible unless hovered
+
+---
+
 ## v2.31.0 — 2026-07-30
 
 ### Changed

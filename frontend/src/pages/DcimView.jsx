@@ -251,22 +251,21 @@ function EquipCell({ item, onSelect, onRename }) {
 }
 
 // One U row — server + equipment side by side, or just equipment, or empty
-function USlotGroup({ u, items, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, dragHandleProps }) {
+function USlotGroup({ u, items, switchAssignments, optOwners, chillerAtU, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, dragHandleProps }) {
   const serverItem = items.find(i => i.kind === "server");
   const equipItems = items.filter(i => i.kind === "custom");
 
   if (items.length === 0) {
     return (
       <div data-u-slot={u} style={{ height: EMPTY_H }} className="flex items-center select-none group/empty">
-        {/* U rail */}
         <div className="w-10 flex-shrink-0 h-full bg-zinc-900/70 border-r border-zinc-800/50 flex items-center justify-end pr-1.5">
           <span className="text-[7px] font-mono text-zinc-800 group-hover/empty:text-zinc-700 transition">{String(u).padStart(2,"0")}</span>
         </div>
         <div className="w-5 flex-shrink-0"/>
         <div className="flex-1 h-px bg-zinc-900/80"/>
-        {/* right screw dot */}
-        <div className="w-2 flex-shrink-0 flex items-center justify-center">
-          <div className="w-1 h-1 rounded-full bg-zinc-800/60"/>
+        {/* chiller slot — right */}
+        <div className="w-14 flex-shrink-0 flex items-center justify-center border-l border-zinc-900/60 h-full">
+          {chillerAtU && <span className="text-[8px] font-mono text-cyan-600 truncate px-1">❄{chillerAtU.name}</span>}
         </div>
       </div>
     );
@@ -274,21 +273,19 @@ function USlotGroup({ u, items, switchAssignments, optOwners, onSelectServer, on
 
   return (
     <div data-u-slot={u} style={{ minHeight: SLOT_H }} className="flex items-stretch border-b border-zinc-900/40 last:border-0">
-      {/* U rail column */}
       <div className="w-10 flex-shrink-0 bg-zinc-900/70 border-r border-zinc-800/50 flex flex-col items-center justify-center select-none gap-0.5">
         <div className="w-1 h-1 rounded-full bg-zinc-700/40 flex-shrink-0"/>
         <span className="text-[8px] font-mono font-bold text-zinc-500">{String(u).padStart(2,"0")}</span>
         <div className="w-1 h-1 rounded-full bg-zinc-700/40 flex-shrink-0"/>
       </div>
-      {/* drag grip — only if there's a server */}
       {serverItem ? (
         <div {...(dragHandleProps || {})} onClick={e => e.stopPropagation()}
           className="flex items-center justify-center w-5 flex-shrink-0 text-zinc-800 hover:text-zinc-500 cursor-grab active:cursor-grabbing transition-colors">
           {Icon.grip}
         </div>
       ) : <div className="w-5 flex-shrink-0"/>}
-      {/* content: server + equipment side-by-side */}
-      <div className="flex-1 flex items-stretch gap-1.5 py-1.5 pr-2 min-w-0 overflow-hidden">
+      {/* content */}
+      <div className="flex-1 flex items-stretch gap-1.5 py-1.5 min-w-0 overflow-hidden">
         {serverItem && (
           <ServerCell server={serverItem.data}
             sw={switchAssignments[serverItem.data.id]}
@@ -302,12 +299,25 @@ function USlotGroup({ u, items, switchAssignments, optOwners, onSelectServer, on
             onRename={v => onRenameCustom?.(data, v)}/>
         ))}
       </div>
+      {/* chiller slot — right side of row */}
+      <div className="w-14 flex-shrink-0 flex items-center justify-center border-l border-zinc-800/40 pr-1">
+        {chillerAtU ? (
+          <div className="flex flex-col items-center gap-0.5">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+            <span className="text-[7px] font-mono text-cyan-500 leading-tight truncate max-w-[48px]">{chillerAtU.name}</span>
+          </div>
+        ) : (
+          <div className="w-8 h-8 rounded border border-dashed border-zinc-800/40 flex items-center justify-center opacity-0 group-hover/row:opacity-100 transition">
+            <span className="text-[8px] text-zinc-800">❄</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 // Sortable wrapper — applies DnD to the server in a U group
-function SortableURow({ u, items, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, isDragging }) {
+function SortableURow({ u, items, switchAssignments, optOwners, chillerAtU, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, isDragging }) {
   const serverId = items.find(i => i.kind === "server")?.data.id;
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: serverId || "noop" });
   const dragHandleProps = serverId ? { ...listeners, ...attributes } : {};
@@ -316,7 +326,7 @@ function SortableURow({ u, items, switchAssignments, optOwners, onSelectServer, 
     <div ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={isDragging ? "opacity-30" : ""}>
-      <USlotGroup u={u} items={items} switchAssignments={switchAssignments} optOwners={optOwners}
+      <USlotGroup u={u} items={items} switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU}
         onSelectServer={onSelectServer} onSelectCustom={onSelectCustom}
         onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
         dragHandleProps={dragHandleProps}/>
@@ -383,7 +393,7 @@ function DraggableChiller({ chiller, onAssign, onUnassign }) {
 }
 
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
-function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, rackChillers, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, width = 400, fixed = false, external = false, externalActiveId = null }) {
+function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, rackChillers, onChillerAssign, onChillerUnassign, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, width = 400, fixed = false, external = false, externalActiveId = null }) {
   const [localActiveId, setLocalActiveId] = useState(null);
   const containerRef = useRef(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
@@ -420,49 +430,21 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
     <SortableContext items={serverIds} strategy={verticalListSortingStrategy}>
       {rows.map(({ u, items }) => {
         const serverItem = items.find(i => i.kind === "server");
-        const chillersHere = chillerByU[u] || [];
+        const chillerAtU = chillerByU[u]?.[0] ?? null;
+        if (serverItem) {
+          return (
+            <SortableURow key={`u${u}`} u={u} items={items}
+              switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU}
+              onSelectServer={onSelect} onSelectCustom={onSelectCustom}
+              onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
+              isDragging={serverItem.data.id === activeId}/>
+          );
+        }
         return (
-          <div key={`u${u}`}>
-            {serverItem ? (
-              <SortableURow u={u} items={items}
-                switchAssignments={switchAssignments} optOwners={optOwners}
-                onSelectServer={onSelect} onSelectCustom={onSelectCustom}
-                onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
-                isDragging={serverItem.data.id === activeId}/>
-            ) : (
-              <USlotGroup u={u} items={items}
-                switchAssignments={switchAssignments} optOwners={optOwners}
-                onSelectServer={onSelect} onSelectCustom={onSelectCustom}
-                onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
-            )}
-            {chillersHere.map(ch => (
-              <div key={ch.id} style={{minHeight: SLOT_H}} className="flex items-stretch border-b border-cyan-900/20">
-                {/* U rail */}
-                <div className="w-10 flex-shrink-0 bg-zinc-900/70 border-r border-zinc-800/50 flex flex-col items-center justify-center select-none gap-0.5">
-                  <div className="w-1 h-1 rounded-full bg-cyan-900/60 flex-shrink-0"/>
-                  <span className="text-[8px] font-mono font-bold text-cyan-800">{String(u).padStart(2,"0")}</span>
-                  <div className="w-1 h-1 rounded-full bg-cyan-900/60 flex-shrink-0"/>
-                </div>
-                <div className="w-5 flex-shrink-0"/>
-                {/* Chiller cell — OPT-style */}
-                <div className="flex-1 py-1.5 pr-2 min-w-0 flex items-stretch">
-                  <div className="flex-1 min-w-0 flex items-stretch rounded overflow-hidden bg-gradient-to-r from-cyan-400/10 via-cyan-400/5 to-transparent border border-cyan-800/40">
-                    <div className="w-1 flex-shrink-0 bg-cyan-500/60"/>
-                    <div className="flex flex-1 items-center gap-2 px-2 min-w-0">
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5" className="flex-shrink-0"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[11px] font-mono font-bold text-cyan-300 truncate">{ch.name}</div>
-                        <div className="text-[8px] font-mono text-cyan-700 mt-0.5">Cooling unit</div>
-                      </div>
-                      <span className="text-[7px] font-bold text-cyan-500/60 uppercase tracking-widest flex-shrink-0 pr-1">❄</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        );
-      })}
+          <USlotGroup key={`u${u}`} u={u} items={items}
+            switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU}
+            onSelectServer={onSelect} onSelectCustom={onSelectCustom}
+            onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
         );
       })}
     </SortableContext>
@@ -537,6 +519,15 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
             </DragOverlay>
           </DndContext>
         )}
+        {/* unassigned chillers — draggable from within rack */}
+        {(rackChillers||[]).filter(c=>c.u==null).length > 0 && (
+          <div className="border-t border-cyan-900/30 bg-cyan-950/15 px-2 py-1.5 flex flex-wrap gap-1.5">
+            <span className="text-[8px] font-mono text-cyan-800 uppercase tracking-widest self-center mr-1">❄ drag to shelf →</span>
+            {(rackChillers||[]).filter(c=>c.u==null).map(ch => (
+              <DraggableChiller key={ch.id} chiller={ch} onAssign={onChillerAssign} onUnassign={onChillerUnassign}/>
+            ))}
+          </div>
+        )}
         {/* bottom cap bar with screw dots */}
         <div className="bg-zinc-900 border-t border-zinc-800/80 h-3 flex items-center justify-between px-2">
           <div className="flex gap-1">
@@ -568,16 +559,6 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
             </div>
           </>
         ) : <div className="text-[9px] font-mono text-zinc-800 text-center uppercase tracking-widest">No PDU attached</div>}
-        {rackChillers?.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-zinc-800/40">
-            {rackChillers.map(ch => (
-              <span key={ch.id} className="flex items-center gap-1 text-[9px] font-mono text-cyan-500 bg-cyan-950/50 border border-cyan-900/40 px-1.5 py-0.5 rounded">
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                {ch.name}
-              </span>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -1692,6 +1673,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
                       rackSlots={rackSlots} rackOrder={rackOrder}
                       switchAssignments={switchAssignments} customItems={customItems}
                       optOwners={optOwners} rackChillers={rackChillers}
+                      onChillerAssign={handleAssignChiller} onChillerUnassign={handleUnassignChiller}
                       onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
                       onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
                       onHeaderClick={() => setSelectedRack(rs.rack)}
@@ -1712,19 +1694,6 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
         </>
       )}
 
-      {chillerUnits.length > 0 && (
-        <div className="mt-4 p-3 bg-cyan-950/20 border border-cyan-900/40 rounded-xl">
-          <div className="text-[9px] uppercase tracking-widest text-cyan-800 mb-2 flex items-center gap-1.5">
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-            Cooling units — גרור לקומה ב-rack
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {chillerUnits.map(ch => (
-              <DraggableChiller key={ch.id} chiller={ch} onAssign={handleAssignChiller} onUnassign={handleUnassignChiller}/>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Modals rendered via Portal — completely outside DOM tree, immune to any stacking context */}
       {addOptFor && (
