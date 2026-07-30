@@ -2,6 +2,24 @@
 
 ---
 
+## v2.34.0 — 2026-07-30
+
+### Added
+- **PDU sensor summary in top bar** — temperature (°C range), humidity (% range), and leak alert now visible in the StatsBar at the top of every page; color-coded amber above 28°C / 70% humidity, red above 35°C; ⚠ Leak pulses red; section hidden when no sensors are connected
+
+### Fixed
+- **Chiller save after refresh** — race condition where auto-seed ran before API load and overwrote saved U assignments; added `chillersLoaded` flag so seed only runs after the stored data is confirmed empty
+- **Chiller unassign** — clicking ✕ on an assigned chiller now clears only the U slot (returns to pool), not the rack assignment (previously deleted the chiller entirely)
+
+---
+
+## v2.33.0 — 2026-07-30
+
+### Fixed
+- **Chiller disconnect** — click ❄ in right column reveals "✕ נתק"; clicking returns chiller to rack pool (u=null, rack kept)
+
+---
+
 ## v2.32.0 — 2026-07-30
 
 ### Changed
