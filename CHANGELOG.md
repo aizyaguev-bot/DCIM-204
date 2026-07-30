@@ -2,6 +2,16 @@
 
 ---
 
+## v2.36.0 — 2026-07-30
+
+### Fixed
+- **PDU environmental sensors** — rewrote sensor discovery to use the correct Raritan API path: PDU → `getPeripheralDeviceSlots` → `getConnectedDevice` → `getSensors`; previously used `getSensors` on the PDU root object which returned nothing on G4 firmware. Temperature, humidity, and leak detection now read from DX2 peripheral sensor modules.
+
+### Changed
+- **Temperature alert threshold** — 24°C triggers amber warning (was 28°C) across StatsBar and PDU detail panel
+
+---
+
 ## v2.35.0 — 2026-07-30
 
 ### Fixed
