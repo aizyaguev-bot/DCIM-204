@@ -221,37 +221,45 @@ class RaritanPduDriver:
         return result
 
     async def _get_peripheral_sensor_rids(self) -> list[dict]:
-        """Walk PDU → peripheral slots → connected devices → sensors.
+        """Walk PDU → getSensorPorts → port → getConnectedDevice → getSensors.
         Returns list of {name, rid} for every readable environmental sensor."""
         found = []
         try:
-            # Ask PDU for its peripheral device slots
-            slots = await self._rpc(PDU_PATH, "getPeripheralDeviceSlots")
-            if not slots:
+            ports = await self._rpc(PDU_PATH, "getSensorPorts")
+            if not ports:
                 return found
-            for slot in (slots if isinstance(slots, list) else slots.values()):
-                slot_rid = slot.get("rid") if isinstance(slot, dict) else slot
-                if not slot_rid:
+            for port in (ports if isinstance(ports, list) else []):
+                port_rid = port.get("rid") if isinstance(port, dict) else port
+                if not port_rid:
                     continue
                 try:
-                    dev = await self._rpc(slot_rid, "getConnectedDevice")
+                    # Try getConnectedDevice on the port
+                    dev = await self._rpc(port_rid, "getConnectedDevice")
                     dev_rid = (dev or {}).get("rid") if isinstance(dev, dict) else dev
-                    if not dev_rid:
+                    if dev_rid:
+                        sensors = await self._rpc(dev_rid, "getSensors")
+                        if isinstance(sensors, dict):
+                            for sname, sinfo in sensors.items():
+                                if isinstance(sinfo, dict) and sinfo.get("rid"):
+                                    found.append({"name": sname, "rid": sinfo["rid"]})
                         continue
-                    sensors = await self._rpc(dev_rid, "getSensors")
-                    if not isinstance(sensors, dict):
-                        continue
-                    for sname, sinfo in sensors.items():
-                        if isinstance(sinfo, dict) and sinfo.get("rid"):
-                            found.append({"name": sname, "rid": sinfo["rid"]})
                 except Exception:
-                    continue
+                    pass
+                # Fallback: try getSensors directly on the port
+                try:
+                    sensors = await self._rpc(port_rid, "getSensors")
+                    if isinstance(sensors, dict):
+                        for sname, sinfo in sensors.items():
+                            if isinstance(sinfo, dict) and sinfo.get("rid"):
+                                found.append({"name": sname, "rid": sinfo["rid"]})
+                except Exception:
+                    pass
         except Exception:
             pass
         return found
 
     async def get_env_sensors(self) -> dict:
-        """Returns PDU-level environmental sensors via peripheral device slots."""
+        """Returns PDU-level environmental sensors via sensor ports → connected device."""
         result: dict = {}
         try:
             sensor_list = await self._get_peripheral_sensor_rids()
@@ -294,42 +302,27 @@ class RaritanPduDriver:
         return result
 
     async def list_sensors(self) -> dict:
-        """Debug: brute-force discovery of Raritan environmental sensor API."""
+        """Debug: explore sensor port and connected device."""
         out: dict = {}
-
-        async def _try(label, rid, method, params=None):
-            try:
-                r = await self._rpc(rid, method, params)
-                if r:  # only store non-empty/non-null results
-                    out[label] = r
-            except Exception as e:
-                err = str(e)
-                if "RPC error" in err:
-                    out[label] = err  # method exists but returned RPC error — still useful
-
-        # Try every plausible method on the PDU object
-        pdu_methods = [
-            "getMetaData",
-            "getExternalSensors", "getExternalSensor",
-            "getPeripheralDeviceSlots", "getPeripheralDeviceSlotList",
-            "getPeripheralDeviceList", "getPeripheralDevices",
-            "getConnectedDeviceList", "getConnectedDevices",
-            "getDeviceList", "getDevices",
-            "getSensorPorts", "getSensorPort",
-            "getEnvSensors", "getEnvSensor",
-            "getAllSensors", "getSensors",
-            "getExternalSensorReadings", "getSensorReadings",
-            "getTemperature", "getHumidity",
-        ]
-        for m in pdu_methods:
-            await _try(f"PDU.{m}", PDU_PATH, m)
-
-        # Try calling getMetaData on common sub-paths
-        for sub in ("peripheralDeviceManager", "peripheralDevices",
-                     "externalSensors", "environmentMonitor"):
-            await _try(f"subpath_{sub}", f"{PDU_PATH}/{sub}", "getMetaData")
-
-        return out if out else {"result": "all methods returned empty/error — check Raritan firmware version"}
+        try:
+            ports = await self._rpc(PDU_PATH, "getSensorPorts")
+            out["getSensorPorts"] = ports
+            for i, port in enumerate(ports or []):
+                port_rid = port.get("rid") if isinstance(port, dict) else port
+                if not port_rid:
+                    continue
+                for m in ("getConnectedDevice", "getSensors", "getMetaData",
+                          "getDevice", "getDeviceList", "getInfo"):
+                    try:
+                        r = await self._rpc(port_rid, m)
+                        if r:
+                            out[f"port{i}.{m}"] = r
+                    except Exception as e:
+                        if "RPC error" in str(e):
+                            out[f"port{i}.{m}"] = str(e)
+        except Exception as e:
+            out["error"] = str(e)
+        return out
 
     async def get_inlet(self) -> dict:
         """Returns inlet voltage/current/power summary."""
