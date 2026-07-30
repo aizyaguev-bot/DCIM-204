@@ -2,6 +2,19 @@
 
 ---
 
+## v2.35.0 — 2026-07-30
+
+### Fixed
+- **PDU sensor crash** — `get_env_sensors()` rewrote to never throw: uses `isinstance` checks on all API responses, catches all exceptions, removed broken `asyncio.sleep(0, result=None)` pattern that crashed PDU status reads
+- **Syntax error** — duplicate `finally:` block in `sensors-debug` endpoint removed
+- **Temperature alert threshold** — changed from 28°C to 24°C across StatsBar and PduDetail
+- **Sensor name matching** — flexible keyword matching (handles `temperature1`, `relativeHumidity`, `leakDetector` etc. across Raritan firmware versions)
+
+### Added
+- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:FTSW2026 http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
+
+---
+
 ## v2.34.0 — 2026-07-30
 
 ### Added
