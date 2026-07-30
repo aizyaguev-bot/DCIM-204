@@ -1541,7 +1541,7 @@ function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClo
 }
 
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
-function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus, rackDevices, chillers, onChillersChange, optOwners }) {
+function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus, rackDevices, chillers, chillersLoaded, onChillersChange, optOwners }) {
   const [selectedRack,   setSelectedRack]   = useState(null);
   const [addOptFor,      setAddOptFor]      = useState(null);
   const [addEquipFor,    setAddEquipFor]    = useState(null);
@@ -1551,9 +1551,9 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
   const [pendingMove,    setPendingMove]    = useState(null);
   // coolingMode removed — chillers always visible
 
-  // Auto-seed chillers when racks load and no chillers saved
+  // Auto-seed chillers — only after API load completes (prevents overwriting saved data)
   useEffect(() => {
-    if (!onChillersChange || !chillers || (chillers.units||[]).length > 0 || rackStats.length === 0) return;
+    if (!chillersLoaded || !onChillersChange || !chillers || (chillers.units||[]).length > 0 || rackStats.length === 0) return;
     const units = rackStats.flatMap(rs => {
       const count = rs.rack === "Rack-04" ? 2 : 1;
       return Array.from({length: count}, (_,i) => ({
@@ -1561,7 +1561,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
       }));
     });
     onChillersChange({ units, connections: [] });
-  }, [rackStats, chillers, onChillersChange]);
+  }, [rackStats, chillers, chillersLoaded, onChillersChange]);
 
   function handleAssignChiller(chillerId, rack, u) {
     const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, rack, u: u ?? null} : c)};
@@ -1934,6 +1934,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [rackOverrides,     setRackOverrides]     = useState({});
   const [optOwners,         setOptOwners]         = useState({});
   const [chillers,          setChillers]          = useState({units:[],connections:[]});
+  const [chillersLoaded,    setChillersLoaded]    = useState(false);
   const [selectedServerId,  setSelectedServerId]  = useState(null);
   const [selectedCustom,    setSelectedCustom]    = useState(null);
 
@@ -1947,7 +1948,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       fetch("/api/opt-owners").then(r=>r.json()).catch(()=>({})),
       fetch("/api/chillers").then(r=>r.json()).catch(()=>({units:[],connections:[]})),
     ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
-      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});setOptOwners(owners||{});setChillers(chill||{units:[],connections:[]});
+      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});setOptOwners(owners||{});setChillers(chill||{units:[],connections:[]});setChillersLoaded(true);
     });
   },[]);
 
@@ -2135,7 +2136,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onLabelChange={handleLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
           onCustomItemsChange={setCustomItems} onRefresh={onRefresh}
-          pdus={pdus} rackDevices={rackDevices} chillers={chillers} onChillersChange={handleChillersChange} optOwners={optOwners}/>
+          pdus={pdus} rackDevices={rackDevices} chillers={chillers} chillersLoaded={chillersLoaded} onChillersChange={handleChillersChange} optOwners={optOwners}/>
       )}
       {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems} optOwners={optOwners} onOwnerChange={handleOwnerChange}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}
