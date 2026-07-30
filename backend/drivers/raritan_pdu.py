@@ -294,9 +294,42 @@ class RaritanPduDriver:
         return result
 
     async def list_sensors(self) -> dict:
-        """Debug: returns all peripheral sensor names the PDU exposes."""
-        found = await self._get_peripheral_sensor_rids()
-        return {"peripheral_sensors": found} if found else {"note": "no peripheral sensors found via getPeripheralDeviceSlots"}
+        """Debug: brute-force discovery of Raritan environmental sensor API."""
+        out: dict = {}
+
+        async def _try(label, rid, method, params=None):
+            try:
+                r = await self._rpc(rid, method, params)
+                if r:  # only store non-empty/non-null results
+                    out[label] = r
+            except Exception as e:
+                err = str(e)
+                if "RPC error" in err:
+                    out[label] = err  # method exists but returned RPC error — still useful
+
+        # Try every plausible method on the PDU object
+        pdu_methods = [
+            "getMetaData",
+            "getExternalSensors", "getExternalSensor",
+            "getPeripheralDeviceSlots", "getPeripheralDeviceSlotList",
+            "getPeripheralDeviceList", "getPeripheralDevices",
+            "getConnectedDeviceList", "getConnectedDevices",
+            "getDeviceList", "getDevices",
+            "getSensorPorts", "getSensorPort",
+            "getEnvSensors", "getEnvSensor",
+            "getAllSensors", "getSensors",
+            "getExternalSensorReadings", "getSensorReadings",
+            "getTemperature", "getHumidity",
+        ]
+        for m in pdu_methods:
+            await _try(f"PDU.{m}", PDU_PATH, m)
+
+        # Try calling getMetaData on common sub-paths
+        for sub in ("peripheralDeviceManager", "peripheralDevices",
+                     "externalSensors", "environmentMonitor"):
+            await _try(f"subpath_{sub}", f"{PDU_PATH}/{sub}", "getMetaData")
+
+        return out if out else {"result": "all methods returned empty/error — check Raritan firmware version"}
 
     async def get_inlet(self) -> dict:
         """Returns inlet voltage/current/power summary."""
