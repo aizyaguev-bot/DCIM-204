@@ -175,77 +175,113 @@ class RaritanPduDriver:
         return True
 
     async def get_env_sensors(self) -> dict:
-        """Returns PDU environmental sensors via event channel subscription.
-        Uses: createChannel → subscribe (port) → pollEvents → parse events."""
+        """Returns PDU environmental sensors.
+        Tries: 1) GET on port path, 2) channel pollEvents, 3) silent fail."""
         result: dict = {}
         try:
-            # Create event channel
-            ch = await self._rpc("/eventservice", "createChannel")
-            ch_rid = (ch or {}).get("rid") if isinstance(ch, dict) else None
-            if not ch_rid:
-                return result
+            client = await self._client_ctx()
+            PORT_PATH = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
 
-            PORT_RID = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
+            # Strategy 1: HTTP GET on the port path — may return full device state
+            try:
+                resp = await client.get(f"{self.base_url}{PORT_PATH}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    result = self._parse_env_from_dict(data)
+                    if result:
+                        return result
+            except Exception:
+                pass
 
-            # Subscribe to sensor port — try different param formats
-            for params in ({"rid": PORT_RID}, [PORT_RID], PORT_RID,
-                           {"rid": PDU_PATH}, [PDU_PATH]):
-                try:
-                    await self._rpc(ch_rid, "subscribe", params)
-                except Exception:
-                    pass
-
-            # Poll for events
-            events = await self._rpc(ch_rid, "pollEvents") or []
-            if not isinstance(events, list):
-                events = []
-
-            TEMP_KEYS = {"temperature", "temp"}
-            HUM_KEYS  = {"humidity", "relativehumidity", "rh"}
-            LEAK_KEYS = {"leakdetector", "leak", "waterdetection", "flood"}
-
-            for ev in events:
-                if not isinstance(ev, dict):
-                    continue
-                rid_lower = str(ev.get("rid", "")).lower()
-                reading = ev.get("reading") or ev
-                val = reading.get("value") if isinstance(reading, dict) else None
-                if val is None:
-                    continue
-                try:
-                    if result.get("temperature") is None and any(k in rid_lower for k in TEMP_KEYS):
-                        result["temperature"] = round(float(val), 1)
-                    elif result.get("humidity") is None and any(k in rid_lower for k in HUM_KEYS):
-                        result["humidity"] = round(float(val), 1)
-                    elif result.get("leak_detected") is None and any(k in rid_lower for k in LEAK_KEYS):
-                        result["leak_detected"] = int(val) > 0
-                except Exception:
-                    continue
+            # Strategy 2: Create channel, poll without subscribing (initial dump)
+            try:
+                ch = await self._rpc("/eventservice", "createChannel")
+                ch_rid = (ch or {}).get("rid") if isinstance(ch, dict) else None
+                if ch_rid:
+                    # Try subscribe with no params (listen to everything)
+                    for params in (None, [], {}):
+                        try:
+                            await self._rpc(ch_rid, "subscribe", params)
+                        except Exception:
+                            pass
+                    events = await self._rpc(ch_rid, "pollEvents") or []
+                    result = self._parse_env_from_events(events)
+            except Exception:
+                pass
         except Exception:
             pass
         return result
 
+    def _parse_env_from_events(self, events: list) -> dict:
+        result: dict = {}
+        TEMP_KEYS = {"temperature", "temp"}
+        HUM_KEYS  = {"humidity", "relativehumidity", "rh"}
+        LEAK_KEYS = {"leakdetector", "leak", "waterdetection", "flood"}
+        for ev in (events if isinstance(events, list) else []):
+            if not isinstance(ev, dict):
+                continue
+            rid_lower = str(ev.get("rid", "")).lower()
+            reading = ev.get("reading") or ev
+            val = reading.get("value") if isinstance(reading, dict) else None
+            if val is None:
+                continue
+            try:
+                if result.get("temperature") is None and any(k in rid_lower for k in TEMP_KEYS):
+                    result["temperature"] = round(float(val), 1)
+                elif result.get("humidity") is None and any(k in rid_lower for k in HUM_KEYS):
+                    result["humidity"] = round(float(val), 1)
+                elif result.get("leak_detected") is None and any(k in rid_lower for k in LEAK_KEYS):
+                    result["leak_detected"] = int(val) > 0
+            except Exception:
+                continue
+        return result
+
+    def _parse_env_from_dict(self, data: dict) -> dict:
+        result: dict = {}
+        if not isinstance(data, dict):
+            return result
+        for key, val in data.items():
+            k = key.lower()
+            try:
+                if "temperature" in k or "temp" in k:
+                    result["temperature"] = round(float(val), 1)
+                elif "humidity" in k or "rh" in k:
+                    result["humidity"] = round(float(val), 1)
+                elif "leak" in k or "flood" in k or "water" in k:
+                    result["leak_detected"] = bool(val)
+            except Exception:
+                continue
+        return result
+
     async def list_sensors(self) -> dict:
-        """Debug: show raw events after channel subscription."""
+        """Debug: try GET on port + channel pollEvents to find sensor data."""
+        out: dict = {}
+        client = await self._client_ctx()
+        PORT_PATH = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
+
+        try:
+            resp = await client.get(f"{self.base_url}{PORT_PATH}")
+            out["GET_port"] = {"status": resp.status_code, "body": resp.text[:500]}
+        except Exception as e:
+            out["GET_port"] = str(e)
+
         try:
             ch = await self._rpc("/eventservice", "createChannel")
             ch_rid = (ch or {}).get("rid") if isinstance(ch, dict) else None
-            if not ch_rid:
-                return {"error": "createChannel failed"}
-
-            PORT_RID = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
-            subs = []
-            for params in ({"rid": PORT_RID}, [PORT_RID], {"rid": PDU_PATH}, [PDU_PATH]):
-                try:
-                    r = await self._rpc(ch_rid, "subscribe", params)
-                    subs.append({"params": str(params)[:60], "ok": r})
-                except Exception as e:
-                    subs.append({"params": str(params)[:60], "err": str(e)})
-
-            events = await self._rpc(ch_rid, "pollEvents")
-            return {"channel": ch_rid, "subscriptions": subs, "events": events}
+            out["channel"] = ch_rid
+            if ch_rid:
+                for params in (None, [], {}):
+                    try:
+                        await self._rpc(ch_rid, "subscribe", params)
+                        out[f"subscribe_{params}"] = "ok"
+                    except Exception as e:
+                        out[f"subscribe_{params}"] = str(e)
+                events = await self._rpc(ch_rid, "pollEvents")
+                out["pollEvents"] = events
         except Exception as e:
-            return {"error": str(e)}
+            out["channel_error"] = str(e)
+
+        return out
 
     async def get_inlet(self) -> dict:
         """Returns inlet voltage/current/power summary."""
