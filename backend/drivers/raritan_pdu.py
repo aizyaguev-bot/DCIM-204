@@ -305,37 +305,38 @@ class RaritanPduDriver:
         """Debug: try REST API + JSON-RPC to find peripheral sensor data."""
         out: dict = {}
 
-        # ── Try Raritan REST API endpoints ─────────────────────────────
+        # ── Try Raritan REST API endpoints (v1.0 and v1) ─────────────
         client = await self._client_ctx()
-        for path in ("/api/v1/sensors", "/api/v1/peripherals", "/api/v1/peripheralDevices",
-                     "/api/v1/sensors/peripheral", "/api/v1/pdu/1/sensors",
-                     "/api/v1/pdu/0/sensors", "/sensors", "/peripherals"):
+        for path in ("/api/v1.0/peripherals", "/api/v1.0/sensors",
+                     "/api/v1.0/peripherals/1/sensors",
+                     "/api/v1/peripherals", "/api/v1/sensors",
+                     "/api/v1/peripherals/1/sensors"):
             try:
                 resp = await client.get(f"{self.base_url}{path}")
-                if resp.status_code == 200:
-                    out[f"REST:{path}"] = resp.json()
-                elif resp.status_code != 404:
-                    out[f"REST:{path}"] = f"HTTP {resp.status_code}"
-            except Exception as e:
+                if resp.status_code not in (404, 301, 302):
+                    out[f"REST:{path}:{resp.status_code}"] = resp.text[:500]
+            except Exception:
                 pass
         if out:
-            return out  # found something via REST — return immediately
+            return out
 
 
         # From debug we know: port = portsensor0, chain position 1
         # Try calling getReading on guessed sensor RIDs
         # Pattern: /tfwopaque/{SensorClass}:{version}/{instanceName}
+        # Known working pattern from PDU.getSensors: PDU0PowerSupplyStatus0
+        # Try same PDU0 prefix for port sensors
         candidate_rids = [
+            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0Port0Temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0Port0Humidity0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0PortSensor0Temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0PortSensor0Humidity0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0ExternalSensor0Temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0ExternalSensor0Humidity0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0Peripheral0Temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0Peripheral0Humidity0",
             "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0package0temperature0",
             "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0package0humidity0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0chain0temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0chain0humidity0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0device0temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0device0humidity0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/Port0Chain0Temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/Port0Chain0Humidity0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/peripheralSensor0temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/peripheralSensor0humidity0",
         ]
 
         for rid in candidate_rids:
