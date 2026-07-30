@@ -256,7 +256,7 @@ function USlotGroup({ u, items, switchAssignments, onSelectServer, onSelectCusto
 
   if (items.length === 0) {
     return (
-      <div style={{ height: EMPTY_H }} className="flex items-center select-none group/empty">
+      <div data-u-slot={u} style={{ height: EMPTY_H }} className="flex items-center select-none group/empty">
         {/* U rail */}
         <div className="w-10 flex-shrink-0 h-full bg-zinc-900/70 border-r border-zinc-800/50 flex items-center justify-end pr-1.5">
           <span className="text-[7px] font-mono text-zinc-800 group-hover/empty:text-zinc-700 transition">{String(u).padStart(2,"0")}</span>
@@ -272,7 +272,7 @@ function USlotGroup({ u, items, switchAssignments, onSelectServer, onSelectCusto
   }
 
   return (
-    <div style={{ minHeight: SLOT_H }} className="flex items-stretch border-b border-zinc-900/40 last:border-0">
+    <div data-u-slot={u} style={{ minHeight: SLOT_H }} className="flex items-stretch border-b border-zinc-900/40 last:border-0">
       {/* U rail column */}
       <div className="w-10 flex-shrink-0 bg-zinc-900/70 border-r border-zinc-800/50 flex flex-col items-center justify-center select-none gap-0.5">
         <div className="w-1 h-1 rounded-full bg-zinc-700/40 flex-shrink-0"/>
@@ -319,6 +319,91 @@ function SortableURow({ u, items, switchAssignments, onSelectServer, onSelectCus
         onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
         dragHandleProps={dragHandleProps}/>
     </div>
+  );
+}
+
+// ─── CHILLER / COOLING ────────────────────────────────────────────────────────
+function ChillerBadge({ chiller, connCount, onPipeDragStart }) {
+  const ref = useRef(null);
+  return (
+    <div ref={ref} data-chiller-id={chiller.id}
+      onMouseDown={e => {
+        e.preventDefault();
+        const r = ref.current.getBoundingClientRect();
+        onPipeDragStart(chiller.id, r.left + r.width/2, r.top + r.height/2);
+      }}
+      title="Drag to connect pipe to a rack U-slot"
+      className="flex items-center gap-1 px-2 py-1 bg-cyan-950/70 border border-cyan-800/50 rounded-lg text-cyan-400 text-[10px] font-mono cursor-crosshair select-none hover:border-cyan-500/60 hover:bg-cyan-900/30 transition">
+      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+      </svg>
+      {chiller.name}
+      {connCount > 0 && <span className="ml-0.5 text-[9px] text-cyan-700">{connCount}↗</span>}
+    </div>
+  );
+}
+
+function CoolingPipesLayer({ connections, dragging, onDeleteConnection, tick }) {
+  const [paths, setPaths] = useState([]);
+
+  useLayoutEffect(() => {
+    const pos = {};
+    document.querySelectorAll('[data-chiller-id]').forEach(el => {
+      const r = el.getBoundingClientRect();
+      pos['ch:'+el.dataset.chillerId] = { x: r.left+r.width/2, y: r.top+r.height/2 };
+    });
+    document.querySelectorAll('[data-u-slot]').forEach(el => {
+      const rackEl = el.closest('[data-rack-id]');
+      const rack = rackEl?.dataset.rackId;
+      const u = el.dataset.uSlot;
+      if (rack && u) {
+        const r = el.getBoundingClientRect();
+        pos[`u:${rack}:${u}`] = { x: r.left + 12, y: r.top + r.height/2 };
+      }
+    });
+    document.querySelectorAll('[data-rack-id]').forEach(el => {
+      const rack = el.dataset.rackId;
+      if (!pos[`rack:${rack}`]) {
+        const r = el.getBoundingClientRect();
+        pos[`rack:${rack}`] = { x: r.left + r.width/2, y: r.top + 20 };
+      }
+    });
+
+    const newPaths = connections.map(conn => {
+      const from = pos['ch:'+conn.chillerId];
+      const to = conn.toU != null ? pos[`u:${conn.toRack}:${conn.toU}`] : pos[`rack:${conn.toRack}`];
+      if (!from || !to) return null;
+      const dy = Math.max(40, Math.abs(to.y - from.y) * 0.5);
+      const cx1 = from.x, cy1 = from.y + dy, cx2 = to.x - dy * 0.6, cy2 = to.y;
+      const d = `M${from.x} ${from.y} C${cx1} ${cy1} ${cx2} ${cy2} ${to.x} ${to.y}`;
+      const label = conn.toU != null ? `U${conn.toU}` : null;
+      return { id: conn.id, d, midX:(from.x+to.x)/2, midY:(from.y+cy1)/2+10, label, conn };
+    }).filter(Boolean);
+    setPaths(newPaths);
+  }, [connections, tick]);
+
+  return createPortal(
+    <svg style={{position:'fixed',inset:0,pointerEvents:'none',zIndex:35,overflow:'visible'}} width="100vw" height="100vh">
+      <defs>
+        <marker id="pipe-dot" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+          <circle cx="3" cy="3" r="2.5" fill="#22d3ee" opacity="0.9"/>
+        </marker>
+      </defs>
+      {paths.map(p => (
+        <g key={p.id}>
+          <path d={p.d} stroke="#164e63" strokeWidth="6" fill="none" strokeLinecap="round"/>
+          <path d={p.d} stroke="#22d3ee" strokeWidth="2.5" fill="none" strokeDasharray="10 5" opacity="0.7" strokeLinecap="round" markerEnd="url(#pipe-dot)"/>
+          {p.label && <text x={p.midX} y={p.midY-6} textAnchor="middle" fill="#67e8f9" fontSize="9" fontFamily="monospace" opacity="0.8">{p.label}</text>}
+          <circle cx={p.midX} cy={p.midY+4} r="8" fill="#0c1a1f" stroke="#ef4444" strokeWidth="1.5" style={{pointerEvents:'all',cursor:'pointer'}} opacity="0.9" onClick={()=>onDeleteConnection(p.conn.id)}/>
+          <text x={p.midX} y={p.midY+8} textAnchor="middle" fill="#f87171" fontSize="10" fontWeight="bold" style={{pointerEvents:'none'}}>✕</text>
+        </g>
+      ))}
+      {dragging && (
+        <line x1={dragging.fromX} y1={dragging.fromY} x2={dragging.curX} y2={dragging.curY}
+          stroke="#22d3ee" strokeWidth="2" strokeDasharray="7 4" opacity="0.5" strokeLinecap="round"/>
+      )}
+    </svg>,
+    document.body
   );
 }
 
@@ -375,7 +460,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   );
 
   return (
-    <div ref={containerRef} className={fixed ? "flex-shrink-0" : "w-full min-w-0"} style={fixed ? { width } : undefined}>
+    <div data-rack-id={r.rack} ref={containerRef} className={fixed ? "flex-shrink-0" : "w-full min-w-0"} style={fixed ? { width } : undefined}>
       {/* label plate */}
       <div className={`mb-0 rounded-t-xl border-2 border-b-0 px-4 py-2.5 bg-zinc-900
         ${pduOnline ? "border-zinc-700" : r.pdus.length ? "border-red-900/60" : "border-zinc-800"}`}>
@@ -1457,7 +1542,7 @@ function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClo
 }
 
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
-function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus, rackDevices }) {
+function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus, rackDevices, chillers, onChillersChange }) {
   const [selectedRack,   setSelectedRack]   = useState(null);
   const [addOptFor,      setAddOptFor]      = useState(null);
   const [addEquipFor,    setAddEquipFor]    = useState(null);
@@ -1465,6 +1550,60 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
   const [editRackTarget, setEditRackTarget] = useState(null); // rack name string
   const [activeId,       setActiveId]       = useState(null);
   const [pendingMove,    setPendingMove]    = useState(null);
+  const [coolingMode,    setCoolingMode]    = useState(false);
+  const [pipeDrag,       setPipeDrag]       = useState(null); // {chillerId,fromX,fromY,curX,curY}
+  const [pipeTick,       setPipeTick]       = useState(0);
+
+  // Auto-seed chillers when racks load and no chillers saved
+  useEffect(() => {
+    if (!onChillersChange || !chillers || (chillers.units||[]).length > 0 || rackStats.length === 0) return;
+    const units = rackStats.flatMap(rs => {
+      const count = rs.rack === "Rack-04" ? 2 : 1;
+      return Array.from({length: count}, (_,i) => ({
+        id: `ch-${rs.rack}-${i+1}`, name: `Chiller-${i+1}`, rack: rs.rack,
+      }));
+    });
+    onChillersChange({ units, connections: [] });
+  }, [rackStats, chillers, onChillersChange]);
+
+  // Global mouse events for pipe dragging
+  useEffect(() => {
+    if (!pipeDrag) return;
+    const move = e => setPipeDrag(d => d ? {...d, curX: e.clientX, curY: e.clientY} : null);
+    const up   = e => {
+      setPipeDrag(d => {
+        if (!d) return null;
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        const uEl   = el?.closest('[data-u-slot]');
+        const rackEl = uEl?.closest('[data-rack-id]') || el?.closest('[data-rack-id]');
+        if (rackEl) {
+          const toRack = rackEl.dataset.rackId;
+          const toU = uEl ? parseInt(uEl.dataset.uSlot) : null;
+          const id = `conn-${Date.now()}`;
+          const updated = { units: chillers?.units||[], connections: [...(chillers?.connections||[]), {id, chillerId:d.chillerId, toRack, toU}] };
+          onChillersChange?.(updated);
+          setPipeTick(t => t+1);
+        }
+        return null;
+      });
+    };
+    const esc = e => { if (e.key === 'Escape') setPipeDrag(null); };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    window.addEventListener('keydown', esc);
+    return () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); window.removeEventListener('keydown', esc); };
+  }, [pipeDrag, chillers, onChillersChange]);
+
+  function handlePipeDragStart(chillerId, fromX, fromY) {
+    setPipeDrag({ chillerId, fromX, fromY, curX: fromX, curY: fromY });
+  }
+  function handleDeleteConnection(connId) {
+    const updated = {...chillers, connections: (chillers?.connections||[]).filter(c => c.id !== connId)};
+    onChillersChange?.(updated);
+    setPipeTick(t => t+1);
+  }
+  const chillerUnits = chillers?.units || [];
+  const chillerConns = chillers?.connections || [];
 
   const r = selectedRack ? rackStats.find(r => r.rack === selectedRack) : null;
 
@@ -1543,28 +1682,49 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
           onRequestAddEquip={setAddEquipFor}/>
       ) : (
         <>
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
             <div className="text-[10px] text-zinc-700">Click rack name ↗ to open · drag grip to reorder · double-click name to rename · drag OPT across racks to move</div>
-            <button onClick={() => setAddRackOpen(true)}
-              className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-3 py-1.5 rounded-xl transition flex-shrink-0">
-              {Icon.plus} Add Rack
-            </button>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button onClick={() => { setCoolingMode(c=>!c); setPipeTick(t=>t+1); }}
+                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border transition ${coolingMode?"bg-cyan-950/60 border-cyan-700/60 text-cyan-400":"border-zinc-700/50 text-zinc-400 hover:text-cyan-400 hover:border-cyan-800/60"}`}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                Cooling {coolingMode && <span className="text-[9px] text-cyan-600">· drag to connect</span>}
+              </button>
+              <button onClick={() => setAddRackOpen(true)}
+                className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-3 py-1.5 rounded-xl transition">
+                {Icon.plus} Add Rack
+              </button>
+            </div>
           </div>
           <DndContext sensors={crossSensors} collisionDetection={closestCenter}
             onDragStart={e => setActiveId(e.active.id)}
             onDragEnd={handleCrossRackDragEnd}
             onDragCancel={() => setActiveId(null)}>
             <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
-              {rackStats.map(rs => (
-                <RackDiagram key={rs.rack} r={rs}
-                  rackSlots={rackSlots} rackOrder={rackOrder}
-                  switchAssignments={switchAssignments} customItems={customItems}
-                  onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
-                  onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
-                  onHeaderClick={() => setSelectedRack(rs.rack)}
-                  onEdit={() => setEditRackTarget(rs.rack)}
-                  external externalActiveId={activeId}/>
-              ))}
+              {rackStats.map(rs => {
+                const rackChillers = chillerUnits.filter(c => c.rack === rs.rack);
+                return (
+                  <div key={rs.rack} className="flex flex-col gap-1">
+                    <RackDiagram r={rs}
+                      rackSlots={rackSlots} rackOrder={rackOrder}
+                      switchAssignments={switchAssignments} customItems={customItems}
+                      onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
+                      onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
+                      onHeaderClick={() => setSelectedRack(rs.rack)}
+                      onEdit={() => setEditRackTarget(rs.rack)}
+                      external externalActiveId={activeId}/>
+                    {coolingMode && rackChillers.length > 0 && (
+                      <div className="flex flex-wrap gap-1 pt-1 pl-1">
+                        {rackChillers.map(ch => (
+                          <ChillerBadge key={ch.id} chiller={ch}
+                            connCount={chillerConns.filter(c=>c.chillerId===ch.id).length}
+                            onPipeDragStart={handlePipeDragStart}/>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <DragOverlay dropAnimation={null}>
               {activeServer && (
@@ -1575,6 +1735,10 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
             </DragOverlay>
           </DndContext>
         </>
+      )}
+
+      {coolingMode && (
+        <CoolingPipesLayer connections={chillerConns} dragging={pipeDrag} onDeleteConnection={handleDeleteConnection} tick={pipeTick}/>
       )}
 
       {/* Modals rendered via Portal — completely outside DOM tree, immune to any stacking context */}
@@ -1816,6 +1980,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [customItems,       setCustomItems]       = useState({});
   const [rackOverrides,     setRackOverrides]     = useState({});
   const [optOwners,         setOptOwners]         = useState({});
+  const [chillers,          setChillers]          = useState({units:[],connections:[]});
   const [selectedServerId,  setSelectedServerId]  = useState(null);
   const [selectedCustom,    setSelectedCustom]    = useState(null);
 
@@ -1827,9 +1992,15 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       fetch("/api/rack-items").then(r=>r.json()).catch(()=>({})),
       fetch("/api/rack-overrides").then(r=>r.json()).catch(()=>({})),
       fetch("/api/opt-owners").then(r=>r.json()).catch(()=>({})),
-    ]).then(([order,slots,sw,items,overrides,owners])=>{
-      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});setOptOwners(owners||{});
+      fetch("/api/chillers").then(r=>r.json()).catch(()=>({units:[],connections:[]})),
+    ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
+      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});setOptOwners(owners||{});setChillers(chill||{units:[],connections:[]});
     });
+  },[]);
+
+  const handleChillersChange = useCallback(async (updated) => {
+    setChillers(updated);
+    await fetch("/api/chillers",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
   },[]);
 
   const handleOwnerChange = useCallback(async (serverId, owner) => {
@@ -2011,7 +2182,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onLabelChange={handleLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
           onCustomItemsChange={setCustomItems} onRefresh={onRefresh}
-          pdus={pdus} rackDevices={rackDevices}/>
+          pdus={pdus} rackDevices={rackDevices} chillers={chillers} onChillersChange={handleChillersChange}/>
       )}
       {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems} optOwners={optOwners} onOwnerChange={handleOwnerChange}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}

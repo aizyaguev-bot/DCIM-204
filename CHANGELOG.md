@@ -2,6 +2,20 @@
 
 ---
 
+## v2.28.0 — 2026-07-30
+
+### Added
+- **Chiller / Cooling system** — visual cooling pipe map in Racks view:
+  - Toggle "❄ Cooling" button in the rack overview header to enter cooling mode
+  - Each rack shows its chiller unit(s) below the rack card (Rack-04 has 2 chillers pre-seeded; all other racks get 1 automatically on first load)
+  - **Drag to connect**: hover over a chiller badge and drag to any rack card or specific U-slot row to draw a pipe connection; release to save
+  - Connections shown as animated cyan bezier pipe lines with U-slot label
+  - Click the red ✕ button on a pipe midpoint to delete the connection
+  - Press ESC during drag to cancel
+  - Data persisted in `backend/chillers.json` via new `/api/chillers` GET+PUT endpoint
+
+---
+
 ## v2.27.0 — 2026-07-29
 
 ### Added

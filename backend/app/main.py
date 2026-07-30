@@ -25,6 +25,7 @@ _SWITCH_ASSIGN_FILE  = pathlib.Path(__file__).parent.parent / "switch_assignment
 _RACK_ITEMS_FILE     = pathlib.Path(__file__).parent.parent / "rack_items.json"
 _RACK_OVERRIDES_FILE = pathlib.Path(__file__).parent.parent / "rack_overrides.json"
 _OPT_OWNERS_FILE     = pathlib.Path(__file__).parent.parent / "opt_owners.json"
+_CHILLERS_FILE       = pathlib.Path(__file__).parent.parent / "chillers.json"
 
 
 async def _warm_cache():
@@ -57,7 +58,7 @@ async def basic_auth(request: Request, call_next):
     password = get_settings().lab_manager_password
     if not password:
         return await call_next(request)
-    if request.url.path in ("/api/version", "/api/changelog", "/api/rack-positions", "/api/rack-slots", "/api/switch-assignments", "/api/rack-items", "/api/rack-overrides", "/api/opt-owners"):  # public endpoints
+    if request.url.path in ("/api/version", "/api/changelog", "/api/rack-positions", "/api/rack-slots", "/api/switch-assignments", "/api/rack-items", "/api/rack-overrides", "/api/opt-owners", "/api/chillers"):  # public endpoints
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
@@ -197,6 +198,22 @@ async def get_opt_owners():
 async def save_opt_owners(payload: dict):
     try:
         _OPT_OWNERS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.get("/api/chillers")
+async def get_chillers():
+    try:
+        return json.loads(_CHILLERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"units": [], "connections": []}
+
+@app.put("/api/chillers")
+async def save_chillers(payload: dict):
+    try:
+        _CHILLERS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception:
         pass
     return {"ok": True}
