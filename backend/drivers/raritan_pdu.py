@@ -302,8 +302,25 @@ class RaritanPduDriver:
         return result
 
     async def list_sensors(self) -> dict:
-        """Debug: brute-force guess sensor RIDs based on known Raritan naming patterns."""
+        """Debug: try REST API + JSON-RPC to find peripheral sensor data."""
         out: dict = {}
+
+        # ── Try Raritan REST API endpoints ─────────────────────────────
+        client = await self._client_ctx()
+        for path in ("/api/v1/sensors", "/api/v1/peripherals", "/api/v1/peripheralDevices",
+                     "/api/v1/sensors/peripheral", "/api/v1/pdu/1/sensors",
+                     "/api/v1/pdu/0/sensors", "/sensors", "/peripherals"):
+            try:
+                resp = await client.get(f"{self.base_url}{path}")
+                if resp.status_code == 200:
+                    out[f"REST:{path}"] = resp.json()
+                elif resp.status_code != 404:
+                    out[f"REST:{path}"] = f"HTTP {resp.status_code}"
+            except Exception as e:
+                pass
+        if out:
+            return out  # found something via REST — return immediately
+
 
         # From debug we know: port = portsensor0, chain position 1
         # Try calling getReading on guessed sensor RIDs
