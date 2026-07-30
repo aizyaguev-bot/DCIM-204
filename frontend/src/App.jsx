@@ -153,6 +153,8 @@ export default function App() {
 
   const stats = useMemo(() => {
     let outletsOn = 0, outletsTotal = 0, watts = 0, portsActive = 0, portsTotal = 0, alerts = 0;
+    const temps = [], humids = [];
+    let leakDetected = false;
     pdus.forEach(p => {
       const s = pduStatuses[p.id];
       if (s?.outlets) {
@@ -161,6 +163,9 @@ export default function App() {
         watts        += s.total_watts || 0;
       }
       if (!s?.reachable && s) alerts++;
+      if (s?.temperature != null) temps.push(s.temperature);
+      if (s?.humidity    != null) humids.push(s.humidity);
+      if (s?.leak_detected)       leakDetected = true;
     });
     kvms.forEach(k => {
       const s = kvmStatuses[k.id];
@@ -169,7 +174,12 @@ export default function App() {
         portsTotal  += s.ports.length;
       }
     });
-    return { deviceCount: devices.length, outletsOn, outletsTotal, watts, portsActive, portsTotal, alerts };
+    const tempMin = temps.length ? Math.min(...temps) : null;
+    const tempMax = temps.length ? Math.max(...temps) : null;
+    const humMin  = humids.length ? Math.min(...humids) : null;
+    const humMax  = humids.length ? Math.max(...humids) : null;
+    return { deviceCount: devices.length, outletsOn, outletsTotal, watts, portsActive, portsTotal, alerts,
+             tempMin, tempMax, humMin, humMax, leakDetected, hasSensors: temps.length > 0 || humids.length > 0 };
   }, [devices, pduStatuses, kvmStatuses]);
 
   if (loading) {
