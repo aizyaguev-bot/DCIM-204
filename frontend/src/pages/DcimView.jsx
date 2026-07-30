@@ -339,40 +339,42 @@ function DraggableChiller({ chiller, onAssign, onUnassign }) {
       setHoverU(uEl ? parseInt(uEl.dataset.uSlot) : null);
     };
     const up = e => {
-      setDragging(false);
-      setHoverU(null);
+      setDragging(false); setHoverU(null);
       const el = document.elementFromPoint(e.clientX, e.clientY);
-      const uEl   = el?.closest('[data-u-slot]');
+      const uEl    = el?.closest('[data-u-slot]');
       const rackEl = uEl?.closest('[data-rack-id]') || el?.closest('[data-rack-id]');
-      if (rackEl) {
-        const rack = rackEl.dataset.rackId;
-        const u = uEl ? parseInt(uEl.dataset.uSlot) : null;
-        onAssign(chiller.id, rack, u);
-      }
+      if (rackEl) onAssign(chiller.id, rackEl.dataset.rackId, uEl ? parseInt(uEl.dataset.uSlot) : null);
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
     return () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
   }, [dragging, chiller.id, onAssign]);
 
+  const isAssigned = !!chiller.rack;
   return (
     <>
       <div onMouseDown={e => { e.preventDefault(); setPos({x:e.clientX,y:e.clientY}); setDragging(true); }}
-        className={`flex items-center gap-1.5 px-2.5 py-1.5 bg-cyan-950/70 border rounded-lg text-[11px] font-mono select-none transition cursor-grab
-          ${dragging ? "opacity-40 border-cyan-700/40 text-cyan-600" : "border-cyan-800/50 text-cyan-400 hover:border-cyan-600/60 hover:bg-cyan-900/30"}`}>
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-        {chiller.name}
-        {chiller.rack
-          ? <><span className="text-[9px] text-cyan-700">→ {chiller.rack}{chiller.u != null ? ` / U${String(chiller.u).padStart(2,'0')}` : ""}</span>
-              <button onMouseDown={e=>e.stopPropagation()} onClick={()=>onUnassign(chiller.id)}
-                className="ml-0.5 text-[9px] text-zinc-700 hover:text-rose-400 transition">✕</button></>
-          : <span className="text-[9px] text-cyan-800">גרור לשורה ברack</span>
+        className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-mono select-none cursor-grab transition
+          ${dragging ? "opacity-40" : ""}
+          ${isAssigned
+            ? "bg-cyan-950/60 border-cyan-800/50 text-cyan-300 hover:border-cyan-600/60"
+            : "bg-zinc-900/60 border-zinc-700/50 text-zinc-400 hover:border-cyan-800/60 hover:text-cyan-500 border-dashed"}`}>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="flex-shrink-0"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+        <span className="font-semibold">{chiller.name}</span>
+        {isAssigned
+          ? <span className="text-[9px] text-cyan-700 ml-1">{chiller.rack}{chiller.u != null ? ` · U${String(chiller.u).padStart(2,'0')}` : ""}</span>
+          : <span className="text-[9px] text-zinc-600">לא משויך — גרור לקומה</span>
         }
+        {isAssigned && (
+          <button onMouseDown={e=>e.stopPropagation()} onClick={()=>onUnassign(chiller.id)}
+            className="ml-auto text-[10px] text-zinc-700 hover:text-rose-400 transition flex-shrink-0">✕</button>
+        )}
       </div>
       {dragging && createPortal(
-        <div style={{position:'fixed',left:pos.x-50,top:pos.y-14,pointerEvents:'none',zIndex:50}}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-900/95 border border-cyan-500/60 rounded-lg text-cyan-200 text-[11px] font-mono shadow-2xl">
-          ❄ {chiller.name}{hoverU != null ? ` → U${String(hoverU).padStart(2,'0')}` : ""}
+        <div style={{position:'fixed',left:pos.x-60,top:pos.y-16,pointerEvents:'none',zIndex:50}}
+          className="flex items-center gap-2 px-3 py-2 bg-cyan-900/95 border border-cyan-500/60 rounded-xl text-cyan-100 text-xs font-mono shadow-2xl">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+          {chiller.name}{hoverU != null ? ` → U${String(hoverU).padStart(2,'0')}` : " → גרור לקומה"}
         </div>,
         document.body
       )}
@@ -434,14 +436,27 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
                 onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
             )}
             {chillersHere.map(ch => (
-              <div key={ch.id} style={{height:24}} className="flex items-center gap-0 border-b border-cyan-900/30 bg-cyan-950/40">
-                <div className="w-10 flex-shrink-0 bg-zinc-900/60 border-r border-zinc-800/50 flex items-center justify-center h-full">
-                  <span className="text-[7px] font-mono text-cyan-800">❄</span>
+              <div key={ch.id} style={{minHeight: SLOT_H}} className="flex items-stretch border-b border-cyan-900/20">
+                {/* U rail */}
+                <div className="w-10 flex-shrink-0 bg-zinc-900/70 border-r border-zinc-800/50 flex flex-col items-center justify-center select-none gap-0.5">
+                  <div className="w-1 h-1 rounded-full bg-cyan-900/60 flex-shrink-0"/>
+                  <span className="text-[8px] font-mono font-bold text-cyan-800">{String(u).padStart(2,"0")}</span>
+                  <div className="w-1 h-1 rounded-full bg-cyan-900/60 flex-shrink-0"/>
                 </div>
                 <div className="w-5 flex-shrink-0"/>
-                <div className="flex items-center gap-1.5 px-2">
-                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                  <span className="text-[10px] font-mono text-cyan-400">{ch.name}</span>
+                {/* Chiller cell — OPT-style */}
+                <div className="flex-1 py-1.5 pr-2 min-w-0 flex items-stretch">
+                  <div className="flex-1 min-w-0 flex items-stretch rounded overflow-hidden bg-gradient-to-r from-cyan-400/10 via-cyan-400/5 to-transparent border border-cyan-800/40">
+                    <div className="w-1 flex-shrink-0 bg-cyan-500/60"/>
+                    <div className="flex flex-1 items-center gap-2 px-2 min-w-0">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5" className="flex-shrink-0"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11px] font-mono font-bold text-cyan-300 truncate">{ch.name}</div>
+                        <div className="text-[8px] font-mono text-cyan-700 mt-0.5">Cooling unit</div>
+                      </div>
+                      <span className="text-[7px] font-bold text-cyan-500/60 uppercase tracking-widest flex-shrink-0 pr-1">❄</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             ))}
@@ -1554,7 +1569,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
   const [editRackTarget, setEditRackTarget] = useState(null); // rack name string
   const [activeId,       setActiveId]       = useState(null);
   const [pendingMove,    setPendingMove]    = useState(null);
-  const [coolingMode, setCoolingMode] = useState(false);
+  // coolingMode removed — chillers always visible
 
   // Auto-seed chillers when racks load and no chillers saved
   useEffect(() => {
@@ -1658,11 +1673,6 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
           <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
             <div className="text-[10px] text-zinc-700">Click rack name ↗ to open · drag grip to reorder · double-click name to rename · drag OPT across racks to move</div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <button onClick={() => setCoolingMode(c=>!c)}
-                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border transition ${coolingMode?"bg-cyan-950/60 border-cyan-700/60 text-cyan-400":"border-zinc-700/50 text-zinc-400 hover:text-cyan-400 hover:border-cyan-800/60"}`}>
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                ❄ Cooling
-              </button>
               <button onClick={() => setAddRackOpen(true)}
                 className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-3 py-1.5 rounded-xl transition">
                 {Icon.plus} Add Rack
@@ -1702,9 +1712,12 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
         </>
       )}
 
-      {coolingMode && (
-        <div className="mt-4 p-3 bg-cyan-950/30 border border-cyan-900/50 rounded-xl">
-          <div className="text-[9px] uppercase tracking-widest text-cyan-700 mb-2">❄ Cooling units — drag to assign to a rack</div>
+      {chillerUnits.length > 0 && (
+        <div className="mt-4 p-3 bg-cyan-950/20 border border-cyan-900/40 rounded-xl">
+          <div className="text-[9px] uppercase tracking-widest text-cyan-800 mb-2 flex items-center gap-1.5">
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+            Cooling units — גרור לקומה ב-rack
+          </div>
           <div className="flex flex-wrap gap-2">
             {chillerUnits.map(ch => (
               <DraggableChiller key={ch.id} chiller={ch} onAssign={handleAssignChiller} onUnassign={handleUnassignChiller}/>

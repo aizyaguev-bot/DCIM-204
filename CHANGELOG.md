@@ -2,6 +2,15 @@
 
 ---
 
+## v2.31.0 — 2026-07-30
+
+### Changed
+- **Chiller always visible** — removed Cooling toggle button; Cooling units panel is always shown at the bottom of the Racks view; no mode switching
+- **Chiller styled as OPT** — assigned chiller appears in the rack diagram as a full-height row identical in structure to an OPT row: U-rail, left cyan stripe, snowflake icon, name, "Cooling unit" sub-label
+- Unassigned chillers shown with dashed border and "drag to shelf" hint
+
+---
+
 ## v2.30.0 — 2026-07-30
 
 ### Changed
