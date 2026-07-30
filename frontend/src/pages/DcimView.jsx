@@ -1568,7 +1568,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
     onChillersChange?.(updated);
   }
   function handleUnassignChiller(chillerId) {
-    const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, rack:null} : c)};
+    const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, u: null} : c)};
     onChillersChange?.(updated);
   }
   const chillerUnits = chillers?.units || [];
