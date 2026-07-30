@@ -220,38 +220,83 @@ class RaritanPduDriver:
             pass
         return result
 
-    async def list_sensors(self) -> dict:
-        """Debug: tries multiple Raritan API methods to discover where environmental sensors live."""
-        out: dict = {}
-
-        async def _try(label: str, rid: str, method: str, params=None):
-            try:
-                r = await self._rpc(rid, method, params)
-                out[label] = r
-            except Exception as e:
-                out[label] = f"ERROR: {e}"
-
-        # 1. PDU-level getSensors
-        await _try("pdu_getSensors", PDU_PATH, "getSensors")
-
-        # 2. PDU getMetaData (to see model info)
-        await _try("pdu_getMetaData", PDU_PATH, "getMetaData")
-
-        # 3. Try peripheral / external sensor methods
-        for method in ("getExternalSensors", "getPeripheralDeviceList",
-                       "getPeripheralDevices", "getSensorReadings",
-                       "getAllSensors", "getEnvironmentalSensors"):
-            await _try(f"pdu_{method}", PDU_PATH, method)
-
-        # 4. Try inlet getSensors (in case env sensors are there)
+    async def _get_peripheral_sensor_rids(self) -> list[dict]:
+        """Walk PDU → peripheral slots → connected devices → sensors.
+        Returns list of {name, rid} for every readable environmental sensor."""
+        found = []
         try:
-            inlet_rids = await self._get_inlet_rids()
-            for i, rid in enumerate(inlet_rids[:2]):
-                await _try(f"inlet{i}_getSensors", rid, "getSensors")
+            # Ask PDU for its peripheral device slots
+            slots = await self._rpc(PDU_PATH, "getPeripheralDeviceSlots")
+            if not slots:
+                return found
+            for slot in (slots if isinstance(slots, list) else slots.values()):
+                slot_rid = slot.get("rid") if isinstance(slot, dict) else slot
+                if not slot_rid:
+                    continue
+                try:
+                    dev = await self._rpc(slot_rid, "getConnectedDevice")
+                    dev_rid = (dev or {}).get("rid") if isinstance(dev, dict) else dev
+                    if not dev_rid:
+                        continue
+                    sensors = await self._rpc(dev_rid, "getSensors")
+                    if not isinstance(sensors, dict):
+                        continue
+                    for sname, sinfo in sensors.items():
+                        if isinstance(sinfo, dict) and sinfo.get("rid"):
+                            found.append({"name": sname, "rid": sinfo["rid"]})
+                except Exception:
+                    continue
         except Exception:
             pass
+        return found
 
-        return out
+    async def get_env_sensors(self) -> dict:
+        """Returns PDU-level environmental sensors via peripheral device slots."""
+        result: dict = {}
+        try:
+            sensor_list = await self._get_peripheral_sensor_rids()
+
+            TEMP_KEYS = {"temperature", "temp"}
+            HUM_KEYS  = {"humidity", "relativehumidity", "rh"}
+            LEAK_KEYS = {"leakdetector", "leak", "waterdetection", "flood"}
+
+            temp_rid = hum_rid = leak_rid = None
+            for s in sensor_list:
+                lname = s["name"].lower()
+                if temp_rid is None and any(k in lname for k in TEMP_KEYS):
+                    temp_rid = s["rid"]
+                elif hum_rid is None and any(k in lname for k in HUM_KEYS):
+                    hum_rid = s["rid"]
+                elif leak_rid is None and any(k in lname for k in LEAK_KEYS):
+                    leak_rid = s["rid"]
+
+            async def _safe_read(rid):
+                if not rid:
+                    return None
+                try:
+                    r = await self._rpc(rid, "getReading")
+                    return r if isinstance(r, dict) else None
+                except Exception:
+                    return None
+
+            temp_r = await _safe_read(temp_rid)
+            hum_r  = await _safe_read(hum_rid)
+            leak_r = await _safe_read(leak_rid)
+
+            if temp_r and temp_r.get("value") is not None:
+                result["temperature"] = round(float(temp_r["value"]), 1)
+            if hum_r and hum_r.get("value") is not None:
+                result["humidity"] = round(float(hum_r["value"]), 1)
+            if leak_r and leak_r.get("value") is not None:
+                result["leak_detected"] = int(leak_r["value"]) > 0
+        except Exception:
+            pass
+        return result
+
+    async def list_sensors(self) -> dict:
+        """Debug: returns all peripheral sensor names the PDU exposes."""
+        found = await self._get_peripheral_sensor_rids()
+        return {"peripheral_sensors": found} if found else {"note": "no peripheral sensors found via getPeripheralDeviceSlots"}
 
     async def get_inlet(self) -> dict:
         """Returns inlet voltage/current/power summary."""
