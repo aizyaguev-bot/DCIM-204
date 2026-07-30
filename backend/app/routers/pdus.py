@@ -136,5 +136,3 @@ async def sensors_debug(device_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=502, detail=str(e))
     finally:
         await driver.close()
-    finally:
-        await driver.close()
