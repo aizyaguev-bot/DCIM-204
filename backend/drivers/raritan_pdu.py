@@ -221,12 +221,37 @@ class RaritanPduDriver:
         return result
 
     async def list_sensors(self) -> dict:
-        """Debug: returns all sensor names the PDU exposes."""
+        """Debug: tries multiple Raritan API methods to discover where environmental sensors live."""
+        out: dict = {}
+
+        async def _try(label: str, rid: str, method: str, params=None):
+            try:
+                r = await self._rpc(rid, method, params)
+                out[label] = r
+            except Exception as e:
+                out[label] = f"ERROR: {e}"
+
+        # 1. PDU-level getSensors
+        await _try("pdu_getSensors", PDU_PATH, "getSensors")
+
+        # 2. PDU getMetaData (to see model info)
+        await _try("pdu_getMetaData", PDU_PATH, "getMetaData")
+
+        # 3. Try peripheral / external sensor methods
+        for method in ("getExternalSensors", "getPeripheralDeviceList",
+                       "getPeripheralDevices", "getSensorReadings",
+                       "getAllSensors", "getEnvironmentalSensors"):
+            await _try(f"pdu_{method}", PDU_PATH, method)
+
+        # 4. Try inlet getSensors (in case env sensors are there)
         try:
-            sensors = await self._rpc(PDU_PATH, "getSensors")
-            return {k: {"rid": v.get("rid")} for k, v in (sensors or {}).items() if isinstance(v, dict)}
-        except Exception as e:
-            return {"error": str(e)}
+            inlet_rids = await self._get_inlet_rids()
+            for i, rid in enumerate(inlet_rids[:2]):
+                await _try(f"inlet{i}_getSensors", rid, "getSensors")
+        except Exception:
+            pass
+
+        return out
 
     async def get_inlet(self) -> dict:
         """Returns inlet voltage/current/power summary."""
