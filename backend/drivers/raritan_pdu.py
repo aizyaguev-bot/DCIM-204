@@ -301,41 +301,56 @@ class RaritanPduDriver:
             pass
         return result
 
+    async def _create_event_channel(self) -> str | None:
+        """Create an event channel and return its RID."""
+        try:
+            ch = await self._rpc("/eventservice", "createChannel")
+            return ch.get("rid") if isinstance(ch, dict) else None
+        except Exception:
+            return None
+
+    async def _subscribe_and_poll(self, ch_rid: str, sub_rid: str) -> list:
+        """Subscribe to an object on a channel, poll for events, return them."""
+        try:
+            await self._rpc(ch_rid, "subscribe", {"rid": sub_rid})
+        except Exception:
+            pass
+        try:
+            events = await self._rpc(ch_rid, "pollEvents")
+            return events if isinstance(events, list) else []
+        except Exception:
+            return []
+
     async def list_sensors(self) -> dict:
-        """Debug: try eventservice channel for peripheral sensor discovery."""
+        """Debug: create event channel, subscribe to port/PDU, poll for sensor events."""
         out: dict = {}
-        client = await self._client_ctx()
 
-        # 1. Try to create/open a channel via eventservice
-        for method in ("newChannel", "createChannel", "openChannel", "open"):
-            try:
-                r = await self._rpc("/eventservice", method)
-                if r is not None:
-                    out[f"evtsvc.{method}"] = r
-            except Exception as e:
-                out[f"evtsvc.{method}"] = str(e)
+        ch_rid = await self._create_event_channel()
+        if not ch_rid:
+            return {"error": "createChannel failed"}
+        out["channel"] = ch_rid
 
-        # 2. Try calling subscribe/getReadings on eventservice directly
-        for method in ("subscribe", "getReadings", "getSensorReadings",
-                       "getPeripheralReadings", "getAllReadings"):
-            try:
-                r = await self._rpc("/eventservice", method)
-                if r is not None:
-                    out[f"evtsvc.{method}"] = r
-            except Exception as e:
-                out[f"evtsvc.{method}"] = str(e)
+        # Try subscribing to different objects and polling
+        for label, sub_rid in [
+            ("port", "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"),
+            ("pdu",  PDU_PATH),
+        ]:
+            # subscribe — try different param styles
+            for params in ({"rid": sub_rid}, [sub_rid], sub_rid):
+                try:
+                    r = await self._rpc(ch_rid, "subscribe", params)
+                    out[f"subscribe.{label}"] = r
+                    break
+                except Exception as e:
+                    out[f"subscribe.{label}:{type(params).__name__}"] = str(e)
 
-        # 3. Try pollEvents on a new channel with a generated ID
-        import random
-        chan_id = random.randint(100000000, 999999999)
-        chan_url = f"/eventservice/channel-{chan_id}"
-        for method in ("pollEvents", "subscribe", "getReadings", "getAll"):
+            # poll immediately after subscribe
             try:
-                r = await self._rpc(chan_url, method)
-                if r is not None:
-                    out[f"chan.{method}"] = r
+                events = await self._rpc(ch_rid, "pollEvents")
+                if events:
+                    out[f"events_after_{label}"] = events
             except Exception as e:
-                out[f"chan.{method}"] = str(e)
+                out[f"poll_after_{label}"] = str(e)
 
         return out
 
