@@ -302,26 +302,57 @@ class RaritanPduDriver:
         return result
 
     async def list_sensors(self) -> dict:
-        """Debug: explore sensor port and connected device."""
+        """Debug: brute-force guess sensor RIDs based on known Raritan naming patterns."""
         out: dict = {}
-        try:
-            ports = await self._rpc(PDU_PATH, "getSensorPorts")
-            out["getSensorPorts"] = ports
-            for i, port in enumerate(ports or []):
-                port_rid = port.get("rid") if isinstance(port, dict) else port
-                if not port_rid:
-                    continue
-                for m in ("getConnectedDevice", "getSensors", "getMetaData",
-                          "getDevice", "getDeviceList", "getInfo"):
-                    try:
-                        r = await self._rpc(port_rid, m)
-                        if r:
-                            out[f"port{i}.{m}"] = r
-                    except Exception as e:
-                        if "RPC error" in str(e):
-                            out[f"port{i}.{m}"] = str(e)
-        except Exception as e:
-            out["error"] = str(e)
+
+        # From debug we know: port = portsensor0, chain position 1
+        # Try calling getReading on guessed sensor RIDs
+        # Pattern: /tfwopaque/{SensorClass}:{version}/{instanceName}
+        candidate_rids = [
+            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0package0temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0package0humidity0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0chain0temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0chain0humidity0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0device0temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0device0humidity0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/Port0Chain0Temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/Port0Chain0Humidity0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/peripheralSensor0temperature0",
+            "/tfwopaque/sensors.NumericSensor:4.0.7/peripheralSensor0humidity0",
+        ]
+
+        for rid in candidate_rids:
+            try:
+                r = await self._rpc(rid, "getReading")
+                if r is not None:
+                    out[rid] = r
+            except Exception as e:
+                out[rid] = str(e)
+
+        # Also try getMetaData on port chain sub-paths
+        for suffix in ("chain0", "package0", "device0", "peripheral0"):
+            rid = f"/tfwopaque/portsmodel.Port:2.0.4/portsensor0/{suffix}"
+            try:
+                r = await self._rpc(rid, "getMetaData")
+                if r:
+                    out[f"sub:{suffix}"] = r
+            except Exception as e:
+                if "RPC error" in str(e):
+                    out[f"sub:{suffix}"] = str(e)
+
+        # Try more methods on the port directly
+        port_rid = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
+        for m in ("getChain", "getDeviceChain", "getPackages", "getChainedDevices",
+                   "getPeripherals", "getConnectedChain", "getConnectedPeripheral",
+                   "getPortDevice", "getAttachedDevices", "getState", "getReadings"):
+            try:
+                r = await self._rpc(port_rid, m)
+                if r is not None:
+                    out[f"port.{m}"] = r
+            except Exception as e:
+                if "RPC error" in str(e):
+                    out[f"port.{m}"] = str(e)
+
         return out
 
     async def get_inlet(self) -> dict:
