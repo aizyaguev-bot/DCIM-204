@@ -6,6 +6,8 @@ Discovered API (reverse-engineered from Angular bundle):
   Outlet object: POST https://{ip}/tfwopaque/pdumodel.Outlet:3.0.3/outlet.{n}  (0-indexed)
   Inlet object:  POST https://{ip}/tfwopaque/pdumodel.Inlet:3.0.3/inlet.{n}    (0-indexed)
   Sensor object: POST https://{ip}<sensor_rid>  (rid returned by getSensors)
+  Event channel: POST https://{ip}/eventservice  createChannel → channel RID
+                 POST https://{ip}/eventservice/channel-{id}  subscribe / pollEvents
 
   setPowerState params: {"pstate": 1}  (1=on, 0=off)
   cyclePowerState params: {}
@@ -173,239 +175,77 @@ class RaritanPduDriver:
         return True
 
     async def get_env_sensors(self) -> dict:
-        """Returns PDU-level environmental sensors: temperature (°C), humidity (%), leak_detected (bool).
-        Uses keyword matching — never raises, returns empty dict on any failure."""
+        """Returns PDU environmental sensors via event channel subscription.
+        Uses: createChannel → subscribe (port) → pollEvents → parse events."""
         result: dict = {}
         try:
-            sensors = await self._rpc(PDU_PATH, "getSensors")
-            if not sensors or not isinstance(sensors, dict):
+            # Create event channel
+            ch = await self._rpc("/eventservice", "createChannel")
+            ch_rid = (ch or {}).get("rid") if isinstance(ch, dict) else None
+            if not ch_rid:
                 return result
 
-            TEMP_KEYS = {"temperature", "temp", "ambienttemperature", "inlettemperature"}
-            HUM_KEYS  = {"humidity", "relativehumidity", "rh"}
-            LEAK_KEYS = {"leakdetector", "leak", "waterdetection", "flood"}
+            PORT_RID = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
 
-            temp_rid = hum_rid = leak_rid = None
-            for name, sinfo in sensors.items():
-                if not isinstance(sinfo, dict) or not sinfo.get("rid"):
-                    continue
-                lname = name.lower()
-                if temp_rid is None and any(k in lname for k in TEMP_KEYS):
-                    temp_rid = sinfo["rid"]
-                elif hum_rid is None and any(k in lname for k in HUM_KEYS):
-                    hum_rid = sinfo["rid"]
-                elif leak_rid is None and any(k in lname for k in LEAK_KEYS):
-                    leak_rid = sinfo["rid"]
-
-            async def _safe_read(rid):
-                if not rid:
-                    return None
+            # Subscribe to sensor port — try different param formats
+            for params in ({"rid": PORT_RID}, [PORT_RID], PORT_RID,
+                           {"rid": PDU_PATH}, [PDU_PATH]):
                 try:
-                    r = await self._rpc(rid, "getReading")
-                    return r if isinstance(r, dict) else None
-                except Exception:
-                    return None
-
-            temp_r = await _safe_read(temp_rid)
-            hum_r  = await _safe_read(hum_rid)
-            leak_r = await _safe_read(leak_rid)
-
-            if temp_r and temp_r.get("value") is not None:
-                result["temperature"] = round(float(temp_r["value"]), 1)
-            if hum_r and hum_r.get("value") is not None:
-                result["humidity"] = round(float(hum_r["value"]), 1)
-            if leak_r and leak_r.get("value") is not None:
-                result["leak_detected"] = int(leak_r["value"]) > 0
-        except Exception:
-            pass
-        return result
-
-    async def _get_peripheral_sensor_rids(self) -> list[dict]:
-        """Walk PDU → getSensorPorts → port → getConnectedDevice → getSensors.
-        Returns list of {name, rid} for every readable environmental sensor."""
-        found = []
-        try:
-            ports = await self._rpc(PDU_PATH, "getSensorPorts")
-            if not ports:
-                return found
-            for port in (ports if isinstance(ports, list) else []):
-                port_rid = port.get("rid") if isinstance(port, dict) else port
-                if not port_rid:
-                    continue
-                try:
-                    # Try getConnectedDevice on the port
-                    dev = await self._rpc(port_rid, "getConnectedDevice")
-                    dev_rid = (dev or {}).get("rid") if isinstance(dev, dict) else dev
-                    if dev_rid:
-                        sensors = await self._rpc(dev_rid, "getSensors")
-                        if isinstance(sensors, dict):
-                            for sname, sinfo in sensors.items():
-                                if isinstance(sinfo, dict) and sinfo.get("rid"):
-                                    found.append({"name": sname, "rid": sinfo["rid"]})
-                        continue
+                    await self._rpc(ch_rid, "subscribe", params)
                 except Exception:
                     pass
-                # Fallback: try getSensors directly on the port
-                try:
-                    sensors = await self._rpc(port_rid, "getSensors")
-                    if isinstance(sensors, dict):
-                        for sname, sinfo in sensors.items():
-                            if isinstance(sinfo, dict) and sinfo.get("rid"):
-                                found.append({"name": sname, "rid": sinfo["rid"]})
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return found
 
-    async def get_env_sensors(self) -> dict:
-        """Returns PDU-level environmental sensors via sensor ports → connected device."""
-        result: dict = {}
-        try:
-            sensor_list = await self._get_peripheral_sensor_rids()
+            # Poll for events
+            events = await self._rpc(ch_rid, "pollEvents") or []
+            if not isinstance(events, list):
+                events = []
 
             TEMP_KEYS = {"temperature", "temp"}
             HUM_KEYS  = {"humidity", "relativehumidity", "rh"}
             LEAK_KEYS = {"leakdetector", "leak", "waterdetection", "flood"}
 
-            temp_rid = hum_rid = leak_rid = None
-            for s in sensor_list:
-                lname = s["name"].lower()
-                if temp_rid is None and any(k in lname for k in TEMP_KEYS):
-                    temp_rid = s["rid"]
-                elif hum_rid is None and any(k in lname for k in HUM_KEYS):
-                    hum_rid = s["rid"]
-                elif leak_rid is None and any(k in lname for k in LEAK_KEYS):
-                    leak_rid = s["rid"]
-
-            async def _safe_read(rid):
-                if not rid:
-                    return None
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                rid_lower = str(ev.get("rid", "")).lower()
+                reading = ev.get("reading") or ev
+                val = reading.get("value") if isinstance(reading, dict) else None
+                if val is None:
+                    continue
                 try:
-                    r = await self._rpc(rid, "getReading")
-                    return r if isinstance(r, dict) else None
+                    if result.get("temperature") is None and any(k in rid_lower for k in TEMP_KEYS):
+                        result["temperature"] = round(float(val), 1)
+                    elif result.get("humidity") is None and any(k in rid_lower for k in HUM_KEYS):
+                        result["humidity"] = round(float(val), 1)
+                    elif result.get("leak_detected") is None and any(k in rid_lower for k in LEAK_KEYS):
+                        result["leak_detected"] = int(val) > 0
                 except Exception:
-                    return None
-
-            temp_r = await _safe_read(temp_rid)
-            hum_r  = await _safe_read(hum_rid)
-            leak_r = await _safe_read(leak_rid)
-
-            if temp_r and temp_r.get("value") is not None:
-                result["temperature"] = round(float(temp_r["value"]), 1)
-            if hum_r and hum_r.get("value") is not None:
-                result["humidity"] = round(float(hum_r["value"]), 1)
-            if leak_r and leak_r.get("value") is not None:
-                result["leak_detected"] = int(leak_r["value"]) > 0
+                    continue
         except Exception:
             pass
         return result
 
-    async def _create_event_channel(self) -> str | None:
-        """Create an event channel and return its RID."""
+    async def list_sensors(self) -> dict:
+        """Debug: show raw events after channel subscription."""
         try:
             ch = await self._rpc("/eventservice", "createChannel")
-            return ch.get("rid") if isinstance(ch, dict) else None
-        except Exception:
-            return None
+            ch_rid = (ch or {}).get("rid") if isinstance(ch, dict) else None
+            if not ch_rid:
+                return {"error": "createChannel failed"}
 
-    async def _subscribe_and_poll(self, ch_rid: str, sub_rid: str) -> list:
-        """Subscribe to an object on a channel, poll for events, return them."""
-        try:
-            await self._rpc(ch_rid, "subscribe", {"rid": sub_rid})
-        except Exception:
-            pass
-        try:
-            events = await self._rpc(ch_rid, "pollEvents")
-            return events if isinstance(events, list) else []
-        except Exception:
-            return []
-
-    async def list_sensors(self) -> dict:
-        """Debug: create event channel, subscribe to port/PDU, poll for sensor events."""
-        out: dict = {}
-
-        ch_rid = await self._create_event_channel()
-        if not ch_rid:
-            return {"error": "createChannel failed"}
-        out["channel"] = ch_rid
-
-        # Try subscribing to different objects and polling
-        for label, sub_rid in [
-            ("port", "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"),
-            ("pdu",  PDU_PATH),
-        ]:
-            # subscribe — try different param styles
-            for params in ({"rid": sub_rid}, [sub_rid], sub_rid):
+            PORT_RID = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
+            subs = []
+            for params in ({"rid": PORT_RID}, [PORT_RID], {"rid": PDU_PATH}, [PDU_PATH]):
                 try:
                     r = await self._rpc(ch_rid, "subscribe", params)
-                    out[f"subscribe.{label}"] = r
-                    break
+                    subs.append({"params": str(params)[:60], "ok": r})
                 except Exception as e:
-                    out[f"subscribe.{label}:{type(params).__name__}"] = str(e)
+                    subs.append({"params": str(params)[:60], "err": str(e)})
 
-            # poll immediately after subscribe
-            try:
-                events = await self._rpc(ch_rid, "pollEvents")
-                if events:
-                    out[f"events_after_{label}"] = events
-            except Exception as e:
-                out[f"poll_after_{label}"] = str(e)
-
-        return out
-
-
-        # From debug we know: port = portsensor0, chain position 1
-        # Try calling getReading on guessed sensor RIDs
-        # Pattern: /tfwopaque/{SensorClass}:{version}/{instanceName}
-        # Known working pattern from PDU.getSensors: PDU0PowerSupplyStatus0
-        # Try same PDU0 prefix for port sensors
-        candidate_rids = [
-            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0Port0Temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0Port0Humidity0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0PortSensor0Temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0PortSensor0Humidity0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0ExternalSensor0Temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0ExternalSensor0Humidity0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0Peripheral0Temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/PDU0Peripheral0Humidity0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0package0temperature0",
-            "/tfwopaque/sensors.NumericSensor:4.0.7/portsensor0package0humidity0",
-        ]
-
-        for rid in candidate_rids:
-            try:
-                r = await self._rpc(rid, "getReading")
-                if r is not None:
-                    out[rid] = r
-            except Exception as e:
-                out[rid] = str(e)
-
-        # Also try getMetaData on port chain sub-paths
-        for suffix in ("chain0", "package0", "device0", "peripheral0"):
-            rid = f"/tfwopaque/portsmodel.Port:2.0.4/portsensor0/{suffix}"
-            try:
-                r = await self._rpc(rid, "getMetaData")
-                if r:
-                    out[f"sub:{suffix}"] = r
-            except Exception as e:
-                if "RPC error" in str(e):
-                    out[f"sub:{suffix}"] = str(e)
-
-        # Try more methods on the port directly
-        port_rid = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
-        for m in ("getChain", "getDeviceChain", "getPackages", "getChainedDevices",
-                   "getPeripherals", "getConnectedChain", "getConnectedPeripheral",
-                   "getPortDevice", "getAttachedDevices", "getState", "getReadings"):
-            try:
-                r = await self._rpc(port_rid, m)
-                if r is not None:
-                    out[f"port.{m}"] = r
-            except Exception as e:
-                if "RPC error" in str(e):
-                    out[f"port.{m}"] = str(e)
-
-        return out
+            events = await self._rpc(ch_rid, "pollEvents")
+            return {"channel": ch_rid, "subscriptions": subs, "events": events}
+        except Exception as e:
+            return {"error": str(e)}
 
     async def get_inlet(self) -> dict:
         """Returns inlet voltage/current/power summary."""
