@@ -7,6 +7,7 @@ import KvmCard from "./components/KvmCard";
 import PduDetail from "./pages/PduDetail";
 import KvmDetail from "./pages/KvmDetail";
 import DcimView from "./pages/DcimView";
+import SyncView from "./pages/SyncView";
 import AddDeviceModal from "./components/AddDeviceModal";
 
 export default function App() {
@@ -209,6 +210,7 @@ export default function App() {
             {[
               { id: "dashboard", label: "Dashboard" },
               { id: "dcim",      label: "DCIM" },
+              { id: "sync",      label: "Sync Map" },
             ].map(t => (
               <button key={t.id} onClick={() => setMainTab(t.id)}
                 className={`px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition ${
@@ -239,6 +241,14 @@ export default function App() {
           }}
           onRenameOpt={handleRenameOpt}
           onRefresh={loadDevices}
+        />
+      )}
+
+      {view.kind === "dashboard" && mainTab === "sync" && (
+        <SyncView
+          devices={devices}
+          pduStatuses={pduStatuses}
+          kvmStatuses={kvmStatuses}
         />
       )}
 

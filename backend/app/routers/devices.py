@@ -137,6 +137,46 @@ async def update_labels(
     return {"ok": True, "synced": list(renames.keys())}
 
 
+@router.get("/sync-map")
+async def get_sync_map(db: AsyncSession = Depends(get_db)):
+    """Cross-reference all OPT labels across PDUs and KVMs."""
+    result = await db.execute(select(Device))
+    opt_index: dict[str, dict] = {}
+    for dev in result.scalars().all():
+        labels = json.loads(dev.labels_json) if dev.labels_json else {}
+        for port, label in labels.items():
+            if not label:
+                continue
+            key = label.lower()
+            if key not in opt_index:
+                opt_index[key] = {"opt_name": label, "pdus": [], "kvms": []}
+            entry = {"device_id": dev.id, "device_name": dev.name, "port": port}
+            if dev.kind == "pdu":
+                opt_index[key]["pdus"].append(entry)
+            elif dev.kind == "kvm":
+                opt_index[key]["kvms"].append(entry)
+    return sorted(opt_index.values(), key=lambda x: x["opt_name"].lower())
+
+
+@router.patch("/direct-label", status_code=200)
+async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db)):
+    """Set a label on one device port without cascading to other devices."""
+    device_id = body.get("device_id")
+    port = str(body.get("port", "")).strip()
+    label = (body.get("label") or "").strip()
+    if not device_id or not port:
+        raise HTTPException(status_code=400, detail="device_id and port required")
+    dev = await _get_or_404(device_id, db)
+    labels = json.loads(dev.labels_json) if dev.labels_json else {}
+    if label:
+        labels[port] = label
+    else:
+        labels.pop(port, None)
+    dev.labels_json = json.dumps(labels)
+    await db.commit()
+    return {"ok": True}
+
+
 @router.post("/rename-opt", status_code=200)
 async def rename_opt(body: dict, db: AsyncSession = Depends(get_db)):
     """Rename an OPT globally across all PDUs, KVMs, and DCIM position files."""

@@ -22,6 +22,8 @@ export const api = {
   updateLabels: (id, labels)  => req("PATCH",  `/api/devices/${id}/labels`, labels),
   renameOpt:   (oldName, newName) => req("POST", "/api/devices/rename-opt", { old_name: oldName, new_name: newName }),
   deleteDevice: (id)          => req("DELETE", `/api/devices/${id}`),
+  getSyncMap:   ()             => req("GET",    "/api/devices/sync-map"),
+  setDirectLabel: (deviceId, port, label) => req("PATCH", "/api/devices/direct-label", { device_id: deviceId, port: String(port), label }),
 
   // PDU
   getPduStatus: (id)          => req("GET",    `/api/pdus/${id}/status`),
