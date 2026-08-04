@@ -85,12 +85,25 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
     return map;
   }, [kvms, kvmStatuses]);
 
-  // Build full table: every outlet from every PDU
+  // Build full table: every outlet from every PDU (including PDUs with no status yet)
   const allRows = useMemo(() => {
     const rows = [];
     pdus.forEach(pdu => {
       const status = pduStatuses[pdu.id];
-      if (!status?.outlets) return;
+      if (!status?.outlets?.length) {
+        // PDU exists but no status yet — add a placeholder row so the group appears
+        rows.push({
+          pdu_id:        pdu.id,
+          pdu_name:      pdu.name,
+          outlet_number: null,
+          outlet_state:  null,
+          outlet_watts:  0,
+          label:         "",
+          kvm:           null,
+          noStatus:      true,
+        });
+        return;
+      }
       status.outlets.forEach(outlet => {
         const label = outlet.label || "";
         rows.push({
@@ -101,6 +114,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
           outlet_watts:  outlet.watts || 0,
           label,
           kvm: label ? (kvmByLabel[label.toLowerCase()] || null) : null,
+          noStatus:      false,
         });
       });
     });
@@ -109,11 +123,12 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
 
   const filtered = useMemo(() => {
     let result = allRows;
-    if (filter === "assigned") result = result.filter(r => r.label);
-    if (filter === "empty")    result = result.filter(r => !r.label);
+    if (filter === "assigned") result = result.filter(r => r.noStatus || r.label);
+    if (filter === "empty")    result = result.filter(r => r.noStatus || !r.label);
     if (search.trim()) {
       const s = search.toLowerCase();
       result = result.filter(r =>
+        r.noStatus ||
         r.label.toLowerCase().includes(s) ||
         r.pdu_name.toLowerCase().includes(s) ||
         String(r.outlet_number).includes(s)
@@ -122,8 +137,8 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
     return result;
   }, [allRows, search, filter]);
 
-  const totalAssigned = allRows.filter(r => r.label).length;
-  const totalEmpty    = allRows.filter(r => !r.label).length;
+  const totalAssigned = allRows.filter(r => !r.noStatus && r.label).length;
+  const totalEmpty    = allRows.filter(r => !r.noStatus && !r.label).length;
 
   const editKey = (pdu_id, outlet_number) => `${pdu_id}:${outlet_number}`;
 
@@ -241,6 +256,15 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
                       </td>
                     </tr>
                   );
+                }
+
+                if (row.noStatus) {
+                  elements.push(
+                    <tr key={`ns-${row.pdu_id}`} className="opacity-40">
+                      <td colSpan={7} className="px-4 py-2 text-xs text-zinc-500 italic">לא נטען עדיין…</td>
+                    </tr>
+                  );
+                  return elements;
                 }
 
                 const key = editKey(row.pdu_id, row.outlet_number);
