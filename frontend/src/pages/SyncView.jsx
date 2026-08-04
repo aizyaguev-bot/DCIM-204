@@ -113,7 +113,16 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
       const s = search.toLowerCase();
       result = result.filter(r => r.opt_name.toLowerCase().includes(s));
     }
-    return result;
+    return [...result].sort((a, b) => {
+      const aPdu  = a.pdus[0];
+      const bPdu  = b.pdus[0];
+      if (!aPdu && !bPdu) return a.opt_name.localeCompare(b.opt_name);
+      if (!aPdu) return 1;
+      if (!bPdu) return -1;
+      const nameComp = aPdu.device_name.localeCompare(bPdu.device_name);
+      if (nameComp !== 0) return nameComp;
+      return parseInt(aPdu.port, 10) - parseInt(bPdu.port, 10);
+    });
   }, [rows, search, filter]);
 
   async function handleSave(optName, draft) {
@@ -210,28 +219,44 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/40">
-              {filtered.map(row => {
-                if (editing === row.opt_name) {
-                  return (
-                    <EditRow
-                      key={row.opt_name}
-                      entry={row}
-                      pdus={pdus}
-                      kvms={kvms}
-                      pduStatuses={pduStatuses}
-                      kvmStatuses={kvmStatuses}
-                      saving={saving}
-                      onSave={draft => handleSave(row.opt_name, draft)}
-                      onCancel={() => setEditing(null)}
-                    />
-                  );
-                }
+              {(() => {
+                let lastPduName = null;
+                return filtered.flatMap(row => {
+                  const pdu      = row.pdus[0];
+                  const kvm      = row.kvms[0];
+                  const isLinked = pdu && kvm;
+                  const pduGroup = pdu?.device_name || "— No PDU —";
+                  const elements = [];
 
-                const pdu    = row.pdus[0];
-                const kvm    = row.kvms[0];
-                const isLinked = pdu && kvm;
+                  if (pduGroup !== lastPduName) {
+                    lastPduName = pduGroup;
+                    elements.push(
+                      <tr key={`group-${pduGroup}`} className="bg-zinc-900/70">
+                        <td colSpan={6} className="px-4 py-1.5 text-[11px] font-semibold text-zinc-400 uppercase tracking-widest">
+                          {pduGroup}
+                        </td>
+                      </tr>
+                    );
+                  }
 
-                return (
+                  if (editing === row.opt_name) {
+                    elements.push(
+                      <EditRow
+                        key={row.opt_name}
+                        entry={row}
+                        pdus={pdus}
+                        kvms={kvms}
+                        pduStatuses={pduStatuses}
+                        kvmStatuses={kvmStatuses}
+                        saving={saving}
+                        onSave={draft => handleSave(row.opt_name, draft)}
+                        onCancel={() => setEditing(null)}
+                      />
+                    );
+                    return elements;
+                  }
+
+                  elements.push(
                   <tr key={row.opt_name} className="hover:bg-zinc-800/20 transition-colors">
                     <td className="px-4 py-3">
                       <span className="font-mono text-sm text-zinc-100">{row.opt_name}</span>
@@ -241,8 +266,8 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-zinc-300 text-sm">{pdu?.device_name || <span className="text-zinc-600">—</span>}</td>
-                    <td className="px-4 py-3 text-zinc-400 text-sm font-mono">{pdu ? `#${pdu.port}` : <span className="text-zinc-700">—</span>}</td>
+                    <td className="px-4 py-3 text-zinc-500 text-sm">{pdu?.device_name || <span className="text-zinc-700">—</span>}</td>
+                    <td className="px-4 py-3 text-zinc-300 text-sm font-mono">{pdu ? `#${pdu.port}` : <span className="text-zinc-700">—</span>}</td>
                     <td className="px-4 py-3 text-zinc-300 text-sm">{kvm?.device_name || <span className="text-zinc-600">—</span>}</td>
                     <td className="px-4 py-3 text-zinc-400 text-sm font-mono">{kvm ? `#${kvm.port}` : <span className="text-zinc-700">—</span>}</td>
                     <td className="px-4 py-3 text-right">
@@ -254,8 +279,10 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
                       </button>
                     </td>
                   </tr>
-                );
-              })}
+                  );
+                  return elements;
+                });
+              })()}
               {filtered.length === 0 && (
                 <tr>
                   <td colSpan={6} className="text-center py-12 text-zinc-500">
