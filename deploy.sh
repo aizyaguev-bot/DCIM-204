@@ -6,8 +6,9 @@ cd "$(dirname "$0")"
 echo "=== Pulling latest code ==="
 git pull
 
-echo "=== Installing test dependencies ==="
+echo "=== Installing backend dependencies ==="
 cd backend
+pip install -q -r requirements.txt
 pip install -q -r requirements-test.txt
 cd ..
 
