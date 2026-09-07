@@ -51,7 +51,7 @@
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
   const controls = new THREE.OrbitControls(camera, canvas);
   controls.enableDamping = true; controls.dampingFactor = 0.1;
-  controls.maxPolarAngle = Math.PI / 2 - 0.01; controls.minDistance = 0.3; controls.maxDistance = 30;
+  controls.maxPolarAngle = Math.PI / 2 - 0.01; controls.minDistance = 0.3; controls.maxDistance = 9;
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
   controls.screenSpacePanning = true;
 
@@ -846,7 +846,7 @@
       const devices = await api('/api/devices/');
       const [slots, order, sw, owners, rackItems, chillers, rov] = await Promise.all(['/api/rack-slots', '/api/rack-positions', '/api/switch-assignments', '/api/opt-owners', '/api/rack-items', '/api/chillers', '/api/rack-overrides'].map(p => api(p).catch(() => ({}))));
       Object.assign(S.live, { connected: true, devices, rackSlots: slots || {}, rackOrder: order || {}, sw: sw || {}, owners: owners || {}, rackItems: rackItems || {}, chillers: chillers || null, rackOverrides: rov || {}, error: null });
-      pill('online', `Live · ${devices.filter(d => d.kind === 'pdu').length} PDU · ${devices.filter(d => d.kind === 'kvm').length} KVM`);
+      pill('online', `${window.LAB_DEMO ? 'DEMO (simulated)' : 'Live'} · ${devices.filter(d => d.kind === 'pdu').length} PDU · ${devices.filter(d => d.kind === 'kvm').length} KVM`);
       $('#sStatus').textContent = `Connected — ${devices.length} devices.`;
       computeModel(); buildItems(); await refreshStatuses();
       if (S.live.timer) clearInterval(S.live.timer);
@@ -912,11 +912,22 @@
   $('#sbDiscard').onclick = () => { if (confirm('Discard all unsaved edits and reload the saved lab-data.json?')) { LS.set('draft', null); location.reload(); } };
   $('#btnPlan').onclick = () => window.open('floorplan.svg', '_blank');
 
+  // ───────────────────────────────────────────────────────────── keep camera + target inside the room
+  const _clampV = new THREE.Vector3();
+  function clampToRoom() {
+    if (!S.data) return; const { width: W, depth: D, height: H } = S.data.room; const m = 0.25;
+    const cl = v => { v.x = Math.min(-m, Math.max(-W + m, v.x)); v.z = Math.min(D - m, Math.max(m, v.z)); };
+    _clampV.copy(camera.position); cl(_clampV); _clampV.y = Math.min(12, Math.max(0.35, _clampV.y));
+    if (!_clampV.equals(camera.position)) camera.position.copy(_clampV);
+    _clampV.copy(controls.target); cl(_clampV); _clampV.y = Math.min(H, Math.max(0.05, _clampV.y));
+    if (!_clampV.equals(controls.target)) controls.target.copy(_clampV);
+  }
+
   // ───────────────────────────────────────────────────────────── camera views
   function roomCenter() { const { width: W, depth: D } = S.data.room; return new THREE.Vector3(W / 2, 0.9, D / 2); }
   function tweenCamera(pos, target, ms = 700) { S.tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() }; }
   const VIEWS = {
-    orbit() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(-2.6), 4.6, -2.8), new THREE.Vector3(WX(W / 2), 0.8, D / 2)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
+    orbit() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(0.6), 2.55, 0.45), new THREE.Vector3(WX(W / 2), 0.9, D * 0.55)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
     top() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 11.5, D / 2 - 0.001), new THREE.Vector3(WX(W / 2), 0, D / 2)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
     eye() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 1.65, 0.35), new THREE.Vector3(WX(W / 2), 1.35, D * 0.7)); controls.maxPolarAngle = Math.PI / 2 + 0.35; },
   };
@@ -1010,7 +1021,7 @@
     if (S.kiosk) { const idle = performance.now() - S.lastInput; controls.autoRotate = idle > 45000 && !S.selected; controls.autoRotateSpeed = 0.6; } else controls.autoRotate = false;
     if (S.tween) { const k = Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms); const e = 1 - Math.pow(1 - k, 3); camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); if (k >= 1) S.tween = null; }
     const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
-    controls.update(); renderer.render(scene, camera); updateLabels();
+    controls.update(); clampToRoom(); renderer.render(scene, camera); updateLabels();
   }
 
 
@@ -1141,22 +1152,35 @@
     return { watts, amps, volts: n ? volts / n : 0, cap: amps / (RATED_AMPS * pdus.length), on, total, temp, hum, leak, reachable: reach > 0, pduCount: pdus.length };
   }
   function updateTelemetry() {
+    let tSum = 0, tN = 0, hSum = 0, hN = 0, tMin = null, tMax = null, leaks = [], kwTot = 0;
     for (const rec of S.recs.values()) {
       if (rec.cat !== 'setup' || !rec.telem) continue;
       const t = rackTelemetry(rec.def);
-      if (!t) { rec.telem.innerHTML = `<span class="t-muted">${S.live.connected ? (rec.def.dcimRack ? 'no PDU in DCIM' : 'not mapped to a DCIM rack') : 'no live data'}</span>`; rec.telem.className = 'telem'; rec.heatPatch.visible = false; rec.leakRing.visible = false; continue; }
-      if (t.loading) { rec.telem.innerHTML = '<span class="t-muted">loading…</span>'; continue; }
-      if (!t.reachable) { rec.telem.innerHTML = '<span class="t-bad">PDU unreachable</span>'; rec.telem.className = 'telem bad'; rec.heatPatch.visible = false; rec.leakRing.visible = false; continue; }
+      if (!t || t.loading || !t.reachable) {
+        rec.telem.className = 'telem dim'; rec.telem.innerHTML = `<span class="t-muted">${!t ? (S.live.connected ? (rec.def.dcimRack ? 'no PDU' : 'unmapped') : '—') : t.loading ? '…' : 'PDU offline'}</span>`;
+        rec.heatPatch.visible = false; rec.leakRing.visible = false; continue;
+      }
+      kwTot += t.watts;
+      if (t.temp != null) { tSum += t.temp; tN++; tMin = tMin == null ? t.temp : Math.min(tMin, t.temp); tMax = tMax == null ? t.temp : Math.max(tMax, t.temp); }
+      if (t.hum != null) { hSum += t.hum; hN++; }
+      if (t.leak) leaks.push(rec.def.dcimRack || rec.id);
       const capPct = Math.round(t.cap * 100); const capCls = t.cap > .95 ? 'bad' : t.cap > .8 ? 'warn' : 'ok';
-      const tCls = t.temp == null ? '' : t.temp > 35 ? 'bad' : t.temp > 24 ? 'warn' : 'ok';
-      rec.telem.className = 'telem' + (t.leak ? ' leak' : capCls === 'bad' || tCls === 'bad' ? ' bad' : capCls === 'warn' || tCls === 'warn' ? ' warn' : '');
-      rec.telem.innerHTML = `
-        <div class="t-row"><b class="t-kw">${(t.watts / 1000).toFixed(2)}</b><span class="t-u">kW</span><span class="t-sep"></span><b>${t.volts.toFixed(0)}</b><span class="t-u">V</span><span class="t-sep"></span><b>${t.amps.toFixed(1)}</b><span class="t-u">A</span></div>
-        <div class="t-cap ${capCls}"><i style="width:${Math.min(100, capPct)}%"></i><span>${capPct}% of ${RATED_AMPS * t.pduCount} A · ${t.on}/${t.total} on</span></div>
-        <div class="t-row t-env">${t.temp != null ? `<span class="t-${tCls}">🌡 ${t.temp.toFixed(1)}°C</span>` : '<span class="t-muted">🌡 —</span>'}${t.hum != null ? `<span>💧 ${t.hum.toFixed(0)}%</span>` : ''}<span class="${t.leak ? 't-leak' : 't-muted'}">${t.leak ? '⚠ LEAK' : '● dry'}</span></div>`;
+      rec.telem.className = 'telem' + (t.leak ? ' leak' : capCls === 'bad' ? ' bad' : capCls === 'warn' ? ' warn' : '');
+      rec.telem.innerHTML = `<div class="t-row"><b class="t-kw">${(t.watts / 1000).toFixed(2)}</b><span class="t-u">kW</span><span class="t-sep"></span><span class="t-v">${t.volts.toFixed(0)} V</span><span class="t-sep"></span><span class="t-v">${t.amps.toFixed(1)} A</span>${t.leak ? '<span class="t-leak">LEAK</span>' : ''}</div><div class="t-cap ${capCls}" title="${capPct}% of ${RATED_AMPS * t.pduCount} A · ${t.on}/${t.total} outlets on"><i style="width:${Math.min(100, capPct)}%"></i></div>`;
       rec.heatPatch.visible = S.heat; rec.heatPatch.material.color.set(heatColor(t.temp)); rec.heatPatch.material.emissive.set(heatColor(t.temp));
       rec.leakRing.visible = !!t.leak;
     }
+    // one environment window for the whole lab (average of all PDU sensors)
+    const env = $('#envPanel'); if (!env) return;
+    if (!S.live.connected || (tN === 0 && hN === 0 && !leaks.length)) { env.classList.add('hidden'); return; }
+    const tAvg = tN ? tSum / tN : null, hAvg = hN ? hSum / hN : null;
+    const tCls = tAvg == null ? '' : tAvg > 35 ? 'bad' : tAvg > 24 ? 'warn' : 'ok';
+    env.className = 'envpanel' + (leaks.length ? ' leak' : tCls === 'bad' ? ' bad' : tCls === 'warn' ? ' warn' : '');
+    env.innerHTML = `<div class="e-title">Lab environment <small>avg of ${tN || hN} sensor${(tN || hN) === 1 ? '' : 's'}</small></div>
+      <div class="e-row"><span class="e-ic">🌡</span><b class="e-${tCls}">${tAvg == null ? '—' : tAvg.toFixed(1) + '°C'}</b>${tN > 1 ? `<small>${tMin.toFixed(1)}–${tMax.toFixed(1)}</small>` : ''}</div>
+      <div class="e-row"><span class="e-ic">💧</span><b>${hAvg == null ? '—' : hAvg.toFixed(0) + '%'}</b><small>humidity</small></div>
+      <div class="e-row"><span class="e-ic">${leaks.length ? '⚠' : '●'}</span><b class="${leaks.length ? 'e-bad' : 'e-ok'}">${leaks.length ? 'LEAK · ' + leaks.join(', ') : 'no leaks'}</b></div>
+      <div class="e-row e-foot"><small>${(kwTot / 1000).toFixed(2)} kW total</small></div>`;
   }
   $('#tHeat').onclick = () => { S.heat = !S.heat; $('#tHeat').classList.toggle('active', S.heat); updateTelemetry(); };
 
@@ -1189,7 +1213,7 @@
     $('#tHeat').classList.toggle('active', S.heat); document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit';
     resize(); VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; $('#vOrbit').classList.add('active');
     animate();
-    const auto = S.settings.url || location.protocol.startsWith('http'); // same-origin when served from the backend
+    const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
     if (S.settings.url) connect(); else if (auto) { api('/api/version').then(() => connect()).catch(() => {}); }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …

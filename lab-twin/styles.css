@@ -352,14 +352,25 @@ body.kiosk .rackbar button small { font-size: 12px; }
 body.kiosk .zb { width: 60px; height: 60px; font-size: 26px; }
 body.kiosk .rackbar { bottom: 24px; }
 
-/* floating telemetry card above each rack */
-.telem { position: absolute; transform: translate(-50%, -100%); pointer-events: auto; cursor: pointer; min-width: 168px; padding: 6px 9px; border-radius: 10px; background: rgba(9,9,11,.86); border: 1px solid rgba(118,185,0,.35); color: var(--z-100); font-family: var(--mono); font-size: 11px; line-height: 1.35; backdrop-filter: blur(4px); box-shadow: 0 6px 20px rgba(0,0,0,.45); }
-.telem.warn { border-color: rgba(251,191,36,.6); } .telem.bad { border-color: rgba(244,63,94,.7); } .telem.leak { border-color: #f43f5e; box-shadow: 0 0 0 2px rgba(244,63,94,.35), 0 0 18px rgba(244,63,94,.6); animation: pulse 1.2s infinite; }
-.telem .t-row { display: flex; align-items: baseline; gap: 4px; white-space: nowrap; }
-.telem b { font-weight: 700; color: #fff; } .telem .t-kw { font-size: 15px; color: var(--nv-300); }
-.telem .t-u { color: var(--z-500); font-size: 9.5px; } .telem .t-sep { width: 6px; }
-.telem .t-cap { position: relative; height: 12px; margin: 4px 0 3px; background: rgba(39,39,42,.9); border-radius: 4px; overflow: hidden; }
-.telem .t-cap i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--nv-400); } .telem .t-cap.warn i { background: var(--amber); } .telem .t-cap.bad i { background: var(--rose); }
-.telem .t-cap span { position: absolute; inset: 0; font-size: 8.5px; line-height: 12px; text-align: center; color: #fff; text-shadow: 0 0 3px #000; letter-spacing: .02em; }
-.telem .t-env { gap: 8px; font-size: 10.5px; } .telem .t-ok { color: #a7f3d0; } .telem .t-warn { color: #fde68a; } .telem .t-bad { color: #fecdd3; } .telem .t-leak { color: #fff; background: #e11d48; padding: 0 5px; border-radius: 4px; font-weight: 700; } .telem .t-muted { color: var(--z-500); }
-body.kiosk .telem { font-size: 13px; min-width: 210px; padding: 8px 11px; } body.kiosk .telem .t-kw { font-size: 19px; } body.kiosk .telem .t-cap { height: 15px; } body.kiosk .telem .t-cap span { font-size: 10px; line-height: 15px; } body.kiosk .telem .t-env { font-size: 12.5px; }
+/* floating telemetry card above each rack (compact) */
+.telem { position: absolute; transform: translate(-50%, -100%); pointer-events: auto; cursor: pointer; min-width: 118px; padding: 3px 7px 4px; border-radius: 7px; background: rgba(9,9,11,.62); border: 1px solid rgba(255,255,255,.10); color: var(--z-200); font-family: var(--mono); font-size: 10px; line-height: 1.3; backdrop-filter: blur(3px); opacity: .85; transition: opacity .15s; }
+.telem:hover { opacity: 1; border-color: rgba(118,185,0,.5); }
+.telem.dim { opacity: .45; min-width: 0; }
+.telem.warn { border-color: rgba(251,191,36,.55); } .telem.bad { border-color: rgba(244,63,94,.7); opacity: 1; } .telem.leak { border-color: #f43f5e; box-shadow: 0 0 14px rgba(244,63,94,.55); opacity: 1; animation: pulse 1.2s infinite; }
+.telem .t-row { display: flex; align-items: baseline; gap: 3px; white-space: nowrap; }
+.telem .t-kw { font-weight: 700; font-size: 12.5px; color: var(--nv-300); } .telem .t-u { color: var(--z-500); font-size: 9px; } .telem .t-sep { width: 5px; } .telem .t-v { color: var(--z-300); }
+.telem .t-cap { height: 3px; margin-top: 3px; background: rgba(255,255,255,.12); border-radius: 2px; overflow: hidden; }
+.telem .t-cap i { display: block; height: 100%; background: var(--nv-400); } .telem .t-cap.warn i { background: var(--amber); } .telem .t-cap.bad i { background: var(--rose); }
+.telem .t-leak { margin-left: 6px; color: #fff; background: #e11d48; padding: 0 5px; border-radius: 3px; font-weight: 700; font-size: 9px; } .telem .t-muted { color: var(--z-500); }
+body.kiosk .telem { font-size: 12px; min-width: 150px; padding: 5px 9px; } body.kiosk .telem .t-kw { font-size: 15px; } body.kiosk .telem .t-cap { height: 4px; }
+
+/* single lab-wide environment window (average temperature / humidity / leak) */
+.envpanel { position: absolute; right: 12px; top: 64px; z-index: 6; min-width: 190px; padding: 10px 12px; border-radius: 12px; background: rgba(9,9,11,.82); border: 1px solid var(--z-800); color: var(--z-100); backdrop-filter: blur(6px); font-size: 12px; }
+.envpanel.warn { border-color: rgba(251,191,36,.55); } .envpanel.bad { border-color: rgba(244,63,94,.7); } .envpanel.leak { border-color: #f43f5e; box-shadow: 0 0 16px rgba(244,63,94,.45); }
+.envpanel .e-title { font-size: 9.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--z-500); margin-bottom: 6px; } .envpanel .e-title small { display: block; font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 9.5px; margin-top: 1px; }
+.envpanel .e-row { display: flex; align-items: baseline; gap: 8px; margin: 3px 0; } .envpanel .e-ic { width: 16px; text-align: center; }
+.envpanel b { font-family: var(--mono); font-size: 18px; font-weight: 700; color: #fff; } .envpanel small { color: var(--z-500); font-size: 10.5px; }
+.envpanel .e-ok { color: #a7f3d0; } .envpanel .e-warn { color: #fde68a; } .envpanel .e-bad { color: #fecdd3; font-size: 13px; }
+.envpanel .e-foot { border-top: 1px solid rgba(39,39,42,.8); margin-top: 6px; padding-top: 5px; }
+body.editmode .envpanel, body.moving .envpanel { top: 64px; }
+body.kiosk .envpanel { top: 76px; min-width: 240px; font-size: 14px; } body.kiosk .envpanel b { font-size: 24px; }
