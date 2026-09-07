@@ -53,7 +53,7 @@
   controls.enableDamping = true; controls.dampingFactor = 0.1;
   controls.maxPolarAngle = Math.PI / 2 - 0.01; controls.minDistance = 0.3; controls.maxDistance = 9;
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-  controls.screenSpacePanning = true;
+  controls.screenSpacePanning = false; controls.panSpeed = 0.7; controls.rotateSpeed = 0.8;
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x50555c, 1.0));
   const sun = new THREE.DirectionalLight(0xffffff, 0.55); sun.position.set(-6, 9, 4); scene.add(sun);
@@ -918,14 +918,33 @@
   $('#btnPlan').onclick = () => window.open('floorplan.svg', '_blank');
 
   // ───────────────────────────────────────────────────────────── keep camera + target inside the room
-  const _clampV = new THREE.Vector3();
+  const _clampV = new THREE.Vector3(), _off = new THREE.Vector3();
+  // Rigid clamp: the target is kept inside the room and the camera follows by the SAME correction (so the view never
+  // swings when you hit a wall); if the camera itself would end up outside, it slides toward the target along the
+  // current view direction instead of being pushed sideways.
   function clampToRoom() {
     if (!S.data) return; const { width: W, depth: D, height: H } = S.data.room; const m = 0.25;
-    const cl = v => { v.x = Math.min(-m, Math.max(-W + m, v.x)); v.z = Math.min(D - m, Math.max(m, v.z)); };
-    _clampV.copy(camera.position); cl(_clampV); _clampV.y = Math.min(12, Math.max(0.35, _clampV.y));
-    if (!_clampV.equals(camera.position)) camera.position.copy(_clampV);
-    _clampV.copy(controls.target); cl(_clampV); _clampV.y = Math.min(H, Math.max(0.05, _clampV.y));
+    const lo = { x: -W + m, y: 0.35, z: m }, hi = { x: -m, y: 12, z: D - m };
+    _off.copy(camera.position).sub(controls.target);
+    _clampV.copy(controls.target);
+    _clampV.x = Math.min(hi.x, Math.max(lo.x, _clampV.x)); _clampV.z = Math.min(hi.z, Math.max(lo.z, _clampV.z)); _clampV.y = Math.min(H, Math.max(0.05, _clampV.y));
     if (!_clampV.equals(controls.target)) controls.target.copy(_clampV);
+    // largest s in (0,1] with target + s*off inside the box
+    let s = 1;
+    for (const k of ['x', 'y', 'z']) { const o = _off[k]; if (Math.abs(o) < 1e-9) continue; const lim = o > 0 ? hi[k] : lo[k]; const t = (lim - controls.target[k]) / o; if (t < s) s = Math.max(0, t); }
+    const minS = Math.min(1, controls.minDistance / Math.max(1e-6, _off.length()));
+    s = Math.max(s, minS);
+    _clampV.copy(controls.target).addScaledVector(_off, s);
+    for (const k of ['x', 'y', 'z']) _clampV[k] = Math.min(hi[k], Math.max(lo[k], _clampV[k])); // last resort (target pressed against a wall)
+    if (!_clampV.equals(camera.position)) camera.position.copy(_clampV);
+  }
+  // pan the whole view (camera + target together) along the floor, relative to where you look
+  function panBy(dx, dz) {
+    const fwd = controls.target.clone().sub(camera.position); fwd.y = 0; if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
+    const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+    const step = Math.max(0.35, camera.position.distanceTo(controls.target) * 0.25);
+    const d = right.multiplyScalar(dx * step).add(fwd.multiplyScalar(dz * step));
+    tweenCamera(camera.position.clone().add(d), controls.target.clone().add(d), 250);
   }
 
   // ───────────────────────────────────────────────────────────── camera views
@@ -964,9 +983,36 @@
 
   // ───────────────────────────────────────────────────────────── picking
   let downPos = null;
-  canvas.addEventListener('pointerdown', e => { downPos = [e.clientX, e.clientY]; S.lastInput = performance.now(); });
+  // ── drag & drop (Edit mode): press a device and drag it onto another shelf / rack / storage
+  let drag = null;
+  function draggable(rec) { return rec && rec.cat === 'item' && rec.meshes.length && (S.data.items.some(x => x.id === rec.id) || movesViaDcim(rec.item)); }
+  function dragUpdate(e, id) {
+    const hit = pickAt(e); const t = hit ? resolveMoveTarget(hit) : null; const name = S.recs.get(id)?.def.name || id;
+    if ((t ? t.id : null) !== S.hover) setHover(t ? t.id : null);
+    $('#moveText').textContent = t ? `Drop ${name} on ${t.id}${t.cat === 'shelf' ? ' · L' + t.level : ''}` : `Drag ${name} onto a shelf, rack or storage`;
+    return t;
+  }
+  function dragEnd(e, drop) {
+    const d = drag; drag = null; if (!d || !d.active) return false;
+    controls.enabled = true; canvas.classList.remove('dragging');
+    const t = drop ? dragUpdate(e, d.id) : null;
+    if (t) finishMove(t); else { cancelMove(); if (drop) toast('Dropped outside a shelf — nothing moved', 'err'); }
+    return true;
+  }
+  canvas.addEventListener('pointerdown', e => {
+    downPos = [e.clientX, e.clientY]; S.lastInput = performance.now();
+    if (S.editMode && !S.moveItem && e.button === 0) { const hit = pickAt(e); const rec = hit && S.recs.get(hit.object.userData.id); drag = draggable(rec) ? { id: rec.id, x: e.clientX, y: e.clientY, active: false, pid: e.pointerId } : null; }
+  });
+  window.addEventListener('pointermove', e => {
+    if (!drag) return;
+    if (!drag.active) { if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 8) return; drag.active = true; controls.enabled = false; canvas.classList.add('dragging'); startMove(drag.id); }
+    dragUpdate(e, drag.id);
+  });
+  window.addEventListener('pointerup', e => { if (drag && drag.active) { dragEnd(e, true); downPos = null; } else if (drag) drag = null; });
+  window.addEventListener('pointercancel', e => { dragEnd(e, false); });
   ['pointermove', 'wheel', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, () => { S.lastInput = performance.now(); }, { passive: true }));
   canvas.addEventListener('pointerup', e => {
+    if (drag && drag.active) return; // handled by the window-level drop handler
     if (!downPos) return; const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]); downPos = null; if (moved > (e.pointerType === 'touch' ? 14 : 6)) return;
     const hit = pickAt(e);
     if (S.moveItem) {
@@ -1298,6 +1344,8 @@
   function zoomBy(f) { const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
   function rotateBy(a) { const dir = camera.position.clone().sub(controls.target); dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), a); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 300); }
   $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4); $('#zL').onclick = () => rotateBy(Math.PI / 8); $('#zR').onclick = () => rotateBy(-Math.PI / 8);
+  $('#pL').onclick = () => panBy(-1, 0); $('#pR').onclick = () => panBy(1, 0); $('#pF').onclick = () => panBy(0, 1); $('#pB').onclick = () => panBy(0, -1);
+  window.addEventListener('keydown', e => { if (e.target.matches('input,textarea,select')) return; const k = e.key; if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1); else return; e.preventDefault(); });
 
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }

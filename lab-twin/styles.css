@@ -347,6 +347,9 @@ body.embed .search-wrap { margin-left: 0; }
 .zoombar { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 5; }
 .zb { width: 44px; height: 44px; border-radius: 10px; background: rgba(9,9,11,.82); border: 1px solid var(--z-700); color: #fff; font-size: 20px; cursor: pointer; backdrop-filter: blur(6px); }
 .zb:hover { border-color: var(--nv-400); }
+.zb-sep { height: 6px; }
+#c.dragging { cursor: grabbing !important; }
+body.editmode #c { cursor: grab; }
 body.kiosk .rackbar button { padding: 12px 16px; font-size: 15px; min-height: 56px; }
 body.kiosk .rackbar button small { font-size: 12px; }
 body.kiosk .zb { width: 60px; height: 60px; font-size: 26px; }
