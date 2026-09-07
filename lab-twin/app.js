@@ -36,7 +36,7 @@
     settings: LS.get('settings', { url: '', pass: '', poll: true }),
     live: { connected: false, devices: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
-    embed: /[?&]embed=1/.test(location.search), editMode: LS.get('editMode', false), kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
+    heat: LS.get('heat', true), embed: /[?&]embed=1/.test(location.search), editMode: LS.get('editMode', false), kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
   };
@@ -217,6 +217,13 @@
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: su.id, cat: 'setup', def: su, group: g, meshes, edges: eds, status, conf: su.confidence, zone: su.zone, setup: su.id, anchor: localToWorld(g, 0, h + 0.12, 0), tpl });
     makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span>${su.id}<small>${dcimRackOf(su) || 'no DCIM rack'} · ${su.name.split('—')[0].trim()}</small>`);
+    // floating telemetry card (power / voltage / current / capacity / temp / humidity / leak) — filled by updateTelemetry()
+    const tel = document.createElement('div'); tel.className = 'telem'; tel.dataset.id = su.id; tel.innerHTML = '<span class="t-muted">no live data</span>';
+    tel.addEventListener('click', e => { e.stopPropagation(); select(su.id, { fly: true }); }); labelsLayer.appendChild(tel);
+    rec.telem = tel; rec.telemAnchor = localToWorld(g, 0, h + 0.55, 0);
+    // heat-map patch under the rack + leak ring (hidden until live data / toggle)
+    const patch = box(dd + 0.3, 0.012, w + 0.3, mat('#22c55e', { opacity: .45, unique: true, rough: 1, emissive: '#22c55e', emissiveIntensity: .35 }), 0, 0.012, 0); patch.visible = false; g.add(patch); rec.heatPatch = patch;
+    const ring = new THREE.Mesh(new THREE.RingGeometry(Math.max(dd, w) * 0.55, Math.max(dd, w) * 0.62, 48), new THREE.MeshBasicMaterial({ color: 0xf43f5e, transparent: true, opacity: .8, side: THREE.DoubleSide })); ring.rotation.x = -Math.PI / 2; ring.position.y = 0.02; ring.visible = false; g.add(ring); rec.leakRing = ring;
 
     // shelves
     shelvesDefs.forEach(sh => {
@@ -379,7 +386,7 @@
       const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${it.live.watts ? ' · ' + Math.round(it.live.watts) + 'W' : ''}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : (it.typeLabel || it.type);
       makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${it.type === 'opt' ? it.name : it.id}<small>${it.type === 'opt' ? it.id + ' · ' + sub : sub}</small>`);
     });
-    applyFilters();
+    applyFilters(); updateTelemetry();
     if (S.selected && !S.recs.has(S.selected)) closeDetail();
     else if (S.selected) select(S.selected, { keepCamera: true });
   }
@@ -813,7 +820,7 @@
 
   function rebuildAll() {
     // setups/shelves colors follow overrides → rebuild static + items
-    for (const [id, r] of [...S.recs]) { if (r.label) r.label.remove(); S.recs.delete(id); }
+    for (const [id, r] of [...S.recs]) { if (r.label) r.label.remove(); if (r.telem) r.telem.remove(); S.recs.delete(id); }
     S.pickables = []; disposeGroup(staticGroup); disposeGroup(wallsGroup); disposeGroup(zonesGroup); disposeGroup(itemsGroup);
     buildStatic(); computeModel(); buildItems(); refreshLabelsStatic();
   }
@@ -970,6 +977,14 @@
   function updateLabels() {
     const r = canvas.getBoundingClientRect(); const camPos = camera.position;
     for (const rec of S.recs.values()) {
+      const el = rec.telem; if (!el) continue;
+      const show = !rec.filtered && S.labelMode !== 'none' && (S.live.connected || S.selected === rec.id);
+      if (!show) { el.style.display = 'none'; continue; }
+      tmpV.copy(rec.telemAnchor); const dist = tmpV.distanceTo(camPos); tmpV.project(camera);
+      if (tmpV.z > 1 || Math.abs(tmpV.x) > 1.1 || Math.abs(tmpV.y) > 1.1) { el.style.display = 'none'; continue; }
+      el.style.display = ''; el.style.left = ((tmpV.x + 1) / 2 * r.width) + 'px'; el.style.top = ((1 - tmpV.y) / 2 * r.height) + 'px'; el.style.opacity = dist > 16 ? .6 : 1; el.style.zIndex = Math.max(2, Math.round(110 - dist * 3));
+    }
+    for (const rec of S.recs.values()) {
       const el = rec.label; if (!el) continue;
       let show = !rec.filtered || S.selected === rec.id;
       if (show) {
@@ -994,6 +1009,7 @@
     requestAnimationFrame(animate);
     if (S.kiosk) { const idle = performance.now() - S.lastInput; controls.autoRotate = idle > 45000 && !S.selected; controls.autoRotateSpeed = 0.6; } else controls.autoRotate = false;
     if (S.tween) { const k = Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms); const e = 1 - Math.pow(1 - k, 3); camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); if (k >= 1) S.tween = null; }
+    const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
     controls.update(); renderer.render(scene, camera); updateLabels();
   }
 
@@ -1110,6 +1126,40 @@
     const mat_ = $('#eMaterialize'); if (mat_) mat_.onclick = () => { const c = { id: nextItemId(), name: it.name, category: 'item', type: it.type, typeLabel: it.typeLabel, setup: it.setup || null, shelf: it.shelf || null, placement: it.placement, zone: it.zone || null, status: it.status || 'active', owner: it.owner || null, confidence: 'high', placementConfidence: 'medium', photos: [], notes: 'Added from live DCIM data.', dcim: it.dcim ? { optKey: it.dcim.optKey, pdu: it.dcim.pdu, pduName: it.dcim.pduName, outlet: it.dcim.outlet, deviceId: it.dcim.deviceId } : undefined }; S.data.items.push(c); markDirty(); rebuildAll(); select(c.id, { keepCamera: true }); };
   }
 
+  // ───────────────────────────────────────────────────────────── telemetry (power / env) per rack
+  const RATED_AMPS = 16;
+  function heatColor(t) { // 18°C blue → 22 green → 26 amber → 32+ red
+    if (t == null) return '#52525b'; if (t <= 18) return '#3b82f6'; if (t <= 22) return '#22c55e'; if (t <= 26) return '#84cc16'; if (t <= 30) return '#f59e0b'; return '#ef4444';
+  }
+  function rackTelemetry(su) {
+    const rack = su.dcimRack; if (!S.live.connected || !rack) return null;
+    const pdus = S.live.devices.filter(d => d.kind === 'pdu' && (d.rack === rack || (d.notes || '').split(',').map(x => x.trim()).includes('shared:' + rack)));
+    if (!pdus.length) return null;
+    let watts = 0, amps = 0, volts = 0, n = 0, on = 0, total = 0, temp = null, hum = null, leak = false, reach = 0, any = false;
+    pdus.forEach(p => { const st = S.live.pdu[p.id]; if (!st) return; any = true; if (st.reachable === false) return; reach++; const v = st.inlet_voltage > 0 ? st.inlet_voltage : 208; volts += v; n++; watts += st.total_watts || 0; amps += (st.total_watts || 0) / v; (st.outlets || []).forEach(o => { total++; if (o.state === 'on') on++; }); if (st.temperature != null) temp = temp == null ? st.temperature : Math.max(temp, st.temperature); if (st.humidity != null) hum = hum == null ? st.humidity : Math.max(hum, st.humidity); if (st.leak_detected) leak = true; });
+    if (!any) return { loading: true };
+    return { watts, amps, volts: n ? volts / n : 0, cap: amps / (RATED_AMPS * pdus.length), on, total, temp, hum, leak, reachable: reach > 0, pduCount: pdus.length };
+  }
+  function updateTelemetry() {
+    for (const rec of S.recs.values()) {
+      if (rec.cat !== 'setup' || !rec.telem) continue;
+      const t = rackTelemetry(rec.def);
+      if (!t) { rec.telem.innerHTML = `<span class="t-muted">${S.live.connected ? (rec.def.dcimRack ? 'no PDU in DCIM' : 'not mapped to a DCIM rack') : 'no live data'}</span>`; rec.telem.className = 'telem'; rec.heatPatch.visible = false; rec.leakRing.visible = false; continue; }
+      if (t.loading) { rec.telem.innerHTML = '<span class="t-muted">loading…</span>'; continue; }
+      if (!t.reachable) { rec.telem.innerHTML = '<span class="t-bad">PDU unreachable</span>'; rec.telem.className = 'telem bad'; rec.heatPatch.visible = false; rec.leakRing.visible = false; continue; }
+      const capPct = Math.round(t.cap * 100); const capCls = t.cap > .95 ? 'bad' : t.cap > .8 ? 'warn' : 'ok';
+      const tCls = t.temp == null ? '' : t.temp > 35 ? 'bad' : t.temp > 24 ? 'warn' : 'ok';
+      rec.telem.className = 'telem' + (t.leak ? ' leak' : capCls === 'bad' || tCls === 'bad' ? ' bad' : capCls === 'warn' || tCls === 'warn' ? ' warn' : '');
+      rec.telem.innerHTML = `
+        <div class="t-row"><b class="t-kw">${(t.watts / 1000).toFixed(2)}</b><span class="t-u">kW</span><span class="t-sep"></span><b>${t.volts.toFixed(0)}</b><span class="t-u">V</span><span class="t-sep"></span><b>${t.amps.toFixed(1)}</b><span class="t-u">A</span></div>
+        <div class="t-cap ${capCls}"><i style="width:${Math.min(100, capPct)}%"></i><span>${capPct}% of ${RATED_AMPS * t.pduCount} A · ${t.on}/${t.total} on</span></div>
+        <div class="t-row t-env">${t.temp != null ? `<span class="t-${tCls}">🌡 ${t.temp.toFixed(1)}°C</span>` : '<span class="t-muted">🌡 —</span>'}${t.hum != null ? `<span>💧 ${t.hum.toFixed(0)}%</span>` : ''}<span class="${t.leak ? 't-leak' : 't-muted'}">${t.leak ? '⚠ LEAK' : '● dry'}</span></div>`;
+      rec.heatPatch.visible = S.heat; rec.heatPatch.material.color.set(heatColor(t.temp)); rec.heatPatch.material.emissive.set(heatColor(t.temp));
+      rec.leakRing.visible = !!t.leak;
+    }
+  }
+  $('#tHeat').onclick = () => { S.heat = !S.heat; $('#tHeat').classList.toggle('active', S.heat); updateTelemetry(); };
+
   // ───────────────────────────────────────────────────────────── quick-jump rack bar + zoom buttons
   function renderRackBar() {
     const bar = $('#rackBar'); if (!bar || !S.data) return;
@@ -1136,7 +1186,7 @@
     document.title = `${data.meta.title} — Lab Manager`;
     setupFilterUI(); buildStatic(); computeModel(); buildItems();
     setLabelMode(LS.get('labelMode', 'setups'), true); updateSaveBar();
-    document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit';
+    $('#tHeat').classList.toggle('active', S.heat); document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit';
     resize(); VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; $('#vOrbit').classList.add('active');
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http'); // same-origin when served from the backend
