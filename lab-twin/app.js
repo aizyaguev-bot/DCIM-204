@@ -235,6 +235,11 @@
       const led = box(0.012, 0.012, 0.03, mat('#76b900', { emissive: '#76b900', emissiveIntensity: 1.2, unique: true }), -dd / 2 + p + 0.026, y + 0.22, 0.2); g.add(led);
       const srec = reg({ id: sh.id, cat: 'shelf', def: sh, group: m, meshes: [m], edges: [se], status: shStatus, conf: sh.confidence, zone: sh.zone, setup: su.id, level: sh.level, strip, led, anchor: null, y });
       srec.anchor = () => localToWorld(g, dd / 2 - 0.05, y + 0.02, -w / 2 + 0.12);
+      // drop-target volume (the space above the shelf) — only visible / pickable while moving an item
+      const nextLv = shelvesDefs.map(s => s.level).filter(l => l > sh.level).sort((a, b) => a - b)[0];
+      const nextY = nextLv ? shelfLevels[nextLv - 1] : h - p; const sh0 = y + 0.01, sh1 = nextY - st - 0.01;
+      const slot = box(dd - 2 * p - 0.02, Math.max(0.1, sh1 - sh0), w - 2 * p - 0.02, mat('#22d3ee', { opacity: .22, unique: true, emissive: '#22d3ee', emissiveIntensity: .5, rough: 1 }), 0, (sh0 + sh1) / 2, 0);
+      slot.material.depthWrite = false; slot.visible = false; slot.userData.id = sh.id; slot.userData.slot = true; g.add(slot); S.pickables.push(slot); srec.slot = slot;
       makeLabel(srec, 'shelf', `${sh.id}<small>L${sh.level}</small>`);
     });
     return rec;
@@ -962,24 +967,58 @@
   canvas.addEventListener('pointerdown', e => { downPos = [e.clientX, e.clientY]; S.lastInput = performance.now(); });
   ['pointermove', 'wheel', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, () => { S.lastInput = performance.now(); }, { passive: true }));
   canvas.addEventListener('pointerup', e => {
-    if (!downPos) return; const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]); downPos = null; if (moved > 5) return;
-    const hit = pick(e); if (!hit) return;
-    if (S.moveItem) { const target = S.recs.get(hit.userData.id); if (target && (target.cat === 'shelf' || target.cat === 'setup' || target.cat === 'storage')) { finishMove(target); return; } }
-    select(hit.userData.id, { fly: true });
+    if (!downPos) return; const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]); downPos = null; if (moved > (e.pointerType === 'touch' ? 14 : 6)) return;
+    const hit = pickAt(e);
+    if (S.moveItem) {
+      // while moving: anything you tap resolves to the shelf / rack / storage at that spot — never changes the selection
+      const target = hit ? resolveMoveTarget(hit) : null;
+      if (target) finishMove(target); else toast('Tap a shelf, a rack or a storage unit (or Cancel)', 'err');
+      return;
+    }
+    if (!hit) return;
+    select(hit.object.userData.id, { fly: true });
   });
   let hoverT = 0;
-  canvas.addEventListener('pointermove', e => { const now = performance.now(); if (now - hoverT < 40) return; hoverT = now; const hit = pick(e); const id = hit ? hit.userData.id : null; if (id !== S.hover) { setHover(id); } });
-  function pick(e) {
+  canvas.addEventListener('pointermove', e => {
+    const now = performance.now(); if (now - hoverT < 40) return; hoverT = now; const hit = pickAt(e);
+    let id = hit ? hit.object.userData.id : null;
+    if (S.moveItem) { const t = hit ? resolveMoveTarget(hit) : null; id = t ? t.id : null; }
+    if (id !== S.hover) { setHover(id); }
+  });
+  function pickAt(e) {
     const r = canvas.getBoundingClientRect(); ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     raycaster.setFromCamera(ndc, camera);
     const hits = raycaster.intersectObjects(S.pickables.filter(m => m.visible && m.parent && (m.material.opacity > 0.2)), false);
-    for (const h of hits) { const rec = S.recs.get(h.object.userData.id); if (!rec || rec.filtered) continue; if (rec.cat === 'zone') continue; return h.object; }
+    for (const h of hits) { const rec = S.recs.get(h.object.userData.id); if (!rec || rec.filtered) continue; if (rec.cat === 'zone') continue; return h; }
     // fall back to zone plane
-    const z = hits.find(h => S.recs.get(h.object.userData.id)?.cat === 'zone'); return z ? z.object : null;
+    return hits.find(h => S.recs.get(h.object.userData.id)?.cat === 'zone') || null;
+  }
+  function pick(e) { const h = pickAt(e); return h ? h.object : null; }
+  // Which shelf / rack / storage does a tap mean while moving an item? Items → their shelf; rack frame → shelf at that height.
+  function resolveMoveTarget(hit) {
+    const rec = S.recs.get(hit.object.userData.id); if (!rec || rec.id === S.moveItem) return null;
+    if (rec.cat === 'shelf' || rec.cat === 'storage') return rec;
+    const shelfAtHeight = (setupId, point) => {
+      const su = S.recs.get(setupId); if (!su || !su.group) return null;
+      const ly = su.group.worldToLocal(point.clone()).y; const st = su.tpl?.shelfThickness || 0.03;
+      const shelves = recsOf(r => r.cat === 'shelf' && r.setup === setupId).sort((a, b) => a.y - b.y);
+      if (!shelves.length) return su;
+      let best = null; for (const sh of shelves) if (sh.y - st - 0.03 <= ly) best = sh;
+      return best || su; // below the lowest shelf → bottom bay of the rack
+    };
+    if (rec.cat === 'setup') return shelfAtHeight(rec.id, hit.point);
+    if (rec.cat === 'item') {
+      const it = rec.item || {};
+      if (it.shelf && S.recs.has(it.shelf)) return S.recs.get(it.shelf);
+      if (it.storage && S.recs.has(it.storage)) return S.recs.get(it.storage);
+      if (it.setup && S.recs.has(it.setup)) return shelfAtHeight(it.setup, hit.point);
+    }
+    return null;
   }
   function setHover(id) {
-    if (S.hover) { const r = S.recs.get(S.hover); if (r) r.meshes.forEach(m => { if (m.material.userData.hoverEm) { m.material.emissiveIntensity = m.material.userData.hoverEm.i; m.material.emissive.setHex(m.material.userData.hoverEm.c); m.material.userData.hoverEm = null; } }); }
+    if (S.hover) { const r = S.recs.get(S.hover); if (r) { r.meshes.forEach(m => { if (m.material.userData.hoverEm) { m.material.emissiveIntensity = m.material.userData.hoverEm.i; m.material.emissive.setHex(m.material.userData.hoverEm.c); m.material.userData.hoverEm = null; } }); if (r.slot) r.slot.material.opacity = .22; } }
     S.hover = id; canvas.style.cursor = id ? 'pointer' : 'default';
+    if (id && S.moveItem) { const r = S.recs.get(id); if (r && r.slot) r.slot.material.opacity = .5; }
     if (id) { const r = S.recs.get(id); if (r && r.cat !== 'zone') r.meshes.forEach(m => { if (m.material.userData.unique !== false && !m.material.userData.hoverEm) { m.material.userData.hoverEm = { i: m.material.emissiveIntensity, c: m.material.emissive.getHex() }; m.material.emissive.setHex(0x76b900); m.material.emissiveIntensity = 0.35; } }); }
   }
 
@@ -1034,15 +1073,76 @@
   function startMove(itemId) { S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden'); $('#moveText').textContent = `Tap the shelf (or rack / storage) where ${S.recs.get(itemId)?.def.name || itemId} goes now`; highlightTargets(true); }
   function cancelMove() { if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); highlightTargets(false); }
   $('#moveCancel').onclick = cancelMove;
-  function highlightTargets(on) { for (const r of S.recs.values()) if (r.cat === 'shelf') r.edges.forEach(e => { e.material.color.set(on ? '#22d3ee' : STATUS_COLOR[r.status]); e.material.opacity = on ? 1 : (e.userData.baseOpacity ?? .7); }); }
-  function finishMove(target) {
-    const id = S.moveItem; const it = S.data.items.find(x => x.id === id); cancelMove(); if (!it) return;
-    const patch = { setup: null, shelf: null, storage: undefined, placement: undefined, placementConfidence: 'high' };
-    if (target.cat === 'shelf') { patch.setup = target.setup; patch.shelf = target.id; patch.zone = target.zone; }
-    else if (target.cat === 'setup') { patch.setup = target.id; patch.placement = 'bottom-bay'; patch.zone = target.zone; }
-    else if (target.cat === 'storage') { patch.storage = target.id; patch.zone = target.zone; }
-    delete patch.pos; patchDef(id, patch); if (patch.storage === undefined) { /* keep */ }
-    rebuildAll(); select(id, { keepCamera: true }); toast(`${it.name} → ${target.id}`, 'ok');
+  function highlightTargets(on) {
+    for (const r of S.recs.values()) if (r.cat === 'shelf') {
+      r.edges.forEach(e => { e.material.color.set(on ? '#22d3ee' : STATUS_COLOR[r.status]); e.material.opacity = on ? 1 : (e.userData.baseOpacity ?? .7); });
+      if (r.slot) { r.slot.visible = on; r.slot.material.opacity = .22; }
+    }
+    setHover(null);
+  }
+  // Devices that Lab Manager places itself (OPTs with a rack slot, DCIM rack items) must be moved in Lab Manager's own
+  // files (rack-slots / rack-overrides / rack-items) — otherwise the live data snaps them back on the next refresh.
+  function movesViaDcim(mit) {
+    if (!S.live.connected || !mit) return false;
+    if (mit.type === 'opt' && mit.live?.inDcim && mit.dcim?.optKey) return 'opt';
+    if (mit.id.startsWith('LIVE-') && mit.type.startsWith('equip-') && mit.live?.rack) return 'rack-item';
+    return false;
+  }
+  function shelfToU(setupId, shelfId) {
+    const shelves = S.data.shelves.filter(sh => sh.setup === setupId).sort((a, b) => a.level - b.level); const n = shelves.length;
+    const uTopDown = (S.data.dcim?.uNumbering || 'top-down') === 'top-down';
+    const idx = shelfId ? shelves.findIndex(s => s.id === shelfId) : 0;   // no shelf (bottom bay) → lowest shelf
+    return uTopDown ? n - Math.max(0, idx) : Math.max(0, idx) + 1;
+  }
+  async function dcimMove(mit, kind, target) {
+    const sid = target.cat === 'shelf' ? target.setup : target.cat === 'setup' ? target.id : null;
+    if (!sid) throw new Error('Lab Manager devices can only be moved onto a rack or a shelf');
+    const su = S.data.setups.find(s => s.id === sid); const rack = dcimRackOf(su);
+    if (!rack) throw new Error(`${sid} is not mapped to a DCIM rack yet — open the rack in Edit mode and set "DCIM rack" first`);
+    const u = shelfToU(sid, target.cat === 'shelf' ? target.id : null);
+    if (kind === 'opt') {
+      const key = mit.dcim.optKey;
+      const slots = JSON.parse(JSON.stringify(S.live.rackSlots || {})); const ov = { ...(S.live.rackOverrides || {}) }; const order = JSON.parse(JSON.stringify(S.live.rackOrder || {}));
+      Object.keys(slots).forEach(r => { if (slots[r] && key in slots[r]) delete slots[r][key]; });
+      (slots[rack] = slots[rack] || {})[key] = u;
+      const pduRack = S.live.devices.find(d => d.id === mit.dcim.pdu)?.rack || null;
+      if (rack === pduRack) delete ov[key]; else ov[key] = rack;
+      Object.keys(order).forEach(r => { if (Array.isArray(order[r])) order[r] = order[r].filter(k => k !== key); });
+      (order[rack] = order[rack] || []).push(key);
+      await api('/api/rack-slots', { method: 'PUT', body: JSON.stringify(slots) });
+      await api('/api/rack-overrides', { method: 'PUT', body: JSON.stringify(ov) });
+      await api('/api/rack-positions', { method: 'PUT', body: JSON.stringify(order) }).catch(() => {});
+      S.live.rackSlots = slots; S.live.rackOverrides = ov; S.live.rackOrder = order;
+      return `${rack} · U${u}`;
+    }
+    // DCIM rack item (switch / patch panel …)
+    const ciId = mit.id.slice(5); const items = JSON.parse(JSON.stringify(S.live.rackItems || {})); let ci = null;
+    Object.keys(items).forEach(r => { const i = (items[r] || []).findIndex(x => String(x.id) === ciId); if (i >= 0) { ci = items[r][i]; items[r].splice(i, 1); } });
+    if (!ci) throw new Error('rack item not found in Lab Manager data');
+    ci.u = u; (items[rack] = items[rack] || []).push(ci);
+    await api('/api/rack-items', { method: 'PUT', body: JSON.stringify(items) }); S.live.rackItems = items;
+    return `${rack} · U${u}`;
+  }
+  async function finishMove(target) {
+    const id = S.moveItem; cancelMove(); if (!id) return;
+    const rec = S.recs.get(id); const mit = rec?.item; const def = S.data.items.find(x => x.id === id);
+    if (!def && !mit) return;
+    const name = (mit || def).name || id;
+    const kind = movesViaDcim(mit);
+    if (kind) {
+      toast(`Moving ${name} in Lab Manager…`);
+      try { const where = await dcimMove(mit, kind, target); toast(`${name} → ${target.id} (${where} saved in Lab Manager)`, 'ok'); }
+      catch (e) { toast('Move failed: ' + e.message, 'err'); return; }
+    }
+    if (def) {
+      const patch = { setup: null, shelf: null, storage: undefined, placement: undefined, pos: undefined, side: undefined, placementConfidence: 'high' };
+      if (target.cat === 'shelf') { patch.setup = target.setup; patch.shelf = target.id; patch.zone = target.zone; }
+      else if (target.cat === 'setup') { patch.setup = target.id; patch.placement = 'bottom-bay'; patch.zone = target.zone; }
+      else if (target.cat === 'storage') { patch.storage = target.id; patch.zone = target.zone; }
+      patchDef(id, patch); rebuildAll();
+      if (!kind) toast(`${name} → ${target.id}`, 'ok');
+    } else { computeModel(); buildItems(); }
+    select(id, { keepCamera: true });
   }
 
   function bigChips(cur) { return `<div class="chips-lg">${STATUSES.map(st => `<button class="chip-lg ${cur === st ? 'on' : ''}" data-st="${st}" style="--c:${STATUS_COLOR[st]}"><span class="ic">${STATUS_ICON[st]}</span>${STATUS_LABEL[st]}</button>`).join('')}</div>`; }
@@ -1053,7 +1153,11 @@
     $('#dId').textContent = rec.id; $('#dName').textContent = def.name || rec.id;
     let html = `<div class="edit-hint">EDIT MODE · tap another object in the 3D view to switch</div>`;
     if (rec.cat === 'item' && isLive) {
-      html += `<div class="sec big"><div class="note">This device comes live from Lab Manager (DCIM labels). Rename / re-slot it there.</div><button class="btn-lg" id="eMaterialize">＋ Add a physical record of it here</button></div>`;
+      const loc = it.shelf ? shelfName(it.shelf) : it.setup ? `${it.setup} · ${it.live?.rack || ''} U${it.live?.u ?? '?'}` : it.live?.rack ? `${it.live.rack} (rack not mapped to a 3D setup)` : 'not placed';
+      html += `<div class="sec big"><div class="note">Live from Lab Manager (DCIM). Moving it here writes the rack / U slot back into Lab Manager.</div>
+        <label class="lbl-lg">Where</label><div class="where"><span class="where-txt">${esc(loc)}</span></div>
+        ${movesViaDcim(it) ? `<div class="row-lg"><button class="btn-lg btn-cyan" id="eMove">⇄ Move… (tap a shelf)</button></div>` : ''}
+        <button class="btn-lg" id="eMaterialize">＋ Add a physical record of it here</button></div>`;
     } else if (rec.cat === 'item') {
       const loc = it.shelf ? shelfName(it.shelf) : it.placement === 'side-mount' ? `${it.setup} · hung on the ${it.side || 'right'} side` : it.placement === 'bottom-bay' ? `${it.setup} · bottom bay` : it.placement === 'rack-strips' ? `${it.setup} · power strips` : it.storage ? it.storage : it.pos ? `free · x ${it.pos[0]} z ${it.pos[1]}` : 'not placed';
       const pdus = S.data.dcim?.pdus || [];
@@ -1217,7 +1321,7 @@
     if (S.settings.url) connect(); else if (auto) { api('/api/version').then(() => connect()).catch(() => {}); }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, select, setView, connect, computeModel, buildItems, VIEWS, finishMove, startMove, toggleEdit, toggleKiosk };
+  window.__twin = { S, scene, camera, controls, select, setView, connect, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
   boot.then(init).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
