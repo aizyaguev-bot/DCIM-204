@@ -336,6 +336,20 @@
         g.add(led(fx + 0.004, c.height * .92, zc - 0.22, col, 0.016));
         const e = edges(body, col, dashed); g.add(e); eds.push(e);
         su.group.add(g); anchor = () => localToWorld(su.group, c.depth / 2, c.height + 0.03, zc);
+      } else if (it.placement === 'side-mount' && it.setup && S.recs.has(it.setup)) {
+        // hung vertically on the outside of the rack's side frame (e.g. KVM). side: 'left' (−z) | 'right' (+z), mountHeight = centre height
+        const su = S.recs.get(it.setup); const rt = su.tpl; const sgn = it.side === 'left' ? -1 : 1;
+        const t = 0.045, L = 0.44, D2 = 0.30; const zc = sgn * (rt.width / 2 + t / 2 + 0.005); const yc = it.mountHeight || 1.45; const xc = -0.05;
+        g = new THREE.Group();
+        const body = makeBox(D2, L, t, bodyCol); body.position.set(xc, yc, zc); g.add(body); meshes.push(body);
+        g.add(box(D2 * .9, L * .92, 0.006, mat('#9aa0a8', { metal: .7, rough: .35, opacity: op, unique: true }), xc, yc, zc + sgn * (t / 2 + 0.003)));          // faceplate
+        for (let i = 0; i < 4; i++) g.add(box(0.05, 0.018, 0.008, mat('#111114', { rough: .8, opacity: op, unique: true }), xc - D2 * .3 + i * 0.06, yc + L * .3, zc + sgn * (t / 2 + 0.006)));  // port row
+        g.add(led(xc + D2 * .38, yc + L * .42, zc + sgn * (t / 2 + 0.008), col));
+        g.add(box(0.02, 0.08, 0.06, mat('#8a8f97', { metal: .6, rough: .4, opacity: op, unique: true }), xc, yc + L / 2 - 0.03, zc - sgn * (t / 2 + 0.02)));   // bracket top
+        g.add(box(0.02, 0.08, 0.06, mat('#8a8f97', { metal: .6, rough: .4, opacity: op, unique: true }), xc, yc - L / 2 + 0.03, zc - sgn * (t / 2 + 0.02)));   // bracket bottom
+        for (let i = 0; i < 3; i++) { const z0 = zc + sgn * (t / 2 + 0.01), y0 = yc + L * .3; g.add(cable([[xc - D2 * .3 + i * 0.06, y0, z0], [xc - D2 * .3 + i * 0.06 + 0.02, y0 + 0.15, z0 + sgn * 0.08], [xc + 0.1, y0 + 0.35, z0 + sgn * 0.03], [rt.depth / 2 - rt.profile, y0 + 0.5, sgn * (rt.width / 2 - rt.profile)]], CABLE_COLORS[(i * 3) % CABLE_COLORS.length])); }
+        const e = edges(body, col, dashed); g.add(e); eds.push(e);
+        su.group.add(g); anchor = () => localToWorld(su.group, xc, yc + L / 2 + 0.05, zc);
       } else if (it.placement === 'rack-strips' && it.setup && S.recs.has(it.setup)) {
         // PDU = the power strips already built with the rack
         const su = S.recs.get(it.setup); g = su.group;
@@ -542,7 +556,7 @@
             html += `<div class="tn ${sh.filtered ? 'dim' : ''} ${S.selected === sh.id ? 'sel' : ''}" data-id="${sh.id}">${dot(sh)}<span class="id shelf">${sh.id}</span><span class="nm">L${sh.level}${its.length ? '' : ' · empty'}</span></div>`;
             its.forEach(it => { const lv = it.item.live; const tag = it.item.type === 'opt' ? (lv?.inDcim ? `<span class="tag ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'offp' : ''}">${lv.state}</span>${lv.sw ? `<span class="tag sw">${esc(lv.sw.switch)}${lv.sw.port ? '·' + lv.sw.port : ''}</span>` : ''}` : `<span class="tag">#${it.item.dcim?.outlet ?? '?'}</span>`) : `<span class="tag">${esc(it.item.type)}</span>`; html += `<div class="tgroup">${node(it, 'item', tag)}</div>`; });
           });
-          recsOf(r => r.cat === 'item' && r.setup === su.id && !r.shelf).forEach(it => { html += node(it, 'item', `<span class="tag">${esc(it.item.type)}</span>`); });
+          recsOf(r => r.cat === 'item' && r.setup === su.id && !r.shelf).forEach(it => { html += node(it, 'item', `<span class="tag">${esc(it.item.placement === 'side-mount' ? 'side · ' + (it.item.side || 'right') : it.item.type)}</span>`); });
           html += `</div>`;
         }
       });
@@ -719,7 +733,7 @@
       const TYPES = ['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'];
       const locVal = it.setup ? 'setup:' + it.setup : it.storage ? 'storage:' + it.storage : '';
       const shelvesOf = sid => S.data.shelves.filter(x => x.setup === sid).sort((a, b) => b.level - a.level);
-      const shelfOpts = sid => `<option value="">— free / rack level —</option>` + shelvesOf(sid).map(x => `<option value="shelf:${x.id}" ${it.shelf === x.id ? 'selected' : ''}>${x.id} · L${x.level}</option>`).join('') + `<option value="bottom-bay" ${it.placement === 'bottom-bay' ? 'selected' : ''}>bottom bay (floor)</option><option value="rack-strips" ${it.placement === 'rack-strips' ? 'selected' : ''}>power strips (PDU)</option>`;
+      const shelfOpts = sid => `<option value="">— free / rack level —</option>` + shelvesOf(sid).map(x => `<option value="shelf:${x.id}" ${it.shelf === x.id ? 'selected' : ''}>${x.id} · L${x.level}</option>`).join('') + `<option value="bottom-bay" ${it.placement === 'bottom-bay' ? 'selected' : ''}>bottom bay (floor)</option><option value="side-right" ${it.placement === 'side-mount' && it.side !== 'left' ? 'selected' : ''}>hung on the right side</option><option value="side-left" ${it.placement === 'side-mount' && it.side === 'left' ? 'selected' : ''}>hung on the left side</option><option value="rack-strips" ${it.placement === 'rack-strips' ? 'selected' : ''}>power strips (PDU)</option>`;
       const pdus = S.data.dcim?.pdus || [];
       html += `<div class="sec"><div class="sec-h">Edit item <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">changes → Save</span></div><div class="edit-grid">
         <span>Name</span><input id="eName" value="${esc(it.name || '')}" />
@@ -755,14 +769,14 @@
     $$('[data-outlet]', $('#dBody')).forEach(c => c.onclick = e => outletMenu(e, it, parseInt(c.dataset.outlet, 10)));
     $$('[data-kport]', $('#dBody')).forEach(c => c.onclick = () => { if (!S.live.connected) { toast('Connect the backend to open the KVM console', 'err'); return; } openKvm(it.dcim.deviceId, parseInt(c.dataset.kport, 10)); });
     const dr = $('#dRack'); if (dr) dr.onchange = () => { patchDef(rec.id, { dcimRack: dr.value || null, dcimMappingConfidence: 'medium' }); rebuildAll(); toast(`${rec.id} → ${dr.value || 'no DCIM rack'}`, 'ok'); };
-    const eLoc = $('#eLoc'); if (eLoc) eLoc.onchange = () => { const v = eLoc.value; const sh = $('#eShelf'); const free = !v; ['#eX', '#eZ'].forEach(q => { $(q).disabled = !free; }); if (v.startsWith('setup:')) { sh.disabled = false; sh.innerHTML = `<option value="">— free / rack level —</option>` + S.data.shelves.filter(x => x.setup === v.slice(6)).sort((a, b) => b.level - a.level).map(x => `<option value="shelf:${x.id}">${x.id} · L${x.level}</option>`).join('') + `<option value="bottom-bay">bottom bay (floor)</option><option value="rack-strips">power strips (PDU)</option>`; } else { sh.disabled = true; sh.innerHTML = '<option value="">—</option>'; } };
+    const eLoc = $('#eLoc'); if (eLoc) eLoc.onchange = () => { const v = eLoc.value; const sh = $('#eShelf'); const free = !v; ['#eX', '#eZ'].forEach(q => { $(q).disabled = !free; }); if (v.startsWith('setup:')) { sh.disabled = false; sh.innerHTML = `<option value="">— free / rack level —</option>` + S.data.shelves.filter(x => x.setup === v.slice(6)).sort((a, b) => b.level - a.level).map(x => `<option value="shelf:${x.id}">${x.id} · L${x.level}</option>`).join('') + `<option value="bottom-bay">bottom bay (floor)</option><option value="side-right">hung on the right side</option><option value="side-left">hung on the left side</option><option value="rack-strips">power strips (PDU)</option>`; } else { sh.disabled = true; sh.innerHTML = '<option value="">—</option>'; } };
     const eSave = $('#eSave'); if (eSave) eSave.onclick = () => {
       const patch = { name: $('#eName').value.trim() || def.name, status: $('#eStatus').value, owner: $('#eOwner').value.trim() || null, notes: $('#eNotes').value };
       if (rec.cat === 'item') {
         patch.type = $('#eType').value; patch.typeLabel = $('#eTypeLabel').value.trim() || undefined; patch.confidence = $('#eConf').value || it.confidence || 'medium';
         const loc = $('#eLoc').value, shv = $('#eShelf').value;
         patch.setup = null; patch.shelf = null; patch.storage = undefined; patch.placement = undefined; patch.zone = null;
-        if (loc.startsWith('setup:')) { patch.setup = loc.slice(6); patch.zone = S.data.setups.find(x => x.id === patch.setup)?.zone || null; if (shv.startsWith('shelf:')) patch.shelf = shv.slice(6); else if (shv) patch.placement = shv; }
+        if (loc.startsWith('setup:')) { patch.setup = loc.slice(6); patch.zone = S.data.setups.find(x => x.id === patch.setup)?.zone || null; if (shv.startsWith('shelf:')) patch.shelf = shv.slice(6); else if (shv.startsWith('side-')) { patch.placement = 'side-mount'; patch.side = shv.slice(5); patch.mountHeight = it.mountHeight || 1.45; } else if (shv) patch.placement = shv; }
         else if (loc.startsWith('storage:')) { patch.storage = loc.slice(8); patch.zone = S.data.storage.find(x => x.id === patch.storage)?.zone || null; }
         else { const x = parseFloat($('#eX').value), z = parseFloat($('#eZ').value); if (!isNaN(x) && !isNaN(z)) { patch.pos = [x, z]; patch.zone = zoneAt(x, z); } }
         const w = parseFloat($('#eW').value), dd = parseFloat($('#eD').value), h = parseFloat($('#eH').value); if (!isNaN(w) && !isNaN(dd) && !isNaN(h)) patch.size = [w, dd, h]; else if (!patch.setup && !patch.storage && patch.pos) patch.size = it.size || [0.5, 0.5, 0.5];
@@ -1013,7 +1027,7 @@
     if (rec.cat === 'item' && isLive) {
       html += `<div class="sec big"><div class="note">This device comes live from Lab Manager (DCIM labels). Rename / re-slot it there.</div><button class="btn-lg" id="eMaterialize">＋ Add a physical record of it here</button></div>`;
     } else if (rec.cat === 'item') {
-      const loc = it.shelf ? shelfName(it.shelf) : it.placement === 'bottom-bay' ? `${it.setup} · bottom bay` : it.placement === 'rack-strips' ? `${it.setup} · power strips` : it.storage ? it.storage : it.pos ? `free · x ${it.pos[0]} z ${it.pos[1]}` : 'not placed';
+      const loc = it.shelf ? shelfName(it.shelf) : it.placement === 'side-mount' ? `${it.setup} · hung on the ${it.side || 'right'} side` : it.placement === 'bottom-bay' ? `${it.setup} · bottom bay` : it.placement === 'rack-strips' ? `${it.setup} · power strips` : it.storage ? it.storage : it.pos ? `free · x ${it.pos[0]} z ${it.pos[1]}` : 'not placed';
       const pdus = S.data.dcim?.pdus || [];
       html += `<div class="sec big">
         <label class="lbl-lg">Name</label><input class="in-lg" id="eName" value="${esc(it.name || '')}" />
@@ -1021,6 +1035,7 @@
         <label class="lbl-lg">Where</label>
         <div class="where"><span class="where-txt">${esc(loc)}</span></div>
         <div class="row-lg"><button class="btn-lg btn-cyan" id="eMove">⇄ Move… (tap a shelf)</button><button class="btn-lg" id="eUnplace">Unplace</button></div>
+        ${it.setup ? `<div class="row-lg"><button class="btn-lg sm" data-side="left">⇤ Hang on left side</button><button class="btn-lg sm" data-side="right">Hang on right side ⇥</button><button class="btn-lg sm" data-side="bay">Bottom bay</button></div>` : ''}
         <label class="lbl-lg">Type</label><select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         <label class="lbl-lg">Owner</label><input class="in-lg" id="eOwner" value="${esc(it.owner || '')}" placeholder="engineer" />
         <label class="lbl-lg">PDU · outlet</label>
@@ -1064,6 +1079,7 @@
     $$('[data-move]', body).forEach(el => el.onclick = e => { e.stopPropagation(); startMove(el.dataset.move); });
     $$('[data-step]', body).forEach(b => b.onclick = () => { const i = $('#eOutlet'); i.value = Math.min(48, Math.max(1, (parseInt(i.value, 10) || 0) + parseInt(b.dataset.step, 10))); });
     const mv = $('#eMove'); if (mv) mv.onclick = () => startMove(rec.id);
+    $$('[data-side]', body).forEach(b => b.onclick = () => { const v = b.dataset.side; const patch = v === 'bay' ? { shelf: null, placement: 'bottom-bay', side: undefined } : { shelf: null, placement: 'side-mount', side: v, mountHeight: it.mountHeight || 1.45 }; patchDef(rec.id, patch); rebuildAll(); select(rec.id, { keepCamera: true }); });
     const un = $('#eUnplace'); if (un) un.onclick = () => { patchDef(rec.id, { setup: null, shelf: null, placement: undefined, storage: undefined, pos: undefined }); rebuildAll(); select(rec.id, { keepCamera: true }); toast('Item unplaced — find it under Unplaced', 'ok'); };
     const dr = $('#dRack'); if (dr) dr.onchange = () => { patchDef(rec.id, { dcimRack: dr.value || null, dcimMappingConfidence: 'medium' }); rebuildAll(); select(rec.id, { keepCamera: true }); toast(`${rec.id} → ${dr.value || 'no DCIM rack'}`, 'ok'); };
     const sv = $('#eSave'); if (sv) sv.onclick = () => {

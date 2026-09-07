@@ -2083,12 +2083,15 @@
       "type": "kvm",
       "typeLabel": "Raritan Dominion KX III",
       "setup": "SETUP-001",
-      "shelf": "SHELF-04",
+      "shelf": null,
+      "placement": "side-mount",
+      "side": "left",
+      "mountHeight": 1.45,
       "zone": "Z02",
       "status": "active",
       "owner": null,
       "confidence": "medium",
-      "placementConfidence": "low",
+      "placementConfidence": "medium",
       "photos": [],
       "dcim": {
         "deviceId": "kvm-unit1",
@@ -2111,7 +2114,7 @@
           "16": "Optn85"
         }
       },
-      "notes": "Rack per DCIM seed; CHANGELOG v2.2.0 says KVM is room-level (not rack-mounted). Drawn on the top shelf of its DCIM rack — verify."
+      "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
     },
     {
       "id": "ITEM-0042",
@@ -2120,12 +2123,15 @@
       "type": "kvm",
       "typeLabel": "Raritan Dominion KX III",
       "setup": "SETUP-006",
-      "shelf": "SHELF-23",
+      "shelf": null,
+      "placement": "side-mount",
+      "side": "left",
+      "mountHeight": 1.45,
       "zone": "Z04",
       "status": "active",
       "owner": null,
       "confidence": "medium",
-      "placementConfidence": "low",
+      "placementConfidence": "medium",
       "photos": [],
       "dcim": {
         "deviceId": "kvm-unit2",
@@ -2139,7 +2145,7 @@
           "6": "Optn101"
         }
       },
-      "notes": "Rack per DCIM seed; CHANGELOG v2.2.0 says KVM is room-level (not rack-mounted). Drawn on the top shelf of its DCIM rack — verify."
+      "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
     },
     {
       "id": "ITEM-0043",
@@ -2148,12 +2154,15 @@
       "type": "kvm",
       "typeLabel": "Raritan Dominion LX II",
       "setup": "SETUP-005",
-      "shelf": "SHELF-19",
+      "shelf": null,
+      "placement": "side-mount",
+      "side": "right",
+      "mountHeight": 1.45,
       "zone": "Z03",
       "status": "active",
       "owner": null,
       "confidence": "medium",
-      "placementConfidence": "low",
+      "placementConfidence": "medium",
       "photos": [],
       "dcim": {
         "deviceId": "kvm-unit3",
@@ -2164,7 +2173,7 @@
           "3": "Optn45"
         }
       },
-      "notes": "Rack per DCIM seed; CHANGELOG v2.2.0 says KVM is room-level (not rack-mounted). Drawn on the top shelf of its DCIM rack — verify."
+      "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
     },
     {
       "name": "Blue mobile stand (monitor / laptop cart)",
