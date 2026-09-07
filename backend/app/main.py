@@ -16,6 +16,7 @@ from .config import get_settings
 from sqlalchemy import select
 
 FRONTEND_DIST = pathlib.Path(__file__).parent.parent.parent / "frontend" / "dist"
+TWIN_DIR = pathlib.Path(__file__).parent.parent.parent / "lab-twin"
 
 _VERSION_FILE = pathlib.Path(__file__).parent.parent / "version.txt"
 try:
@@ -97,9 +98,28 @@ async def get_version():
     return {"version": _GIT_HASH}
 
 
+_TWIN_DATA_FILE = TWIN_DIR / "lab-data.json"
+
+@app.get("/api/twin-data")
+async def get_twin_data():
+    """Digital twin inventory (lab-twin/lab-data.json)."""
+    try:
+        return json.loads(_TWIN_DATA_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+@app.put("/api/twin-data")
+async def save_twin_data(payload: dict):
+    """Save edits made inside the twin (items, shelves, rack mapping)."""
+    _TWIN_DATA_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True}
+
+
 # Serve built React frontend if it exists
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
+    if TWIN_DIR.exists():
+        app.mount("/twin", StaticFiles(directory=str(TWIN_DIR), html=True), name="twin")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):

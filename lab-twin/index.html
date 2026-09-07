@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lab Manager — Digital Twin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ─── Header (Lab Manager look) ─────────────────────────────────────── -->
+  <header class="hdr">
+    <button class="brand" id="btnHome" title="Reset view">
+      <div class="brand-icon">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#76b900" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-7 4 14 2-7h7"/></svg>
+      </div>
+      <div class="brand-text">
+        <div class="brand-title">Lab Manager <span class="brand-sep">/</span> Digital Twin</div>
+        <div class="brand-sub">3D lab map · Raritan PDU + KVM control</div>
+      </div>
+    </button>
+
+    <div class="search-wrap">
+      <svg class="search-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-3.5-3.5"/></svg>
+      <input id="search" type="text" placeholder="Search ID or name — SETUP-003, Opt133, chiller, KVM…" autocomplete="off" />
+      <div id="searchResults" class="search-results hidden"></div>
+    </div>
+
+    <div class="hdr-right">
+      <div id="livePill" class="live-pill offline" title="Backend connection">
+        <span class="dot"></span><span id="liveText">Offline · static data</span>
+      </div>
+      <button class="btn btn-edit" id="btnEdit" title="Edit mode (F2) — tap objects to edit, move, replace">Edit</button>
+      <button class="btn btn-ghost" id="btnKiosk" title="Lab screen mode (K) — big touch UI, auto-rotate when idle">Screen</button>
+      <button class="btn btn-ghost" id="btnPlan" title="Open the 2D floor plan (floorplan.svg)">2D plan</button>
+      <button class="btn btn-ghost" id="btnExport" title="Download the current lab-data.json (with your edits)">Export JSON</button>
+      <button class="btn btn-primary" id="btnSettings">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        Backend
+      </button>
+      <span class="ver" id="ver">twin v0.1.0</span>
+    </div>
+  </header>
+
+  <!-- ─── Stats bar ────────────────────────────────────────────────────── -->
+  <div class="stats" id="stats"></div>
+
+  <!-- ─── Main layout ──────────────────────────────────────────────────── -->
+  <main class="layout">
+    <!-- left sidebar -->
+    <aside class="side">
+      <section class="card">
+        <div class="card-h">Filters</div>
+        <div class="card-b filters">
+          <label>Zone <select id="fZone"><option value="">All zones</option></select></label>
+          <label>Setup <select id="fSetup"><option value="">All setups</option></select></label>
+          <div class="chips" id="fStatus"></div>
+          <div class="row-btns">
+            <button class="btn btn-xs" id="fClear">Clear filters</button>
+            <label class="chk"><input type="checkbox" id="fOnlyLow" /> only uncertain</label>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-h">Legend</div>
+        <div class="card-b legend" id="legend"></div>
+      </section>
+
+      <section class="card grow">
+        <div class="card-h tabs">
+          <button class="tab active" data-tab="tree">Tree</button>
+          <button class="tab" data-tab="inv">Inventory</button>
+          <button class="tab" data-tab="unplaced">Unplaced <span class="badge" id="unplacedCount">0</span></button>
+        </div>
+        <div class="card-b list" id="tree"></div>
+        <div class="card-b list hidden" id="inv"></div>
+        <div class="card-b list hidden" id="unplaced"></div>
+      </section>
+    </aside>
+
+    <!-- 3D viewport -->
+    <section class="viewport" id="viewport">
+      <canvas id="c"></canvas>
+      <div id="labels" class="labels"></div>
+
+      <div class="toolbar">
+        <div class="tb-group">
+          <button class="tb" id="vOrbit" title="Orbit view (R)">Orbit</button>
+          <button class="tb" id="vTop" title="Top view (T)">Top</button>
+          <button class="tb" id="vEye" title="Eye-level walk (E)">Eye level</button>
+        </div>
+        <div class="tb-group">
+          <button class="tb" id="tWalls" title="Hide / show walls (W)">Walls</button>
+          <button class="tb" id="tLabels" title="Label density (L)">Labels: setups</button>
+          <button class="tb" id="tZones" title="Zone overlays (Z)">Zones</button>
+        </div>
+        <div class="tb-group">
+          <button class="tb tb-accent" id="vReset" title="Reset view (Home)">Reset View</button>
+        </div>
+      </div>
+
+      <div class="movebanner hidden" id="moveBanner"><span class="mv-ic">⇄</span><span id="moveText">Tap a shelf</span><button class="btn btn-xs" id="moveCancel">Cancel</button></div>
+      <div class="savebar hidden" id="saveBar"><span class="sb-dot"></span><span>Unsaved edits</span><button class="btn btn-primary btn-xs" id="sbSave">Save to server</button><button class="btn btn-xs" id="sbDownload">Download JSON</button><button class="btn btn-xs" id="sbDiscard">Discard</button></div>
+      <div class="hint" id="hint">Drag to rotate · wheel to zoom · right-drag to pan · click an object</div>
+      <div class="compass" id="compass">ENTRANCE ↓</div>
+    </section>
+
+    <!-- right details panel -->
+    <aside class="detail hidden" id="detail">
+      <div class="detail-h">
+        <div>
+          <div class="detail-id" id="dId">—</div>
+          <div class="detail-name" id="dName">—</div>
+        </div>
+        <div class="detail-actions">
+          <button class="btn btn-xs" id="dFocus" title="Fly camera to object">Focus</button>
+          <button class="icon-btn" id="dClose" title="Close (Esc)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="detail-b" id="dBody"></div>
+    </aside>
+  </main>
+
+  <!-- ─── Settings modal ───────────────────────────────────────────────── -->
+  <div class="modal hidden" id="settings">
+    <div class="modal-card">
+      <div class="modal-h">Backend connection <button class="icon-btn" id="sClose">✕</button></div>
+      <div class="modal-b">
+        <p class="muted">Connect to the Lab Manager FastAPI backend (DCIM-204). Device IPs never reach this page — all control goes through the backend, like the main UI.</p>
+        <label>Backend URL <input id="sUrl" placeholder="http://lab-manager-vm:8000  (empty = same origin)" /></label>
+        <label>Shared password <input id="sPass" type="password" placeholder="LAB_MANAGER_PASSWORD (leave empty if auth disabled)" /></label>
+        <label class="chk"><input type="checkbox" id="sPoll" checked /> poll live status every 15 s</label>
+        <div id="sStatus" class="muted small"></div>
+      </div>
+      <div class="modal-f">
+        <button class="btn btn-ghost" id="sDisconnect">Disconnect</button>
+        <button class="btn btn-primary" id="sConnect">Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Data-load fallback (file:// without a server) ────────────────── -->
+  <div class="modal hidden" id="loadFallback">
+    <div class="modal-card">
+      <div class="modal-h">Load lab-data.json</div>
+      <div class="modal-b">
+        <p>The browser blocked reading <code>lab-data.json</code> directly from disk (file://). Either:</p>
+        <ol>
+          <li>Run <code>start-twin.bat</code> (starts a tiny local server and opens the page), or</li>
+          <li>Pick the file manually: <input type="file" id="fileJson" accept=".json" /></li>
+        </ol>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+
+  <script src="vendor/three.min.js"></script>
+  <script src="vendor/OrbitControls.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
