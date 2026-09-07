@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Lab 204 — Digital Twin",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "generated": "2026-09-07",
     "units": "meters",
     "axes": "x: across room (0 = left wall), z: depth (0 = entrance wall), y: up",

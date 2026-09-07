@@ -799,7 +799,8 @@
   function zoneAt(x, z) { const zn = S.data.zones.find(q => x >= q.bounds[0] && x <= q.bounds[2] && z >= q.bounds[1] && z <= q.bounds[3]); return zn ? zn.id : null; }
   function addItem(partial) { const it = { id: nextItemId(), name: 'New item', category: 'item', type: 'other', status: 'unknown', owner: null, confidence: 'high', placementConfidence: 'high', photos: [], notes: '', ...partial }; S.data.items.push(it); markDirty(); rebuildAll(); select(it.id, { keepCamera: true }); toast(`${it.id} added — fill in the details and Save`, 'ok'); }
   function deleteItem(id) { S.data.items = S.data.items.filter(i => i.id !== id); markDirty(); closeDetail(); rebuildAll(); toast(`${id} deleted`, 'ok'); }
-  function markDirty() { S.dirty = true; S.data.meta.modified = new Date().toISOString(); LS.set('draft', { savedAt: Date.now(), data: S.data }); updateSaveBar(); }
+  function dataFingerprint(d) { const str = JSON.stringify({ m: d.meta && d.meta.generated, v: d.meta && d.meta.version, s: d.setups.map(x => x.id + x.dcimRack), sh: d.shelves.map(x => x.id), i: d.items.map(x => x.id + (x.shelf || '') + (x.placement || '')) }); let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0; return str.length + ':' + h; }
+  function markDirty() { S.dirty = true; S.data.meta.modified = new Date().toISOString(); LS.set('draft', { savedAt: Date.now(), base: S.dataBase, data: S.data }); updateSaveBar(); }
   function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; }
   async function saveToServer() {
     const b = $('#sbSave'); b.disabled = true; b.innerHTML = '<span class="busy"></span> Saving…';
@@ -1126,8 +1127,11 @@
 
   // ───────────────────────────────────────────────────────────── boot
   function init(data) {
+    // a browser draft is only restored if it was made on top of THIS exact dataset (otherwise a newer lab-data.json would be hidden by stale edits)
+    S.dataBase = dataFingerprint(data);
     const draft = LS.get('draft', null);
-    if (draft && draft.data && draft.data.meta) { data = draft.data; S.dirty = true; setTimeout(() => toast('Restored unsaved edits from this browser — Save or Discard', 'ok'), 800); }
+    if (draft && draft.data && draft.data.meta && draft.base === S.dataBase) { data = draft.data; S.dirty = true; setTimeout(() => toast('Restored unsaved edits from this browser — Save or Discard', 'ok'), 800); }
+    else if (draft) { LS.set('draft', null); if (draft.data) setTimeout(() => toast('lab-data.json changed on the server — old unsaved browser edits were dropped', 'err'), 800); }
     S.data = data; $('#ver').textContent = `twin v${data.meta.version} · ${data.meta.generated}`;
     document.title = `${data.meta.title} — Lab Manager`;
     setupFilterUI(); buildStatic(); computeModel(); buildItems();
