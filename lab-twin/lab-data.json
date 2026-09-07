@@ -484,7 +484,7 @@
     },
     {
       "id": "SETUP-005",
-      "name": "Rack B1 — back wall, single rack",
+      "name": "Rack B1 — back wall, single rack (3 shelves)",
       "category": "setup",
       "type": "switch-rack",
       "template": "rack",
@@ -505,12 +505,11 @@
         3,
         4
       ],
-      "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-05' is PROVISIONAL — verify on site (rack label / PDU name).",
+      "notes": "Aluminium-profile 3-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-05' is PROVISIONAL — verify on site (rack label / PDU name).",
       "shelves": [
         "SHELF-17",
         "SHELF-18",
-        "SHELF-19",
-        "SHELF-20"
+        "SHELF-19"
       ]
     },
     {
@@ -538,10 +537,10 @@
       ],
       "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-06' is PROVISIONAL — verify on site (rack label / PDU name).",
       "shelves": [
+        "SHELF-20",
         "SHELF-21",
         "SHELF-22",
-        "SHELF-23",
-        "SHELF-24"
+        "SHELF-23"
       ]
     },
     {
@@ -569,10 +568,10 @@
       ],
       "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-07' is PROVISIONAL — verify on site (rack label / PDU name).",
       "shelves": [
+        "SHELF-24",
         "SHELF-25",
         "SHELF-26",
-        "SHELF-27",
-        "SHELF-28"
+        "SHELF-27"
       ]
     }
   ],
@@ -879,22 +878,6 @@
     },
     {
       "id": "SHELF-20",
-      "name": "SETUP-005 · level L4 (top)",
-      "category": "shelf",
-      "setup": "SETUP-005",
-      "level": 4,
-      "zone": "Z03",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-21",
       "name": "SETUP-006 · level L1 (lowest)",
       "category": "shelf",
       "setup": "SETUP-006",
@@ -910,7 +893,7 @@
       "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
     },
     {
-      "id": "SHELF-22",
+      "id": "SHELF-21",
       "name": "SETUP-006 · level L2",
       "category": "shelf",
       "setup": "SETUP-006",
@@ -926,7 +909,7 @@
       "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
     },
     {
-      "id": "SHELF-23",
+      "id": "SHELF-22",
       "name": "SETUP-006 · level L3",
       "category": "shelf",
       "setup": "SETUP-006",
@@ -942,7 +925,7 @@
       "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
     },
     {
-      "id": "SHELF-24",
+      "id": "SHELF-23",
       "name": "SETUP-006 · level L4 (top)",
       "category": "shelf",
       "setup": "SETUP-006",
@@ -958,7 +941,7 @@
       "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
     },
     {
-      "id": "SHELF-25",
+      "id": "SHELF-24",
       "name": "SETUP-007 · level L1 (lowest)",
       "category": "shelf",
       "setup": "SETUP-007",
@@ -974,7 +957,7 @@
       "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
     },
     {
-      "id": "SHELF-26",
+      "id": "SHELF-25",
       "name": "SETUP-007 · level L2",
       "category": "shelf",
       "setup": "SETUP-007",
@@ -990,7 +973,7 @@
       "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
     },
     {
-      "id": "SHELF-27",
+      "id": "SHELF-26",
       "name": "SETUP-007 · level L3",
       "category": "shelf",
       "setup": "SETUP-007",
@@ -1006,7 +989,7 @@
       "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
     },
     {
-      "id": "SHELF-28",
+      "id": "SHELF-27",
       "name": "SETUP-007 · level L4 (top)",
       "category": "shelf",
       "setup": "SETUP-007",
@@ -1612,7 +1595,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-005",
-      "shelf": "SHELF-20",
+      "shelf": "SHELF-19",
       "zone": "Z03",
       "status": "unknown",
       "owner": null,
@@ -1646,7 +1629,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-005",
-      "shelf": "SHELF-19",
+      "shelf": "SHELF-18",
       "zone": "Z03",
       "status": "unknown",
       "owner": null,
@@ -1675,7 +1658,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-006",
-      "shelf": "SHELF-24",
+      "shelf": "SHELF-23",
       "zone": "Z04",
       "status": "unknown",
       "owner": null,
@@ -1704,7 +1687,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-006",
-      "shelf": "SHELF-23",
+      "shelf": "SHELF-22",
       "zone": "Z04",
       "status": "unknown",
       "owner": null,
@@ -1733,7 +1716,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-006",
-      "shelf": "SHELF-22",
+      "shelf": "SHELF-21",
       "zone": "Z04",
       "status": "unknown",
       "owner": null,
@@ -1762,7 +1745,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-006",
-      "shelf": "SHELF-21",
+      "shelf": "SHELF-20",
       "zone": "Z04",
       "status": "unknown",
       "owner": null,
@@ -1791,7 +1774,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-006",
-      "shelf": "SHELF-24",
+      "shelf": "SHELF-23",
       "zone": "Z04",
       "status": "unknown",
       "owner": null,
@@ -1820,7 +1803,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-007",
-      "shelf": "SHELF-28",
+      "shelf": "SHELF-27",
       "zone": "Z04",
       "status": "unknown",
       "owner": null,
@@ -1849,7 +1832,7 @@
       "type": "opt",
       "typeLabel": "OPT — switch under test",
       "setup": "SETUP-007",
-      "shelf": "SHELF-27",
+      "shelf": "SHELF-26",
       "zone": "Z04",
       "status": "unknown",
       "owner": null,
@@ -2137,7 +2120,7 @@
       "type": "kvm",
       "typeLabel": "Raritan Dominion KX III",
       "setup": "SETUP-006",
-      "shelf": "SHELF-24",
+      "shelf": "SHELF-23",
       "zone": "Z04",
       "status": "active",
       "owner": null,
@@ -2165,7 +2148,7 @@
       "type": "kvm",
       "typeLabel": "Raritan Dominion LX II",
       "setup": "SETUP-005",
-      "shelf": "SHELF-20",
+      "shelf": "SHELF-19",
       "zone": "Z03",
       "status": "active",
       "owner": null,

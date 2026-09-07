@@ -14,6 +14,9 @@
   const STATUSES = Object.keys(STATUS_COLOR);
   const CONF_OPACITY = { high: 1.0, medium: 0.82, low: 0.5 };
   const TYPE_STRIPE = { opt: '#76b900', kvm: '#a78bfa', pdu: '#fbbf24', chiller: '#22d3ee', 'equip-switch': '#22d3ee', 'equip-patchpanel': '#94a3b8', 'equip-kvm': '#a78bfa', 'equip-pdu': '#fbbf24', 'equip-ups': '#4ade80', 'equip-cable': '#71717a', 'equip-blank': '#3f3f46', 'equip-other': '#a1a1aa', cart: '#3b82f6', ladder: '#facc15', toolbox: '#f97316', 'spare-chassis': '#d6c9a8', misc: '#71717a' };
+  // realistic body colours (photo-matched); status is shown by edge outline + LED + label dot
+  const TYPE_BODY = { opt: '#2a2c31', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#232a38', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
+  const CABLE_COLORS = ['#d92b2b', '#d92b2b', '#1a1a1a', '#d92b2b', '#22c1a6', '#d92b2b', '#f4f4f5'];
   const EQUIP_LABEL = { switch: 'Switch', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
   const POLL_MS = 15000;
 
@@ -33,7 +36,7 @@
     settings: LS.get('settings', { url: '', pass: '', poll: true }),
     live: { connected: false, devices: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
-    editMode: LS.get('editMode', false), kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
+    embed: /[?&]embed=1/.test(location.search), editMode: LS.get('editMode', false), kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
   };
@@ -44,7 +47,7 @@
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputEncoding = THREE.sRGBEncoding;
   const scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(0x0a0a0c, 0.018);
+  scene.fog = null;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
   const controls = new THREE.OrbitControls(camera, canvas);
   controls.enableDamping = true; controls.dampingFactor = 0.1;
@@ -52,8 +55,8 @@
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
   controls.screenSpacePanning = true;
 
-  scene.add(new THREE.HemisphereLight(0xdfe6f0, 0x1a1a1f, 0.85));
-  const sun = new THREE.DirectionalLight(0xffffff, 0.75); sun.position.set(6, 9, 4); scene.add(sun);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x50555c, 1.0));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.55); sun.position.set(-6, 9, 4); scene.add(sun);
   const fill = new THREE.DirectionalLight(0x9fe040, 0.12); fill.position.set(-4, 5, -6); scene.add(fill);
 
   const wallsGroup = new THREE.Group(); wallsGroup.name = 'walls';
@@ -118,22 +121,22 @@
   function buildRoom(d) {
     const { width: W, depth: D, height: H } = d.room;
     // floor
-    const floor = box(W, 0.02, D, mat('#2a2a30', { rough: 0.95, metal: 0 }), W / 2, -0.01, D / 2); floor.receiveShadow = true; staticGroup.add(floor);
+    const floor = box(W, 0.02, D, mat('#c4c8cc', { rough: 0.95, metal: 0 }), W / 2, -0.01, D / 2); floor.receiveShadow = true; staticGroup.add(floor);
     // grid 0.6 m
     const pts = [];
     for (let x = 0; x <= W + 1e-6; x += 0.6) pts.push(x, 0.002, 0, x, 0.002, D);
     for (let z = 0; z <= D + 1e-6; z += 0.6) pts.push(0, 0.002, z, W, 0.002, z);
     const gg = new THREE.BufferGeometry(); gg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    staticGroup.add(new THREE.LineSegments(gg, new THREE.LineBasicMaterial({ color: 0x3a3a40, transparent: true, opacity: 0.6 })));
+    staticGroup.add(new THREE.LineSegments(gg, new THREE.LineBasicMaterial({ color: 0x9a9ea3, transparent: true, opacity: 0.55 })));
     // walls
-    const wallMat = mat('#5a5a63', { opacity: 0.26, double: true, rough: 1, metal: 0, unique: true });
+    const wallMat = mat('#eceef0', { opacity: 0.38, double: true, rough: 1, metal: 0, unique: true });
     const t = 0.08;
     (d.structure.walls || []).forEach(w => {
       const [x1, z1] = w.from, [x2, z2] = w.to; const len = Math.hypot(x2 - x1, z2 - z1);
       const m = box(len, H, t, wallMat, (x1 + x2) / 2, H / 2, (z1 + z2) / 2); m.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
       const off = t / 2; // push outward so the interior face sits on the room boundary
       if (w.id === 'WALL-L') m.position.x -= off; if (w.id === 'WALL-R') m.position.x += off; if (w.id === 'WALL-F') m.position.z -= off; if (w.id === 'WALL-B') m.position.z += off;
-      wallsGroup.add(m); wallsGroup.add(edges(m, '#3f3f46'));
+      wallsGroup.add(m); wallsGroup.add(edges(m, '#9ca3af'));
     });
     // wall base line (visible even with translucent walls)
     const base = [0, 0.01, 0, W, 0.01, 0, W, 0.01, 0, W, 0.01, D, W, 0.01, D, 0, 0.01, D, 0, 0.01, D, 0, 0.01, 0];
@@ -197,7 +200,7 @@
     const { width: w, depth: dd, height: h, shelfLevels, shelfThickness: st, profile: p } = tpl;
     const g = new THREE.Group(); g.position.set(su.pos[0], 0, su.pos[1]); g.rotation.y = THREE.MathUtils.degToRad(su.rot || 0); g.updateMatrixWorld(true);
     const status = effStatus(su); const col = STATUS_COLOR[status];
-    const postMat = mat('#b9bec7', { metal: .55, rough: .35, unique: true });
+    const postMat = mat('#cdd0d5', { metal: .6, rough: .3, unique: true });
     const meshes = [], eds = [];
     // posts
     [[-1, -1], [-1, 1], [1, -1], [1, 1]].forEach(([sx, sz]) => {
@@ -218,7 +221,7 @@
     // shelves
     shelvesDefs.forEach(sh => {
       const y = shelfLevels[sh.level - 1];
-      const m = box(dd - 2 * p - 0.02, st, w - 2 * p - 0.02, mat('#cfd3d9', { metal: .3, rough: .5, unique: true }), 0, y - st / 2, 0); g.add(m);
+      const m = box(dd - 2 * p - 0.02, st, w - 2 * p - 0.02, mat('#dfe2e6', { metal: .3, rough: .5, unique: true }), 0, y - st / 2, 0); g.add(m);
       const shStatus = effStatus(sh); const se = setEdgeOp(edges(m, STATUS_COLOR[shStatus]), .7); g.add(se);
       // power strip above the shelf (part of the rack PDU)
       const strip = box(0.05, 0.045, 0.55, mat('#1b1b20', { rough: .6, metal: .3, unique: true }), -dd / 2 + p + 0.05, y + 0.22, 0); g.add(strip);
@@ -285,6 +288,10 @@
         const m = box(w, h, d, mat(color, { opacity: op, unique: true, rough: .6, metal: .2, emissive: emis ? color : '#000', emissiveIntensity: emis }));
         return m;
       };
+      const bodyCol = TYPE_BODY[it.type] || TYPE_BODY.other;
+      const led = (x, y, z, c, size = 0.014) => box(size, size, size, mat(c, { emissive: c, emissiveIntensity: 1.3, unique: true }), x, y, z);
+      let seed = 0; for (const ch of it.id) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+      const cable = (pts, c, r = 0.006) => { const curve = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(...p))); const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 18, r, 6, false), mat(c, { rough: .55, metal: .05, opacity: op, unique: true })); return m; };
 
       if (it.shelf && S.recs.has(it.shelf)) {
         const sh = S.recs.get(it.shelf); const su = S.recs.get(sh.setup); const rt = su.tpl;
@@ -296,8 +303,22 @@
         if (it.type === 'kvm') { w = 0.44; d = 0.30; h = 0.045; }
         if (it.type.startsWith('equip-')) { w = 0.44; d = 0.35; h = 0.045; }
         w = Math.min(w, slotW - 0.03);
-        const body = makeBox(d, h, w, col, status === 'active' ? .25 : 0); body.position.set(0.04, sh.y + h / 2, zc); g.add(body); meshes.push(body);
-        const stripe = box(0.012, h * .7, w * .92, mat(stripeCol, { emissive: stripeCol, emissiveIntensity: .8, opacity: op, unique: true }), d / 2 + 0.04 + 0.002, sh.y + h / 2, zc); g.add(stripe);
+        const body = makeBox(d, h, w, bodyCol); body.position.set(0.04, sh.y + h / 2, zc); g.add(body); meshes.push(body);
+        const fx = d / 2 + 0.04 + 0.002; // front face x (local)
+        // front faceplate: silver band + port row (dark) + type stripe + status LED + blue activity LEDs
+        g.add(box(0.006, h * .8, w * .94, mat('#9aa0a8', { metal: .7, rough: .35, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
+        g.add(box(0.008, Math.min(0.022, h * .35), w * .7, mat('#111114', { rough: .8, opacity: op, unique: true }), fx + 0.003, sh.y + h * .42, zc + w * .05));
+        g.add(box(0.008, h * .55, 0.012, mat(stripeCol, { emissive: stripeCol, emissiveIntensity: .8, opacity: op, unique: true }), fx + 0.003, sh.y + h / 2, zc - w / 2 + 0.02));
+        g.add(led(fx + 0.006, sh.y + h * .78, zc - w / 2 + 0.06, col));
+        if (it.type === 'opt' && status !== 'dismantled') { const nb = 1 + Math.floor(rnd() * 3); for (let i = 0; i < nb; i++) g.add(led(fx + 0.006, sh.y + h * .78, zc - w / 2 + 0.1 + i * 0.03, '#3b82f6', 0.009)); }
+        // cables from the front to the rack post (red fibre / black power), like the photos
+        if (it.type === 'opt' || it.type.startsWith('equip-')) {
+          const nc = 1 + Math.floor(rnd() * 2); const postZ = (zc > 0 ? 1 : -1) * (rt.width / 2 - rt.profile - 0.02); const postX = rt.depth / 2 - rt.profile;
+          for (let i = 0; i < nc; i++) {
+            const z0 = zc + (rnd() - 0.5) * w * .6, y0 = sh.y + h * .45; const cc = CABLE_COLORS[Math.floor(rnd() * CABLE_COLORS.length)];
+            g.add(cable([[fx, y0, z0], [fx + 0.12 + rnd() * 0.1, y0 - 0.08 - rnd() * 0.12, z0 + (postZ - z0) * 0.35], [fx + 0.06, y0 - 0.22 - rnd() * 0.15, postZ * 0.9], [postX, sh.y - 0.12 - rnd() * 0.1, postZ]], cc));
+          }
+        }
         const e = edges(body, col, dashed); g.add(e); eds.push(e);
         su.group.add(g);
         anchor = () => localToWorld(su.group, 0.04 + d / 2, sh.y + h + 0.02, zc);
@@ -305,8 +326,14 @@
         const su = S.recs.get(it.setup); const c = tpl.chiller; const n = model.items.filter(x => x.placement === 'bottom-bay' && x.setup === it.setup); const idx = n.indexOf(it);
         const zc = n.length > 1 ? (idx === 0 ? -0.22 : 0.22) : -0.08;
         g = new THREE.Group();
-        const body = makeBox(c.depth, c.height, c.width, col); body.position.set(-0.05, c.height / 2, zc); g.add(body); meshes.push(body);
-        const disp = box(0.01, 0.04, 0.08, mat('#f43f5e', { emissive: '#f43f5e', emissiveIntensity: .9 }), c.depth / 2 - 0.05 + 0.006, c.height * .78, zc - 0.15); g.add(disp);
+        const body = makeBox(c.depth, c.height, c.width, bodyCol); body.position.set(-0.05, c.height / 2, zc); g.add(body); meshes.push(body);
+        const fx = c.depth / 2 - 0.05 + 0.004;
+        g.add(box(0.008, 0.045, 0.09, mat('#0b0b0e', { rough: .4, opacity: op, unique: true }), fx, c.height * .80, zc - 0.14));           // display window
+        g.add(box(0.012, 0.014, 0.05, mat('#22c55e', { emissive: '#22c55e', emissiveIntensity: 1.2, unique: true }), fx + 0.002, c.height * .80, zc - 0.14)); // green digits
+        g.add(box(0.008, 0.06, 0.05, mat('#d92b2b', { rough: .7, opacity: op, unique: true }), fx, c.height * .80, zc + 0.16));            // red warning label
+        g.add(box(0.008, 0.16, 0.06, mat('#f4f4f5', { rough: .7, opacity: op, unique: true }), fx, c.height * .45, zc + 0.18));            // white spec label
+        g.add(box(0.008, 0.05, 0.05, mat('#e11d48', { rough: .7, opacity: op, unique: true }), fx, c.height * .30, zc - 0.05));            // red sticker
+        g.add(led(fx + 0.004, c.height * .92, zc - 0.22, col, 0.016));
         const e = edges(body, col, dashed); g.add(e); eds.push(e);
         su.group.add(g); anchor = () => localToWorld(su.group, c.depth / 2, c.height + 0.03, zc);
       } else if (it.placement === 'rack-strips' && it.setup && S.recs.has(it.setup)) {
@@ -318,12 +345,14 @@
         anchor = () => localToWorld(su.group, -su.tpl.depth / 2 + 0.1, top + 0.32, 0);
       } else if (it.storage && S.recs.has(it.storage) && it.type === 'spare-chassis') {
         const st = S.recs.get(it.storage); g = new THREE.Group(); const q = Math.min(it.quantity || 1, st.trayY.length);
-        for (let i = 0; i < q; i++) { const m = makeBox(0.40, 0.045, 0.44, '#d6c9a8'); m.material.opacity = op; m.position.set(0, st.trayY[i] + 0.03, 0); g.add(m); meshes.push(m); eds.push(edges(m, col, dashed)); }
+        for (let i = 0; i < q; i++) { const m = makeBox(0.40, 0.045, 0.44, bodyCol); m.material.opacity = op; m.position.set(0, st.trayY[i] + 0.03, 0); g.add(m); meshes.push(m); eds.push(edges(m, col, dashed)); g.add(box(0.006, 0.02, 0.36, mat('#3f3f46', { rough: .8, opacity: op, unique: true }), 0.204, st.trayY[i] + 0.03, 0)); }
         eds.forEach(e => g.add(e)); st.group.add(g); anchor = () => localToWorld(st.group, 0.3, st.trayY[q - 1] + 0.12, 0);
       } else if (it.pos && it.size) {
         const [w, d, h] = it.size; const y0 = it.y || 0; g = new THREE.Group(); g.position.set(it.pos[0], y0, it.pos[1]);
-        const body = makeBox(w, h, d, col); body.position.set(0, h / 2, 0); g.add(body); meshes.push(body);
-        const stripe = box(w * .9, 0.008, d * .9, mat(stripeCol, { emissive: stripeCol, emissiveIntensity: .6 }), 0, h + 0.004, 0); g.add(stripe);
+        const body = makeBox(w, h, d, bodyCol); body.position.set(0, h / 2, 0); g.add(body); meshes.push(body);
+        g.add(led(w / 2 * .8, h + 0.008, d / 2 * .8, col, 0.02));
+        if (it.type === 'cart') { g.add(box(w * .8, 0.02, d * .6, mat('#0b0b0e', { rough: .4, opacity: op, unique: true }), 0, h + 0.01, 0)); g.add(box(0.04, 0.5, 0.04, mat('#2f6fd6', { rough: .5, opacity: op, unique: true }), 0, h + 0.25, -d / 2 * .6)); }
+        if (it.type === 'ladder') { for (let i = 1; i <= 3; i++) g.add(box(w * .9, 0.02, 0.06, mat('#9ca3af', { metal: .5, rough: .4, opacity: op, unique: true }), 0, h * i / 3.5, -d / 2 + d * i / 4)); }
         const e = edges(body, col, dashed); g.add(e); eds.push(e);
         itemsGroup.add(g); anchor = new THREE.Vector3(it.pos[0], y0 + h + 0.05, it.pos[1]);
       } else {
@@ -459,7 +488,7 @@
       rec.edges.forEach(e => { e.material.opacity = (e.userData.baseOpacity ?? .9) * (rec.filtered ? 0.15 : 1); });
       if (rec.cat === 'shelf' && rec.strip) { rec.strip.material.opacity = fade; rec.led.material.opacity = fade; }
     }
-    renderTree(); renderInventory(); renderUnplaced(); renderStats();
+    renderTree(); renderInventory(); renderUnplaced(); renderStats(); renderRackBar();
   }
   function setupFilterUI() {
     const d = S.data;
@@ -576,7 +605,7 @@
       if (!opts.keepCamera && opts.fly !== false) flyTo(rec);
     }
     $$('.lbl.sel').forEach(l => l.classList.remove('sel')); if (rec.label) rec.label.classList.add('sel');
-    if (S.editMode) renderEditor(rec); else renderDetail(rec); renderTree();
+    if (S.editMode) renderEditor(rec); else renderDetail(rec); renderTree(); renderRackBar();
     $('#detail').classList.remove('hidden'); resize();
   }
   function closeDetail() { S.selected = null; if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; } $('#detail').classList.add('hidden'); $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); resize(); }
@@ -872,10 +901,11 @@
   function setView(name) { VIEWS[name](); $$('.tb').forEach(b => b.classList.remove('active')); $('#v' + name[0].toUpperCase() + name.slice(1)).classList.add('active'); }
   function flyTo(rec, force) {
     if (!rec.group) return; const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (b.isEmpty()) return;
-    const c = b.getCenter(new THREE.Vector3()), s = b.getSize(new THREE.Vector3()); const dist = Math.max(s.x, s.y, s.z) * 1.7 + 1.1;
+    const c = b.getCenter(new THREE.Vector3()), s = b.getSize(new THREE.Vector3()); let dist = Math.max(s.x, s.y, s.z) * 1.7 + 1.1;
+    if (rec.cat === 'setup') { dist = 3.4; c.y = 1.25; } else if (rec.cat === 'shelf') { dist = 2.2; } else if (rec.cat === 'item' && rec.setup) { dist = Math.max(1.2, dist * 0.8); }
     let dir = camera.position.clone().sub(controls.target); if (dir.length() < 0.01) dir.set(-1, 1, -1); dir.normalize(); if (dir.y < 0.25) dir.y = 0.25; dir.normalize();
     // prefer approaching a rack from its front
-    if (rec.cat === 'setup' || rec.cat === 'shelf' || (rec.cat === 'item' && rec.setup)) { const su = S.recs.get(rec.setup || rec.id); if (su && su.group) { const front = new THREE.Vector3(1, 0, 0).transformDirection(su.group.matrixWorld); dir = front.multiplyScalar(0.85).add(new THREE.Vector3(0, 0.55, 0)).normalize(); } }
+    if (rec.cat === 'setup' || rec.cat === 'shelf' || (rec.cat === 'item' && rec.setup)) { const su = S.recs.get(rec.setup || rec.id); if (su && su.group) { const front = new THREE.Vector3(1, 0, 0).transformDirection(su.group.matrixWorld); dir = front.multiplyScalar(1).add(new THREE.Vector3(0, rec.cat === 'setup' ? 0.28 : 0.4, 0)).normalize(); } }
     tweenCamera(c.clone().add(dir.multiplyScalar(dist)), c, force ? 500 : 800);
   }
   $('#vOrbit').onclick = () => setView('orbit'); $('#vTop').onclick = () => setView('top'); $('#vEye').onclick = () => setView('eye');
@@ -902,7 +932,7 @@
     if (!downPos) return; const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]); downPos = null; if (moved > 5) return;
     const hit = pick(e); if (!hit) return;
     if (S.moveItem) { const target = S.recs.get(hit.userData.id); if (target && (target.cat === 'shelf' || target.cat === 'setup' || target.cat === 'storage')) { finishMove(target); return; } }
-    select(hit.userData.id, { keepCamera: true });
+    select(hit.userData.id, { fly: true });
   });
   let hoverT = 0;
   canvas.addEventListener('pointermove', e => { const now = performance.now(); if (now - hoverT < 40) return; hoverT = now; const hit = pick(e); const id = hit ? hit.userData.id : null; if (id !== S.hover) { setHover(id); } });
@@ -1063,6 +1093,17 @@
     const mat_ = $('#eMaterialize'); if (mat_) mat_.onclick = () => { const c = { id: nextItemId(), name: it.name, category: 'item', type: it.type, typeLabel: it.typeLabel, setup: it.setup || null, shelf: it.shelf || null, placement: it.placement, zone: it.zone || null, status: it.status || 'active', owner: it.owner || null, confidence: 'high', placementConfidence: 'medium', photos: [], notes: 'Added from live DCIM data.', dcim: it.dcim ? { optKey: it.dcim.optKey, pdu: it.dcim.pdu, pduName: it.dcim.pduName, outlet: it.dcim.outlet, deviceId: it.dcim.deviceId } : undefined }; S.data.items.push(c); markDirty(); rebuildAll(); select(c.id, { keepCamera: true }); };
   }
 
+  // ───────────────────────────────────────────────────────────── quick-jump rack bar + zoom buttons
+  function renderRackBar() {
+    const bar = $('#rackBar'); if (!bar || !S.data) return;
+    bar.innerHTML = S.data.setups.map(su => `<button data-jump="${su.id}" class="${S.selected === su.id ? 'on' : ''}"><span><span class="rb-dot" style="background:${STATUS_COLOR[su.status || 'unknown']}"></span>${esc(su.dcimRack || su.id)}</span><small>${esc(su.name.split('—')[0].replace('Rack', '').trim())}</small></button>`).join('') +
+      S.data.storage.map(st => `<button data-jump="${st.id}" class="${S.selected === st.id ? 'on' : ''}"><span><span class="rb-dot" style="background:${STATUS_COLOR[st.status || 'unknown']}"></span>${st.id.replace('STORAGE-', 'ST-')}</span><small>${esc(st.name.split(' ').slice(0, 2).join(' '))}</small></button>`).join('');
+    $$('[data-jump]', bar).forEach(b => b.onclick = () => select(b.dataset.jump, { fly: true }));
+  }
+  function zoomBy(f) { const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
+  function rotateBy(a) { const dir = camera.position.clone().sub(controls.target); dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), a); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 300); }
+  $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4); $('#zL').onclick = () => rotateBy(Math.PI / 8); $('#zR').onclick = () => rotateBy(-Math.PI / 8);
+
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }
   $$('.tab').forEach(b => b.onclick = () => { $$('.tab').forEach(x => x.classList.remove('active')); b.classList.add('active'); ['tree', 'inv', 'unplaced'].forEach(id => $('#' + id).classList.toggle('hidden', id !== b.dataset.tab)); });
@@ -1075,7 +1116,7 @@
     document.title = `${data.meta.title} — Lab Manager`;
     setupFilterUI(); buildStatic(); computeModel(); buildItems();
     setLabelMode(LS.get('labelMode', 'setups'), true); updateSaveBar();
-    document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit';
+    document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit';
     resize(); VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; $('#vOrbit').classList.add('active');
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http'); // same-origin when served from the backend

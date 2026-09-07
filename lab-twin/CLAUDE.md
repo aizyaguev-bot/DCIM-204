@@ -1,0 +1,31 @@
+# Lab 204 Digital Twin — project notes for Claude / new sessions
+
+Standalone Three.js (r128, classic scripts, **no build step**) app served by the Lab Manager FastAPI backend at `/twin/`.
+Repo: `aizyaguev-bot/DCIM-204`, folder `lab-twin/`. Production: VM `yokbvdiprd955`, `~/DCIM-204`, uvicorn on :8000 (venv: `backend/.venv`).
+
+## Files
+- `index.html` — layout: header (search, Edit, Screen, Backend), stats bar, left sidebar (filters/legend/tree), 3D viewport (toolbar, rack bar, zoom buttons, save bar, move banner), right detail/editor panel, modals.
+- `styles.css` — Lab Manager theme (NVIDIA green `#76b900` on zinc, JetBrains Mono). Sections: header, buttons, layout, detail, edit-mode (`.btn-lg`, `.chip-lg`), kiosk (`body.kiosk`), embed (`body.embed`).
+- `app.js` — everything: scene/geometry (`buildRoom`, `buildRack`, `buildTrayRack`, `buildCabinet`, `buildItems`), effective model (`computeModel` = JSON + live DCIM), filters/search/tree, detail panel (`renderDetail`), touch editor (`renderEditor`, `startMove/finishMove`), live backend (`connect`, `refreshStatuses`, `outletAction`, `openKvm`), views/camera (`VIEWS`, `flyTo`, `zoomBy`), persistence (`markDirty`, `saveToServer` → `PUT /api/twin-data`, `downloadJson`).
+- `lab-data.json` — **the inventory** (room, templates, structure, zones, setups=racks, shelves, storage, items, dcim seed). Edit this, never hard-code inventory in JS.
+- `vendor/` — three.min.js + OrbitControls.js (local, lab has no internet). `photos/` — 4 source photos.
+- `floorplan.svg` — 2D plan generated from the JSON (generator scripts live in the Cowork outputs of the original session; regenerate manually if positions change).
+
+## Conventions
+- Units: metres. Data axes: `x` across the room (0 = LEFT wall when standing at the entrance), `z` depth from the entrance wall, `y` up. The Three.js world is mirrored on x (`world.scale.x = -1`) so data-x grows to the viewer's right — use `WX()` for camera positions, `transformDirection(matrixWorld)` for directions.
+- Rack local frame: front = +x local, width along z, `rot` = yaw degrees (0 → front faces +x, 90 → faces −z, 180 → faces −x).
+- IDs: `Z01`, `SETUP-001`, `SHELF-01…28` (4 per rack, L1 = lowest), `STORAGE-01`, `ITEM-0001`. `LIVE-*` = objects that come from the DCIM backend only (not in JSON).
+- Status colours: active green, building amber, inactive grey, dismantled rose, unknown dark grey — shown on edge outlines, LEDs and label dots (bodies use realistic colours from `TYPE_BODY`). Confidence: high solid, medium faded, low dashed.
+- Backend endpoints used: `/api/devices/`, `/api/rack-slots`, `/api/switch-assignments`, `/api/opt-owners`, `/api/rack-items`, `/api/chillers`, `/api/rack-overrides`, `/api/pdus/{id}/status`, `POST /api/pdus/{id}/outlets/{n}/power`, `/api/kvms/{id}/status`, `/api/kvms/{id}/autologin?port=N`, `GET/PUT /api/twin-data`. No IPs/credentials in this folder — ever.
+- Same-origin auto-connect; `?embed=1` hides the brand (used by the React tab), `?kiosk=1` = lab screen mode.
+
+## Dev loop
+1. Edit files here. Preview: `start-twin.bat` (Python http.server on :8090) or open `../lab-twin-standalone.html` equivalent by bundling.
+2. Sanity: `node --check app.js`.
+3. Ship: `git add lab-twin && git commit -m "..." && git push` (from the repo root), then on the VM `cd ~/DCIM-204 && git pull` — static files are served from disk, **no restart needed**; hard-refresh the browser. Restart only if `backend/app/main.py` changed:
+   `pkill -f "uvicorn app.main:app"; sleep 1; cd backend && nohup .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/lab-manager.log 2>&1 &`
+
+## Open items
+- Physical rack ↔ `Rack-0X` mapping is provisional (low confidence) — fix in Edit mode → Save to server.
+- `DOOR-02` (right wall) unverified; room size 4.0×5.6 m is an estimate.
+- Frontend tab "3D Twin" (App.jsx iframe) requires `npm run build` in `frontend/`.

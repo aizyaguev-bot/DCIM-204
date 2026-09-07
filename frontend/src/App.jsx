@@ -211,6 +211,7 @@ export default function App() {
               { id: "dashboard", label: "Dashboard" },
               { id: "dcim",      label: "DCIM" },
               { id: "sync",      label: "Sync Map" },
+              { id: "twin",      label: "3D Twin" },
             ].map(t => (
               <button key={t.id} onClick={() => setMainTab(t.id)}
                 className={`px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition ${
@@ -242,6 +243,11 @@ export default function App() {
           onRenameOpt={handleRenameOpt}
           onRefresh={loadDevices}
         />
+      )}
+
+      {view.kind === "dashboard" && mainTab === "twin" && (
+        <iframe title="3D Digital Twin" src="/twin/index.html?embed=1" className="w-full flex-1 border-0"
+          style={{ minHeight: "calc(100vh - 150px)" }} allow="fullscreen" />
       )}
 
       {view.kind === "dashboard" && mainTab === "sync" && (
