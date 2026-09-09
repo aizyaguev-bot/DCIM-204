@@ -1590,7 +1590,7 @@
     "optKey": "opt207",
     "pdu": "pdu-rack01",
     "pduName": "PDU-Rack-01",
-    "outlet": 23
+    "outlet": 1
    },
    "notes": "Lab Manager rack view Rack-01 · U01 · 13 W at capture"
   },
@@ -1612,7 +1612,7 @@
     "optKey": "optn85",
     "pdu": "pdu-rack01",
     "pduName": "PDU-Rack-01",
-    "outlet": null
+    "outlet": 2
    },
    "notes": "Lab Manager rack view Rack-01 · U02 · 24 W at capture"
   },
@@ -1650,7 +1650,7 @@
     "optKey": "opt168",
     "pdu": "pdu-rack01",
     "pduName": "PDU-Rack-01",
-    "outlet": null
+    "outlet": 3
    },
    "notes": "Lab Manager rack view Rack-01 · U03 · 34 W at capture"
   },
@@ -1672,7 +1672,7 @@
     "optKey": "opt133",
     "pdu": "pdu-rack01",
     "pduName": "PDU-Rack-01",
-    "outlet": 13
+    "outlet": 4
    },
    "notes": "Lab Manager rack view Rack-01 · U04 · 20 W at capture",
    "dut": "Rosalind"
@@ -1695,7 +1695,7 @@
     "optKey": "opt40",
     "pdu": "pdu-rack02",
     "pduName": "PDU-Rack-02",
-    "outlet": null
+    "outlet": 1
    },
    "notes": "Lab Manager rack view Rack-02 · U01 · 35 W at capture"
   },
@@ -1717,7 +1717,7 @@
     "optKey": "optn84",
     "pdu": "pdu-rack02",
     "pduName": "PDU-Rack-02",
-    "outlet": 20
+    "outlet": 2
    },
    "notes": "Lab Manager rack view Rack-02 · U02 · 95 W at capture",
    "dut": "Chameleon MGMT"
@@ -1740,7 +1740,7 @@
     "optKey": "optn87",
     "pdu": "pdu-rack02",
     "pduName": "PDU-Rack-02",
-    "outlet": null
+    "outlet": 3
    },
    "notes": "Lab Manager rack view Rack-02 · U03 · 13 W at capture",
    "dut": "V3000"
@@ -1763,7 +1763,7 @@
     "optKey": "optn130",
     "pdu": "pdu-rack02",
     "pduName": "PDU-Rack-02",
-    "outlet": 6
+    "outlet": 4
    },
    "notes": "Lab Manager rack view Rack-02 · U04 · 28 W at capture",
    "dut": "MGMT test"
@@ -1786,7 +1786,7 @@
     "optKey": "opt114 (vm)",
     "pdu": "pdu-rack03",
     "pduName": "PDU-Rack-03",
-    "outlet": null
+    "outlet": 1
    },
    "notes": "Lab Manager rack view Rack-03 · U01 · 19 W at capture"
   },
@@ -1808,7 +1808,7 @@
     "optKey": "optn176",
     "pdu": "pdu-rack03",
     "pduName": "PDU-Rack-03",
-    "outlet": null
+    "outlet": 2
    },
    "notes": "Lab Manager rack view Rack-03 · U02 · 8 W at capture"
   },
@@ -1830,7 +1830,7 @@
     "optKey": "optn88",
     "pdu": "pdu-rack03",
     "pduName": "PDU-Rack-03",
-    "outlet": 20
+    "outlet": 3
    },
    "notes": "Lab Manager rack view Rack-03 · U03 · 15 W at capture"
   },
@@ -1868,7 +1868,7 @@
     "optKey": "opt106",
     "pdu": "pdu-rack03",
     "pduName": "PDU-Rack-03",
-    "outlet": 9
+    "outlet": 4
    },
    "notes": "Lab Manager rack view Rack-03 · U04 · 20 W at capture",
    "dut": "Chameleon Eoptol"
@@ -1891,7 +1891,7 @@
     "optKey": "optn144",
     "pdu": "pdu-rack04",
     "pduName": "PDU-Rack-04",
-    "outlet": 19
+    "outlet": 1
    },
    "notes": "Lab Manager rack view Rack-04 · U01 · 30 W at capture"
   },
@@ -1913,7 +1913,7 @@
     "optKey": "opt46",
     "pdu": "pdu-rack04",
     "pduName": "PDU-Rack-04",
-    "outlet": null
+    "outlet": 2
    },
    "notes": "Lab Manager rack view Rack-04 · U02 · 12 W at capture"
   },
@@ -1935,7 +1935,7 @@
     "optKey": "opt94",
     "pdu": "pdu-rack04",
     "pduName": "PDU-Rack-04",
-    "outlet": 18
+    "outlet": 3
    },
    "notes": "Lab Manager rack view Rack-04 · U03 · 22 W at capture",
    "dut": "Salamandra"
@@ -1958,7 +1958,7 @@
     "optKey": "opt60",
     "pdu": "pdu-rack04",
     "pduName": "PDU-Rack-04",
-    "outlet": 9
+    "outlet": 4
    },
    "notes": "Lab Manager rack view Rack-04 · U04 · 23 W at capture",
    "dut": "chameleon 6S"
@@ -1981,7 +1981,7 @@
     "optKey": "opt174",
     "pdu": "pdu-rack05",
     "pduName": "PDU-Rack-05",
-    "outlet": null
+    "outlet": 1
    },
    "notes": "Lab Manager rack view Rack-05 · U01 · 13 W at capture"
   },
@@ -2003,7 +2003,7 @@
     "optKey": "optn108",
     "pdu": "pdu-rack05",
     "pduName": "PDU-Rack-05",
-    "outlet": 23
+    "outlet": 2
    },
    "notes": "Lab Manager rack view Rack-05 · U02"
   },
@@ -2041,7 +2041,7 @@
     "optKey": "optn45",
     "pdu": "pdu-rack05",
     "pduName": "PDU-Rack-05",
-    "outlet": 13
+    "outlet": 3
    },
    "notes": "Lab Manager rack view Rack-05 · U03 · 17 W at capture",
    "dut": "rosalind HN"
@@ -2064,7 +2064,7 @@
     "optKey": "optn34",
     "pdu": "pdu-rack06",
     "pduName": "PDU-Rack-06",
-    "outlet": null
+    "outlet": 1
    },
    "notes": "Lab Manager rack view Rack-06 · U01"
   },
@@ -2086,7 +2086,7 @@
     "optKey": "optn190",
     "pdu": "pdu-rack06",
     "pduName": "PDU-Rack-06",
-    "outlet": null
+    "outlet": 2
    },
    "notes": "Lab Manager rack view Rack-06 · U02 · 10 W at capture"
   },
@@ -2108,7 +2108,7 @@
     "optKey": "opt208",
     "pdu": "pdu-rack06",
     "pduName": "PDU-Rack-06",
-    "outlet": null
+    "outlet": 3
    },
    "notes": "Lab Manager rack view Rack-06 · U03 · 19 W at capture"
   },
@@ -2130,7 +2130,7 @@
     "optKey": "opt250",
     "pdu": "pdu-rack06",
     "pduName": "PDU-Rack-06",
-    "outlet": 17
+    "outlet": 4
    },
    "notes": "Lab Manager rack view Rack-06 · U04 · 41 W at capture",
    "dut": "taipan"
@@ -2153,7 +2153,7 @@
     "optKey": "optn101",
     "pdu": "pdu-rack07",
     "pduName": "PDU-Rack-07",
-    "outlet": null
+    "outlet": 1
    },
    "notes": "Lab Manager rack view Rack-07 · U02 · 20 W at capture",
    "dut": "rosetta"
@@ -2176,7 +2176,7 @@
     "optKey": "optn29",
     "pdu": "pdu-rack07",
     "pduName": "PDU-Rack-07",
-    "outlet": 9
+    "outlet": 2
    },
    "notes": "Lab Manager rack view Rack-07 · U03 · 12 W at capture",
    "dut": "rosetta"
@@ -2199,7 +2199,7 @@
     "optKey": "optn93",
     "pdu": "pdu-rack07",
     "pduName": "PDU-Rack-07",
-    "outlet": null
+    "outlet": 3
    },
    "notes": "Lab Manager rack view Rack-07 · U04 · 22 W at capture",
    "dut": "rosalind"
@@ -2215,10 +2215,10 @@
     "rack": "Rack-01",
     "outlets": 24,
     "labels": {
-     "13": "Opt133",
-     "21": "Opt183",
-     "23": "Opt207",
-     "24": "Optn85 (SSD)"
+     "1": "Opt207",
+     "2": "optn85",
+     "3": "Opt168",
+     "4": "Opt133"
     }
    },
    {
@@ -2227,10 +2227,10 @@
     "rack": "Rack-02",
     "outlets": 24,
     "labels": {
-     "6": "Optn130",
-     "13": "Opt208",
-     "20": "Optn84",
-     "22": "Optn84 (2)"
+     "1": "opt40",
+     "2": "Optn84",
+     "3": "Optn87",
+     "4": "Optn130"
     }
    },
    {
@@ -2239,10 +2239,10 @@
     "rack": "Rack-03",
     "outlets": 24,
     "labels": {
-     "9": "Opt106",
-     "17": "Optn36",
-     "20": "Optn88",
-     "23": "Optn51"
+     "1": "Opt114 (VM)",
+     "2": "Optn176",
+     "3": "Optn88",
+     "4": "Opt106"
     }
    },
    {
@@ -2251,10 +2251,10 @@
     "rack": "Rack-04",
     "outlets": 24,
     "labels": {
-     "9": "Opt60",
-     "18": "Opt94",
-     "19": "Optn144",
-     "23": "Opt (unlabeled)"
+     "1": "optn144",
+     "2": "opt46",
+     "3": "Opt94",
+     "4": "Opt60"
     }
    },
    {
@@ -2263,9 +2263,10 @@
     "rack": "Rack-05",
     "outlets": 24,
     "labels": {
-     "13": "Optn45",
-     "22": "Opt (unlabeled)",
-     "23": "Optn108"
+     "1": "opt174",
+     "2": "Optn108",
+     "3": "Optn45",
+     "4": "KVM Power"
     }
    },
    {
@@ -2274,11 +2275,10 @@
     "rack": "Rack-06",
     "outlets": 24,
     "labels": {
-     "13": "Optn93",
-     "17": "Opt250",
-     "20": "Optn114",
-     "22": "Optn101",
-     "23": "Opt41"
+     "1": "Optn34",
+     "2": "optn190",
+     "3": "Opt208",
+     "4": "Opt250"
     }
    },
    {
@@ -2287,8 +2287,10 @@
     "rack": "Rack-07",
     "outlets": 24,
     "labels": {
-     "9": "Optn29",
-     "14": "Optn149"
+     "1": "optn101",
+     "2": "optn29",
+     "3": "Optn93",
+     "4": "empty"
     }
    },
    {
@@ -2351,7 +2353,101 @@
      "3": "Optn45"
     }
    }
-  ]
+  ],
+  "rackSlots": {
+   "Rack-01": {
+    "opt207": 1,
+    "optn85": 2,
+    "opt168": 3,
+    "opt133": 4
+   },
+   "Rack-02": {
+    "opt40": 1,
+    "optn84": 2,
+    "optn87": 3,
+    "optn130": 4
+   },
+   "Rack-03": {
+    "opt114 (vm)": 1,
+    "optn176": 2,
+    "optn88": 3,
+    "opt106": 4
+   },
+   "Rack-04": {
+    "optn144": 1,
+    "opt46": 2,
+    "opt94": 3,
+    "opt60": 4
+   },
+   "Rack-05": {
+    "opt174": 1,
+    "optn108": 2,
+    "optn45": 3
+   },
+   "Rack-06": {
+    "optn34": 1,
+    "optn190": 2,
+    "opt208": 3,
+    "opt250": 4
+   },
+   "Rack-07": {
+    "optn101": 2,
+    "optn29": 3,
+    "optn93": 4
+   }
+  },
+  "switchAssignments": {
+   "opt133": {
+    "switch": "Rosalind"
+   },
+   "optn84": {
+    "switch": "Chameleon MGMT"
+   },
+   "optn87": {
+    "switch": "V3000"
+   },
+   "optn130": {
+    "switch": "MGMT test"
+   },
+   "opt106": {
+    "switch": "Chameleon Eoptol"
+   },
+   "opt94": {
+    "switch": "Salamandra"
+   },
+   "opt60": {
+    "switch": "chameleon 6S"
+   },
+   "optn45": {
+    "switch": "rosalind HN"
+   },
+   "opt250": {
+    "switch": "taipan"
+   },
+   "optn101": {
+    "switch": "rosetta"
+   },
+   "optn29": {
+    "switch": "rosetta"
+   },
+   "optn93": {
+    "switch": "rosalind"
+   }
+  },
+  "optOwners": {
+   "opt133": "Eden Levi",
+   "optn87": "Royi Journo",
+   "optn88": "Roy Mendelson",
+   "opt106": "Liran Cohen",
+   "opt94": "Limor Romano",
+   "opt60": "Adam Cohen",
+   "optn45": "Eden Levi",
+   "opt250": "Liran Cohen",
+   "optn101": "Yaniv Shnur",
+   "optn29": "Yaniv Shnur",
+   "optn93": "Eden Levi"
+  },
+  "note": "labels / rackSlots / switchAssignments mirror the Lab Manager rack view of 2026-09-09 (outlet numbers are placeholders — the live backend is authoritative)"
  },
  "backend": {
   "defaultUrl": "",

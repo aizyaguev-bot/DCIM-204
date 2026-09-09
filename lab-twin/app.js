@@ -318,7 +318,7 @@
         const slotW = (isPC ? leftW : rightW) / n; const zc = -usable / 2 + (isPC ? 0 : leftW) + slotW * (idx + 0.5);
         g = new THREE.Group();
         let w, d, h;
-        if (isPC) { w = 0.30; h = 0.095; d = 0.32; }                              // small form-factor desktop, lying flat
+        if (isPC) { w = 0.17; h = 0.24; d = 0.31; }                               // small desktop PC — mini tower standing upright
         else if (it.type === 'dut-switch') { w = 0.44; h = 0.066; d = 0.50; }       // NVIDIA-style 1U switch under test
         else if (it.type === 'kvm') { w = 0.44; d = 0.30; h = 0.045; }
         else { w = 0.40; d = 0.35; h = 0.05; }                                      // other rack equipment (UPS, SSD box …)
@@ -327,18 +327,21 @@
         const fx = d / 2 + 0.02 + 0.002; // front face x (local)
         const dark = c => mat(c, { rough: .8, opacity: op, unique: true });
         if (isPC) {
-          // bezel, power button (status colour), 2 USB, slim optical slot, vent lines, silver brand tag
-          g.add(box(0.006, h * .92, w * .96, mat('#3a3d44', { rough: .6, metal: .2, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
-          g.add(led(fx + 0.006, sh.y + h * .72, zc - w / 2 + 0.035, col, 0.013));
-          for (let i = 0; i < 2; i++) g.add(box(0.006, 0.006, 0.014, dark('#0b0b0e'), fx + 0.004, sh.y + h * .72, zc - w / 2 + 0.075 + i * 0.022));
-          g.add(box(0.006, 0.004, w * .5, dark('#15161a'), fx + 0.004, sh.y + h * .45, zc + w * .1));
-          for (let i = 0; i < 3; i++) g.add(box(0.006, 0.003, w * .8, dark('#1a1b1f'), fx + 0.004, sh.y + h * .15 + i * 0.008, zc));
-          g.add(box(0.006, 0.014, 0.032, mat('#c0c4cc', { metal: .8, rough: .3, opacity: op, unique: true }), fx + 0.004, sh.y + h * .72, zc + w / 2 - 0.04));
-          if (status === 'active') g.add(led(fx + 0.006, sh.y + h * .58, zc - w / 2 + 0.035, '#f59e0b', 0.008)); // HDD activity
-          // power + network cables from the front to the rack post
-          const postZ = -(rt.width / 2 - rt.profile - 0.02), postX = rt.depth / 2 - rt.profile;
+          // upright mini tower: bezel, power button (status colour) on top, optical-drive slot, 2 USB + audio, vent grille, silver brand tag
+          g.add(box(0.006, h * .96, w * .94, mat('#4a4e56', { rough: .55, metal: .25, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
+          g.add(box(0.004, h * .96, w * .94, mat('#22242a', { rough: .6, opacity: op, unique: true }), -d / 2 + 0.02 - 0.002, sh.y + h / 2, zc));      // rear panel
+          g.add(led(fx + 0.006, sh.y + h * .90, zc, col, 0.016));                                                                                      // power button
+          g.add(box(0.006, 0.006, w * .72, dark('#15161a'), fx + 0.004, sh.y + h * .74, zc));                                                          // DVD slot
+          g.add(box(0.006, 0.002, w * .72, mat('#6b7078', { metal: .6, rough: .4, opacity: op, unique: true }), fx + 0.005, sh.y + h * .74 - 0.006, zc));
+          for (let i = 0; i < 2; i++) g.add(box(0.006, 0.006, 0.013, dark('#0b0b0e'), fx + 0.004, sh.y + h * .58, zc - 0.03 + i * 0.024));             // USB
+          g.add(box(0.006, 0.007, 0.007, mat('#22c55e', { emissive: '#22c55e', emissiveIntensity: .4, opacity: op, unique: true }), fx + 0.004, sh.y + h * .58, zc + 0.04)); // audio jack
+          for (let i = 0; i < 6; i++) g.add(box(0.006, 0.003, w * .7, dark('#1a1b1f'), fx + 0.004, sh.y + h * .12 + i * 0.011, zc));                 // vents
+          g.add(box(0.006, 0.012, 0.036, mat('#c0c4cc', { metal: .8, rough: .3, opacity: op, unique: true }), fx + 0.004, sh.y + h * .30, zc));       // brand tag
+          if (status === 'active') g.add(led(fx + 0.006, sh.y + h * .84, zc + w * .3, '#f59e0b', 0.007));                                             // HDD activity
+          // power + network cables from the rear, down to the rack post
+          const postZ = -(rt.width / 2 - rt.profile - 0.02), postX = rt.depth / 2 - rt.profile; const bx = -d / 2 + 0.02;
           const nc = 1 + Math.floor(rnd() * 2);
-          for (let i = 0; i < nc; i++) { const z0 = zc - w * .2 + rnd() * 0.06, y0 = sh.y + h * .5; const cc = CABLE_COLORS[Math.floor(rnd() * CABLE_COLORS.length)]; g.add(cable([[fx, y0, z0], [fx + 0.1 + rnd() * 0.08, y0 - 0.08 - rnd() * 0.1, z0 + (postZ - z0) * 0.4], [fx + 0.05, y0 - 0.2 - rnd() * 0.1, postZ * 0.95], [postX, sh.y - 0.12 - rnd() * 0.1, postZ]], cc)); }
+          for (let i = 0; i < nc; i++) { const y0 = sh.y + h * (.3 + rnd() * .4), z0 = zc + (rnd() - .5) * w * .5; const cc = CABLE_COLORS[Math.floor(rnd() * CABLE_COLORS.length)]; g.add(cable([[bx, y0, z0], [bx - 0.08 - rnd() * 0.05, y0 - 0.1, z0 + (postZ - z0) * 0.5], [fx - 0.1, sh.y - 0.1 - rnd() * 0.1, postZ * 0.95], [postX, sh.y - 0.16 - rnd() * 0.1, postZ]], cc)); }
         } else if (it.type === 'dut-switch') {
           // faceplate, 2 × 12 QSFP cages, link LEDs, NVIDIA badge + green accent, rack ears, DAC cable to the PC
           g.add(box(0.006, h * .94, w * .98, mat('#23262e', { rough: .55, metal: .35, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
@@ -353,7 +356,7 @@
           g.add(box(0.006, 0.005, w * .92, mat('#76b900', { emissive: '#76b900', emissiveIntensity: .7, opacity: op, unique: true }), fx + 0.004, sh.y + h * .07, zc));  // accent
           g.add(led(fx + 0.007, sh.y + h * .78, zc + w / 2 - 0.03, col, 0.009)); g.add(led(fx + 0.007, sh.y + h * .78, zc + w / 2 - 0.05, '#3b82f6', 0.007));
           [-1, 1].forEach(s => g.add(box(0.02, h * .9, 0.014, mat('#9aa0a8', { metal: .7, rough: .35, opacity: op, unique: true }), fx - 0.01, sh.y + h / 2, zc + s * (w / 2 + 0.008))));
-          const host = pcs[0]; if (host) { const zp = -usable / 2 + leftW / 2 + 0.12, ys = sh.y + h * .34, yp = sh.y + 0.095 * .72; g.add(cable([[fx + 0.004, ys, z0], [fx + 0.14, ys - 0.11, (z0 + zp) / 2], [fx + 0.004, yp, zp]], '#22c1a6', 0.005)); }
+          const host = pcs[0]; if (host) { const zp = -usable / 2 + leftW / 2 + 0.085, ys = sh.y + h * .34, yp = sh.y + 0.24 * .45; g.add(cable([[fx + 0.004, ys, z0], [fx + 0.16, ys - 0.06, (z0 + zp) / 2], [fx - 0.08, yp, zp], [-0.13, yp, zp]], '#22c1a6', 0.005)); }
         } else {
           // generic equipment: silver band, port row, type stripe, status LED
           g.add(box(0.006, h * .8, w * .94, mat('#9aa0a8', { metal: .7, rough: .35, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
