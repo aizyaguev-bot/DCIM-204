@@ -50,11 +50,51 @@
   const scene = new THREE.Scene();
   scene.fog = null;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
-  const controls = new THREE.OrbitControls(camera, canvas);
-  controls.enableDamping = true; controls.dampingFactor = 0.1;
-  controls.maxPolarAngle = Math.PI / 2 - 0.01; controls.minDistance = 0.3; controls.maxDistance = 9;
-  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-  controls.screenSpacePanning = false; controls.panSpeed = 0.7; controls.rotateSpeed = 0.8;
+  // ── WalkControls: "you are standing in the room" navigation (replaces OrbitControls, keeps its .target API)
+  //   one finger / left-drag  → look around (the scene follows the finger; nothing flies away)
+  //   two fingers / right-drag → slide along the floor · pinch / wheel → step forward / back along the view
+  //   looking straight down (Top view) → one finger slides the map instead
+  class WalkControls {
+    constructor(camera, dom) {
+      this.camera = camera; this.dom = dom; this.target = new THREE.Vector3(0, 1, -3); this.enabled = true;
+      this.autoRotate = false; this.autoRotateSpeed = 0.6; this.minDistance = 0.3; this.maxDistance = 9; this.maxPolarAngle = Math.PI;
+      this.lookSpeed = 0.0038; this.slideSpeed = 0.0035; this.pinchSpeed = 0.006; this.wheelSpeed = 0.0025; this.minPitch = -Math.PI / 2 + 0.03; this.maxPitch = Math.PI / 3;
+      this._p = new Map(); this._pinch0 = null; this._sph = new THREE.Spherical(); this._v = new THREE.Vector3(); this._v2 = new THREE.Vector3();
+      dom.style.touchAction = 'none';
+      dom.addEventListener('pointerdown', e => { if (!this.enabled) return; this._p.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button }); try { dom.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ } if (this._p.size === 2) this._pinch0 = this._pinchDist(); });
+      dom.addEventListener('pointermove', e => { if (!this.enabled || !this._p.has(e.pointerId)) return; const p = this._p.get(e.pointerId); const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+        if (this._p.size === 1) { if (p.b === 2 || p.b === 1) this.slide(dx, dy); else if (this.pitch() < -1.35) this.slide(dx, dy); else this.look(dx, dy); }
+        else if (this._p.size === 2) { const pts = [...this._p.values()]; this.slide(dx / 2, dy / 2); const d = this._pinchDist(); if (this._pinch0) this.dolly((d - this._pinch0) * this.pinchSpeed); this._pinch0 = d; void pts; } });
+      const end = e => { this._p.delete(e.pointerId); this._pinch0 = this._p.size === 2 ? this._pinchDist() : null; };
+      dom.addEventListener('pointerup', end); dom.addEventListener('pointercancel', end); dom.addEventListener('lostpointercapture', end);
+      dom.addEventListener('wheel', e => { if (!this.enabled) return; e.preventDefault(); this.dolly(-e.deltaY * this.wheelSpeed * (e.deltaMode === 1 ? 16 : 1)); }, { passive: false });
+      dom.addEventListener('contextmenu', e => e.preventDefault());
+    }
+    _pinchDist() { const a = [...this._p.values()]; return a.length < 2 ? 0 : Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); }
+    dist() { return this.camera.position.distanceTo(this.target); }
+    pitch() { this._v.copy(this.target).sub(this.camera.position); return Math.atan2(this._v.y, Math.hypot(this._v.x, this._v.z)); }
+    look(dx, dy) { // rotate the view direction around the camera; the scene follows the finger
+      this._v.copy(this.target).sub(this.camera.position); this._sph.setFromVector3(this._v);
+      this._sph.theta += dx * this.lookSpeed;
+      this._sph.phi = Math.max(Math.PI / 2 - this.maxPitch, Math.min(Math.PI / 2 - this.minPitch, this._sph.phi - dy * this.lookSpeed));
+      this._sph.makeSafe(); this.target.copy(this.camera.position).add(this._v.setFromSpherical(this._sph));
+    }
+    slide(dx, dy) { // move camera + target together along the floor, relative to the view (the scene follows the finger)
+      const k = this.slideSpeed * Math.max(1, this.dist() * 0.6);
+      this._v.copy(this.target).sub(this.camera.position); this._v.y = 0; if (this._v.lengthSq() < 1e-6) this._v.set(0, 0, -1); this._v.normalize();
+      this._v2.crossVectors(this._v, new THREE.Vector3(0, 1, 0)).normalize();
+      const d = this._v2.multiplyScalar(-dx * k).add(this._v.multiplyScalar(-dy * k)); // drag down = step back (the floor follows the finger)
+      this.camera.position.add(d); this.target.add(d);
+    }
+    dolly(m) { // step forward (m > 0) / back along the view direction
+      this._v.copy(this.target).sub(this.camera.position); const L = this._v.length(); if (L < 1e-6) return; this._v.normalize();
+      const step = Math.max(-2, Math.min(2, m)); this.camera.position.addScaledVector(this._v, step);
+      if (this.camera.position.distanceTo(this.target) < this.minDistance) this.target.copy(this.camera.position).addScaledVector(this._v, this.minDistance);
+    }
+    update() { if (this.autoRotate) this.look(this.autoRotateSpeed * 0.25, 0); this.camera.lookAt(this.target); return true; }
+    dispose() {}
+  }
+  const controls = new WalkControls(camera, canvas);
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x50555c, 1.0));
   const sun = new THREE.DirectionalLight(0xffffff, 0.55); sun.position.set(-6, 9, 4); scene.add(sun);
@@ -1048,7 +1088,7 @@
     return true;
   }
   canvas.addEventListener('pointerdown', e => {
-    downPos = [e.clientX, e.clientY]; S.lastInput = performance.now();
+    downPos = [e.clientX, e.clientY]; S.lastInput = performance.now(); S.tween = null; // a touch always wins over a running camera animation
     if (S.editMode && !S.moveItem && e.button === 0) { const hit = pickAt(e); const rec = hit && S.recs.get(hit.object.userData.id); drag = draggable(rec) ? { id: rec.id, x: e.clientX, y: e.clientY, active: false, pid: e.pointerId } : null; }
   });
   window.addEventListener('pointermove', e => {
@@ -1070,7 +1110,8 @@
       return;
     }
     if (!hit) return;
-    select(hit.object.userData.id, { fly: true });
+    const rec = S.recs.get(hit.object.userData.id);
+    select(hit.object.userData.id, rec && rec.cat === 'setup' && !S.editMode ? { fly: true } : { keepCamera: true });
   });
   let hoverT = 0;
   canvas.addEventListener('pointermove', e => {
