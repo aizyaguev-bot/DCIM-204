@@ -51,20 +51,19 @@
   scene.fog = null;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
   // ── WalkControls: "you are standing in the room" navigation (replaces OrbitControls, keeps its .target API)
-  //   one finger / left-drag  → look around (the scene follows the finger; nothing flies away)
-  //   two fingers / right-drag → slide along the floor · pinch / wheel → step forward / back along the view
-  //   looking straight down (Top view) → one finger slides the map instead
+  //   one finger / left-drag  → WALK in the direction of the finger (up = forward, right = step right)
+  //   two fingers / right-drag → turn / look around · pinch / wheel → step forward / back along the view
   class WalkControls {
     constructor(camera, dom) {
       this.camera = camera; this.dom = dom; this.target = new THREE.Vector3(0, 1, -3); this.enabled = true;
       this.autoRotate = false; this.autoRotateSpeed = 0.6; this.minDistance = 0.3; this.maxDistance = 9; this.maxPolarAngle = Math.PI;
-      this.lookSpeed = 0.0038; this.slideSpeed = 0.0035; this.pinchSpeed = 0.006; this.wheelSpeed = 0.0025; this.minPitch = -Math.PI / 2 + 0.03; this.maxPitch = Math.PI / 3;
+      this.lookSpeed = 0.0038; this.slideSpeed = 0.004; this.pinchSpeed = 0.006; this.wheelSpeed = 0.0025; this.minPitch = -Math.PI / 2 + 0.03; this.maxPitch = Math.PI / 3;
       this._p = new Map(); this._pinch0 = null; this._sph = new THREE.Spherical(); this._v = new THREE.Vector3(); this._v2 = new THREE.Vector3();
       dom.style.touchAction = 'none';
       dom.addEventListener('pointerdown', e => { if (!this.enabled) return; this._p.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button }); try { dom.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ } if (this._p.size === 2) this._pinch0 = this._pinchDist(); });
       dom.addEventListener('pointermove', e => { if (!this.enabled || !this._p.has(e.pointerId)) return; const p = this._p.get(e.pointerId); const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
-        if (this._p.size === 1) { if (p.b === 2 || p.b === 1) this.slide(dx, dy); else if (this.pitch() < -1.35) this.slide(dx, dy); else this.look(dx, dy); }
-        else if (this._p.size === 2) { const pts = [...this._p.values()]; this.slide(dx / 2, dy / 2); const d = this._pinchDist(); if (this._pinch0) this.dolly((d - this._pinch0) * this.pinchSpeed); this._pinch0 = d; void pts; } });
+        if (this._p.size === 1) { if (p.b === 2 || p.b === 1) this.look(dx, dy); else this.slide(dx, dy); }                 // one finger / left = WALK where the finger goes
+        else if (this._p.size === 2) { this.look(dx / 2, dy / 2); const d = this._pinchDist(); if (this._pinch0) this.dolly((d - this._pinch0) * this.pinchSpeed); this._pinch0 = d; } });   // two fingers = turn / pinch
       const end = e => { this._p.delete(e.pointerId); this._pinch0 = this._p.size === 2 ? this._pinchDist() : null; };
       dom.addEventListener('pointerup', end); dom.addEventListener('pointercancel', end); dom.addEventListener('lostpointercapture', end);
       dom.addEventListener('wheel', e => { if (!this.enabled) return; e.preventDefault(); this.dolly(-e.deltaY * this.wheelSpeed * (e.deltaMode === 1 ? 16 : 1)); }, { passive: false });
@@ -83,7 +82,7 @@
       const k = this.slideSpeed * Math.max(1, this.dist() * 0.6);
       this._v.copy(this.target).sub(this.camera.position); this._v.y = 0; if (this._v.lengthSq() < 1e-6) this._v.set(0, 0, -1); this._v.normalize();
       this._v2.crossVectors(this._v, new THREE.Vector3(0, 1, 0)).normalize();
-      const d = this._v2.multiplyScalar(-dx * k).add(this._v.multiplyScalar(-dy * k)); // drag down = step back (the floor follows the finger)
+      const d = this._v2.multiplyScalar(dx * k).add(this._v.multiplyScalar(-dy * k)); // finger up = walk forward, finger right = step right
       this.camera.position.add(d); this.target.add(d);
     }
     dolly(m) { // step forward (m > 0) / back along the view direction
