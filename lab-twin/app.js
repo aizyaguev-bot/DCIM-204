@@ -13,9 +13,10 @@
   const STATUS_LABEL = { active: 'Active', building: 'In construction', inactive: 'Inactive', dismantled: 'Dismantled', unknown: 'Unknown' };
   const STATUSES = Object.keys(STATUS_COLOR);
   const CONF_OPACITY = { high: 1.0, medium: 0.82, low: 0.5 };
-  const TYPE_STRIPE = { opt: '#76b900', kvm: '#a78bfa', pdu: '#fbbf24', chiller: '#22d3ee', 'equip-switch': '#22d3ee', 'equip-patchpanel': '#94a3b8', 'equip-kvm': '#a78bfa', 'equip-pdu': '#fbbf24', 'equip-ups': '#4ade80', 'equip-cable': '#71717a', 'equip-blank': '#3f3f46', 'equip-other': '#a1a1aa', cart: '#3b82f6', ladder: '#facc15', toolbox: '#f97316', 'spare-chassis': '#d6c9a8', misc: '#71717a' };
+  const TYPE_STRIPE = { opt: '#76b900', 'dut-switch': '#22d3ee', kvm: '#a78bfa', pdu: '#fbbf24', chiller: '#22d3ee', 'equip-switch': '#22d3ee', 'equip-patchpanel': '#94a3b8', 'equip-kvm': '#a78bfa', 'equip-pdu': '#fbbf24', 'equip-ups': '#4ade80', 'equip-cable': '#71717a', 'equip-blank': '#3f3f46', 'equip-other': '#a1a1aa', cart: '#3b82f6', ladder: '#facc15', toolbox: '#f97316', 'spare-chassis': '#d6c9a8', misc: '#71717a' };
   // realistic body colours (photo-matched); status is shown by edge outline + LED + label dot
-  const TYPE_BODY = { opt: '#2a2c31', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#232a38', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
+  const TYPE_BODY = { opt: '#2b2d33', 'dut-switch': '#1a1d24', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#232a38', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
+  const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
   const CABLE_COLORS = ['#d92b2b', '#d92b2b', '#1a1a1a', '#d92b2b', '#22c1a6', '#d92b2b', '#f4f4f5'];
   const EQUIP_LABEL = { switch: 'Switch', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
   const POLL_MS = 15000;
@@ -306,34 +307,65 @@
       const cable = (pts, c, r = 0.006) => { const curve = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(...p))); const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 18, r, 6, false), mat(c, { rough: .55, metal: .05, opacity: op, unique: true })); return m; };
 
       if (it.shelf && S.recs.has(it.shelf)) {
+        // Shelf layout (like the Lab Manager rack view): ONE PC (the OPT) on the left, ONE unit (switch under test or
+        // other equipment) on the right. Rack local frame: front = +x, width along z. Viewer's left = −z (world is x-mirrored).
         const sh = S.recs.get(it.shelf); const su = S.recs.get(sh.setup); const rt = su.tpl;
-        const siblings = byShelf.get(it.shelf); const n = siblings.length; const idx = siblings.indexOf(it);
-        const usable = rt.width - 2 * rt.profile - 0.12; const slotW = usable / n;
-        const zc = -usable / 2 + slotW * (idx + 0.5);
+        const siblings = byShelf.get(it.shelf);
+        const pcs = siblings.filter(x => x.type === 'opt'); const units = siblings.filter(x => x.type !== 'opt');
+        const usable = rt.width - 2 * rt.profile - 0.06; const leftW = 0.36, rightW = usable - leftW;
+        const isPC = it.type === 'opt';
+        const grp = isPC ? pcs : units; const n = grp.length, idx = grp.indexOf(it);
+        const slotW = (isPC ? leftW : rightW) / n; const zc = -usable / 2 + (isPC ? 0 : leftW) + slotW * (idx + 0.5);
         g = new THREE.Group();
-        let w = 0.48, d = 0.55, h = 0.09;
-        if (it.type === 'kvm') { w = 0.44; d = 0.30; h = 0.045; }
-        if (it.type.startsWith('equip-')) { w = 0.44; d = 0.35; h = 0.045; }
-        w = Math.min(w, slotW - 0.03);
-        const body = makeBox(d, h, w, bodyCol); body.position.set(0.04, sh.y + h / 2, zc); g.add(body); meshes.push(body);
-        const fx = d / 2 + 0.04 + 0.002; // front face x (local)
-        // front faceplate: silver band + port row (dark) + type stripe + status LED + blue activity LEDs
-        g.add(box(0.006, h * .8, w * .94, mat('#9aa0a8', { metal: .7, rough: .35, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
-        g.add(box(0.008, Math.min(0.022, h * .35), w * .7, mat('#111114', { rough: .8, opacity: op, unique: true }), fx + 0.003, sh.y + h * .42, zc + w * .05));
-        g.add(box(0.008, h * .55, 0.012, mat(stripeCol, { emissive: stripeCol, emissiveIntensity: .8, opacity: op, unique: true }), fx + 0.003, sh.y + h / 2, zc - w / 2 + 0.02));
-        g.add(led(fx + 0.006, sh.y + h * .78, zc - w / 2 + 0.06, col));
-        if (it.type === 'opt' && status !== 'dismantled') { const nb = 1 + Math.floor(rnd() * 3); for (let i = 0; i < nb; i++) g.add(led(fx + 0.006, sh.y + h * .78, zc - w / 2 + 0.1 + i * 0.03, '#3b82f6', 0.009)); }
-        // cables from the front to the rack post (red fibre / black power), like the photos
-        if (it.type === 'opt' || it.type.startsWith('equip-')) {
-          const nc = 1 + Math.floor(rnd() * 2); const postZ = (zc > 0 ? 1 : -1) * (rt.width / 2 - rt.profile - 0.02); const postX = rt.depth / 2 - rt.profile;
-          for (let i = 0; i < nc; i++) {
-            const z0 = zc + (rnd() - 0.5) * w * .6, y0 = sh.y + h * .45; const cc = CABLE_COLORS[Math.floor(rnd() * CABLE_COLORS.length)];
-            g.add(cable([[fx, y0, z0], [fx + 0.12 + rnd() * 0.1, y0 - 0.08 - rnd() * 0.12, z0 + (postZ - z0) * 0.35], [fx + 0.06, y0 - 0.22 - rnd() * 0.15, postZ * 0.9], [postX, sh.y - 0.12 - rnd() * 0.1, postZ]], cc));
+        let w, d, h;
+        if (isPC) { w = 0.30; h = 0.095; d = 0.32; }                              // small form-factor desktop, lying flat
+        else if (it.type === 'dut-switch') { w = 0.44; h = 0.066; d = 0.50; }       // NVIDIA-style 1U switch under test
+        else if (it.type === 'kvm') { w = 0.44; d = 0.30; h = 0.045; }
+        else { w = 0.40; d = 0.35; h = 0.05; }                                      // other rack equipment (UPS, SSD box …)
+        w = Math.min(w, slotW - 0.02);
+        const body = makeBox(d, h, w, bodyCol); body.position.set(0.02, sh.y + h / 2, zc); g.add(body); meshes.push(body);
+        const fx = d / 2 + 0.02 + 0.002; // front face x (local)
+        const dark = c => mat(c, { rough: .8, opacity: op, unique: true });
+        if (isPC) {
+          // bezel, power button (status colour), 2 USB, slim optical slot, vent lines, silver brand tag
+          g.add(box(0.006, h * .92, w * .96, mat('#3a3d44', { rough: .6, metal: .2, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
+          g.add(led(fx + 0.006, sh.y + h * .72, zc - w / 2 + 0.035, col, 0.013));
+          for (let i = 0; i < 2; i++) g.add(box(0.006, 0.006, 0.014, dark('#0b0b0e'), fx + 0.004, sh.y + h * .72, zc - w / 2 + 0.075 + i * 0.022));
+          g.add(box(0.006, 0.004, w * .5, dark('#15161a'), fx + 0.004, sh.y + h * .45, zc + w * .1));
+          for (let i = 0; i < 3; i++) g.add(box(0.006, 0.003, w * .8, dark('#1a1b1f'), fx + 0.004, sh.y + h * .15 + i * 0.008, zc));
+          g.add(box(0.006, 0.014, 0.032, mat('#c0c4cc', { metal: .8, rough: .3, opacity: op, unique: true }), fx + 0.004, sh.y + h * .72, zc + w / 2 - 0.04));
+          if (status === 'active') g.add(led(fx + 0.006, sh.y + h * .58, zc - w / 2 + 0.035, '#f59e0b', 0.008)); // HDD activity
+          // power + network cables from the front to the rack post
+          const postZ = -(rt.width / 2 - rt.profile - 0.02), postX = rt.depth / 2 - rt.profile;
+          const nc = 1 + Math.floor(rnd() * 2);
+          for (let i = 0; i < nc; i++) { const z0 = zc - w * .2 + rnd() * 0.06, y0 = sh.y + h * .5; const cc = CABLE_COLORS[Math.floor(rnd() * CABLE_COLORS.length)]; g.add(cable([[fx, y0, z0], [fx + 0.1 + rnd() * 0.08, y0 - 0.08 - rnd() * 0.1, z0 + (postZ - z0) * 0.4], [fx + 0.05, y0 - 0.2 - rnd() * 0.1, postZ * 0.95], [postX, sh.y - 0.12 - rnd() * 0.1, postZ]], cc)); }
+        } else if (it.type === 'dut-switch') {
+          // faceplate, 2 × 12 QSFP cages, link LEDs, NVIDIA badge + green accent, rack ears, DAC cable to the PC
+          g.add(box(0.006, h * .94, w * .98, mat('#23262e', { rough: .55, metal: .35, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
+          const cageW = 0.02, gap = 0.008, cols = Math.min(12, Math.floor((w * .78) / (cageW + gap))); const z0 = zc - (cols * (cageW + gap) - gap) / 2 + cageW / 2 + w * .04;
+          for (let r = 0; r < 2; r++) for (let c = 0; c < cols; c++) {
+            const y = sh.y + h * (r ? .66 : .34), z = z0 + c * (cageW + gap);
+            g.add(box(0.006, 0.017, cageW, mat('#0d0e12', { metal: .6, rough: .4, opacity: op, unique: true }), fx + 0.004, y, z));
+            if (status === 'active' && rnd() < 0.35) g.add(led(fx + 0.007, y + 0.013, z + cageW / 2 - 0.004, rnd() < 0.7 ? '#76b900' : '#f59e0b', 0.005));
           }
+          g.add(box(0.006, 0.014, 0.05, mat('#d4d4d8', { metal: .7, rough: .3, opacity: op, unique: true }), fx + 0.004, sh.y + h * .78, zc - w / 2 + 0.045));   // badge
+          g.add(box(0.006, 0.012, 0.012, mat('#76b900', { emissive: '#76b900', emissiveIntensity: .9, opacity: op, unique: true }), fx + 0.005, sh.y + h * .78, zc - w / 2 + 0.014));
+          g.add(box(0.006, 0.005, w * .92, mat('#76b900', { emissive: '#76b900', emissiveIntensity: .7, opacity: op, unique: true }), fx + 0.004, sh.y + h * .07, zc));  // accent
+          g.add(led(fx + 0.007, sh.y + h * .78, zc + w / 2 - 0.03, col, 0.009)); g.add(led(fx + 0.007, sh.y + h * .78, zc + w / 2 - 0.05, '#3b82f6', 0.007));
+          [-1, 1].forEach(s => g.add(box(0.02, h * .9, 0.014, mat('#9aa0a8', { metal: .7, rough: .35, opacity: op, unique: true }), fx - 0.01, sh.y + h / 2, zc + s * (w / 2 + 0.008))));
+          const host = pcs[0]; if (host) { const zp = -usable / 2 + leftW / 2 + 0.12, ys = sh.y + h * .34, yp = sh.y + 0.095 * .72; g.add(cable([[fx + 0.004, ys, z0], [fx + 0.14, ys - 0.11, (z0 + zp) / 2], [fx + 0.004, yp, zp]], '#22c1a6', 0.005)); }
+        } else {
+          // generic equipment: silver band, port row, type stripe, status LED
+          g.add(box(0.006, h * .8, w * .94, mat('#9aa0a8', { metal: .7, rough: .35, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
+          g.add(box(0.008, Math.min(0.022, h * .35), w * .7, dark('#111114'), fx + 0.003, sh.y + h * .42, zc + w * .05));
+          g.add(box(0.008, h * .55, 0.012, mat(stripeCol, { emissive: stripeCol, emissiveIntensity: .8, opacity: op, unique: true }), fx + 0.003, sh.y + h / 2, zc - w / 2 + 0.02));
+          g.add(led(fx + 0.006, sh.y + h * .78, zc - w / 2 + 0.06, col));
+          const postZ = rt.width / 2 - rt.profile - 0.02, postX = rt.depth / 2 - rt.profile; const y0 = sh.y + h * .45;
+          g.add(cable([[fx, y0, zc], [fx + 0.1, y0 - 0.1, zc + (postZ - zc) * 0.4], [postX, sh.y - 0.12, postZ]], CABLE_COLORS[Math.floor(rnd() * CABLE_COLORS.length)]));
         }
         const e = edges(body, col, dashed); g.add(e); eds.push(e);
         su.group.add(g);
-        anchor = () => localToWorld(su.group, 0.04 + d / 2, sh.y + h + 0.02, zc);
+        anchor = () => localToWorld(su.group, 0.02 + d / 2, sh.y + h + 0.02, zc);
       } else if (it.placement === 'bottom-bay' && it.setup && S.recs.has(it.setup)) {
         const su = S.recs.get(it.setup); const c = tpl.chiller; const n = model.items.filter(x => x.placement === 'bottom-bay' && x.setup === it.setup); const idx = n.indexOf(it);
         const zc = n.length > 1 ? (idx === 0 ? -0.22 : 0.22) : -0.08;
@@ -388,8 +420,9 @@
       }
       if (g && it.placement !== 'rack-strips') S.itemGroups.push(g);
       const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor });
-      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${it.live.watts ? ' · ' + Math.round(it.live.watts) + 'W' : ''}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : (it.typeLabel || it.type);
-      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${it.type === 'opt' ? it.name : it.id}<small>${it.type === 'opt' ? it.id + ' · ' + sub : sub}</small>`);
+      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${it.live.watts ? ' · ' + Math.round(it.live.watts) + 'W' : ''}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : (it.dut ? `DUT ${it.dut}` : `outlet #${it.dcim?.outlet ?? '?'}`)) : it.type === 'dut-switch' ? `switch under test · ${it.hostName}${it.port ? ' · port ' + it.port : ''}` : (it.typeLabel || it.type);
+      const named = it.type === 'opt' || it.type === 'dut-switch' || it.type.startsWith('equip-');
+      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${named ? it.name : it.id}<small>${it.type === 'opt' ? it.id + ' · ' + sub : sub}</small>`);
     });
     applyFilters(); updateTelemetry();
     if (S.selected && !S.recs.has(S.selected)) closeDetail();
@@ -480,6 +513,8 @@
         });
       }
     }
+    // outlet labels that are not servers ("empty", "KVM Power" …) must not become PCs on a shelf
+    items = items.filter(it => !(it.type === 'opt' && NON_SERVER_LABEL.test(it.name || '')));
     items.forEach(it => {
       it.effStatus = it.status || 'unknown';
       if (it.type === 'opt' && it.live?.inDcim) it.effStatus = it.live.state === 'on' ? 'active' : it.live.state === 'off' ? 'inactive' : (it.status || 'unknown');
@@ -487,6 +522,20 @@
       if (it.type === 'kvm' && it.live) it.effStatus = it.live.reachable === false ? 'inactive' : it.live.reachable ? 'active' : it.effStatus;
       if (it.type === 'opt' && it.live && it.live.owner) it.owner = it.live.owner;
     });
+    // Every OPT (= a small desktop PC) may have ONE switch under test next to it on the shelf: live switch-assignments
+    // win, otherwise the JSON field `dut`. The switch is a derived, clickable unit that follows its PC.
+    const derived = [];
+    items.forEach(i => {
+      if (i.type !== 'opt' || !i.shelf) return;
+      const sw = i.live?.sw?.switch ? i.live.sw : (i.dut ? { switch: i.dut, port: i.dutPort } : null); if (!sw) return;
+      const id = 'SW-' + i.id.replace(/^ITEM-/, '');
+      derived.push({ id, name: sw.switch, category: 'item', type: 'dut-switch', typeLabel: 'Switch under test (DUT)', setup: i.setup, shelf: i.shelf, zone: i.zone,
+        status: i.effStatus === 'dismantled' ? 'inactive' : i.effStatus, effStatus: i.effStatus === 'dismantled' ? 'inactive' : i.effStatus,
+        confidence: 'high', placementConfidence: i.placementConfidence || 'high', photos: [], owner: i.owner || null,
+        notes: `Switch under test connected to ${i.name}${sw.port ? ' · port ' + sw.port : ''}.`, derived: true, host: i.id, hostName: i.name, port: sw.port || null });
+      i.dutId = id;
+    });
+    items.push(...derived);
     // DCIM racks without a physical setup
     const liveRacks = live.connected ? [...new Set(live.devices.filter(x => x.kind === 'pdu' || x.kind === 'rack').map(x => x.rack).filter(Boolean))] : (d.dcim?.pdus || []).map(p => p.rack);
     const unmappedRacks = liveRacks.filter(r => !setupByRack[r]);
@@ -738,7 +787,9 @@
     }
     // ── Edit (mutates lab-data.json in memory → Save to server / Download)
     const isLive = rec.id.startsWith('LIVE-');
-    if (rec.cat === 'item' && isLive) {
+    if (rec.cat === 'item' && it?.derived) {
+      html += `<div class="sec big"><div class="note">This switch under test follows its PC <b>${esc(it.hostName || it.host)}</b> (${esc(shelfName(it.shelf))}). ${S.live.connected ? 'Its name comes from the Lab Manager switch assignment.' : 'Rename or remove it in the PC\'s "Switch under test" field.'}</div><button class="btn-lg" data-go="${esc(it.host)}">Open ${esc(it.hostName || it.host)} ›</button></div>`;
+    } else if (rec.cat === 'item' && isLive) {
       html += `<div class="sec"><div class="sec-h">Edit</div><div class="note muted">This object comes live from the DCIM backend (labels / rack items). Rename or move it in Lab Manager. To keep a physical record of it in the twin (photos, notes, exact shelf), add it to lab-data.json:</div>
         <div class="ctl-row" style="margin-top:8px"><button class="btn btn-xs" id="eMaterialize">+ Add a copy to lab-data.json</button></div></div>`;
     } else if (rec.cat === 'item') {
@@ -1198,7 +1249,9 @@
     const def = rec.def; const it = rec.item; const isLive = rec.id.startsWith('LIVE-');
     $('#dId').textContent = rec.id; $('#dName').textContent = def.name || rec.id;
     let html = `<div class="edit-hint">EDIT MODE · tap another object in the 3D view to switch</div>`;
-    if (rec.cat === 'item' && isLive) {
+    if (rec.cat === 'item' && it?.derived) {
+      html += `<div class="sec big"><div class="note">This switch under test follows its PC <b>${esc(it.hostName || it.host)}</b> (${esc(shelfName(it.shelf))}). ${S.live.connected ? 'Its name comes from the Lab Manager switch assignment.' : 'Rename or remove it in the PC\'s "Switch under test" field.'}</div><button class="btn-lg" data-go="${esc(it.host)}">Open ${esc(it.hostName || it.host)} ›</button></div>`;
+    } else if (rec.cat === 'item' && isLive) {
       const loc = it.shelf ? shelfName(it.shelf) : it.setup ? `${it.setup} · ${it.live?.rack || ''} U${it.live?.u ?? '?'}` : it.live?.rack ? `${it.live.rack} (rack not mapped to a 3D setup)` : 'not placed';
       html += `<div class="sec big"><div class="note">Live from Lab Manager (DCIM). Moving it here writes the rack / U slot back into Lab Manager.</div>
         <label class="lbl-lg">Where</label><div class="where"><span class="where-txt">${esc(loc)}</span></div>
@@ -1216,6 +1269,7 @@
         ${it.setup ? `<div class="row-lg"><button class="btn-lg sm" data-side="left">⇤ Hang on left side</button><button class="btn-lg sm" data-side="right">Hang on right side ⇥</button><button class="btn-lg sm" data-side="bay">Bottom bay</button></div>` : ''}
         <label class="lbl-lg">Type</label><select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         <label class="lbl-lg">Owner</label><input class="in-lg" id="eOwner" value="${esc(it.owner || '')}" placeholder="engineer" />
+        ${it.type === 'opt' ? `<label class="lbl-lg">Switch under test (next to the PC)</label><input class="in-lg" id="eDut" value="${esc(it.dut || '')}" placeholder="e.g. Rosalind — empty = no switch" ${it.live?.sw?.switch ? 'disabled title="Set by the Lab Manager switch assignment"' : ''} />` : ''}
         <label class="lbl-lg">PDU · outlet</label>
         <div class="row-lg"><select class="in-lg" id="ePdu" style="flex:2"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${x.id}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
           <div class="stepper"><button data-step="-1">−</button><input id="eOutlet" type="number" min="1" max="48" value="${it.dcim?.outlet ?? ''}" placeholder="#" /><button data-step="1">＋</button></div></div>
@@ -1230,7 +1284,7 @@
     } else if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
       html += `<div class="sec big"><div class="lbl-lg">On ${rec.id} · level L${rec.level} · ${rec.setup}</div>
-        ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>${esc(i.item.typeLabel || i.item.type)}${i.item.dcim?.outlet ? ' · outlet #' + i.item.dcim.outlet : ''}</small></span><button class="btn-lg sm" data-edit="${i.id}">Edit</button><button class="btn-lg sm btn-cyan" data-move="${i.id}">Move</button></div>`).join('') : '<div class="note">Shelf is empty.</div>'}
+        ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>${esc(i.item.typeLabel || i.item.type)}${i.item.dcim?.outlet ? ' · outlet #' + i.item.dcim.outlet : ''}</small></span><button class="btn-lg sm" data-edit="${i.id}">Edit</button>${i.item.derived ? '' : `<button class="btn-lg sm btn-cyan" data-move="${i.id}">Move</button>`}</div>`).join('') : '<div class="note">Shelf is empty.</div>'}
         <button class="btn-lg btn-save" id="eAddHere">＋ Add device on this shelf</button></div>
         <div class="sec big"><label class="lbl-lg">Shelf status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${def.status || 'unknown'}"/><label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>`;
     } else if (rec.cat === 'setup') {
@@ -1265,6 +1319,7 @@
       if ($('#eName')) patch.name = $('#eName').value.trim() || def.name;
       if (rec.cat === 'item') {
         patch.type = $('#eType').value; patch.owner = $('#eOwner').value.trim() || null;
+        if ($('#eDut') && !$('#eDut').disabled) patch.dut = $('#eDut').value.trim() || undefined;
         const pdu = $('#ePdu').value, outlet = parseInt($('#eOutlet').value, 10);
         if (pdu) { const pd = (S.data.dcim?.pdus || []).find(x => x.id === pdu); patch.dcim = { ...(it.dcim || {}), pdu, pduName: pd?.name, outlet: isNaN(outlet) ? undefined : outlet, optKey: optKey(patch.name) }; }
         else if (it.dcim) { const { pdu: _p, pduName: _n, outlet: _o, ...rest } = it.dcim; patch.dcim = Object.keys(rest).length ? rest : undefined; }

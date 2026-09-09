@@ -1,2458 +1,2375 @@
 {
-  "meta": {
-    "title": "Lab 204 — Digital Twin",
-    "version": "0.2.0",
-    "generated": "2026-09-07",
-    "units": "meters",
-    "axes": "x: across room (0 = left wall), z: depth (0 = entrance wall), y: up",
-    "photoIndex": {
-      "1": "photos/photo-01.jpg — left row from the aisle (door at left)",
-      "2": "photos/photo-02.jpg — down the aisle from the entrance (portrait)",
-      "3": "photos/photo-03.jpg — wide view: both rows + back wall",
-      "4": "photos/photo-04.jpg — right row, pillar, tray stand, right door"
-    },
-    "statuses": [
-      "active",
-      "building",
-      "inactive",
-      "dismantled",
-      "unknown"
-    ],
-    "confidences": [
-      "high",
-      "medium",
-      "low"
-    ],
-    "idScheme": {
-      "zones": "Z01…",
-      "benches": "BENCH-01… (none visible in photos)",
-      "storage": "STORAGE-01…",
-      "shelves": "SHELF-01…",
-      "setups": "SETUP-001…",
-      "items": "ITEM-0001…"
-    }
+ "meta": {
+  "title": "Lab 204 — Digital Twin",
+  "version": "0.3.0",
+  "generated": "2026-09-09",
+  "units": "meters",
+  "axes": "x: across room (0 = left wall), z: depth (0 = entrance wall), y: up",
+  "photoIndex": {
+   "1": "photos/photo-01.jpg — left row from the aisle (door at left)",
+   "2": "photos/photo-02.jpg — down the aisle from the entrance (portrait)",
+   "3": "photos/photo-03.jpg — wide view: both rows + back wall",
+   "4": "photos/photo-04.jpg — right row, pillar, tray stand, right door"
   },
-  "room": {
-    "width": 4.0,
-    "depth": 5.6,
-    "height": 2.7,
-    "confidence": "medium",
-    "note": "Room envelope estimated from rack count x rack width (1.044 m) + gaps. Ceiling height estimated from ~0.45 m clearance above 2.225 m racks."
+  "statuses": [
+   "active",
+   "building",
+   "inactive",
+   "dismantled",
+   "unknown"
+  ],
+  "confidences": [
+   "high",
+   "medium",
+   "low"
+  ],
+  "idScheme": {
+   "zones": "Z01…",
+   "benches": "BENCH-01… (none visible in photos)",
+   "storage": "STORAGE-01…",
+   "shelves": "SHELF-01…",
+   "setups": "SETUP-001…",
+   "items": "ITEM-0001…"
   },
-  "templates": {
-    "rack": {
-      "width": 1.044,
-      "depth": 1.0,
-      "height": 2.225,
-      "shelfLevels": [
-        1.1,
-        1.4,
-        1.7,
-        2.0
-      ],
-      "shelfThickness": 0.03,
-      "bottomBay": 0.8,
-      "profile": 0.045,
-      "source": "NVIDIA SWITCHES 00-00 (ST Engineering, 05/01/2023): 1044 x 1000 x 2225 mm, 4 shelves @300 mm, 800 mm bottom bay",
-      "note": "Shelf heights: drawing gives 300 mm spacing; absolute heights estimated from photos (lowest shelf ~1.1 m)."
-    },
-    "trayRack": {
-      "width": 0.98,
-      "depth": 0.48,
-      "height": 1.94,
-      "trayPitch": [
-        0.2,
-        0.2,
-        0.13,
-        0.13,
-        0.13,
-        0.13,
-        0.13,
-        0.13,
-        0.13,
-        0.13
-      ],
-      "source": "NVIDIA ROLLER STAND FRAME (ST Engineering, 25/05/2025): 980 x 480 x 1940 mm, ball-conveyor trays"
-    },
-    "chiller": {
-      "width": 0.6,
-      "depth": 0.62,
-      "height": 0.75,
-      "confidence": "medium",
-      "note": "Size estimated from photos (beige control cabinet with small display, under lowest shelf)"
-    }
+  "shelfRule": "One PC (OPT/OPTN) per shelf on the left, one unit (switch under test = `dut`, or other equipment) on the right. U01 = top shelf."
+ },
+ "room": {
+  "width": 4.0,
+  "depth": 5.6,
+  "height": 2.7,
+  "confidence": "medium",
+  "note": "Room envelope estimated from rack count x rack width (1.044 m) + gaps. Ceiling height estimated from ~0.45 m clearance above 2.225 m racks."
+ },
+ "templates": {
+  "rack": {
+   "width": 1.044,
+   "depth": 1.0,
+   "height": 2.225,
+   "shelfLevels": [
+    1.1,
+    1.4,
+    1.7,
+    2.0
+   ],
+   "shelfThickness": 0.03,
+   "bottomBay": 0.8,
+   "profile": 0.045,
+   "source": "NVIDIA SWITCHES 00-00 (ST Engineering, 05/01/2023): 1044 x 1000 x 2225 mm, 4 shelves @300 mm, 800 mm bottom bay",
+   "note": "Shelf heights: drawing gives 300 mm spacing; absolute heights estimated from photos (lowest shelf ~1.1 m)."
   },
-  "structure": {
-    "walls": [
-      {
-        "id": "WALL-L",
-        "to": [
-          0,
-          5.6
-        ],
-        "from": [
-          0,
-          0
-        ]
-      },
-      {
-        "id": "WALL-R",
-        "to": [
-          4.0,
-          5.6
-        ],
-        "from": [
-          4.0,
-          0
-        ]
-      },
-      {
-        "id": "WALL-B",
-        "to": [
-          4.0,
-          5.6
-        ],
-        "from": [
-          0,
-          5.6
-        ]
-      },
-      {
-        "id": "WALL-F",
-        "to": [
-          4.0,
-          0
-        ],
-        "from": [
-          0,
-          0
-        ]
-      }
-    ],
-    "doors": [
-      {
-        "id": "DOOR-01",
-        "wall": "WALL-F",
-        "pos": [
-          0.35,
-          0.0
-        ],
-        "width": 0.9,
-        "height": 2.1,
-        "swing": "out",
-        "confidence": "medium",
-        "photos": [
-          1
-        ],
-        "note": "Beige door seen edge-on at the left of photo 1, next to the E-stop wall segment."
-      },
-      {
-        "id": "DOOR-02",
-        "wall": "WALL-R",
-        "pos": [
-          4.0,
-          0.3
-        ],
-        "width": 0.9,
-        "height": 2.1,
-        "swing": "unknown",
-        "confidence": "low",
-        "photos": [
-          4
-        ],
-        "note": "Beige door/panel at the far right of photo 4. Could be a door to an adjacent room or an electrical cabinet. VERIFY."
-      }
-    ],
-    "windows": [
-      {
-        "id": "WIN-01",
-        "wall": "WALL-L",
-        "pos": [
-          0.0,
-          4.9
-        ],
-        "width": 0.65,
-        "sill": 0.9,
-        "height": 1.3,
-        "confidence": "medium",
-        "photos": [
-          1,
-          2,
-          3
-        ],
-        "note": "Window in the back-left corner, seen past rack L4."
-      },
-      {
-        "id": "WIN-02",
-        "wall": "WALL-B",
-        "pos": [
-          2.95,
-          5.6
-        ],
-        "width": 0.55,
-        "sill": 0.9,
-        "height": 1.3,
-        "confidence": "medium",
-        "photos": [
-          2,
-          3,
-          4
-        ],
-        "note": "Window with blinds between the single back rack and the pillar; yellow ladder stands in front."
-      }
-    ],
-    "pillars": [
-      {
-        "id": "PILLAR-01",
-        "pos": [
-          4.0,
-          5.6
-        ],
-        "radius": 0.35,
-        "confidence": "high",
-        "photos": [
-          2,
-          3,
-          4
-        ],
-        "note": "Rounded column in the back-right corner."
-      }
-    ],
-    "fixtures": [
-      {
-        "id": "ESTOP-01",
-        "type": "emergency-stop",
-        "pos": [
-          0.0,
-          0.25
-        ],
-        "height": 1.35,
-        "confidence": "high",
-        "photos": [
-          1
-        ]
-      }
-    ],
-    "ceilingLights": [
-      [
-        1.0,
-        1.2
-      ],
-      [
-        3.0,
-        1.2
-      ],
-      [
-        1.0,
-        2.8
-      ],
-      [
-        3.0,
-        2.8
-      ],
-      [
-        1.0,
-        4.4
-      ],
-      [
-        3.0,
-        4.4
-      ]
-    ]
+  "trayRack": {
+   "width": 0.98,
+   "depth": 0.48,
+   "height": 1.94,
+   "trayPitch": [
+    0.2,
+    0.2,
+    0.13,
+    0.13,
+    0.13,
+    0.13,
+    0.13,
+    0.13,
+    0.13,
+    0.13
+   ],
+   "source": "NVIDIA ROLLER STAND FRAME (ST Engineering, 25/05/2025): 980 x 480 x 1940 mm, ball-conveyor trays"
   },
-  "zones": [
-    {
-      "id": "Z01",
-      "name": "Entrance & central aisle",
-      "bounds": [
-        1.0,
-        0.0,
-        3.0,
-        4.6
-      ],
-      "color": "#3f3f46",
-      "confidence": "medium"
-    },
-    {
-      "id": "Z02",
-      "name": "Left rack row (wall x=0)",
-      "bounds": [
-        0.0,
-        0.55,
-        1.0,
-        4.85
-      ],
-      "color": "#76b900",
-      "confidence": "high"
-    },
-    {
-      "id": "Z03",
-      "name": "Back wall — storage, single rack, windows",
-      "bounds": [
-        0.0,
-        4.6,
-        4.0,
-        5.6
-      ],
-      "color": "#a78bfa",
-      "confidence": "medium"
-    },
-    {
-      "id": "Z04",
-      "name": "Right rack row + tray storage (wall x=4.0)",
-      "bounds": [
-        3.0,
-        1.5,
-        4.0,
-        4.9
-      ],
-      "color": "#22d3ee",
-      "confidence": "high"
-    }
-  ],
-  "benches": [],
-  "storage": [
-    {
-      "id": "STORAGE-01",
-      "name": "Grey 2-door metal cabinet",
-      "category": "storage",
-      "type": "cabinet",
-      "pos": [
-        1.3,
-        5.37
-      ],
-      "size": [
-        0.8,
-        0.45,
-        1.95
-      ],
-      "rot": 0,
-      "zone": "Z03",
-      "status": "active",
-      "confidence": "medium",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Back wall, left of the single rack. Tool box on top."
-    },
-    {
-      "id": "STORAGE-02",
-      "name": "Roller-tray stand (spare switch chassis)",
-      "category": "storage",
-      "type": "tray-rack",
-      "template": "trayRack",
-      "pos": [
-        3.76,
-        2.05
-      ],
-      "rot": 180,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        3,
-        4
-      ],
-      "notes": "ST Engineering 'NVIDIA ROLLER STAND FRAME' 980x480x1940. ~8 of 10 trays hold switch chassis (beige, front-port units)."
-    }
-  ],
-  "setups": [
-    {
-      "id": "SETUP-001",
-      "name": "Rack L1 — left row, nearest entrance",
-      "category": "setup",
-      "type": "switch-rack",
-      "template": "rack",
-      "pos": [
-        0.5,
-        1.1219999999999999
-      ],
-      "rot": 0,
-      "zone": "Z02",
-      "dcimRack": "Rack-01",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "positionConfidence": "medium",
-      "dcimMappingConfidence": "low",
-      "photos": [
-        1,
-        2
-      ],
-      "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-01' is PROVISIONAL — verify on site (rack label / PDU name).",
-      "shelves": [
-        "SHELF-01",
-        "SHELF-02",
-        "SHELF-03",
-        "SHELF-04"
-      ]
-    },
-    {
-      "id": "SETUP-002",
-      "name": "Rack L2 — left row",
-      "category": "setup",
-      "type": "switch-rack",
-      "template": "rack",
-      "pos": [
-        0.5,
-        2.1719999999999997
-      ],
-      "rot": 0,
-      "zone": "Z02",
-      "dcimRack": "Rack-02",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "positionConfidence": "medium",
-      "dcimMappingConfidence": "low",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-02' is PROVISIONAL — verify on site (rack label / PDU name).",
-      "shelves": [
-        "SHELF-05",
-        "SHELF-06",
-        "SHELF-07",
-        "SHELF-08"
-      ]
-    },
-    {
-      "id": "SETUP-003",
-      "name": "Rack L3 — left row",
-      "category": "setup",
-      "type": "switch-rack",
-      "template": "rack",
-      "pos": [
-        0.5,
-        3.2220000000000004
-      ],
-      "rot": 0,
-      "zone": "Z02",
-      "dcimRack": "Rack-03",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "positionConfidence": "medium",
-      "dcimMappingConfidence": "low",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-03' is PROVISIONAL — verify on site (rack label / PDU name).",
-      "shelves": [
-        "SHELF-09",
-        "SHELF-10",
-        "SHELF-11",
-        "SHELF-12"
-      ]
-    },
-    {
-      "id": "SETUP-004",
-      "name": "Rack L4 — left row, nearest window",
-      "category": "setup",
-      "type": "switch-rack",
-      "template": "rack",
-      "pos": [
-        0.5,
-        4.272
-      ],
-      "rot": 0,
-      "zone": "Z02",
-      "dcimRack": "Rack-04",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "positionConfidence": "medium",
-      "dcimMappingConfidence": "low",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-04' is PROVISIONAL — verify on site (rack label / PDU name).",
-      "shelves": [
-        "SHELF-13",
-        "SHELF-14",
-        "SHELF-15",
-        "SHELF-16"
-      ]
-    },
-    {
-      "id": "SETUP-005",
-      "name": "Rack B1 — back wall, single rack (3 shelves)",
-      "category": "setup",
-      "type": "switch-rack",
-      "template": "rack",
-      "pos": [
-        2.42,
-        5.1
-      ],
-      "rot": 90,
-      "zone": "Z03",
-      "dcimRack": "Rack-05",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "positionConfidence": "medium",
-      "dcimMappingConfidence": "low",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Aluminium-profile 3-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-05' is PROVISIONAL — verify on site (rack label / PDU name).",
-      "shelves": [
-        "SHELF-17",
-        "SHELF-18",
-        "SHELF-19"
-      ]
-    },
-    {
-      "id": "SETUP-006",
-      "name": "Rack R1 — right row, next to pillar",
-      "category": "setup",
-      "type": "switch-rack",
-      "template": "rack",
-      "pos": [
-        3.5,
-        4.372
-      ],
-      "rot": 180,
-      "zone": "Z04",
-      "dcimRack": "Rack-06",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "positionConfidence": "medium",
-      "dcimMappingConfidence": "low",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-06' is PROVISIONAL — verify on site (rack label / PDU name).",
-      "shelves": [
-        "SHELF-20",
-        "SHELF-21",
-        "SHELF-22",
-        "SHELF-23"
-      ]
-    },
-    {
-      "id": "SETUP-007",
-      "name": "Rack R2 — right row",
-      "category": "setup",
-      "type": "switch-rack",
-      "template": "rack",
-      "pos": [
-        3.5,
-        3.322
-      ],
-      "rot": 180,
-      "zone": "Z04",
-      "dcimRack": "Rack-07",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "positionConfidence": "medium",
-      "dcimMappingConfidence": "low",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-07' is PROVISIONAL — verify on site (rack label / PDU name).",
-      "shelves": [
-        "SHELF-24",
-        "SHELF-25",
-        "SHELF-26",
-        "SHELF-27"
-      ]
-    }
-  ],
-  "shelves": [
-    {
-      "id": "SHELF-01",
-      "name": "SETUP-001 · level L1 (lowest)",
-      "category": "shelf",
-      "setup": "SETUP-001",
-      "level": 1,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-02",
-      "name": "SETUP-001 · level L2",
-      "category": "shelf",
-      "setup": "SETUP-001",
-      "level": 2,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-03",
-      "name": "SETUP-001 · level L3",
-      "category": "shelf",
-      "setup": "SETUP-001",
-      "level": 3,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-04",
-      "name": "SETUP-001 · level L4 (top)",
-      "category": "shelf",
-      "setup": "SETUP-001",
-      "level": 4,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-05",
-      "name": "SETUP-002 · level L1 (lowest)",
-      "category": "shelf",
-      "setup": "SETUP-002",
-      "level": 1,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-06",
-      "name": "SETUP-002 · level L2",
-      "category": "shelf",
-      "setup": "SETUP-002",
-      "level": 2,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-07",
-      "name": "SETUP-002 · level L3",
-      "category": "shelf",
-      "setup": "SETUP-002",
-      "level": 3,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-08",
-      "name": "SETUP-002 · level L4 (top)",
-      "category": "shelf",
-      "setup": "SETUP-002",
-      "level": 4,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-09",
-      "name": "SETUP-003 · level L1 (lowest)",
-      "category": "shelf",
-      "setup": "SETUP-003",
-      "level": 1,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-10",
-      "name": "SETUP-003 · level L2",
-      "category": "shelf",
-      "setup": "SETUP-003",
-      "level": 2,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-11",
-      "name": "SETUP-003 · level L3",
-      "category": "shelf",
-      "setup": "SETUP-003",
-      "level": 3,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-12",
-      "name": "SETUP-003 · level L4 (top)",
-      "category": "shelf",
-      "setup": "SETUP-003",
-      "level": 4,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-13",
-      "name": "SETUP-004 · level L1 (lowest)",
-      "category": "shelf",
-      "setup": "SETUP-004",
-      "level": 1,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-14",
-      "name": "SETUP-004 · level L2",
-      "category": "shelf",
-      "setup": "SETUP-004",
-      "level": 2,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-15",
-      "name": "SETUP-004 · level L3",
-      "category": "shelf",
-      "setup": "SETUP-004",
-      "level": 3,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-16",
-      "name": "SETUP-004 · level L4 (top)",
-      "category": "shelf",
-      "setup": "SETUP-004",
-      "level": 4,
-      "zone": "Z02",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-17",
-      "name": "SETUP-005 · level L1 (lowest)",
-      "category": "shelf",
-      "setup": "SETUP-005",
-      "level": 1,
-      "zone": "Z03",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-18",
-      "name": "SETUP-005 · level L2",
-      "category": "shelf",
-      "setup": "SETUP-005",
-      "level": 2,
-      "zone": "Z03",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-19",
-      "name": "SETUP-005 · level L3",
-      "category": "shelf",
-      "setup": "SETUP-005",
-      "level": 3,
-      "zone": "Z03",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-20",
-      "name": "SETUP-006 · level L1 (lowest)",
-      "category": "shelf",
-      "setup": "SETUP-006",
-      "level": 1,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-21",
-      "name": "SETUP-006 · level L2",
-      "category": "shelf",
-      "setup": "SETUP-006",
-      "level": 2,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-22",
-      "name": "SETUP-006 · level L3",
-      "category": "shelf",
-      "setup": "SETUP-006",
-      "level": 3,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-23",
-      "name": "SETUP-006 · level L4 (top)",
-      "category": "shelf",
-      "setup": "SETUP-006",
-      "level": 4,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-24",
-      "name": "SETUP-007 · level L1 (lowest)",
-      "category": "shelf",
-      "setup": "SETUP-007",
-      "level": 1,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-25",
-      "name": "SETUP-007 · level L2",
-      "category": "shelf",
-      "setup": "SETUP-007",
-      "level": 2,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-26",
-      "name": "SETUP-007 · level L3",
-      "category": "shelf",
-      "setup": "SETUP-007",
-      "level": 3,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    },
-    {
-      "id": "SHELF-27",
-      "name": "SETUP-007 · level L4 (top)",
-      "category": "shelf",
-      "setup": "SETUP-007",
-      "level": 4,
-      "zone": "Z04",
-      "status": "active",
-      "confidence": "high",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
-    }
-  ],
-  "items": [
-    {
-      "id": "ITEM-0001",
-      "name": "Cooling unit (chiller) — SETUP-001",
-      "category": "item",
-      "type": "chiller",
-      "setup": "SETUP-001",
-      "shelf": null,
-      "placement": "bottom-bay",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "photos": [
-        1,
-        2
-      ],
-      "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
-    },
-    {
-      "id": "ITEM-0002",
-      "name": "Cooling unit (chiller) — SETUP-002",
-      "category": "item",
-      "type": "chiller",
-      "setup": "SETUP-002",
-      "shelf": null,
-      "placement": "bottom-bay",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
-    },
-    {
-      "id": "ITEM-0003",
-      "name": "Cooling unit (chiller) — SETUP-003",
-      "category": "item",
-      "type": "chiller",
-      "setup": "SETUP-003",
-      "shelf": null,
-      "placement": "bottom-bay",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
-    },
-    {
-      "id": "ITEM-0004",
-      "name": "Cooling unit (chiller) — SETUP-004",
-      "category": "item",
-      "type": "chiller",
-      "setup": "SETUP-004",
-      "shelf": null,
-      "placement": "bottom-bay",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
-    },
-    {
-      "id": "ITEM-0005",
-      "name": "Cooling unit (chiller) — SETUP-005",
-      "category": "item",
-      "type": "chiller",
-      "setup": "SETUP-005",
-      "shelf": null,
-      "placement": "bottom-bay",
-      "zone": "Z03",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
-    },
-    {
-      "id": "ITEM-0006",
-      "name": "Cooling unit (chiller) — SETUP-006",
-      "category": "item",
-      "type": "chiller",
-      "setup": "SETUP-006",
-      "shelf": null,
-      "placement": "bottom-bay",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
-    },
-    {
-      "id": "ITEM-0007",
-      "name": "Cooling unit (chiller) — SETUP-007",
-      "category": "item",
-      "type": "chiller",
-      "setup": "SETUP-007",
-      "shelf": null,
-      "placement": "bottom-bay",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "photos": [
-        2,
-        3,
-        4
-      ],
-      "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
-    },
-    {
-      "id": "ITEM-0008",
-      "name": "Opt133",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-001",
-      "shelf": "SHELF-04",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt133",
-        "pdu": "pdu-rack01",
-        "pduName": "PDU-Rack-01",
-        "outlet": 13,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 5
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0009",
-      "name": "Opt183",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-001",
-      "shelf": "SHELF-03",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt183",
-        "pdu": "pdu-rack01",
-        "pduName": "PDU-Rack-01",
-        "outlet": 21,
-        "kvm": []
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0010",
-      "name": "Opt207",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-001",
-      "shelf": "SHELF-02",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt207",
-        "pdu": "pdu-rack01",
-        "pduName": "PDU-Rack-01",
-        "outlet": 23,
-        "kvm": []
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0011",
-      "name": "Optn85 (SSD)",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-001",
-      "shelf": "SHELF-01",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn85 (ssd)",
-        "pdu": "pdu-rack01",
-        "pduName": "PDU-Rack-01",
-        "outlet": 24,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 16
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0012",
-      "name": "Optn130",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-002",
-      "shelf": "SHELF-08",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn130",
-        "pdu": "pdu-rack02",
-        "pduName": "PDU-Rack-02",
-        "outlet": 6,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 11
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0013",
-      "name": "Opt208",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-002",
-      "shelf": "SHELF-07",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt208",
-        "pdu": "pdu-rack02",
-        "pduName": "PDU-Rack-02",
-        "outlet": 13,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 10
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0014",
-      "name": "Optn84",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-002",
-      "shelf": "SHELF-06",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn84",
-        "pdu": "pdu-rack02",
-        "pduName": "PDU-Rack-02",
-        "outlet": 20,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 9
-          },
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 12
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0015",
-      "name": "Optn84 (2)",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-002",
-      "shelf": "SHELF-05",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn84 (2)",
-        "pdu": "pdu-rack02",
-        "pduName": "PDU-Rack-02",
-        "outlet": 22,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 9
-          },
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 12
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0016",
-      "name": "Opt106",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-003",
-      "shelf": "SHELF-12",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt106",
-        "pdu": "pdu-rack03",
-        "pduName": "PDU-Rack-03",
-        "outlet": 9,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 4
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0017",
-      "name": "Optn36",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-003",
-      "shelf": "SHELF-11",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn36",
-        "pdu": "pdu-rack03",
-        "pduName": "PDU-Rack-03",
-        "outlet": 17,
-        "kvm": []
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0018",
-      "name": "Optn88",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-003",
-      "shelf": "SHELF-10",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn88",
-        "pdu": "pdu-rack03",
-        "pduName": "PDU-Rack-03",
-        "outlet": 20,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 1
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0019",
-      "name": "Optn51",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-003",
-      "shelf": "SHELF-09",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn51",
-        "pdu": "pdu-rack03",
-        "pduName": "PDU-Rack-03",
-        "outlet": 23,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 2
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0020",
-      "name": "Opt60",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-004",
-      "shelf": "SHELF-16",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt60",
-        "pdu": "pdu-rack04",
-        "pduName": "PDU-Rack-04",
-        "outlet": 9,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 7
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0021",
-      "name": "Opt94",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-004",
-      "shelf": "SHELF-15",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt94",
-        "pdu": "pdu-rack04",
-        "pduName": "PDU-Rack-04",
-        "outlet": 18,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 8
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0022",
-      "name": "Optn144",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-004",
-      "shelf": "SHELF-14",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn144",
-        "pdu": "pdu-rack04",
-        "pduName": "PDU-Rack-04",
-        "outlet": 19,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 6
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0023",
-      "name": "Opt (unlabeled)",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-004",
-      "shelf": "SHELF-13",
-      "zone": "Z02",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt (unlabeled)",
-        "pdu": "pdu-rack04",
-        "pduName": "PDU-Rack-04",
-        "outlet": 23,
-        "kvm": []
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0024",
-      "name": "Optn45",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-005",
-      "shelf": "SHELF-19",
-      "zone": "Z03",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn45",
-        "pdu": "pdu-rack05",
-        "pduName": "PDU-Rack-05",
-        "outlet": 13,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 15
-          },
-          {
-            "kvm": "kvm-unit3",
-            "kvmName": "KVM-Unit-3",
-            "port": 3
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0025",
-      "name": "Optn108",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-005",
-      "shelf": "SHELF-18",
-      "zone": "Z03",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn108",
-        "pdu": "pdu-rack05",
-        "pduName": "PDU-Rack-05",
-        "outlet": 23,
-        "kvm": [
-          {
-            "kvm": "kvm-unit3",
-            "kvmName": "KVM-Unit-3",
-            "port": 2
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0026",
-      "name": "Optn93",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-006",
-      "shelf": "SHELF-23",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn93",
-        "pdu": "pdu-rack06",
-        "pduName": "PDU-Rack-06",
-        "outlet": 13,
-        "kvm": [
-          {
-            "kvm": "kvm-unit2",
-            "kvmName": "KVM-Unit-2",
-            "port": 2
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0027",
-      "name": "Opt250",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-006",
-      "shelf": "SHELF-22",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt250",
-        "pdu": "pdu-rack06",
-        "pduName": "PDU-Rack-06",
-        "outlet": 17,
-        "kvm": [
-          {
-            "kvm": "kvm-unit2",
-            "kvmName": "KVM-Unit-2",
-            "port": 1
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0028",
-      "name": "Optn114",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-006",
-      "shelf": "SHELF-21",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn114",
-        "pdu": "pdu-rack06",
-        "pduName": "PDU-Rack-06",
-        "outlet": 20,
-        "kvm": [
-          {
-            "kvm": "kvm-unit2",
-            "kvmName": "KVM-Unit-2",
-            "port": 4
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0029",
-      "name": "Optn101",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-006",
-      "shelf": "SHELF-20",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn101",
-        "pdu": "pdu-rack06",
-        "pduName": "PDU-Rack-06",
-        "outlet": 22,
-        "kvm": [
-          {
-            "kvm": "kvm-unit2",
-            "kvmName": "KVM-Unit-2",
-            "port": 6
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0030",
-      "name": "Opt41",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-006",
-      "shelf": "SHELF-23",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "opt41",
-        "pdu": "pdu-rack06",
-        "pduName": "PDU-Rack-06",
-        "outlet": 23,
-        "kvm": [
-          {
-            "kvm": "kvm-unit2",
-            "kvmName": "KVM-Unit-2",
-            "port": 5
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0031",
-      "name": "Optn29",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-007",
-      "shelf": "SHELF-27",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn29",
-        "pdu": "pdu-rack07",
-        "pduName": "PDU-Rack-07",
-        "outlet": 9,
-        "kvm": [
-          {
-            "kvm": "kvm-unit1",
-            "kvmName": "KVM-Unit-1",
-            "port": 3
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0032",
-      "name": "Optn149",
-      "category": "item",
-      "type": "opt",
-      "typeLabel": "OPT — switch under test",
-      "setup": "SETUP-007",
-      "shelf": "SHELF-26",
-      "zone": "Z04",
-      "status": "unknown",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "low",
-      "photos": [],
-      "dcim": {
-        "optKey": "optn149",
-        "pdu": "pdu-rack07",
-        "pduName": "PDU-Rack-07",
-        "outlet": 14,
-        "kvm": [
-          {
-            "kvm": "kvm-unit3",
-            "kvmName": "KVM-Unit-3",
-            "port": 1
-          }
-        ]
-      },
-      "notes": "Existence + PDU outlet from DCIM seed labels (high). Shelf placement is a provisional top-down fill by outlet number — the live /api/rack-slots assignment overrides it when the backend is connected."
-    },
-    {
-      "id": "ITEM-0033",
-      "name": "PDU-Rack-01",
-      "category": "item",
-      "type": "pdu",
-      "typeLabel": "Raritan PX PDU (24 outlets)",
-      "setup": "SETUP-001",
-      "shelf": null,
-      "placement": "rack-strips",
-      "zone": "Z02",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "photos": [
-        1,
-        4
-      ],
-      "dcim": {
-        "deviceId": "pdu-rack01",
-        "outlets": 24,
-        "labels": {
-          "13": "Opt133",
-          "21": "Opt183",
-          "23": "Opt207",
-          "24": "Optn85 (SSD)"
-        }
-      },
-      "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
-    },
-    {
-      "id": "ITEM-0034",
-      "name": "PDU-Rack-02",
-      "category": "item",
-      "type": "pdu",
-      "typeLabel": "Raritan PX PDU (24 outlets)",
-      "setup": "SETUP-002",
-      "shelf": null,
-      "placement": "rack-strips",
-      "zone": "Z02",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "photos": [
-        1,
-        4
-      ],
-      "dcim": {
-        "deviceId": "pdu-rack02",
-        "outlets": 24,
-        "labels": {
-          "6": "Optn130",
-          "13": "Opt208",
-          "20": "Optn84",
-          "22": "Optn84 (2)"
-        }
-      },
-      "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
-    },
-    {
-      "id": "ITEM-0035",
-      "name": "PDU-Rack-03",
-      "category": "item",
-      "type": "pdu",
-      "typeLabel": "Raritan PX PDU (24 outlets)",
-      "setup": "SETUP-003",
-      "shelf": null,
-      "placement": "rack-strips",
-      "zone": "Z02",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "photos": [
-        1,
-        4
-      ],
-      "dcim": {
-        "deviceId": "pdu-rack03",
-        "outlets": 24,
-        "labels": {
-          "9": "Opt106",
-          "17": "Optn36",
-          "20": "Optn88",
-          "23": "Optn51"
-        }
-      },
-      "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
-    },
-    {
-      "id": "ITEM-0036",
-      "name": "PDU-Rack-04",
-      "category": "item",
-      "type": "pdu",
-      "typeLabel": "Raritan PX PDU (24 outlets)",
-      "setup": "SETUP-004",
-      "shelf": null,
-      "placement": "rack-strips",
-      "zone": "Z02",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "photos": [
-        1,
-        4
-      ],
-      "dcim": {
-        "deviceId": "pdu-rack04",
-        "outlets": 24,
-        "labels": {
-          "9": "Opt60",
-          "18": "Opt94",
-          "19": "Optn144",
-          "23": "Opt (unlabeled)"
-        }
-      },
-      "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
-    },
-    {
-      "id": "ITEM-0037",
-      "name": "PDU-Rack-05",
-      "category": "item",
-      "type": "pdu",
-      "typeLabel": "Raritan PX PDU (24 outlets)",
-      "setup": "SETUP-005",
-      "shelf": null,
-      "placement": "rack-strips",
-      "zone": "Z03",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "photos": [
-        1,
-        4
-      ],
-      "dcim": {
-        "deviceId": "pdu-rack05",
-        "outlets": 24,
-        "labels": {
-          "13": "Optn45",
-          "22": "Opt (unlabeled)",
-          "23": "Optn108"
-        }
-      },
-      "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
-    },
-    {
-      "id": "ITEM-0038",
-      "name": "PDU-Rack-06",
-      "category": "item",
-      "type": "pdu",
-      "typeLabel": "Raritan PX PDU (24 outlets)",
-      "setup": "SETUP-006",
-      "shelf": null,
-      "placement": "rack-strips",
-      "zone": "Z04",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "photos": [
-        1,
-        4
-      ],
-      "dcim": {
-        "deviceId": "pdu-rack06",
-        "outlets": 24,
-        "labels": {
-          "13": "Optn93",
-          "17": "Opt250",
-          "20": "Optn114",
-          "22": "Optn101",
-          "23": "Opt41"
-        }
-      },
-      "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
-    },
-    {
-      "id": "ITEM-0039",
-      "name": "PDU-Rack-07",
-      "category": "item",
-      "type": "pdu",
-      "typeLabel": "Raritan PX PDU (24 outlets)",
-      "setup": "SETUP-007",
-      "shelf": null,
-      "placement": "rack-strips",
-      "zone": "Z04",
-      "status": "active",
-      "owner": null,
-      "confidence": "high",
-      "photos": [
-        1,
-        4
-      ],
-      "dcim": {
-        "deviceId": "pdu-rack07",
-        "outlets": 24,
-        "labels": {
-          "9": "Optn29",
-          "14": "Optn149"
-        }
-      },
-      "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
-    },
-    {
-      "id": "ITEM-0040",
-      "name": "PDU-Rack-08",
-      "category": "item",
-      "type": "pdu",
-      "typeLabel": "Raritan PX PDU (24 outlets)",
-      "setup": null,
-      "shelf": null,
-      "placement": "rack-strips",
-      "zone": null,
-      "status": "building",
-      "owner": null,
-      "confidence": "low",
-      "photos": [],
-      "dcim": {
-        "deviceId": "pdu-rack08",
-        "outlets": 24,
-        "labels": {}
-      },
-      "notes": "Rack-08 exists in DCIM as an empty/planned rack (CHANGELOG v2.6.0). No physical rack identified in photos — unplaced."
-    },
-    {
-      "id": "ITEM-0041",
-      "name": "KVM-Unit-1",
-      "category": "item",
-      "type": "kvm",
-      "typeLabel": "Raritan Dominion KX III",
-      "setup": "SETUP-001",
-      "shelf": null,
-      "placement": "side-mount",
-      "side": "left",
-      "mountHeight": 1.45,
-      "zone": "Z02",
-      "status": "active",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "medium",
-      "photos": [],
-      "dcim": {
-        "deviceId": "kvm-unit1",
-        "ports": 16,
-        "labels": {
-          "1": "Optn88",
-          "2": "Optn51",
-          "3": "Optn29",
-          "4": "Opt106",
-          "5": "Opt133",
-          "6": "Optn144",
-          "7": "Opt60",
-          "8": "Opt94",
-          "9": "Optn84",
-          "10": "Opt208",
-          "11": "Optn130",
-          "12": "Optn84",
-          "14": "Optn87",
-          "15": "Optn45",
-          "16": "Optn85"
-        }
-      },
-      "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
-    },
-    {
-      "id": "ITEM-0042",
-      "name": "KVM-Unit-2",
-      "category": "item",
-      "type": "kvm",
-      "typeLabel": "Raritan Dominion KX III",
-      "setup": "SETUP-006",
-      "shelf": null,
-      "placement": "side-mount",
-      "side": "left",
-      "mountHeight": 1.45,
-      "zone": "Z04",
-      "status": "active",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "medium",
-      "photos": [],
-      "dcim": {
-        "deviceId": "kvm-unit2",
-        "ports": 8,
-        "labels": {
-          "1": "Opt250",
-          "2": "Optn93",
-          "3": "Optn87",
-          "4": "Optn114",
-          "5": "Opt41",
-          "6": "Optn101"
-        }
-      },
-      "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
-    },
-    {
-      "id": "ITEM-0043",
-      "name": "KVM-Unit-3",
-      "category": "item",
-      "type": "kvm",
-      "typeLabel": "Raritan Dominion LX II",
-      "setup": "SETUP-005",
-      "shelf": null,
-      "placement": "side-mount",
-      "side": "right",
-      "mountHeight": 1.45,
-      "zone": "Z03",
-      "status": "active",
-      "owner": null,
-      "confidence": "medium",
-      "placementConfidence": "medium",
-      "photos": [],
-      "dcim": {
-        "deviceId": "kvm-unit3",
-        "ports": 8,
-        "labels": {
-          "1": "Optn149",
-          "2": "Optn108",
-          "3": "Optn45"
-        }
-      },
-      "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
-    },
-    {
-      "name": "Blue mobile stand (monitor / laptop cart)",
-      "type": "cart",
-      "pos": [
-        1.35,
-        4.65
-      ],
-      "size": [
-        0.55,
-        0.55,
-        1.55
-      ],
-      "zone": "Z03",
-      "status": "active",
-      "confidence": "medium",
-      "photos": [
-        1,
-        2,
-        3
-      ],
-      "notes": "Mobile — position changes.",
-      "id": "ITEM-0044",
-      "category": "item",
-      "owner": null
-    },
-    {
-      "name": "Yellow step ladder",
-      "type": "ladder",
-      "pos": [
-        3.25,
-        5.05
-      ],
-      "size": [
-        0.45,
-        0.55,
-        0.95
-      ],
-      "zone": "Z03",
-      "status": "active",
-      "confidence": "medium",
-      "photos": [
-        3,
-        4
-      ],
-      "notes": "In front of WIN-02. Mobile.",
-      "id": "ITEM-0045",
-      "category": "item",
-      "owner": null
-    },
-    {
-      "name": "Tool box (on cabinet top)",
-      "type": "toolbox",
-      "pos": [
-        1.3,
-        5.37
-      ],
-      "size": [
-        0.45,
-        0.25,
-        0.25
-      ],
-      "y": 1.95,
-      "zone": "Z03",
-      "status": "active",
-      "confidence": "medium",
-      "photos": [
-        2,
-        3
-      ],
-      "id": "ITEM-0046",
-      "category": "item",
-      "owner": null
-    },
-    {
-      "name": "Spare switch chassis in tray stand (≈7 units)",
-      "type": "spare-chassis",
-      "storage": "STORAGE-02",
-      "quantity": 7,
-      "zone": "Z04",
-      "status": "inactive",
-      "confidence": "low",
-      "photos": [
-        3,
-        4
-      ],
-      "notes": "Count approximate from photo 4; units are not powered.",
-      "id": "ITEM-0047",
-      "category": "item",
-      "owner": null
-    },
-    {
-      "name": "Wall panel / cover leaning at right wall",
-      "type": "misc",
-      "pos": [
-        3.85,
-        0.95
-      ],
-      "size": [
-        0.1,
-        0.6,
-        0.9
-      ],
-      "zone": "Z04",
-      "status": "unknown",
-      "confidence": "low",
-      "photos": [
-        4
-      ],
-      "id": "ITEM-0048",
-      "category": "item",
-      "owner": null
-    }
-  ],
-  "dcim": {
-    "source": "github.com/aizyaguev-bot/DCIM-204 — backend/seed.py + scripts/seed_kvm_labels.py (labels only, IPs intentionally omitted)",
-    "uNumbering": "top-down",
-    "pdus": [
-      {
-        "id": "pdu-rack01",
-        "name": "PDU-Rack-01",
-        "rack": "Rack-01",
-        "outlets": 24,
-        "labels": {
-          "13": "Opt133",
-          "21": "Opt183",
-          "23": "Opt207",
-          "24": "Optn85 (SSD)"
-        }
-      },
-      {
-        "id": "pdu-rack02",
-        "name": "PDU-Rack-02",
-        "rack": "Rack-02",
-        "outlets": 24,
-        "labels": {
-          "6": "Optn130",
-          "13": "Opt208",
-          "20": "Optn84",
-          "22": "Optn84 (2)"
-        }
-      },
-      {
-        "id": "pdu-rack03",
-        "name": "PDU-Rack-03",
-        "rack": "Rack-03",
-        "outlets": 24,
-        "labels": {
-          "9": "Opt106",
-          "17": "Optn36",
-          "20": "Optn88",
-          "23": "Optn51"
-        }
-      },
-      {
-        "id": "pdu-rack04",
-        "name": "PDU-Rack-04",
-        "rack": "Rack-04",
-        "outlets": 24,
-        "labels": {
-          "9": "Opt60",
-          "18": "Opt94",
-          "19": "Optn144",
-          "23": "Opt (unlabeled)"
-        }
-      },
-      {
-        "id": "pdu-rack05",
-        "name": "PDU-Rack-05",
-        "rack": "Rack-05",
-        "outlets": 24,
-        "labels": {
-          "13": "Optn45",
-          "22": "Opt (unlabeled)",
-          "23": "Optn108"
-        }
-      },
-      {
-        "id": "pdu-rack06",
-        "name": "PDU-Rack-06",
-        "rack": "Rack-06",
-        "outlets": 24,
-        "labels": {
-          "13": "Optn93",
-          "17": "Opt250",
-          "20": "Optn114",
-          "22": "Optn101",
-          "23": "Opt41"
-        }
-      },
-      {
-        "id": "pdu-rack07",
-        "name": "PDU-Rack-07",
-        "rack": "Rack-07",
-        "outlets": 24,
-        "labels": {
-          "9": "Optn29",
-          "14": "Optn149"
-        }
-      },
-      {
-        "id": "pdu-rack08",
-        "name": "PDU-Rack-08",
-        "rack": "Rack-08",
-        "outlets": 24,
-        "labels": {}
-      }
-    ],
-    "kvms": [
-      {
-        "id": "kvm-unit1",
-        "name": "KVM-Unit-1",
-        "model": "Raritan Dominion KX III",
-        "rack": "Rack-01",
-        "ports": 16,
-        "labels": {
-          "1": "Optn88",
-          "2": "Optn51",
-          "3": "Optn29",
-          "4": "Opt106",
-          "5": "Opt133",
-          "6": "Optn144",
-          "7": "Opt60",
-          "8": "Opt94",
-          "9": "Optn84",
-          "10": "Opt208",
-          "11": "Optn130",
-          "12": "Optn84",
-          "14": "Optn87",
-          "15": "Optn45",
-          "16": "Optn85"
-        }
-      },
-      {
-        "id": "kvm-unit2",
-        "name": "KVM-Unit-2",
-        "model": "Raritan Dominion KX III",
-        "rack": "Rack-06",
-        "ports": 8,
-        "labels": {
-          "1": "Opt250",
-          "2": "Optn93",
-          "3": "Optn87",
-          "4": "Optn114",
-          "5": "Opt41",
-          "6": "Optn101"
-        }
-      },
-      {
-        "id": "kvm-unit3",
-        "name": "KVM-Unit-3",
-        "model": "Raritan Dominion LX II",
-        "rack": "Rack-05",
-        "ports": 8,
-        "labels": {
-          "1": "Optn149",
-          "2": "Optn108",
-          "3": "Optn45"
-        }
-      }
-    ]
-  },
-  "backend": {
-    "defaultUrl": "",
-    "note": "Set the Lab Manager backend URL (e.g. http://<vm>:8000) in the app settings. Same-origin when served from the backend under /twin/.",
-    "endpoints": {
-      "devices": "/api/devices/",
-      "rackSlots": "/api/rack-slots",
-      "rackPositions": "/api/rack-positions",
-      "switchAssignments": "/api/switch-assignments",
-      "optOwners": "/api/opt-owners",
-      "rackItems": "/api/rack-items",
-      "chillers": "/api/chillers",
-      "rackOverrides": "/api/rack-overrides",
-      "pduStatus": "/api/pdus/{id}/status",
-      "outletPower": "/api/pdus/{id}/outlets/{n}/power",
-      "kvmStatus": "/api/kvms/{id}/status",
-      "kvmAutologin": "/api/kvms/{id}/autologin?port={port}",
-      "kvmMarkInUse": "/api/kvms/{id}/ports/{port}/mark-in-use"
-    }
+  "chiller": {
+   "width": 0.6,
+   "depth": 0.62,
+   "height": 0.75,
+   "confidence": "medium",
+   "note": "Size estimated from photos (beige control cabinet with small display, under lowest shelf)"
   }
+ },
+ "structure": {
+  "walls": [
+   {
+    "id": "WALL-L",
+    "to": [
+     0,
+     5.6
+    ],
+    "from": [
+     0,
+     0
+    ]
+   },
+   {
+    "id": "WALL-R",
+    "to": [
+     4.0,
+     5.6
+    ],
+    "from": [
+     4.0,
+     0
+    ]
+   },
+   {
+    "id": "WALL-B",
+    "to": [
+     4.0,
+     5.6
+    ],
+    "from": [
+     0,
+     5.6
+    ]
+   },
+   {
+    "id": "WALL-F",
+    "to": [
+     4.0,
+     0
+    ],
+    "from": [
+     0,
+     0
+    ]
+   }
+  ],
+  "doors": [
+   {
+    "id": "DOOR-01",
+    "wall": "WALL-F",
+    "pos": [
+     0.35,
+     0.0
+    ],
+    "width": 0.9,
+    "height": 2.1,
+    "swing": "out",
+    "confidence": "medium",
+    "photos": [
+     1
+    ],
+    "note": "Beige door seen edge-on at the left of photo 1, next to the E-stop wall segment."
+   },
+   {
+    "id": "DOOR-02",
+    "wall": "WALL-R",
+    "pos": [
+     4.0,
+     0.3
+    ],
+    "width": 0.9,
+    "height": 2.1,
+    "swing": "unknown",
+    "confidence": "low",
+    "photos": [
+     4
+    ],
+    "note": "Beige door/panel at the far right of photo 4. Could be a door to an adjacent room or an electrical cabinet. VERIFY."
+   }
+  ],
+  "windows": [
+   {
+    "id": "WIN-01",
+    "wall": "WALL-L",
+    "pos": [
+     0.0,
+     4.9
+    ],
+    "width": 0.65,
+    "sill": 0.9,
+    "height": 1.3,
+    "confidence": "medium",
+    "photos": [
+     1,
+     2,
+     3
+    ],
+    "note": "Window in the back-left corner, seen past rack L4."
+   },
+   {
+    "id": "WIN-02",
+    "wall": "WALL-B",
+    "pos": [
+     2.95,
+     5.6
+    ],
+    "width": 0.55,
+    "sill": 0.9,
+    "height": 1.3,
+    "confidence": "medium",
+    "photos": [
+     2,
+     3,
+     4
+    ],
+    "note": "Window with blinds between the single back rack and the pillar; yellow ladder stands in front."
+   }
+  ],
+  "pillars": [
+   {
+    "id": "PILLAR-01",
+    "pos": [
+     4.0,
+     5.6
+    ],
+    "radius": 0.35,
+    "confidence": "high",
+    "photos": [
+     2,
+     3,
+     4
+    ],
+    "note": "Rounded column in the back-right corner."
+   }
+  ],
+  "fixtures": [
+   {
+    "id": "ESTOP-01",
+    "type": "emergency-stop",
+    "pos": [
+     0.0,
+     0.25
+    ],
+    "height": 1.35,
+    "confidence": "high",
+    "photos": [
+     1
+    ]
+   }
+  ],
+  "ceilingLights": [
+   [
+    1.0,
+    1.2
+   ],
+   [
+    3.0,
+    1.2
+   ],
+   [
+    1.0,
+    2.8
+   ],
+   [
+    3.0,
+    2.8
+   ],
+   [
+    1.0,
+    4.4
+   ],
+   [
+    3.0,
+    4.4
+   ]
+  ]
+ },
+ "zones": [
+  {
+   "id": "Z01",
+   "name": "Entrance & central aisle",
+   "bounds": [
+    1.0,
+    0.0,
+    3.0,
+    4.6
+   ],
+   "color": "#3f3f46",
+   "confidence": "medium"
+  },
+  {
+   "id": "Z02",
+   "name": "Left rack row (wall x=0)",
+   "bounds": [
+    0.0,
+    0.55,
+    1.0,
+    4.85
+   ],
+   "color": "#76b900",
+   "confidence": "high"
+  },
+  {
+   "id": "Z03",
+   "name": "Back wall — storage, single rack, windows",
+   "bounds": [
+    0.0,
+    4.6,
+    4.0,
+    5.6
+   ],
+   "color": "#a78bfa",
+   "confidence": "medium"
+  },
+  {
+   "id": "Z04",
+   "name": "Right rack row + tray storage (wall x=4.0)",
+   "bounds": [
+    3.0,
+    1.5,
+    4.0,
+    4.9
+   ],
+   "color": "#22d3ee",
+   "confidence": "high"
+  }
+ ],
+ "benches": [],
+ "storage": [
+  {
+   "id": "STORAGE-01",
+   "name": "Grey 2-door metal cabinet",
+   "category": "storage",
+   "type": "cabinet",
+   "pos": [
+    1.3,
+    5.37
+   ],
+   "size": [
+    0.8,
+    0.45,
+    1.95
+   ],
+   "rot": 0,
+   "zone": "Z03",
+   "status": "active",
+   "confidence": "medium",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Back wall, left of the single rack. Tool box on top."
+  },
+  {
+   "id": "STORAGE-02",
+   "name": "Roller-tray stand (spare switch chassis)",
+   "category": "storage",
+   "type": "tray-rack",
+   "template": "trayRack",
+   "pos": [
+    3.76,
+    2.05
+   ],
+   "rot": 180,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    3,
+    4
+   ],
+   "notes": "ST Engineering 'NVIDIA ROLLER STAND FRAME' 980x480x1940. ~8 of 10 trays hold switch chassis (beige, front-port units)."
+  }
+ ],
+ "setups": [
+  {
+   "id": "SETUP-001",
+   "name": "Rack L1 — left row, nearest entrance",
+   "category": "setup",
+   "type": "switch-rack",
+   "template": "rack",
+   "pos": [
+    0.5,
+    1.1219999999999999
+   ],
+   "rot": 0,
+   "zone": "Z02",
+   "dcimRack": "Rack-01",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "positionConfidence": "medium",
+   "dcimMappingConfidence": "low",
+   "photos": [
+    1,
+    2
+   ],
+   "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-01' is PROVISIONAL — verify on site (rack label / PDU name).",
+   "shelves": [
+    "SHELF-01",
+    "SHELF-02",
+    "SHELF-03",
+    "SHELF-04"
+   ]
+  },
+  {
+   "id": "SETUP-002",
+   "name": "Rack L2 — left row",
+   "category": "setup",
+   "type": "switch-rack",
+   "template": "rack",
+   "pos": [
+    0.5,
+    2.1719999999999997
+   ],
+   "rot": 0,
+   "zone": "Z02",
+   "dcimRack": "Rack-02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "positionConfidence": "medium",
+   "dcimMappingConfidence": "low",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-02' is PROVISIONAL — verify on site (rack label / PDU name).",
+   "shelves": [
+    "SHELF-05",
+    "SHELF-06",
+    "SHELF-07",
+    "SHELF-08"
+   ]
+  },
+  {
+   "id": "SETUP-003",
+   "name": "Rack L3 — left row",
+   "category": "setup",
+   "type": "switch-rack",
+   "template": "rack",
+   "pos": [
+    0.5,
+    3.2220000000000004
+   ],
+   "rot": 0,
+   "zone": "Z02",
+   "dcimRack": "Rack-03",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "positionConfidence": "medium",
+   "dcimMappingConfidence": "low",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-03' is PROVISIONAL — verify on site (rack label / PDU name).",
+   "shelves": [
+    "SHELF-09",
+    "SHELF-10",
+    "SHELF-11",
+    "SHELF-12"
+   ]
+  },
+  {
+   "id": "SETUP-004",
+   "name": "Rack L4 — left row, nearest window",
+   "category": "setup",
+   "type": "switch-rack",
+   "template": "rack",
+   "pos": [
+    0.5,
+    4.272
+   ],
+   "rot": 0,
+   "zone": "Z02",
+   "dcimRack": "Rack-04",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "positionConfidence": "medium",
+   "dcimMappingConfidence": "low",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-04' is PROVISIONAL — verify on site (rack label / PDU name).",
+   "shelves": [
+    "SHELF-13",
+    "SHELF-14",
+    "SHELF-15",
+    "SHELF-16"
+   ]
+  },
+  {
+   "id": "SETUP-005",
+   "name": "Rack B1 — back wall, single rack (3 shelves)",
+   "category": "setup",
+   "type": "switch-rack",
+   "template": "rack",
+   "pos": [
+    2.42,
+    5.1
+   ],
+   "rot": 90,
+   "zone": "Z03",
+   "dcimRack": "Rack-05",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "positionConfidence": "medium",
+   "dcimMappingConfidence": "low",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Aluminium-profile 3-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-05' is PROVISIONAL — verify on site (rack label / PDU name).",
+   "shelves": [
+    "SHELF-17",
+    "SHELF-18",
+    "SHELF-19"
+   ]
+  },
+  {
+   "id": "SETUP-006",
+   "name": "Rack R1 — right row, next to pillar",
+   "category": "setup",
+   "type": "switch-rack",
+   "template": "rack",
+   "pos": [
+    3.5,
+    4.372
+   ],
+   "rot": 180,
+   "zone": "Z04",
+   "dcimRack": "Rack-06",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "positionConfidence": "medium",
+   "dcimMappingConfidence": "low",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-06' is PROVISIONAL — verify on site (rack label / PDU name).",
+   "shelves": [
+    "SHELF-20",
+    "SHELF-21",
+    "SHELF-22",
+    "SHELF-23"
+   ]
+  },
+  {
+   "id": "SETUP-007",
+   "name": "Rack R2 — right row",
+   "category": "setup",
+   "type": "switch-rack",
+   "template": "rack",
+   "pos": [
+    3.5,
+    3.322
+   ],
+   "rot": 180,
+   "zone": "Z04",
+   "dcimRack": "Rack-07",
+   "status": "inactive",
+   "owner": null,
+   "confidence": "high",
+   "positionConfidence": "medium",
+   "dcimMappingConfidence": "low",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Aluminium-profile 4-shelf rack (ST Engineering 'NVIDIA SWITCHES'). Shelf load label 90 KG. Mapping to DCIM 'Rack-07' is PROVISIONAL — verify on site (rack label / PDU name). PDU offline in Lab Manager (2026-09-09).",
+   "shelves": [
+    "SHELF-24",
+    "SHELF-25",
+    "SHELF-26",
+    "SHELF-27"
+   ]
+  }
+ ],
+ "shelves": [
+  {
+   "id": "SHELF-01",
+   "name": "SETUP-001 · level L1 (lowest)",
+   "category": "shelf",
+   "setup": "SETUP-001",
+   "level": 1,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-02",
+   "name": "SETUP-001 · level L2",
+   "category": "shelf",
+   "setup": "SETUP-001",
+   "level": 2,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-03",
+   "name": "SETUP-001 · level L3",
+   "category": "shelf",
+   "setup": "SETUP-001",
+   "level": 3,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-04",
+   "name": "SETUP-001 · level L4 (top)",
+   "category": "shelf",
+   "setup": "SETUP-001",
+   "level": 4,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-05",
+   "name": "SETUP-002 · level L1 (lowest)",
+   "category": "shelf",
+   "setup": "SETUP-002",
+   "level": 1,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-06",
+   "name": "SETUP-002 · level L2",
+   "category": "shelf",
+   "setup": "SETUP-002",
+   "level": 2,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-07",
+   "name": "SETUP-002 · level L3",
+   "category": "shelf",
+   "setup": "SETUP-002",
+   "level": 3,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-08",
+   "name": "SETUP-002 · level L4 (top)",
+   "category": "shelf",
+   "setup": "SETUP-002",
+   "level": 4,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-09",
+   "name": "SETUP-003 · level L1 (lowest)",
+   "category": "shelf",
+   "setup": "SETUP-003",
+   "level": 1,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-10",
+   "name": "SETUP-003 · level L2",
+   "category": "shelf",
+   "setup": "SETUP-003",
+   "level": 2,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-11",
+   "name": "SETUP-003 · level L3",
+   "category": "shelf",
+   "setup": "SETUP-003",
+   "level": 3,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-12",
+   "name": "SETUP-003 · level L4 (top)",
+   "category": "shelf",
+   "setup": "SETUP-003",
+   "level": 4,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-13",
+   "name": "SETUP-004 · level L1 (lowest)",
+   "category": "shelf",
+   "setup": "SETUP-004",
+   "level": 1,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-14",
+   "name": "SETUP-004 · level L2",
+   "category": "shelf",
+   "setup": "SETUP-004",
+   "level": 2,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-15",
+   "name": "SETUP-004 · level L3",
+   "category": "shelf",
+   "setup": "SETUP-004",
+   "level": 3,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-16",
+   "name": "SETUP-004 · level L4 (top)",
+   "category": "shelf",
+   "setup": "SETUP-004",
+   "level": 4,
+   "zone": "Z02",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-17",
+   "name": "SETUP-005 · level L1 (lowest)",
+   "category": "shelf",
+   "setup": "SETUP-005",
+   "level": 1,
+   "zone": "Z03",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-18",
+   "name": "SETUP-005 · level L2",
+   "category": "shelf",
+   "setup": "SETUP-005",
+   "level": 2,
+   "zone": "Z03",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-19",
+   "name": "SETUP-005 · level L3",
+   "category": "shelf",
+   "setup": "SETUP-005",
+   "level": 3,
+   "zone": "Z03",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-20",
+   "name": "SETUP-006 · level L1 (lowest)",
+   "category": "shelf",
+   "setup": "SETUP-006",
+   "level": 1,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-21",
+   "name": "SETUP-006 · level L2",
+   "category": "shelf",
+   "setup": "SETUP-006",
+   "level": 2,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-22",
+   "name": "SETUP-006 · level L3",
+   "category": "shelf",
+   "setup": "SETUP-006",
+   "level": 3,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-23",
+   "name": "SETUP-006 · level L4 (top)",
+   "category": "shelf",
+   "setup": "SETUP-006",
+   "level": 4,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-24",
+   "name": "SETUP-007 · level L1 (lowest)",
+   "category": "shelf",
+   "setup": "SETUP-007",
+   "level": 1,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-25",
+   "name": "SETUP-007 · level L2",
+   "category": "shelf",
+   "setup": "SETUP-007",
+   "level": 2,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-26",
+   "name": "SETUP-007 · level L3",
+   "category": "shelf",
+   "setup": "SETUP-007",
+   "level": 3,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  },
+  {
+   "id": "SHELF-27",
+   "name": "SETUP-007 · level L4 (top)",
+   "category": "shelf",
+   "setup": "SETUP-007",
+   "level": 4,
+   "zone": "Z04",
+   "status": "active",
+   "confidence": "high",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Shelf with rack-mount power strip above (visible in photos & drawing)."
+  }
+ ],
+ "items": [
+  {
+   "id": "ITEM-0001",
+   "name": "Cooling unit (chiller) — SETUP-001",
+   "category": "item",
+   "type": "chiller",
+   "setup": "SETUP-001",
+   "shelf": null,
+   "placement": "bottom-bay",
+   "zone": "Z02",
+   "status": "unknown",
+   "owner": null,
+   "confidence": "medium",
+   "photos": [
+    1,
+    2
+   ],
+   "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
+  },
+  {
+   "id": "ITEM-0002",
+   "name": "Cooling unit (chiller) — SETUP-002",
+   "category": "item",
+   "type": "chiller",
+   "setup": "SETUP-002",
+   "shelf": null,
+   "placement": "bottom-bay",
+   "zone": "Z02",
+   "status": "unknown",
+   "owner": null,
+   "confidence": "medium",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
+  },
+  {
+   "id": "ITEM-0003",
+   "name": "Cooling unit (chiller) — SETUP-003",
+   "category": "item",
+   "type": "chiller",
+   "setup": "SETUP-003",
+   "shelf": null,
+   "placement": "bottom-bay",
+   "zone": "Z02",
+   "status": "unknown",
+   "owner": null,
+   "confidence": "medium",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
+  },
+  {
+   "id": "ITEM-0004",
+   "name": "Cooling unit (chiller) — SETUP-004",
+   "category": "item",
+   "type": "chiller",
+   "setup": "SETUP-004",
+   "shelf": null,
+   "placement": "bottom-bay",
+   "zone": "Z02",
+   "status": "unknown",
+   "owner": null,
+   "confidence": "medium",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
+  },
+  {
+   "id": "ITEM-0005",
+   "name": "Cooling unit (chiller) — SETUP-005",
+   "category": "item",
+   "type": "chiller",
+   "setup": "SETUP-005",
+   "shelf": null,
+   "placement": "bottom-bay",
+   "zone": "Z03",
+   "status": "unknown",
+   "owner": null,
+   "confidence": "medium",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
+  },
+  {
+   "id": "ITEM-0006",
+   "name": "Cooling unit (chiller) — SETUP-006",
+   "category": "item",
+   "type": "chiller",
+   "setup": "SETUP-006",
+   "shelf": null,
+   "placement": "bottom-bay",
+   "zone": "Z04",
+   "status": "unknown",
+   "owner": null,
+   "confidence": "medium",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
+  },
+  {
+   "id": "ITEM-0007",
+   "name": "Cooling unit (chiller) — SETUP-007",
+   "category": "item",
+   "type": "chiller",
+   "setup": "SETUP-007",
+   "shelf": null,
+   "placement": "bottom-bay",
+   "zone": "Z04",
+   "status": "unknown",
+   "owner": null,
+   "confidence": "medium",
+   "photos": [
+    2,
+    3,
+    4
+   ],
+   "notes": "Beige control cabinet with digital display and warning labels, standing in the 800 mm bottom bay. DCIM 'chillers.json' seeds one per rack (Rack-04 has two) — second unit not visible in photos."
+  },
+  {
+   "id": "ITEM-0033",
+   "name": "PDU-Rack-01",
+   "category": "item",
+   "type": "pdu",
+   "typeLabel": "Raritan PX PDU (24 outlets)",
+   "setup": "SETUP-001",
+   "shelf": null,
+   "placement": "rack-strips",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "photos": [
+    1,
+    4
+   ],
+   "dcim": {
+    "deviceId": "pdu-rack01",
+    "outlets": 24,
+    "labels": {
+     "13": "Opt133",
+     "21": "Opt183",
+     "23": "Opt207",
+     "24": "Optn85 (SSD)"
+    }
+   },
+   "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
+  },
+  {
+   "id": "ITEM-0034",
+   "name": "PDU-Rack-02",
+   "category": "item",
+   "type": "pdu",
+   "typeLabel": "Raritan PX PDU (24 outlets)",
+   "setup": "SETUP-002",
+   "shelf": null,
+   "placement": "rack-strips",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "photos": [
+    1,
+    4
+   ],
+   "dcim": {
+    "deviceId": "pdu-rack02",
+    "outlets": 24,
+    "labels": {
+     "6": "Optn130",
+     "13": "Opt208",
+     "20": "Optn84",
+     "22": "Optn84 (2)"
+    }
+   },
+   "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
+  },
+  {
+   "id": "ITEM-0035",
+   "name": "PDU-Rack-03",
+   "category": "item",
+   "type": "pdu",
+   "typeLabel": "Raritan PX PDU (24 outlets)",
+   "setup": "SETUP-003",
+   "shelf": null,
+   "placement": "rack-strips",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "photos": [
+    1,
+    4
+   ],
+   "dcim": {
+    "deviceId": "pdu-rack03",
+    "outlets": 24,
+    "labels": {
+     "9": "Opt106",
+     "17": "Optn36",
+     "20": "Optn88",
+     "23": "Optn51"
+    }
+   },
+   "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
+  },
+  {
+   "id": "ITEM-0036",
+   "name": "PDU-Rack-04",
+   "category": "item",
+   "type": "pdu",
+   "typeLabel": "Raritan PX PDU (24 outlets)",
+   "setup": "SETUP-004",
+   "shelf": null,
+   "placement": "rack-strips",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "photos": [
+    1,
+    4
+   ],
+   "dcim": {
+    "deviceId": "pdu-rack04",
+    "outlets": 24,
+    "labels": {
+     "9": "Opt60",
+     "18": "Opt94",
+     "19": "Optn144",
+     "23": "Opt (unlabeled)"
+    }
+   },
+   "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
+  },
+  {
+   "id": "ITEM-0037",
+   "name": "PDU-Rack-05",
+   "category": "item",
+   "type": "pdu",
+   "typeLabel": "Raritan PX PDU (24 outlets)",
+   "setup": "SETUP-005",
+   "shelf": null,
+   "placement": "rack-strips",
+   "zone": "Z03",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "photos": [
+    1,
+    4
+   ],
+   "dcim": {
+    "deviceId": "pdu-rack05",
+    "outlets": 24,
+    "labels": {
+     "13": "Optn45",
+     "22": "Opt (unlabeled)",
+     "23": "Optn108"
+    }
+   },
+   "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
+  },
+  {
+   "id": "ITEM-0038",
+   "name": "PDU-Rack-06",
+   "category": "item",
+   "type": "pdu",
+   "typeLabel": "Raritan PX PDU (24 outlets)",
+   "setup": "SETUP-006",
+   "shelf": null,
+   "placement": "rack-strips",
+   "zone": "Z04",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "photos": [
+    1,
+    4
+   ],
+   "dcim": {
+    "deviceId": "pdu-rack06",
+    "outlets": 24,
+    "labels": {
+     "13": "Optn93",
+     "17": "Opt250",
+     "20": "Optn114",
+     "22": "Optn101",
+     "23": "Opt41"
+    }
+   },
+   "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
+  },
+  {
+   "id": "ITEM-0039",
+   "name": "PDU-Rack-07",
+   "category": "item",
+   "type": "pdu",
+   "typeLabel": "Raritan PX PDU (24 outlets)",
+   "setup": "SETUP-007",
+   "shelf": null,
+   "placement": "rack-strips",
+   "zone": "Z04",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "photos": [
+    1,
+    4
+   ],
+   "dcim": {
+    "deviceId": "pdu-rack07",
+    "outlets": 24,
+    "labels": {
+     "9": "Optn29",
+     "14": "Optn149"
+    }
+   },
+   "notes": "Outlet strips visible above each shelf (drawing shows one strip per shelf)."
+  },
+  {
+   "id": "ITEM-0040",
+   "name": "PDU-Rack-08",
+   "category": "item",
+   "type": "pdu",
+   "typeLabel": "Raritan PX PDU (24 outlets)",
+   "setup": null,
+   "shelf": null,
+   "placement": "rack-strips",
+   "zone": null,
+   "status": "building",
+   "owner": null,
+   "confidence": "low",
+   "photos": [],
+   "dcim": {
+    "deviceId": "pdu-rack08",
+    "outlets": 24,
+    "labels": {}
+   },
+   "notes": "Rack-08 exists in DCIM as an empty/planned rack (CHANGELOG v2.6.0). No physical rack identified in photos — unplaced."
+  },
+  {
+   "id": "ITEM-0041",
+   "name": "KVM-Unit-1",
+   "category": "item",
+   "type": "kvm",
+   "typeLabel": "Raritan Dominion KX III",
+   "setup": "SETUP-001",
+   "shelf": null,
+   "placement": "side-mount",
+   "side": "left",
+   "mountHeight": 1.45,
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "medium",
+   "placementConfidence": "medium",
+   "photos": [],
+   "dcim": {
+    "deviceId": "kvm-unit1",
+    "ports": 16,
+    "labels": {
+     "1": "Optn88",
+     "2": "Optn51",
+     "3": "Optn29",
+     "4": "Opt106",
+     "5": "Opt133",
+     "6": "Optn144",
+     "7": "Opt60",
+     "8": "Opt94",
+     "9": "Optn84",
+     "10": "Opt208",
+     "11": "Optn130",
+     "12": "Optn84",
+     "14": "Optn87",
+     "15": "Optn45",
+     "16": "Optn85"
+    }
+   },
+   "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
+  },
+  {
+   "id": "ITEM-0042",
+   "name": "KVM-Unit-2",
+   "category": "item",
+   "type": "kvm",
+   "typeLabel": "Raritan Dominion KX III",
+   "setup": "SETUP-006",
+   "shelf": null,
+   "placement": "side-mount",
+   "side": "left",
+   "mountHeight": 1.45,
+   "zone": "Z04",
+   "status": "active",
+   "owner": null,
+   "confidence": "medium",
+   "placementConfidence": "medium",
+   "photos": [],
+   "dcim": {
+    "deviceId": "kvm-unit2",
+    "ports": 8,
+    "labels": {
+     "1": "Opt250",
+     "2": "Optn93",
+     "3": "Optn87",
+     "4": "Optn114",
+     "5": "Opt41",
+     "6": "Optn101"
+    }
+   },
+   "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
+  },
+  {
+   "id": "ITEM-0043",
+   "name": "KVM-Unit-3",
+   "category": "item",
+   "type": "kvm",
+   "typeLabel": "Raritan Dominion LX II",
+   "setup": "SETUP-005",
+   "shelf": null,
+   "placement": "side-mount",
+   "side": "right",
+   "mountHeight": 1.45,
+   "zone": "Z03",
+   "status": "active",
+   "owner": null,
+   "confidence": "medium",
+   "placementConfidence": "medium",
+   "photos": [],
+   "dcim": {
+    "deviceId": "kvm-unit3",
+    "ports": 8,
+    "labels": {
+     "1": "Optn149",
+     "2": "Optn108",
+     "3": "Optn45"
+    }
+   },
+   "notes": "Rack per DCIM seed. Hangs on the side of the rack frame (not on a shelf) — side/height to verify on site."
+  },
+  {
+   "name": "Blue mobile stand (monitor / laptop cart)",
+   "type": "cart",
+   "pos": [
+    1.35,
+    4.65
+   ],
+   "size": [
+    0.55,
+    0.55,
+    1.55
+   ],
+   "zone": "Z03",
+   "status": "active",
+   "confidence": "medium",
+   "photos": [
+    1,
+    2,
+    3
+   ],
+   "notes": "Mobile — position changes.",
+   "id": "ITEM-0044",
+   "category": "item",
+   "owner": null
+  },
+  {
+   "name": "Yellow step ladder",
+   "type": "ladder",
+   "pos": [
+    3.25,
+    5.05
+   ],
+   "size": [
+    0.45,
+    0.55,
+    0.95
+   ],
+   "zone": "Z03",
+   "status": "active",
+   "confidence": "medium",
+   "photos": [
+    3,
+    4
+   ],
+   "notes": "In front of WIN-02. Mobile.",
+   "id": "ITEM-0045",
+   "category": "item",
+   "owner": null
+  },
+  {
+   "name": "Tool box (on cabinet top)",
+   "type": "toolbox",
+   "pos": [
+    1.3,
+    5.37
+   ],
+   "size": [
+    0.45,
+    0.25,
+    0.25
+   ],
+   "y": 1.95,
+   "zone": "Z03",
+   "status": "active",
+   "confidence": "medium",
+   "photos": [
+    2,
+    3
+   ],
+   "id": "ITEM-0046",
+   "category": "item",
+   "owner": null
+  },
+  {
+   "name": "Spare switch chassis in tray stand (≈7 units)",
+   "type": "spare-chassis",
+   "storage": "STORAGE-02",
+   "quantity": 7,
+   "zone": "Z04",
+   "status": "inactive",
+   "confidence": "low",
+   "photos": [
+    3,
+    4
+   ],
+   "notes": "Count approximate from photo 4; units are not powered.",
+   "id": "ITEM-0047",
+   "category": "item",
+   "owner": null
+  },
+  {
+   "name": "Wall panel / cover leaning at right wall",
+   "type": "misc",
+   "pos": [
+    3.85,
+    0.95
+   ],
+   "size": [
+    0.1,
+    0.6,
+    0.9
+   ],
+   "zone": "Z04",
+   "status": "unknown",
+   "confidence": "low",
+   "photos": [
+    4
+   ],
+   "id": "ITEM-0048",
+   "category": "item",
+   "owner": null
+  },
+  {
+   "id": "ITEM-0049",
+   "name": "Opt207",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-001",
+   "shelf": "SHELF-04",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt207",
+    "pdu": "pdu-rack01",
+    "pduName": "PDU-Rack-01",
+    "outlet": 23
+   },
+   "notes": "Lab Manager rack view Rack-01 · U01 · 13 W at capture"
+  },
+  {
+   "id": "ITEM-0050",
+   "name": "optn85",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-001",
+   "shelf": "SHELF-03",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn85",
+    "pdu": "pdu-rack01",
+    "pduName": "PDU-Rack-01",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-01 · U02 · 24 W at capture"
+  },
+  {
+   "id": "ITEM-0051",
+   "name": "SSD SA",
+   "category": "item",
+   "type": "equip-other",
+   "typeLabel": "Other equipment",
+   "setup": "SETUP-001",
+   "shelf": "SHELF-03",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item · Rack-01 U02"
+  },
+  {
+   "id": "ITEM-0052",
+   "name": "Opt168",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-001",
+   "shelf": "SHELF-02",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt168",
+    "pdu": "pdu-rack01",
+    "pduName": "PDU-Rack-01",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-01 · U03 · 34 W at capture"
+  },
+  {
+   "id": "ITEM-0053",
+   "name": "Opt133",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-001",
+   "shelf": "SHELF-01",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Eden Levi",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt133",
+    "pdu": "pdu-rack01",
+    "pduName": "PDU-Rack-01",
+    "outlet": 13
+   },
+   "notes": "Lab Manager rack view Rack-01 · U04 · 20 W at capture",
+   "dut": "Rosalind"
+  },
+  {
+   "id": "ITEM-0054",
+   "name": "opt40",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-002",
+   "shelf": "SHELF-08",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt40",
+    "pdu": "pdu-rack02",
+    "pduName": "PDU-Rack-02",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-02 · U01 · 35 W at capture"
+  },
+  {
+   "id": "ITEM-0055",
+   "name": "Optn84",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-002",
+   "shelf": "SHELF-07",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn84",
+    "pdu": "pdu-rack02",
+    "pduName": "PDU-Rack-02",
+    "outlet": 20
+   },
+   "notes": "Lab Manager rack view Rack-02 · U02 · 95 W at capture",
+   "dut": "Chameleon MGMT"
+  },
+  {
+   "id": "ITEM-0056",
+   "name": "Optn87",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-002",
+   "shelf": "SHELF-06",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Royi Journo",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn87",
+    "pdu": "pdu-rack02",
+    "pduName": "PDU-Rack-02",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-02 · U03 · 13 W at capture",
+   "dut": "V3000"
+  },
+  {
+   "id": "ITEM-0057",
+   "name": "Optn130",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-002",
+   "shelf": "SHELF-05",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn130",
+    "pdu": "pdu-rack02",
+    "pduName": "PDU-Rack-02",
+    "outlet": 6
+   },
+   "notes": "Lab Manager rack view Rack-02 · U04 · 28 W at capture",
+   "dut": "MGMT test"
+  },
+  {
+   "id": "ITEM-0058",
+   "name": "Opt114 (VM)",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-003",
+   "shelf": "SHELF-12",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt114 (vm)",
+    "pdu": "pdu-rack03",
+    "pduName": "PDU-Rack-03",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-03 · U01 · 19 W at capture"
+  },
+  {
+   "id": "ITEM-0059",
+   "name": "Optn176",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-003",
+   "shelf": "SHELF-11",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn176",
+    "pdu": "pdu-rack03",
+    "pduName": "PDU-Rack-03",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-03 · U02 · 8 W at capture"
+  },
+  {
+   "id": "ITEM-0060",
+   "name": "Optn88",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-003",
+   "shelf": "SHELF-10",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Roy Mendelson",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn88",
+    "pdu": "pdu-rack03",
+    "pduName": "PDU-Rack-03",
+    "outlet": 20
+   },
+   "notes": "Lab Manager rack view Rack-03 · U03 · 15 W at capture"
+  },
+  {
+   "id": "ITEM-0061",
+   "name": "Salamandra AC",
+   "category": "item",
+   "type": "equip-other",
+   "typeLabel": "Other equipment",
+   "setup": "SETUP-003",
+   "shelf": "SHELF-10",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item · Rack-03 U03"
+  },
+  {
+   "id": "ITEM-0062",
+   "name": "Opt106",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-003",
+   "shelf": "SHELF-09",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Liran Cohen",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt106",
+    "pdu": "pdu-rack03",
+    "pduName": "PDU-Rack-03",
+    "outlet": 9
+   },
+   "notes": "Lab Manager rack view Rack-03 · U04 · 20 W at capture",
+   "dut": "Chameleon Eoptol"
+  },
+  {
+   "id": "ITEM-0063",
+   "name": "optn144",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-004",
+   "shelf": "SHELF-16",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn144",
+    "pdu": "pdu-rack04",
+    "pduName": "PDU-Rack-04",
+    "outlet": 19
+   },
+   "notes": "Lab Manager rack view Rack-04 · U01 · 30 W at capture"
+  },
+  {
+   "id": "ITEM-0064",
+   "name": "opt46",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-004",
+   "shelf": "SHELF-15",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt46",
+    "pdu": "pdu-rack04",
+    "pduName": "PDU-Rack-04",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-04 · U02 · 12 W at capture"
+  },
+  {
+   "id": "ITEM-0065",
+   "name": "Opt94",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-004",
+   "shelf": "SHELF-14",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Limor Romano",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt94",
+    "pdu": "pdu-rack04",
+    "pduName": "PDU-Rack-04",
+    "outlet": 18
+   },
+   "notes": "Lab Manager rack view Rack-04 · U03 · 22 W at capture",
+   "dut": "Salamandra"
+  },
+  {
+   "id": "ITEM-0066",
+   "name": "Opt60",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-004",
+   "shelf": "SHELF-13",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Adam Cohen",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt60",
+    "pdu": "pdu-rack04",
+    "pduName": "PDU-Rack-04",
+    "outlet": 9
+   },
+   "notes": "Lab Manager rack view Rack-04 · U04 · 23 W at capture",
+   "dut": "chameleon 6S"
+  },
+  {
+   "id": "ITEM-0067",
+   "name": "opt174",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-005",
+   "shelf": "SHELF-19",
+   "zone": "Z03",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt174",
+    "pdu": "pdu-rack05",
+    "pduName": "PDU-Rack-05",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-05 · U01 · 13 W at capture"
+  },
+  {
+   "id": "ITEM-0068",
+   "name": "Optn108",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-005",
+   "shelf": "SHELF-18",
+   "zone": "Z03",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn108",
+    "pdu": "pdu-rack05",
+    "pduName": "PDU-Rack-05",
+    "outlet": 23
+   },
+   "notes": "Lab Manager rack view Rack-05 · U02"
+  },
+  {
+   "id": "ITEM-0069",
+   "name": "PowerShelf",
+   "category": "item",
+   "type": "equip-ups",
+   "typeLabel": "UPS",
+   "setup": "SETUP-005",
+   "shelf": "SHELF-18",
+   "zone": "Z03",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item · Rack-05 U02"
+  },
+  {
+   "id": "ITEM-0070",
+   "name": "Optn45",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-005",
+   "shelf": "SHELF-17",
+   "zone": "Z03",
+   "status": "active",
+   "owner": "Eden Levi",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn45",
+    "pdu": "pdu-rack05",
+    "pduName": "PDU-Rack-05",
+    "outlet": 13
+   },
+   "notes": "Lab Manager rack view Rack-05 · U03 · 17 W at capture",
+   "dut": "rosalind HN"
+  },
+  {
+   "id": "ITEM-0071",
+   "name": "Optn34",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-006",
+   "shelf": "SHELF-23",
+   "zone": "Z04",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn34",
+    "pdu": "pdu-rack06",
+    "pduName": "PDU-Rack-06",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-06 · U01"
+  },
+  {
+   "id": "ITEM-0072",
+   "name": "optn190",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-006",
+   "shelf": "SHELF-22",
+   "zone": "Z04",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn190",
+    "pdu": "pdu-rack06",
+    "pduName": "PDU-Rack-06",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-06 · U02 · 10 W at capture"
+  },
+  {
+   "id": "ITEM-0073",
+   "name": "Opt208",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-006",
+   "shelf": "SHELF-21",
+   "zone": "Z04",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt208",
+    "pdu": "pdu-rack06",
+    "pduName": "PDU-Rack-06",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-06 · U03 · 19 W at capture"
+  },
+  {
+   "id": "ITEM-0074",
+   "name": "Opt250",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-006",
+   "shelf": "SHELF-20",
+   "zone": "Z04",
+   "status": "active",
+   "owner": "Liran Cohen",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "opt250",
+    "pdu": "pdu-rack06",
+    "pduName": "PDU-Rack-06",
+    "outlet": 17
+   },
+   "notes": "Lab Manager rack view Rack-06 · U04 · 41 W at capture",
+   "dut": "taipan"
+  },
+  {
+   "id": "ITEM-0075",
+   "name": "optn101",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-007",
+   "shelf": "SHELF-26",
+   "zone": "Z04",
+   "status": "unknown",
+   "owner": "Yaniv Shnur",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn101",
+    "pdu": "pdu-rack07",
+    "pduName": "PDU-Rack-07",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-07 · U02 · 20 W at capture",
+   "dut": "rosetta"
+  },
+  {
+   "id": "ITEM-0076",
+   "name": "optn29",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-007",
+   "shelf": "SHELF-25",
+   "zone": "Z04",
+   "status": "unknown",
+   "owner": "Yaniv Shnur",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn29",
+    "pdu": "pdu-rack07",
+    "pduName": "PDU-Rack-07",
+    "outlet": 9
+   },
+   "notes": "Lab Manager rack view Rack-07 · U03 · 12 W at capture",
+   "dut": "rosetta"
+  },
+  {
+   "id": "ITEM-0077",
+   "name": "Optn93",
+   "category": "item",
+   "type": "opt",
+   "typeLabel": "OPT — small desktop PC (server)",
+   "setup": "SETUP-007",
+   "shelf": "SHELF-24",
+   "zone": "Z04",
+   "status": "unknown",
+   "owner": "Eden Levi",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "dcim": {
+    "optKey": "optn93",
+    "pdu": "pdu-rack07",
+    "pduName": "PDU-Rack-07",
+    "outlet": null
+   },
+   "notes": "Lab Manager rack view Rack-07 · U04 · 22 W at capture",
+   "dut": "rosalind"
+  }
+ ],
+ "dcim": {
+  "source": "github.com/aizyaguev-bot/DCIM-204 — backend/seed.py + scripts/seed_kvm_labels.py (labels only, IPs intentionally omitted)",
+  "uNumbering": "top-down",
+  "pdus": [
+   {
+    "id": "pdu-rack01",
+    "name": "PDU-Rack-01",
+    "rack": "Rack-01",
+    "outlets": 24,
+    "labels": {
+     "13": "Opt133",
+     "21": "Opt183",
+     "23": "Opt207",
+     "24": "Optn85 (SSD)"
+    }
+   },
+   {
+    "id": "pdu-rack02",
+    "name": "PDU-Rack-02",
+    "rack": "Rack-02",
+    "outlets": 24,
+    "labels": {
+     "6": "Optn130",
+     "13": "Opt208",
+     "20": "Optn84",
+     "22": "Optn84 (2)"
+    }
+   },
+   {
+    "id": "pdu-rack03",
+    "name": "PDU-Rack-03",
+    "rack": "Rack-03",
+    "outlets": 24,
+    "labels": {
+     "9": "Opt106",
+     "17": "Optn36",
+     "20": "Optn88",
+     "23": "Optn51"
+    }
+   },
+   {
+    "id": "pdu-rack04",
+    "name": "PDU-Rack-04",
+    "rack": "Rack-04",
+    "outlets": 24,
+    "labels": {
+     "9": "Opt60",
+     "18": "Opt94",
+     "19": "Optn144",
+     "23": "Opt (unlabeled)"
+    }
+   },
+   {
+    "id": "pdu-rack05",
+    "name": "PDU-Rack-05",
+    "rack": "Rack-05",
+    "outlets": 24,
+    "labels": {
+     "13": "Optn45",
+     "22": "Opt (unlabeled)",
+     "23": "Optn108"
+    }
+   },
+   {
+    "id": "pdu-rack06",
+    "name": "PDU-Rack-06",
+    "rack": "Rack-06",
+    "outlets": 24,
+    "labels": {
+     "13": "Optn93",
+     "17": "Opt250",
+     "20": "Optn114",
+     "22": "Optn101",
+     "23": "Opt41"
+    }
+   },
+   {
+    "id": "pdu-rack07",
+    "name": "PDU-Rack-07",
+    "rack": "Rack-07",
+    "outlets": 24,
+    "labels": {
+     "9": "Optn29",
+     "14": "Optn149"
+    }
+   },
+   {
+    "id": "pdu-rack08",
+    "name": "PDU-Rack-08",
+    "rack": "Rack-08",
+    "outlets": 24,
+    "labels": {}
+   }
+  ],
+  "kvms": [
+   {
+    "id": "kvm-unit1",
+    "name": "KVM-Unit-1",
+    "model": "Raritan Dominion KX III",
+    "rack": "Rack-01",
+    "ports": 16,
+    "labels": {
+     "1": "Optn88",
+     "2": "Optn51",
+     "3": "Optn29",
+     "4": "Opt106",
+     "5": "Opt133",
+     "6": "Optn144",
+     "7": "Opt60",
+     "8": "Opt94",
+     "9": "Optn84",
+     "10": "Opt208",
+     "11": "Optn130",
+     "12": "Optn84",
+     "14": "Optn87",
+     "15": "Optn45",
+     "16": "Optn85"
+    }
+   },
+   {
+    "id": "kvm-unit2",
+    "name": "KVM-Unit-2",
+    "model": "Raritan Dominion KX III",
+    "rack": "Rack-06",
+    "ports": 8,
+    "labels": {
+     "1": "Opt250",
+     "2": "Optn93",
+     "3": "Optn87",
+     "4": "Optn114",
+     "5": "Opt41",
+     "6": "Optn101"
+    }
+   },
+   {
+    "id": "kvm-unit3",
+    "name": "KVM-Unit-3",
+    "model": "Raritan Dominion LX II",
+    "rack": "Rack-05",
+    "ports": 8,
+    "labels": {
+     "1": "Optn149",
+     "2": "Optn108",
+     "3": "Optn45"
+    }
+   }
+  ]
+ },
+ "backend": {
+  "defaultUrl": "",
+  "note": "Set the Lab Manager backend URL (e.g. http://<vm>:8000) in the app settings. Same-origin when served from the backend under /twin/.",
+  "endpoints": {
+   "devices": "/api/devices/",
+   "rackSlots": "/api/rack-slots",
+   "rackPositions": "/api/rack-positions",
+   "switchAssignments": "/api/switch-assignments",
+   "optOwners": "/api/opt-owners",
+   "rackItems": "/api/rack-items",
+   "chillers": "/api/chillers",
+   "rackOverrides": "/api/rack-overrides",
+   "pduStatus": "/api/pdus/{id}/status",
+   "outletPower": "/api/pdus/{id}/outlets/{n}/power",
+   "kvmStatus": "/api/kvms/{id}/status",
+   "kvmAutologin": "/api/kvms/{id}/autologin?port={port}",
+   "kvmMarkInUse": "/api/kvms/{id}/ports/{port}/mark-in-use"
+  }
+ }
 }
