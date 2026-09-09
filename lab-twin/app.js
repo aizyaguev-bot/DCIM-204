@@ -50,50 +50,70 @@
   const scene = new THREE.Scene();
   scene.fog = null;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
-  // ── WalkControls: "you are standing in the room" navigation (replaces OrbitControls, keeps its .target API)
-  //   one finger / left-drag  → WALK in the direction of the finger (up = forward, right = step right)
-  //   two fingers / right-drag → turn / look around · pinch / wheel → step forward / back along the view
-  class WalkControls {
-    constructor(camera, dom) {
-      this.camera = camera; this.dom = dom; this.target = new THREE.Vector3(0, 1, -3); this.enabled = true;
-      this.autoRotate = false; this.autoRotateSpeed = 0.6; this.minDistance = 0.3; this.maxDistance = 9; this.maxPolarAngle = Math.PI;
-      this.lookSpeed = 0.0038; this.slideSpeed = 0.004; this.pinchSpeed = 0.006; this.wheelSpeed = 0.0025; this.minPitch = -Math.PI / 2 + 0.03; this.maxPitch = Math.PI / 3;
-      this._p = new Map(); this._pinch0 = null; this._sph = new THREE.Spherical(); this._v = new THREE.Vector3(); this._v2 = new THREE.Vector3();
+  // ── MapControls: navigation like facility-management / digital-twin viewers (dollhouse style)
+  //   one finger / left-drag   → orbit around the point you touched (object or floor) — the room turns under your finger
+  //   two fingers / right-drag → grab the floor and slide it (the touched point stays under the finger)
+  //   pinch / wheel            → zoom towards the point under the fingers / cursor
+  //   two-finger twist         → rotate around the pinch point · tap a rack → fly to it
+  //   Keeps OrbitControls' `.target` API (camera looks at target) so tweens / fly-to / buttons work unchanged.
+  class MapControls {
+    constructor(camera, dom, pickFn) {
+      this.camera = camera; this.dom = dom; this.pick = pickFn; this.target = new THREE.Vector3(0, 1, -3); this.enabled = true;
+      this.autoRotate = false; this.autoRotateSpeed = 0.6; this.minDistance = 0.4; this.maxDistance = 30; this.maxPolarAngle = Math.PI;
+      this.rotateSpeed = 0.0055; this.minPitch = -Math.PI / 2 + 0.02; this.maxPitch = 0.35;   // pitch of the view direction: straight down … slightly up
+      this._p = new Map(); this._pivot = null; this._plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); this._ray = new THREE.Raycaster();
+      this._v = new THREE.Vector3(); this._v2 = new THREE.Vector3(); this._q = new THREE.Quaternion(); this._pinch = null;
       dom.style.touchAction = 'none';
-      dom.addEventListener('pointerdown', e => { if (!this.enabled) return; this._p.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button }); try { dom.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ } if (this._p.size === 2) this._pinch0 = this._pinchDist(); });
-      dom.addEventListener('pointermove', e => { if (!this.enabled || !this._p.has(e.pointerId)) return; const p = this._p.get(e.pointerId); const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
-        if (this._p.size === 1) { if (p.b === 2 || p.b === 1) this.look(dx, dy); else this.slide(dx, dy); }                 // one finger / left = WALK where the finger goes
-        else if (this._p.size === 2) { this.look(dx / 2, dy / 2); const d = this._pinchDist(); if (this._pinch0) this.dolly((d - this._pinch0) * this.pinchSpeed); this._pinch0 = d; } });   // two fingers = turn / pinch
-      const end = e => { this._p.delete(e.pointerId); this._pinch0 = this._p.size === 2 ? this._pinchDist() : null; };
+      dom.addEventListener('pointerdown', e => { if (!this.enabled) return; this._p.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button }); try { dom.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+        if (this._p.size === 1) { this._pivot = this.pointUnder(e.clientX, e.clientY); this._plane.constant = -this._pivot.y; }
+        if (this._p.size === 2) { const a = [...this._p.values()]; this._pinch = { d: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), ang: Math.atan2(a[1].y - a[0].y, a[1].x - a[0].x), cx: (a[0].x + a[1].x) / 2, cy: (a[0].y + a[1].y) / 2 }; this._pivot = this.pointUnder(this._pinch.cx, this._pinch.cy); this._plane.constant = -this._pivot.y; } });
+      dom.addEventListener('pointermove', e => { if (!this.enabled || !this._p.has(e.pointerId)) return; const p = this._p.get(e.pointerId); const x0 = p.x, y0 = p.y; p.x = e.clientX; p.y = e.clientY;
+        if (this._p.size === 1) { if (p.b === 2 || p.b === 1 || e.shiftKey) this.grab(x0, y0, p.x, p.y); else this.orbit((p.x - x0), (p.y - y0)); }
+        else if (this._p.size === 2 && this._pinch) { const a = [...this._p.values()]; const d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), ang = Math.atan2(a[1].y - a[0].y, a[1].x - a[0].x), cx = (a[0].x + a[1].x) / 2, cy = (a[0].y + a[1].y) / 2;
+          this.grab(this._pinch.cx, this._pinch.cy, cx, cy); if (this._pinch.d > 0) this.zoomAt(cx, cy, this._pinch.d / d); let da = ang - this._pinch.ang; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI; this.rotateAround(this._pivot, da);
+          this._pinch = { d, ang, cx, cy }; } });
+      const end = e => { this._p.delete(e.pointerId); if (this._p.size < 2) this._pinch = null; if (this._p.size === 1) { const a = [...this._p.values()][0]; this._pivot = this.pointUnder(a.x, a.y); this._plane.constant = -this._pivot.y; } };
       dom.addEventListener('pointerup', end); dom.addEventListener('pointercancel', end); dom.addEventListener('lostpointercapture', end);
-      dom.addEventListener('wheel', e => { if (!this.enabled) return; e.preventDefault(); this.dolly(-e.deltaY * this.wheelSpeed * (e.deltaMode === 1 ? 16 : 1)); }, { passive: false });
+      dom.addEventListener('wheel', e => { if (!this.enabled) return; e.preventDefault(); const k = Math.exp((e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY) * 0.0012); this.zoomAt(e.clientX, e.clientY, k); }, { passive: false });
       dom.addEventListener('contextmenu', e => e.preventDefault());
     }
-    _pinchDist() { const a = [...this._p.values()]; return a.length < 2 ? 0 : Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); }
+    _ndc(x, y) { const r = this.dom.getBoundingClientRect(); return new THREE.Vector2(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1); }
+    pointUnder(x, y) { // 3D point under the screen position: nearest object, else the floor, else the current target
+      const hit = this.pick ? this.pick({ clientX: x, clientY: y }) : null; if (hit && hit.point) return hit.point.clone();
+      this._ray.setFromCamera(this._ndc(x, y), this.camera); const fl = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); const out = new THREE.Vector3();
+      return this._ray.ray.intersectPlane(fl, out) ? out : this.target.clone();
+    }
+    onPlane(x, y, out) { this._ray.setFromCamera(this._ndc(x, y), this.camera); return this._ray.ray.intersectPlane(this._plane, out); }
     dist() { return this.camera.position.distanceTo(this.target); }
     pitch() { this._v.copy(this.target).sub(this.camera.position); return Math.atan2(this._v.y, Math.hypot(this._v.x, this._v.z)); }
-    look(dx, dy) { // rotate the view direction around the camera; the scene follows the finger
-      this._v.copy(this.target).sub(this.camera.position); this._sph.setFromVector3(this._v);
-      this._sph.theta += dx * this.lookSpeed;
-      this._sph.phi = Math.max(Math.PI / 2 - this.maxPitch, Math.min(Math.PI / 2 - this.minPitch, this._sph.phi - dy * this.lookSpeed));
-      this._sph.makeSafe(); this.target.copy(this.camera.position).add(this._v.setFromSpherical(this._sph));
+    rotateAround(P, yaw, pitch = 0) { // rigid rotation of camera + target around the pivot P (yaw about vertical, pitch about the camera's right axis)
+      if (!P) P = this.target;
+      if (yaw) { this._q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw); this.camera.position.sub(P).applyQuaternion(this._q).add(P); this.target.sub(P).applyQuaternion(this._q).add(P); }
+      if (pitch) {
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion); right.y = 0; if (right.lengthSq() < 1e-6) return; right.normalize();
+        const pos0 = this.camera.position.clone(), tgt0 = this.target.clone();
+        this._q.setFromAxisAngle(right, pitch); this.camera.position.sub(P).applyQuaternion(this._q).add(P); this.target.sub(P).applyQuaternion(this._q).add(P);
+        const pt = this.pitch(); if (pt < this.minPitch || pt > this.maxPitch || this.camera.position.y < 0.3) { this.camera.position.copy(pos0); this.target.copy(tgt0); }
+      }
     }
-    slide(dx, dy) { // move camera + target together along the floor, relative to the view (the scene follows the finger)
-      const k = this.slideSpeed * Math.max(1, this.dist() * 0.6);
-      this._v.copy(this.target).sub(this.camera.position); this._v.y = 0; if (this._v.lengthSq() < 1e-6) this._v.set(0, 0, -1); this._v.normalize();
-      this._v2.crossVectors(this._v, new THREE.Vector3(0, 1, 0)).normalize();
-      const d = this._v2.multiplyScalar(dx * k).add(this._v.multiplyScalar(-dy * k)); // finger up = walk forward, finger right = step right
-      this.camera.position.add(d); this.target.add(d);
+    orbit(dx, dy) { this.rotateAround(this._pivot, -dx * this.rotateSpeed, -dy * this.rotateSpeed); }
+    grab(x0, y0, x1, y1) { // slide so that the floor point under the finger follows the finger
+      const a = new THREE.Vector3(), b = new THREE.Vector3();
+      if (this.onPlane(x0, y0, a) && this.onPlane(x1, y1, b) && a.distanceTo(b) < 30) { a.sub(b); this.camera.position.add(a); this.target.add(a); return; }
+      // fallback (looking at the horizon): screen-space slide
+      const k = this.dist() * 0.0015; const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion); const up = new THREE.Vector3(0, 1, 0);
+      const d = right.multiplyScalar(-(x1 - x0) * k).add(up.multiplyScalar((y1 - y0) * k)); this.camera.position.add(d); this.target.add(d);
     }
-    dolly(m) { // step forward (m > 0) / back along the view direction
-      this._v.copy(this.target).sub(this.camera.position); const L = this._v.length(); if (L < 1e-6) return; this._v.normalize();
-      const step = Math.max(-2, Math.min(2, m)); this.camera.position.addScaledVector(this._v, step);
-      if (this.camera.position.distanceTo(this.target) < this.minDistance) this.target.copy(this.camera.position).addScaledVector(this._v, this.minDistance);
+    zoomAt(x, y, k) { // scale the view about the point under the cursor: k < 1 zooms in
+      const Q = this.pointUnder(x, y); const dQ = this.camera.position.distanceTo(Q);
+      if (k < 1 && dQ * k < this.minDistance) k = Math.max(k, this.minDistance / Math.max(dQ, 1e-6));
+      if (k > 1 && this.dist() * k > this.maxDistance) k = Math.min(k, this.maxDistance / Math.max(this.dist(), 1e-6));
+      this.camera.position.sub(Q).multiplyScalar(k).add(Q); this.target.sub(Q).multiplyScalar(k).add(Q);
     }
-    update() { if (this.autoRotate) this.look(this.autoRotateSpeed * 0.25, 0); this.camera.lookAt(this.target); return true; }
+    update() { if (this.autoRotate) this.rotateAround(this.target, this.autoRotateSpeed * 0.0015, 0); this.camera.lookAt(this.target); return true; }
     dispose() {}
   }
-  const controls = new WalkControls(camera, canvas);
+  const controls = new MapControls(camera, canvas, e => (typeof pickAt === 'function' ? pickAt(e) : null));
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x50555c, 1.0));
   const sun = new THREE.DirectionalLight(0xffffff, 0.55); sun.position.set(-6, 9, 4); scene.add(sun);
@@ -1011,10 +1031,11 @@
   // current view direction instead of being pushed sideways.
   function clampToRoom() {
     if (!S.data) return; const { width: W, depth: D, height: H } = S.data.room; const m = 0.25;
-    const lo = { x: -W + m, y: 0.35, z: m }, hi = { x: -m, y: 12, z: D - m };
+    // the point you look at stays inside the room; the camera may hover up to 3 m outside the walls (dollhouse view) but never below the floor
+    const lo = { x: -W - 3, y: 0.3, z: -3 }, hi = { x: 3, y: 16, z: D + 3 };
     _off.copy(camera.position).sub(controls.target);
     _clampV.copy(controls.target);
-    _clampV.x = Math.min(hi.x, Math.max(lo.x, _clampV.x)); _clampV.z = Math.min(hi.z, Math.max(lo.z, _clampV.z)); _clampV.y = Math.min(H, Math.max(0.05, _clampV.y));
+    _clampV.x = Math.min(-m, Math.max(-W + m, _clampV.x)); _clampV.z = Math.min(D - m, Math.max(m, _clampV.z)); _clampV.y = Math.min(H, Math.max(0.0, _clampV.y));
     if (!_clampV.equals(controls.target)) controls.target.copy(_clampV);
     // largest s in (0,1] with target + s*off inside the box
     let s = 1;
@@ -1038,7 +1059,7 @@
   function roomCenter() { const { width: W, depth: D } = S.data.room; return new THREE.Vector3(W / 2, 0.9, D / 2); }
   function tweenCamera(pos, target, ms = 700) { S.tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() }; }
   const VIEWS = {
-    orbit() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(0.6), 2.55, 0.45), new THREE.Vector3(WX(W / 2), 0.9, D * 0.55)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
+    orbit() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(-1.0), 5.4, -1.6), new THREE.Vector3(WX(W / 2), 0.5, D * 0.5)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
     top() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 11.5, D / 2 - 0.001), new THREE.Vector3(WX(W / 2), 0, D / 2)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
     eye() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 1.65, 0.35), new THREE.Vector3(WX(W / 2), 1.35, D * 0.7)); controls.maxPolarAngle = Math.PI / 2 + 0.35; },
   };
