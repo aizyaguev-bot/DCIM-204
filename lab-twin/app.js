@@ -13,9 +13,9 @@
   const STATUS_LABEL = { active: 'Active', building: 'In construction', inactive: 'Inactive', dismantled: 'Dismantled', unknown: 'Unknown' };
   const STATUSES = Object.keys(STATUS_COLOR);
   const CONF_OPACITY = { high: 1.0, medium: 0.82, low: 0.5 };
-  const TYPE_STRIPE = { opt: '#76b900', 'dut-switch': '#22d3ee', kvm: '#a78bfa', pdu: '#fbbf24', chiller: '#22d3ee', 'equip-switch': '#22d3ee', 'equip-patchpanel': '#94a3b8', 'equip-kvm': '#a78bfa', 'equip-pdu': '#fbbf24', 'equip-ups': '#4ade80', 'equip-cable': '#71717a', 'equip-blank': '#3f3f46', 'equip-other': '#a1a1aa', cart: '#3b82f6', ladder: '#facc15', toolbox: '#f97316', 'spare-chassis': '#d6c9a8', misc: '#71717a' };
+  const TYPE_STRIPE = { opt: '#76b900', kvm: '#a78bfa', pdu: '#fbbf24', chiller: '#22d3ee', 'equip-switch': '#22d3ee', 'equip-patchpanel': '#94a3b8', 'equip-kvm': '#a78bfa', 'equip-pdu': '#fbbf24', 'equip-ups': '#4ade80', 'equip-cable': '#71717a', 'equip-blank': '#3f3f46', 'equip-other': '#a1a1aa', cart: '#3b82f6', ladder: '#facc15', toolbox: '#f97316', 'spare-chassis': '#d6c9a8', misc: '#71717a' };
   // realistic body colours (photo-matched); status is shown by edge outline + LED + label dot
-  const TYPE_BODY = { opt: '#2b2d33', 'dut-switch': '#1a1d24', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#232a38', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
+  const TYPE_BODY = { opt: '#2b2d33', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#1a1d24', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
   const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
   const CABLE_COLORS = ['#d92b2b', '#d92b2b', '#1a1a1a', '#d92b2b', '#22c1a6', '#d92b2b', '#f4f4f5'];
   const EQUIP_LABEL = { switch: 'Switch', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
@@ -319,7 +319,7 @@
         g = new THREE.Group();
         let w, d, h;
         if (isPC) { w = 0.17; h = 0.24; d = 0.31; }                               // small desktop PC — mini tower standing upright
-        else if (it.type === 'dut-switch') { w = 0.44; h = 0.066; d = 0.50; }       // NVIDIA-style 1U switch under test
+        else if (it.type === 'equip-switch') { w = 0.44; h = 0.066; d = 0.50; }     // NVIDIA-style 1U switch under test (Lab Manager rack item of type switch)
         else if (it.type === 'kvm') { w = 0.44; d = 0.30; h = 0.045; }
         else { w = 0.40; d = 0.35; h = 0.05; }                                      // other rack equipment (UPS, SSD box …)
         w = Math.min(w, slotW - 0.02);
@@ -342,7 +342,7 @@
           const postZ = -(rt.width / 2 - rt.profile - 0.02), postX = rt.depth / 2 - rt.profile; const bx = -d / 2 + 0.02;
           const nc = 1 + Math.floor(rnd() * 2);
           for (let i = 0; i < nc; i++) { const y0 = sh.y + h * (.3 + rnd() * .4), z0 = zc + (rnd() - .5) * w * .5; const cc = CABLE_COLORS[Math.floor(rnd() * CABLE_COLORS.length)]; g.add(cable([[bx, y0, z0], [bx - 0.08 - rnd() * 0.05, y0 - 0.1, z0 + (postZ - z0) * 0.5], [fx - 0.1, sh.y - 0.1 - rnd() * 0.1, postZ * 0.95], [postX, sh.y - 0.16 - rnd() * 0.1, postZ]], cc)); }
-        } else if (it.type === 'dut-switch') {
+        } else if (it.type === 'equip-switch') {
           // faceplate, 2 × 12 QSFP cages, link LEDs, NVIDIA badge + green accent, rack ears, DAC cable to the PC
           g.add(box(0.006, h * .94, w * .98, mat('#23262e', { rough: .55, metal: .35, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
           const cageW = 0.02, gap = 0.008, cols = Math.min(12, Math.floor((w * .78) / (cageW + gap))); const z0 = zc - (cols * (cageW + gap) - gap) / 2 + cageW / 2 + w * .04;
@@ -423,8 +423,8 @@
       }
       if (g && it.placement !== 'rack-strips') S.itemGroups.push(g);
       const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor });
-      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${it.live.watts ? ' · ' + Math.round(it.live.watts) + 'W' : ''}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : (it.dut ? `DUT ${it.dut}` : `outlet #${it.dcim?.outlet ?? '?'}`)) : it.type === 'dut-switch' ? `switch under test · ${it.hostName}${it.port ? ' · port ' + it.port : ''}` : (it.typeLabel || it.type);
-      const named = it.type === 'opt' || it.type === 'dut-switch' || it.type.startsWith('equip-');
+      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${it.live.watts ? ' · ' + Math.round(it.live.watts) + 'W' : ''}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : it.type === 'equip-switch' ? `switch under test${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
+      const named = it.type === 'opt' || it.type.startsWith('equip-');
       makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${named ? it.name : it.id}<small>${it.type === 'opt' ? it.id + ' · ' + sub : sub}</small>`);
     });
     applyFilters(); updateTelemetry();
@@ -525,20 +525,16 @@
       if (it.type === 'kvm' && it.live) it.effStatus = it.live.reachable === false ? 'inactive' : it.live.reachable ? 'active' : it.effStatus;
       if (it.type === 'opt' && it.live && it.live.owner) it.owner = it.live.owner;
     });
-    // Every OPT (= a small desktop PC) may have ONE switch under test next to it on the shelf: live switch-assignments
-    // win, otherwise the JSON field `dut`. The switch is a derived, clickable unit that follows its PC.
-    const derived = [];
-    items.forEach(i => {
-      if (i.type !== 'opt' || !i.shelf) return;
-      const sw = i.live?.sw?.switch ? i.live.sw : (i.dut ? { switch: i.dut, port: i.dutPort } : null); if (!sw) return;
-      const id = 'SW-' + i.id.replace(/^ITEM-/, '');
-      derived.push({ id, name: sw.switch, category: 'item', type: 'dut-switch', typeLabel: 'Switch under test (DUT)', setup: i.setup, shelf: i.shelf, zone: i.zone,
-        status: i.effStatus === 'dismantled' ? 'inactive' : i.effStatus, effStatus: i.effStatus === 'dismantled' ? 'inactive' : i.effStatus,
-        confidence: 'high', placementConfidence: i.placementConfidence || 'high', photos: [], owner: i.owner || null,
-        notes: `Switch under test connected to ${i.name}${sw.port ? ' · port ' + sw.port : ''}.`, derived: true, host: i.id, hostName: i.name, port: sw.port || null });
-      i.dutId = id;
-    });
-    items.push(...derived);
+    // Equipment next to the PC (switch under test, UPS, SSD box …) = Lab Manager "rack items". When connected, the live
+    // rack items are authoritative: a JSON equipment record with the same name is replaced by the live one (no doubles).
+    if (live.connected) {
+      const norm = x => String(x || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      const liveEq = items.filter(i => i.id.startsWith('LIVE-') && i.type.startsWith('equip-'));
+      const liveNames = new Set(liveEq.map(i => norm(i.name)));
+      const liveShelves = new Set(liveEq.map(i => i.shelf).filter(Boolean));
+      items = items.filter(i => !(i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && (liveNames.has(norm(i.name)) || (i.shelf && liveShelves.has(i.shelf)))));
+      items.forEach(i => { if (i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && i.setup && setups.find(x => x.id === i.setup)?.dcimRack) i.notes = (i.notes || '') + ' ⚠ Not present in the Lab Manager rack items.'; });
+    }
     // DCIM racks without a physical setup
     const liveRacks = live.connected ? [...new Set(live.devices.filter(x => x.kind === 'pdu' || x.kind === 'rack').map(x => x.rack).filter(Boolean))] : (d.dcim?.pdus || []).map(p => p.rack);
     const unmappedRacks = liveRacks.filter(r => !setupByRack[r]);
@@ -790,9 +786,7 @@
     }
     // ── Edit (mutates lab-data.json in memory → Save to server / Download)
     const isLive = rec.id.startsWith('LIVE-');
-    if (rec.cat === 'item' && it?.derived) {
-      html += `<div class="sec big"><div class="note">This switch under test follows its PC <b>${esc(it.hostName || it.host)}</b> (${esc(shelfName(it.shelf))}). ${S.live.connected ? 'Its name comes from the Lab Manager switch assignment.' : 'Rename or remove it in the PC\'s "Switch under test" field.'}</div><button class="btn-lg" data-go="${esc(it.host)}">Open ${esc(it.hostName || it.host)} ›</button></div>`;
-    } else if (rec.cat === 'item' && isLive) {
+    if (rec.cat === 'item' && isLive) {
       html += `<div class="sec"><div class="sec-h">Edit</div><div class="note muted">This object comes live from the DCIM backend (labels / rack items). Rename or move it in Lab Manager. To keep a physical record of it in the twin (photos, notes, exact shelf), add it to lab-data.json:</div>
         <div class="ctl-row" style="margin-top:8px"><button class="btn btn-xs" id="eMaterialize">+ Add a copy to lab-data.json</button></div></div>`;
     } else if (rec.cat === 'item') {
@@ -1252,9 +1246,7 @@
     const def = rec.def; const it = rec.item; const isLive = rec.id.startsWith('LIVE-');
     $('#dId').textContent = rec.id; $('#dName').textContent = def.name || rec.id;
     let html = `<div class="edit-hint">EDIT MODE · tap another object in the 3D view to switch</div>`;
-    if (rec.cat === 'item' && it?.derived) {
-      html += `<div class="sec big"><div class="note">This switch under test follows its PC <b>${esc(it.hostName || it.host)}</b> (${esc(shelfName(it.shelf))}). ${S.live.connected ? 'Its name comes from the Lab Manager switch assignment.' : 'Rename or remove it in the PC\'s "Switch under test" field.'}</div><button class="btn-lg" data-go="${esc(it.host)}">Open ${esc(it.hostName || it.host)} ›</button></div>`;
-    } else if (rec.cat === 'item' && isLive) {
+    if (rec.cat === 'item' && isLive) {
       const loc = it.shelf ? shelfName(it.shelf) : it.setup ? `${it.setup} · ${it.live?.rack || ''} U${it.live?.u ?? '?'}` : it.live?.rack ? `${it.live.rack} (rack not mapped to a 3D setup)` : 'not placed';
       html += `<div class="sec big"><div class="note">Live from Lab Manager (DCIM). Moving it here writes the rack / U slot back into Lab Manager.</div>
         <label class="lbl-lg">Where</label><div class="where"><span class="where-txt">${esc(loc)}</span></div>
@@ -1272,7 +1264,6 @@
         ${it.setup ? `<div class="row-lg"><button class="btn-lg sm" data-side="left">⇤ Hang on left side</button><button class="btn-lg sm" data-side="right">Hang on right side ⇥</button><button class="btn-lg sm" data-side="bay">Bottom bay</button></div>` : ''}
         <label class="lbl-lg">Type</label><select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         <label class="lbl-lg">Owner</label><input class="in-lg" id="eOwner" value="${esc(it.owner || '')}" placeholder="engineer" />
-        ${it.type === 'opt' ? `<label class="lbl-lg">Switch under test (next to the PC)</label><input class="in-lg" id="eDut" value="${esc(it.dut || '')}" placeholder="e.g. Rosalind — empty = no switch" ${it.live?.sw?.switch ? 'disabled title="Set by the Lab Manager switch assignment"' : ''} />` : ''}
         <label class="lbl-lg">PDU · outlet</label>
         <div class="row-lg"><select class="in-lg" id="ePdu" style="flex:2"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${x.id}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
           <div class="stepper"><button data-step="-1">−</button><input id="eOutlet" type="number" min="1" max="48" value="${it.dcim?.outlet ?? ''}" placeholder="#" /><button data-step="1">＋</button></div></div>
@@ -1287,7 +1278,7 @@
     } else if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
       html += `<div class="sec big"><div class="lbl-lg">On ${rec.id} · level L${rec.level} · ${rec.setup}</div>
-        ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>${esc(i.item.typeLabel || i.item.type)}${i.item.dcim?.outlet ? ' · outlet #' + i.item.dcim.outlet : ''}</small></span><button class="btn-lg sm" data-edit="${i.id}">Edit</button>${i.item.derived ? '' : `<button class="btn-lg sm btn-cyan" data-move="${i.id}">Move</button>`}</div>`).join('') : '<div class="note">Shelf is empty.</div>'}
+        ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>${esc(i.item.typeLabel || i.item.type)}${i.item.dcim?.outlet ? ' · outlet #' + i.item.dcim.outlet : ''}</small></span><button class="btn-lg sm" data-edit="${i.id}">Edit</button><button class="btn-lg sm btn-cyan" data-move="${i.id}">Move</button></div>`).join('') : '<div class="note">Shelf is empty.</div>'}
         <button class="btn-lg btn-save" id="eAddHere">＋ Add device on this shelf</button></div>
         <div class="sec big"><label class="lbl-lg">Shelf status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${def.status || 'unknown'}"/><label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>`;
     } else if (rec.cat === 'setup') {
@@ -1322,7 +1313,6 @@
       if ($('#eName')) patch.name = $('#eName').value.trim() || def.name;
       if (rec.cat === 'item') {
         patch.type = $('#eType').value; patch.owner = $('#eOwner').value.trim() || null;
-        if ($('#eDut') && !$('#eDut').disabled) patch.dut = $('#eDut').value.trim() || undefined;
         const pdu = $('#ePdu').value, outlet = parseInt($('#eOutlet').value, 10);
         if (pdu) { const pd = (S.data.dcim?.pdus || []).find(x => x.id === pdu); patch.dcim = { ...(it.dcim || {}), pdu, pduName: pd?.name, outlet: isNaN(outlet) ? undefined : outlet, optKey: optKey(patch.name) }; }
         else if (it.dcim) { const { pdu: _p, pduName: _n, outlet: _o, ...rest } = it.dcim; patch.dcim = Object.keys(rest).length ? rest : undefined; }

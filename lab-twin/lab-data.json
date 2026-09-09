@@ -31,7 +31,7 @@
    "setups": "SETUP-001…",
    "items": "ITEM-0001…"
   },
-  "shelfRule": "One PC (OPT/OPTN) per shelf on the left, one unit (switch under test = `dut`, or other equipment) on the right. U01 = top shelf."
+  "shelfRule": "One PC (OPT/OPTN, type opt) per shelf on the left; one Lab Manager rack item on the right (type equip-switch = switch under test, equip-ups, equip-other …). U01 = top shelf. When connected, live rack items replace JSON equipment with the same name."
  },
  "room": {
   "width": 4.0,
@@ -1674,8 +1674,7 @@
     "pduName": "PDU-Rack-01",
     "outlet": 4
    },
-   "notes": "Lab Manager rack view Rack-01 · U04 · 20 W at capture",
-   "dut": "Rosalind"
+   "notes": "Lab Manager rack view Rack-01 · U04 · 20 W at capture"
   },
   {
    "id": "ITEM-0054",
@@ -1719,8 +1718,7 @@
     "pduName": "PDU-Rack-02",
     "outlet": 2
    },
-   "notes": "Lab Manager rack view Rack-02 · U02 · 95 W at capture",
-   "dut": "Chameleon MGMT"
+   "notes": "Lab Manager rack view Rack-02 · U02 · 95 W at capture"
   },
   {
    "id": "ITEM-0056",
@@ -1742,8 +1740,7 @@
     "pduName": "PDU-Rack-02",
     "outlet": 3
    },
-   "notes": "Lab Manager rack view Rack-02 · U03 · 13 W at capture",
-   "dut": "V3000"
+   "notes": "Lab Manager rack view Rack-02 · U03 · 13 W at capture"
   },
   {
    "id": "ITEM-0057",
@@ -1765,8 +1762,7 @@
     "pduName": "PDU-Rack-02",
     "outlet": 4
    },
-   "notes": "Lab Manager rack view Rack-02 · U04 · 28 W at capture",
-   "dut": "MGMT test"
+   "notes": "Lab Manager rack view Rack-02 · U04 · 28 W at capture"
   },
   {
    "id": "ITEM-0058",
@@ -1870,8 +1866,7 @@
     "pduName": "PDU-Rack-03",
     "outlet": 4
    },
-   "notes": "Lab Manager rack view Rack-03 · U04 · 20 W at capture",
-   "dut": "Chameleon Eoptol"
+   "notes": "Lab Manager rack view Rack-03 · U04 · 20 W at capture"
   },
   {
    "id": "ITEM-0063",
@@ -1937,8 +1932,7 @@
     "pduName": "PDU-Rack-04",
     "outlet": 3
    },
-   "notes": "Lab Manager rack view Rack-04 · U03 · 22 W at capture",
-   "dut": "Salamandra"
+   "notes": "Lab Manager rack view Rack-04 · U03 · 22 W at capture"
   },
   {
    "id": "ITEM-0066",
@@ -1960,8 +1954,7 @@
     "pduName": "PDU-Rack-04",
     "outlet": 4
    },
-   "notes": "Lab Manager rack view Rack-04 · U04 · 23 W at capture",
-   "dut": "chameleon 6S"
+   "notes": "Lab Manager rack view Rack-04 · U04 · 23 W at capture"
   },
   {
    "id": "ITEM-0067",
@@ -2043,8 +2036,7 @@
     "pduName": "PDU-Rack-05",
     "outlet": 3
    },
-   "notes": "Lab Manager rack view Rack-05 · U03 · 17 W at capture",
-   "dut": "rosalind HN"
+   "notes": "Lab Manager rack view Rack-05 · U03 · 17 W at capture"
   },
   {
    "id": "ITEM-0071",
@@ -2132,8 +2124,7 @@
     "pduName": "PDU-Rack-06",
     "outlet": 4
    },
-   "notes": "Lab Manager rack view Rack-06 · U04 · 41 W at capture",
-   "dut": "taipan"
+   "notes": "Lab Manager rack view Rack-06 · U04 · 41 W at capture"
   },
   {
    "id": "ITEM-0075",
@@ -2155,8 +2146,7 @@
     "pduName": "PDU-Rack-07",
     "outlet": 1
    },
-   "notes": "Lab Manager rack view Rack-07 · U02 · 20 W at capture",
-   "dut": "rosetta"
+   "notes": "Lab Manager rack view Rack-07 · U02 · 20 W at capture"
   },
   {
    "id": "ITEM-0076",
@@ -2178,8 +2168,7 @@
     "pduName": "PDU-Rack-07",
     "outlet": 2
    },
-   "notes": "Lab Manager rack view Rack-07 · U03 · 12 W at capture",
-   "dut": "rosetta"
+   "notes": "Lab Manager rack view Rack-07 · U03 · 12 W at capture"
   },
   {
    "id": "ITEM-0077",
@@ -2201,8 +2190,199 @@
     "pduName": "PDU-Rack-07",
     "outlet": 3
    },
-   "notes": "Lab Manager rack view Rack-07 · U04 · 22 W at capture",
-   "dut": "rosalind"
+   "notes": "Lab Manager rack view Rack-07 · U04 · 22 W at capture"
+  },
+  {
+   "id": "ITEM-0078",
+   "name": "Rosalind",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-001",
+   "shelf": "SHELF-01",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Eden Levi",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Opt133"
+  },
+  {
+   "id": "ITEM-0079",
+   "name": "Chameleon MGMT",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-002",
+   "shelf": "SHELF-07",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Optn84"
+  },
+  {
+   "id": "ITEM-0080",
+   "name": "V3000",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-002",
+   "shelf": "SHELF-06",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Royi Journo",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Optn87"
+  },
+  {
+   "id": "ITEM-0081",
+   "name": "MGMT test",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-002",
+   "shelf": "SHELF-05",
+   "zone": "Z02",
+   "status": "active",
+   "owner": null,
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Optn130"
+  },
+  {
+   "id": "ITEM-0082",
+   "name": "Chameleon Eoptol",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-003",
+   "shelf": "SHELF-09",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Liran Cohen",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Opt106"
+  },
+  {
+   "id": "ITEM-0083",
+   "name": "Salamandra",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-004",
+   "shelf": "SHELF-14",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Limor Romano",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Opt94"
+  },
+  {
+   "id": "ITEM-0084",
+   "name": "chameleon 6S",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-004",
+   "shelf": "SHELF-13",
+   "zone": "Z02",
+   "status": "active",
+   "owner": "Adam Cohen",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Opt60"
+  },
+  {
+   "id": "ITEM-0085",
+   "name": "rosalind HN",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-005",
+   "shelf": "SHELF-17",
+   "zone": "Z03",
+   "status": "active",
+   "owner": "Eden Levi",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Optn45"
+  },
+  {
+   "id": "ITEM-0086",
+   "name": "taipan",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-006",
+   "shelf": "SHELF-20",
+   "zone": "Z04",
+   "status": "active",
+   "owner": "Liran Cohen",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Opt250"
+  },
+  {
+   "id": "ITEM-0087",
+   "name": "rosetta",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-007",
+   "shelf": "SHELF-26",
+   "zone": "Z04",
+   "status": "unknown",
+   "owner": "Yaniv Shnur",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to optn101"
+  },
+  {
+   "id": "ITEM-0088",
+   "name": "rosetta",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-007",
+   "shelf": "SHELF-25",
+   "zone": "Z04",
+   "status": "unknown",
+   "owner": "Yaniv Shnur",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to optn29"
+  },
+  {
+   "id": "ITEM-0089",
+   "name": "rosalind",
+   "category": "item",
+   "type": "equip-switch",
+   "typeLabel": "Switch under test",
+   "setup": "SETUP-007",
+   "shelf": "SHELF-24",
+   "zone": "Z04",
+   "status": "unknown",
+   "owner": "Eden Levi",
+   "confidence": "high",
+   "placementConfidence": "high",
+   "photos": [],
+   "notes": "Lab Manager rack item (switch) next to Optn93"
   }
  ],
  "dcim": {
@@ -2396,44 +2576,6 @@
     "optn93": 4
    }
   },
-  "switchAssignments": {
-   "opt133": {
-    "switch": "Rosalind"
-   },
-   "optn84": {
-    "switch": "Chameleon MGMT"
-   },
-   "optn87": {
-    "switch": "V3000"
-   },
-   "optn130": {
-    "switch": "MGMT test"
-   },
-   "opt106": {
-    "switch": "Chameleon Eoptol"
-   },
-   "opt94": {
-    "switch": "Salamandra"
-   },
-   "opt60": {
-    "switch": "chameleon 6S"
-   },
-   "optn45": {
-    "switch": "rosalind HN"
-   },
-   "opt250": {
-    "switch": "taipan"
-   },
-   "optn101": {
-    "switch": "rosetta"
-   },
-   "optn29": {
-    "switch": "rosetta"
-   },
-   "optn93": {
-    "switch": "rosalind"
-   }
-  },
   "optOwners": {
    "opt133": "Eden Levi",
    "optn87": "Royi Journo",
@@ -2447,7 +2589,128 @@
    "optn29": "Yaniv Shnur",
    "optn93": "Eden Levi"
   },
-  "note": "labels / rackSlots / switchAssignments mirror the Lab Manager rack view of 2026-09-09 (outlet numbers are placeholders — the live backend is authoritative)"
+  "note": "labels / rackSlots / switchAssignments mirror the Lab Manager rack view of 2026-09-09 (outlet numbers are placeholders — the live backend is authoritative)",
+  "rackItems": {
+   "Rack-01": [
+    {
+     "id": "ri-1",
+     "name": "SSD SA",
+     "type": "other",
+     "u": 2,
+     "notes": ""
+    },
+    {
+     "id": "ri-4",
+     "name": "Rosalind",
+     "type": "switch",
+     "u": 4,
+     "notes": ""
+    }
+   ],
+   "Rack-03": [
+    {
+     "id": "ri-2",
+     "name": "Salamandra AC",
+     "type": "other",
+     "u": 3,
+     "notes": ""
+    },
+    {
+     "id": "ri-8",
+     "name": "Chameleon Eoptol",
+     "type": "switch",
+     "u": 4,
+     "notes": ""
+    }
+   ],
+   "Rack-05": [
+    {
+     "id": "ri-3",
+     "name": "PowerShelf",
+     "type": "ups",
+     "u": 2,
+     "notes": ""
+    },
+    {
+     "id": "ri-11",
+     "name": "rosalind HN",
+     "type": "switch",
+     "u": 3,
+     "notes": ""
+    }
+   ],
+   "Rack-02": [
+    {
+     "id": "ri-5",
+     "name": "Chameleon MGMT",
+     "type": "switch",
+     "u": 2,
+     "notes": ""
+    },
+    {
+     "id": "ri-6",
+     "name": "V3000",
+     "type": "switch",
+     "u": 3,
+     "notes": ""
+    },
+    {
+     "id": "ri-7",
+     "name": "MGMT test",
+     "type": "switch",
+     "u": 4,
+     "notes": ""
+    }
+   ],
+   "Rack-04": [
+    {
+     "id": "ri-9",
+     "name": "Salamandra",
+     "type": "switch",
+     "u": 3,
+     "notes": ""
+    },
+    {
+     "id": "ri-10",
+     "name": "chameleon 6S",
+     "type": "switch",
+     "u": 4,
+     "notes": ""
+    }
+   ],
+   "Rack-06": [
+    {
+     "id": "ri-12",
+     "name": "taipan",
+     "type": "switch",
+     "u": 4,
+     "notes": ""
+    }
+   ],
+   "Rack-07": [
+    {
+     "id": "ri-13",
+     "name": "rosetta",
+     "type": "switch",
+     "u": 2,
+     "notes": ""
+    },
+    {
+     "id": "ri-14",
+     "name": "rosetta",
+     "type": "switch",
+     "u": 3,
+     "notes": ""
+    },
+    {
+     "id": "ri-15",
+     "name": "rosalind",
+     "type": "switch",
+     "u": 4,
+     "notes": ""
+    }
+   ]
+  }
  },
  "backend": {
   "defaultUrl": "",
