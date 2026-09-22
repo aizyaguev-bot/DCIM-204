@@ -565,7 +565,7 @@
       // 3) rack_items (custom equipment: switches, patch panels …)
       Object.entries(live.rackItems || {}).forEach(([rack, list]) => (list || []).forEach(ci => {
         const sid = setupByRack[rack] || null; const id = 'LIVE-' + ci.id;
-        items.push({ id, name: ci.name, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid ? shelfForU(sid, ci.u || 1) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
+        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid ? shelfForU(sid, ci.u || 1) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
       }));
       // 4) chillers from DCIM
       if (live.chillers?.units?.length) {
@@ -602,6 +602,10 @@
   function pickOv() { return {}; }
 
   // ───────────────────────────────────────────────────────────── filters / search
+  function matchesQuery(rec, query) {
+    const q = query.toLowerCase();
+    return [rec.id, rec.def.name, rec.item?.serial_number || rec.def.serial_number].some(value => String(value || '').toLowerCase().includes(q));
+  }
   function matches(rec) {
     const f = S.filters;
     if (rec.cat === 'zone') return !f.zone || rec.id === f.zone;
@@ -609,7 +613,7 @@
     if (f.setup && rec.setup !== f.setup && rec.id !== f.setup) return false;
     if (rec.cat !== 'structure' && !f.statuses.has(rec.status)) return false;
     if (f.onlyLow && !(rec.conf === 'low' || rec.pconf === 'low' || (rec.cat === 'setup' && rec.def.dcimMappingConfidence === 'low'))) return false;
-    if (f.q) { const q = f.q.toLowerCase(); const nm = (rec.def.name || '').toLowerCase(); if (!rec.id.toLowerCase().includes(q) && !nm.includes(q)) return false; }
+    if (f.q && !matchesQuery(rec, f.q)) return false;
     return true;
   }
   function applyFilters() {
@@ -645,7 +649,7 @@
     inp.addEventListener('input', () => {
       const q = inp.value.trim(); S.filters.q = q; applyFilters();
       if (!q) { res.classList.add('hidden'); return; }
-      const ql = q.toLowerCase(); const hits = [...S.recs.values()].filter(r => r.id.toLowerCase().includes(ql) || (r.def.name || '').toLowerCase().includes(ql)).slice(0, 14);
+      const hits = [...S.recs.values()].filter(r => matchesQuery(r, q)).slice(0, 14);
       res.innerHTML = hits.map(r => `<div class="sr" data-id="${r.id}"><span class="id">${r.id}</span><span class="nm">${esc(r.def.name || '')}</span><span class="cat">${r.cat}</span></div>`).join('') || '<div class="sr"><span class="nm muted">No matches</span></div>';
       res.classList.remove('hidden');
       $$('.sr', res).forEach(el => el.onclick = () => { if (el.dataset.id) { select(el.dataset.id); res.classList.add('hidden'); } });
@@ -772,6 +776,7 @@
     // status / identity
     html += `<div class="sec"><div class="sec-h">Identity</div><div class="kv">
       <span class="k">Category</span><span class="v">${rec.cat}${it?.typeLabel ? ' · ' + esc(it.typeLabel) : it?.type ? ' · ' + esc(it.type) : def.type ? ' · ' + esc(def.type) : ''}</span>
+      ${it?.serial_number ? `<span class="k">SN</span><span class="v mono">${esc(it.serial_number)}</span>` : ''}
       <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${it.live.state}${it.live.watts ? ' · ' + Math.round(it.live.watts) + ' W' : ''}</span>` : ''}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(ov(rec.id).dcimRack !== undefined ? 'medium' : def.dcimMappingConfidence)}` : ''}</span>
       <span class="k">Owner</span><span class="v">${esc(it?.owner || def.owner || '—')}${it?.live?.owner ? ' <span class="muted small">(DCIM)</span>' : ''}</span>
@@ -952,34 +957,69 @@
     if (!r.ok) throw new Error(`${r.status} ${await r.text().catch(() => '')}`.trim());
     if (r.status === 204) return null; return r.json();
   }
+  const INVENTORY_PATHS = {
+    devices: '/api/devices/', rackSlots: '/api/rack-slots', rackOrder: '/api/rack-positions',
+    sw: '/api/switch-assignments', owners: '/api/opt-owners', rackItems: '/api/rack-items',
+    chillers: '/api/chillers', rackOverrides: '/api/rack-overrides',
+  };
+  async function readLiveInventory() {
+    // Share the same inventory source on connection and every live refresh.
+    // Failed requests must not clear previously loaded devices or placements.
+    const entries = await Promise.all(Object.entries(INVENTORY_PATHS).map(async ([key, path]) => {
+      try { return [key, await api(path)]; } catch { return null; }
+    }));
+    return Object.fromEntries(entries.filter(entry => entry && entry[1] != null));
+  }
+  let liveSession = 0;
+  let refreshInFlight = null;
   async function connect() {
+    const session = ++liveSession;
+    if (S.live.timer) clearInterval(S.live.timer);
+    S.live.timer = null;
+    S.live.connected = false;
     pill('connecting', 'Connecting…'); $('#sStatus').textContent = 'Connecting…';
     try {
-      const devices = await api('/api/devices/');
-      const [slots, order, sw, owners, rackItems, chillers, rov] = await Promise.all(['/api/rack-slots', '/api/rack-positions', '/api/switch-assignments', '/api/opt-owners', '/api/rack-items', '/api/chillers', '/api/rack-overrides'].map(p => api(p).catch(() => ({}))));
-      Object.assign(S.live, { connected: true, devices, rackSlots: slots || {}, rackOrder: order || {}, sw: sw || {}, owners: owners || {}, rackItems: rackItems || {}, chillers: chillers || null, rackOverrides: rov || {}, error: null });
+      const inventory = await readLiveInventory();
+      if (session !== liveSession) return;
+      if (!Array.isArray(inventory.devices)) throw new Error('Could not load devices');
+      Object.assign(S.live, inventory, { connected: true, error: null });
+      const devices = S.live.devices;
       pill('online', `${window.LAB_DEMO ? 'DEMO (simulated)' : 'Live'} · ${devices.filter(d => d.kind === 'pdu').length} PDU · ${devices.filter(d => d.kind === 'kvm').length} KVM`);
       $('#sStatus').textContent = `Connected — ${devices.length} devices.`;
       computeModel(); buildItems(); await refreshStatuses();
+      if (session !== liveSession) return;
       if (S.live.timer) clearInterval(S.live.timer);
       if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, POLL_MS);
       toast('Backend connected', 'ok');
     } catch (e) {
+      if (session !== liveSession) return;
       S.live.connected = false; S.live.error = String(e.message || e);
       pill('error', 'Backend error'); $('#sStatus').textContent = 'Error: ' + S.live.error + (location.protocol === 'file:' ? ' — if you opened index.html from disk, make sure the URL includes http:// and the backend allows CORS (it does by default).' : '');
       toast('Backend connection failed: ' + S.live.error, 'err');
       computeModel(); buildItems();
     }
   }
-  function disconnect() { S.live.connected = false; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
+  function disconnect() { ++liveSession; S.live.connected = false; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
   async function refreshStatuses() {
-    if (!S.live.connected) return;
-    const pdus = S.live.devices.filter(d => d.kind === 'pdu'), kvms = S.live.devices.filter(d => d.kind === 'kvm');
-    await Promise.all([
-      ...pdus.map(p => api(`/api/pdus/${p.id}/status`).then(s => { S.live.pdu[p.id] = s; }).catch(() => {})),
-      ...kvms.map(k => api(`/api/kvms/${k.id}/status`).then(s => { S.live.kvm[k.id] = s; }).catch(() => {})),
-    ]);
-    computeModel(); buildItems();
+    const session = liveSession;
+    if (!S.live.connected || refreshInFlight === session) return;
+    refreshInFlight = session;
+    try {
+      const inventory = await readLiveInventory();
+      if (!S.live.connected || session !== liveSession) return;
+      Object.assign(S.live, inventory);
+      const pdus = S.live.devices.filter(d => d.kind === 'pdu'), kvms = S.live.devices.filter(d => d.kind === 'kvm');
+      // Update inventory immediately; a slow PDU must not delay shelf/SN changes.
+      computeModel(); buildItems();
+      await Promise.all([
+        ...pdus.map(p => api(`/api/pdus/${p.id}/status`).then(s => { if (session === liveSession) S.live.pdu[p.id] = s; }).catch(() => {})),
+        ...kvms.map(k => api(`/api/kvms/${k.id}/status`).then(s => { if (session === liveSession) S.live.kvm[k.id] = s; }).catch(() => {})),
+      ]);
+      if (!S.live.connected || session !== liveSession) return;
+      computeModel(); buildItems();
+    } finally {
+      if (refreshInFlight === session) refreshInFlight = null;
+    }
   }
   async function outletAction(pduId, outlet, action, btn) {
     if (!S.live.connected) { toast('Connect the backend first', 'err'); return; }
@@ -1478,7 +1518,7 @@
     if (S.settings.url) connect(); else if (auto) { api('/api/version').then(() => connect()).catch(() => {}); }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, select, setView, connect, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk };
+  window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
   boot.then(init).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
