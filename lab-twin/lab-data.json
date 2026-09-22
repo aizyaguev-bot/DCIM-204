@@ -2194,6 +2194,7 @@
   },
   {
    "id": "ITEM-0078",
+   "serial_number": "MT26276039AF",
    "name": "Rosalind",
    "category": "item",
    "type": "equip-switch",
@@ -2206,7 +2207,7 @@
    "confidence": "high",
    "placementConfidence": "high",
    "photos": [],
-   "notes": "Lab Manager rack item (switch) next to Opt133"
+   "notes": "Lab Manager rack item (switch) next to Opt133 · SN: MT26276039AF"
   },
   {
    "id": "ITEM-0079",
@@ -2258,6 +2259,7 @@
   },
   {
    "id": "ITEM-0082",
+   "serial_number": "MT26176064CD",
    "name": "Chameleon Eoptol",
    "category": "item",
    "type": "equip-switch",
@@ -2270,10 +2272,11 @@
    "confidence": "high",
    "placementConfidence": "high",
    "photos": [],
-   "notes": "Lab Manager rack item (switch) next to Opt106"
+   "notes": "Lab Manager rack item (switch) next to Opt106 · SN: MT26176064CD"
   },
   {
    "id": "ITEM-0083",
+   "serial_number": "MT2604603M8U",
    "name": "Salamandra",
    "category": "item",
    "type": "equip-switch",
@@ -2286,10 +2289,11 @@
    "confidence": "high",
    "placementConfidence": "high",
    "photos": [],
-   "notes": "Lab Manager rack item (switch) next to Opt94"
+   "notes": "Lab Manager rack item (switch) next to Opt94 · SN: MT2604603M8U"
   },
   {
    "id": "ITEM-0084",
+   "serial_number": "MT2629600G08",
    "name": "chameleon 6S",
    "category": "item",
    "type": "equip-switch",
@@ -2302,7 +2306,7 @@
    "confidence": "high",
    "placementConfidence": "high",
    "photos": [],
-   "notes": "Lab Manager rack item (switch) next to Opt60"
+   "notes": "Lab Manager rack item (switch) next to Opt60 · SN: MT2629600G08"
   },
   {
    "id": "ITEM-0085",
@@ -2322,6 +2326,7 @@
   },
   {
    "id": "ITEM-0086",
+   "serial_number": "MT2629600FTV",
    "name": "taipan",
    "category": "item",
    "type": "equip-switch",
@@ -2334,7 +2339,7 @@
    "confidence": "high",
    "placementConfidence": "high",
    "photos": [],
-   "notes": "Lab Manager rack item (switch) next to Opt250"
+   "notes": "Lab Manager rack item (switch) next to Opt250 · SN: MT2629600FTV"
   },
   {
    "id": "ITEM-0087",
@@ -2370,6 +2375,7 @@
   },
   {
    "id": "ITEM-0089",
+   "serial_number": "MT2619601XQV",
    "name": "rosalind",
    "category": "item",
    "type": "equip-switch",
@@ -2382,7 +2388,7 @@
    "confidence": "high",
    "placementConfidence": "high",
    "photos": [],
-   "notes": "Lab Manager rack item (switch) next to Optn93"
+   "notes": "Lab Manager rack item (switch) next to Optn93 · SN: MT2619601XQV"
   }
  ],
  "dcim": {
