@@ -1,0 +1,123 @@
+# Barcode scanning and shelf tracking
+
+Open **Scan & Track** in Lab Manager, or append `?tab=scan` to the site URL.
+This page uses the existing DCIM rack equipment records, including their serial
+numbers. There is no separate scanner inventory to reconcile.
+
+## Connect the scanner
+
+1. Connect a USB scanner or pair a Bluetooth scanner in keyboard / HID mode with
+   the computer displaying the site.
+2. Configure the scanner to send **Enter** or **Tab** after each barcode. Use an
+   English keyboard layout for the scanner's input.
+3. Open Scan & Track and click **Focus scanner**. A manual barcode followed by
+   Enter works as well.
+
+The computer needs access to the lab site. A keyboard scanner does not need a
+browser plugin, camera permission, or a direct connection to the Linux VM.
+The physical scanner must support the barcode symbology on the equipment.
+
+## Find and track equipment
+
+- Scan an existing serial number, assigned barcode, or equipment ID to find its
+  record. Matches are exact, case-insensitive strings; leading zeros are kept.
+- Unknown codes can be linked to an existing rack item. Match the name, ID,
+  rack and shelf before linking. Its serial number and other properties remain.
+- To register equipment that is not in DCIM, enter its name, type, rack, shelf
+  and optional position. It will appear in the DCIM rack view too.
+- Scan the destination shelf label, or select the rack and shelf manually.
+  **Shelf 01 / U01 means the top shelf.** The optional position identifies a
+  particular spot, for example `left / front`, `right`, or `slot A`.
+- Review the proposed destination and click **Save and confirm location**.
+  Scanning alone performs a lookup; it does not move equipment.
+
+The page tracks rack equipment, such as switches and independently registered
+computers. Existing OPT records derived from PDU outlet labels and their cable,
+power and KVM connections remain managed in DCIM. Inventory moves do not issue
+power commands or change those connections.
+
+## Shelf labels
+
+Use **Shelf labels** to select a rack, a shelf range and an optional position,
+then print. Attach the labels to the corresponding physical shelves or slots.
+Short position names keep labels easy to scan. Labels use Code 128, rendered
+locally with [JsBarcode](https://github.com/lindell/JsBarcode); generation works
+without an external barcode service.
+
+Each label encodes `LOC:<URL-encoded rack>:<shelf number>:<URL-encoded position>`.
+The `LOC:` prefix is reserved for locations. A location label fills the proposed
+destination; it still requires the save button. Rack names in labels must match
+existing DCIM racks. Reprint labels after renaming a rack.
+
+## Shared state and history
+
+Barcode, serial number, location, last scan confirmation and the latest 100
+tracking events stay on the same record in `backend/rack_items.json`. Moves from
+the DCIM equipment editor or 3D Twin also appear in the history. Existing
+history is server-managed. Deleting a rack item also deletes that item's history.
+
+Every scan reloads the current inventory. Use **Refresh** to reload a selected
+item; switch to DCIM to see its saved shelf. The connected 3D Twin refreshes
+inventory every 15 seconds when auto-refresh is enabled. Position within a shelf
+appears as text in the Twin's Identity panel; the 3D layout depicts its shelf.
+
+Writes are atomic and version checked. If another client changed the inventory,
+the save is rejected with a message to refresh and review the destination.
+Disconnected or failed writes display an error and do not show success.
+
+## Install on the existing Linux VM
+
+The repository includes a built frontend and `scripts/install-barcode.py`.
+Use the existing `backend/.venv/bin/python`, not the VM's system Python 3.6.
+The installer takes the full reviewed commit SHA and defaults to `~/DCIM-204`:
+
+```bash
+"$HOME/DCIM-204/backend/.venv/bin/python" /tmp/install-barcode.py FULL_COMMIT_SHA
+```
+
+Download the installer from that same reviewed commit first. It:
+
+1. Verifies the repository and refuses staged changes, local source edits,
+   diverged Git history or a port owned by an unrelated process.
+2. Fetches the exact commit and tests it with an empty database on a temporary
+   local port using the VM's Python environment.
+3. Stops only the current user's uvicorn process in this project's backend
+   directory on port 8000, then backs up `.env`, databases, runtime JSON files,
+   deployment version and live Twin data under a private `.barcode-backups/`.
+4. Fast-forwards the local checkout, restores the live Twin inventory and starts
+   the backend in the background. No sudo or dependency installation is needed.
+5. Checks the version and inventory endpoint. If startup fails, rolls back its
+   update and restarts the old backend, provided no new source edits intervene.
+
+The installer keeps the existing inventory and Python environment. Reload open
+browser tabs after installation. It does not configure startup after a VM reboot.
+
+## API compatibility
+
+`GET /api/rack-items` still returns the existing rack-to-items mapping and now
+includes an `ETag`. `PUT /api/rack-items` requires that ETag in `If-Match`, returns
+the saved mapping and a new ETag, and records location changes. Missing versions
+return 428; stale versions return 409. Updated DCIM and Twin clients use this
+contract. Existing third-party writers must also send the version.
+
+Scanner endpoints are `GET /api/inventory?code=...`, `POST /api/inventory`,
+`POST /api/inventory/{id}/barcode`, and `POST /api/inventory/{id}/location`.
+All writes use `If-Match`. When the shared site password is configured, scanner
+endpoints and writes require the same site login; existing public metadata reads
+remain available. Corrupt inventory and disk errors are surfaced, never treated
+as a successfully saved empty inventory.
+
+## Validation
+
+```bash
+cd backend
+python -m pytest tests/ --ignore=tests/test_kvm_regression.py -q
+cd ../frontend
+npm run test:inventory
+npm run build
+```
+
+Browser verification uses fake equipment to exercise keyboard input, Enter / Tab
+suffixes, linking, registration, precise shelf moves, stale-session rejection,
+network failures, reload persistence, DCIM shelf placement and printable labels.
+Physical hardware scanning still requires a check with the user's scanner.

@@ -23,3 +23,7 @@ backend/rack_positions.json
 backend/rack_slots.json
 backend/switch_assignments.json
 backend/rack_items.json
+backend/rack_items.lock
+backend/.rack-items-*.tmp
+.barcode-backups/
+.barcode-install.lock

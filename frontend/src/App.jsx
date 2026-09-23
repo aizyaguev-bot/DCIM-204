@@ -8,6 +8,7 @@ import PduDetail from "./pages/PduDetail";
 import KvmDetail from "./pages/KvmDetail";
 import DcimView from "./pages/DcimView";
 import SyncView from "./pages/SyncView";
+import ScanView from "./pages/ScanView";
 import AddDeviceModal from "./components/AddDeviceModal";
 
 export default function App() {
@@ -15,7 +16,7 @@ export default function App() {
   const [pduStatuses, setPduStatuses] = useState({});   // { id: PduStatus }
   const [kvmStatuses, setKvmStatuses] = useState({});   // { id: KvmStatus }
   const [view, setView] = useState({ kind: "dashboard" });
-  const [mainTab, setMainTab] = useState("dashboard");  // "dashboard" | "dcim"
+  const [mainTab, setMainTab] = useState(() => new URLSearchParams(window.location.search).get("tab") === "scan" ? "scan" : "dashboard");
 
   function openDetail(newView) {
     history.pushState({ view: newView }, "");
@@ -211,6 +212,7 @@ export default function App() {
               { id: "dashboard", label: "Dashboard" },
               { id: "dcim",      label: "DCIM" },
               { id: "sync",      label: "Sync Map" },
+              { id: "scan",      label: "Scan & Track" },
               { id: "twin",      label: "3D Twin" },
             ].map(t => (
               <button key={t.id} onClick={() => setMainTab(t.id)}
@@ -244,6 +246,8 @@ export default function App() {
           onRefresh={loadDevices}
         />
       )}
+
+      {view.kind === "dashboard" && mainTab === "scan" && <ScanView />}
 
       {view.kind === "dashboard" && mainTab === "twin" && (
         <iframe title="3D Digital Twin" src="/twin/index.html?embed=1" className="w-full flex-1 border-0"
