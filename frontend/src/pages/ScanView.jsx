@@ -9,6 +9,7 @@ const secondary = "rounded-lg px-4 py-2.5 text-sm border border-zinc-700 text-zi
 const types = ["switch", "computer", "patchpanel", "cable", "pdu", "kvm", "ups", "other"];
 const emptyLocation = { rack: "", u: 1, position: "" };
 const place = item => ({ rack: item.rack, u: item.u ?? 0, position: item.shelf_position || "" });
+const validLocation = (value, racks) => value && racks.includes(value.rack) && Number.isInteger(value.u) && value.u >= 0 && value.u <= 42 && (value.rack !== MAIN_STORAGE || value.u === 0 && !value.position);
 function where(p) { return p ? p.rack === MAIN_STORAGE ? "Main storage · whole unit" : `${p.rack} · ${p.u ? `Shelf ${String(p.u).padStart(2, "0")}` : "Whole rack / no shelf"}${p.position ? ` · ${p.position}` : ""}` : "Not registered"; }
 function when(value) { return value ? new Date(value).toLocaleString() : "Not confirmed by scan yet"; }
 
@@ -50,7 +51,7 @@ function ShelfLabels({ racks, onClose }) {
     <div role="dialog" aria-modal="true" aria-label="Location labels" className="fixed inset-0 z-50 bg-black/80 p-4 flex items-center justify-center" onKeyDown={e => { if (e.key === "Escape") onClose(); }}>
       <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 max-w-3xl w-full max-h-[90vh] overflow-auto space-y-4">
         <div className="flex justify-between gap-4 items-center"><h2 className="text-lg font-semibold">Print location labels</h2><button className={secondary} onClick={onClose}>Close</button></div>
-        <p className="text-sm text-zinc-400">Scan a destination label, then the equipment to place there. Rack labels select the whole rack; main storage has one label for the entire unit. Save to confirm each move.</p>
+        <p className="text-sm text-zinc-400">Scan a destination label, then the equipment to place there. New barcodes register automatically when enabled. Confirm moves for existing equipment with Save.</p>
         <Field label="Label type"><select className={input} value={kind} onChange={e => setKind(e.target.value)}><option value="shelf">Shelf</option><option value="rack">Whole rack</option><option value="storage">Main storage (one label)</option></select></Field>
         <div className="grid sm:grid-cols-4 gap-3">
           <Field label="Rack"><select className={input} disabled={kind === "storage"} value={rack} onChange={e => setRack(e.target.value)}>{physicalRacks.map(r => <option key={r}>{r}</option>)}</select></Field>
@@ -82,6 +83,7 @@ export default function ScanView() {
   const [editRevision, setEditRevision] = useState(null);
   const [destination, setDestination] = useState(emptyLocation);
   const [destinationChosen, setDestinationChosen] = useState(false);
+  const [autoRegister, setAutoRegister] = useState(true);
   const [scan, setScan] = useState("");
   const [unknown, setUnknown] = useState("");
   const [matches, setMatches] = useState([]);
@@ -108,9 +110,9 @@ export default function ScanView() {
   }, []);
   useEffect(() => { if (!busy && !labelsOpen) inputRef.current?.focus(); }, [busy, labelsOpen]);
 
-  function choose(item, revision = snapshot?.revision) {
+  function choose(item, revision = snapshot?.revision, target = destinationChosen ? destination : null) {
     setSelected(item); setEditRevision(revision);
-    if (!destinationChosen) setDestination(place(item));
+    setDestination(target || place(item));
     setUnknown(""); setMatches([]); setLinkId(""); setError("");
   }
 
@@ -142,30 +144,48 @@ export default function ScanView() {
       if (location) {
         if (!racks.includes(location.rack)) throw new Error("This rack is not in the inventory. Add it in DCIM first.");
         selectDestination(location); setScan("");
+        if (unknown && autoRegister) {
+          await findEquipment(unknown, location);
+          return;
+        }
         setMessage(selected || unknown ? "Destination selected. Review it below, then save to confirm." : "Destination selected. Now scan the equipment barcode to place it here.");
         return;
       }
-      const result = await loadInventory(code);
-      if (!mounted.current) return;
-      setSnapshot(result); setSelected(null); setUnknown(""); setMatches([]); setLinkId(""); setName(""); setScan("");
-      setEditRevision(result.revision);
-      if (result.data.matches.length === 1) {
-        choose(result.data.matches[0], result.revision);
-        setMessage(destinationChosen ? "Equipment found. Review the selected destination, then save to confirm." : "Equipment found. Scan its destination label or choose a destination below.");
-      } else if (result.data.matches.length > 1) {
-        setMatches(result.data.matches);
-        setError("This code matches multiple items. Select the correct item by ID and location; nothing has been changed.");
-      } else {
-        setUnknown(code);
-        if (!destinationChosen) setDestination({ ...emptyLocation, rack: result.data.racks[0] || "" });
-        setMessage("New barcode. Link it to existing equipment, or register a new item.");
-      }
+      await findEquipment(code);
     });
   }
 
-  function acceptSaved(result) {
+  async function findEquipment(code, target = destinationChosen ? destination : null) {
+    const result = await loadInventory(code);
+    if (!mounted.current) return;
+    setSnapshot(result); setSelected(null); setUnknown(""); setMatches([]); setLinkId(""); setName(""); setScan("");
+    setEditRevision(result.revision);
+    if (result.data.matches.length === 1) {
+      choose(result.data.matches[0], result.revision, target);
+      setMessage(target ? "Equipment found. Review the selected destination, then save to confirm." : "Equipment found. Scan its destination label or choose a destination below.");
+    } else if (result.data.matches.length > 1) {
+      setMatches(result.data.matches);
+      setError("This code matches multiple items. Select the correct item by ID and location; nothing has been changed.");
+    } else if (autoRegister && validLocation(target, result.data.racks)) {
+      try {
+        const saved = await updateInventory("", { code, name: Array.from(code).slice(0, 160).join(""), type: "other", ...target }, result.revision);
+        if (!mounted.current) return;
+        acceptSaved(saved, target);
+        setMessage(`Registered automatically: ${saved.data.name} → ${where(place(saved.data))}. Saved in DCIM. Scan the next equipment barcode.`);
+      } catch (error) {
+        if (mounted.current) setUnknown(code);
+        throw error;
+      }
+    } else {
+      setUnknown(code);
+      if (!target) setDestination({ ...emptyLocation, rack: result.data.racks[0] || "" });
+      setMessage(autoRegister ? "New barcode. Scan a destination label to register it automatically, or link it to existing equipment below." : "New barcode. Link it to existing equipment, or register a new item.");
+    }
+  }
+
+  function acceptSaved(result, target = destinationChosen ? destination : null) {
     setSnapshot(old => ({ revision: result.revision, data: { ...old.data, items: [...old.data.items.filter(i => i.id !== result.data.id), result.data] } }));
-    choose(result.data, result.revision);
+    choose(result.data, result.revision, target);
   }
 
   async function saveLocation(event) {
@@ -189,13 +209,13 @@ export default function ScanView() {
     });
   }
 
-  const locationValid = racks.includes(destination.rack) && Number.isInteger(destination.u) && destination.u >= 0 && destination.u <= 42 && (destination.rack !== MAIN_STORAGE || destination.u === 0 && !destination.position);
+  const locationValid = validLocation(destination, racks);
   const neighbors = items.filter(i => i.id !== selected?.id && i.rack === destination.rack && i.u === destination.u);
   const visible = items.filter(i => [i.name, i.barcode, i.serial_number, i.rack, i.shelf_position].some(v => String(v || "").toLowerCase().includes(filter.toLowerCase())));
 
-  return <main className="flex-1 max-w-[1400px] w-full mx-auto px-4 sm:px-6 py-6 space-y-5">
+  return <main className="flex-1 max-w-[1400px] w-full mx-auto px-4 sm:px-6 py-6 space-y-5 [overflow-wrap:anywhere]">
     <div className="flex flex-wrap justify-between items-start gap-3">
-      <div><h1 className="text-2xl font-semibold">Scan & Track</h1><p className="text-sm text-zinc-400 mt-1">1. Scan a location. 2. Scan equipment. 3. Confirm placement.</p></div>
+      <div><h1 className="text-2xl font-semibold">Scan & Track</h1><p className="text-sm text-zinc-400 mt-1">Scan a location, then equipment. New barcodes can be registered automatically.</p></div>
       <div className="flex gap-2"><button className={secondary} disabled={busy} onClick={reload}>Refresh</button><button className={secondary} disabled={!racks.length || busy} onClick={() => setLabelsOpen(true)}>Location labels</button></div>
     </div>
     <section className="bg-zinc-900/60 rounded-2xl border border-zinc-800 p-5 space-y-3">
@@ -208,7 +228,9 @@ export default function ScanView() {
         <button type="submit" className={primary} disabled={busy || !scan.trim()}>{busy ? "Please wait…" : "Find barcode"}</button>
         <button type="button" className={secondary} onClick={() => inputRef.current?.focus()} disabled={busy}>Focus scanner</button>
       </form>
-      <p className="text-xs text-zinc-400">USB / Bluetooth keyboard scanner: use English keyboard mode and an Enter or Tab suffix. Shelf 01 is the top shelf. Scanning alone does not change a location.</p>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="accent-nv-400" checked={autoRegister} disabled={busy} onChange={e => { setAutoRegister(e.target.checked); inputRef.current?.focus(); }}/>Automatically register new equipment</label>
+      <p className="text-xs text-zinc-400">{autoRegister ? "New barcodes are saved immediately at your selected destination, using the barcode as the name and type Other. Edit these details later in DCIM. Existing equipment moves still require Save." : "Unknown barcodes can be linked to existing equipment or registered manually. Moves require Save."}</p>
+      <p className="text-xs text-zinc-400">USB / Bluetooth keyboard scanner: use English keyboard mode and an Enter or Tab suffix. Shelf 01 is the top shelf.</p>
     </section>
     {error && <div role="alert" className="rounded-xl border border-rose-800 bg-rose-950/30 text-rose-200 p-4">{error}</div>}
     {message && <div role="status" aria-live="polite" className="rounded-xl border border-nv-400/30 bg-nv-400/5 text-nv-400 p-4">{message}</div>}
@@ -232,6 +254,7 @@ export default function ScanView() {
     </div>}
     {unknown && <section className="rounded-2xl border border-zinc-800 p-5 space-y-5">
       <h2 className="text-lg font-medium">Unknown barcode: <span className="font-mono break-all">{unknown}</span></h2>
+      {autoRegister && destinationChosen && locationValid && <button type="button" className={primary} disabled={busy} onClick={() => run(() => findEquipment(unknown))}>Register barcode here</button>}
       <div className="grid lg:grid-cols-2 gap-6">
         <form className="space-y-3" onSubmit={e => { e.preventDefault(); run(async () => { const result = await updateInventory(`/${encodeURIComponent(linkId)}/barcode`, { code: unknown }, editRevision); if (mounted.current) { acceptSaved(result); setMessage(destinationChosen ? "Barcode linked. Review the selected destination, then save to confirm the move. The saved location has not changed yet." : "Barcode linked to existing equipment. Its serial number and location were kept."); } }); }}>
           <h3 className="font-medium">Link to existing equipment</h3><p className="text-xs text-zinc-400">Choose the existing rack item to keep one equipment record.</p>

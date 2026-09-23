@@ -25,17 +25,25 @@ The physical scanner must support the barcode symbology on the equipment.
   record. Matches are exact, case-insensitive strings; leading zeros are kept.
   The selected destination is kept instead of being replaced by the item's
   current saved location.
-- Unknown codes can be linked to an existing rack item. Match the name, ID,
-  rack and shelf before linking. Its serial number and other properties remain.
-- To register equipment that is not in DCIM, enter its name, type, rack, shelf
-  and optional position. It will appear in the DCIM rack view too.
+- **Automatically register new equipment** is enabled by default. After choosing
+  a destination, scan a new barcode to create and save the unit there immediately.
+  No registration form or extra save is required. The initial name is the barcode
+  (up to 160 characters), type is **Other**, and the complete barcode is retained.
+  Edit its name and type later in DCIM if needed.
+- A new barcode scanned without a chosen destination waits for a location label.
+  Scanning that label then registers it automatically. The default rack shown in
+  a manual form is never used as an implicit automatic destination.
+- To link an unrecognized barcode to equipment already listed under another
+  identifier, turn off automatic registration before scanning it. Match the name,
+  ID, rack and shelf before linking. Manual registration is also available when
+  automatic registration is off.
 - To change the destination, scan another label or select the rack and shelf manually.
   **Shelf 01 / U01 means the top shelf.** The optional position identifies a
   particular spot, for example `left / front`, `right`, or `slot A`.
-- Review the proposed destination and click **Save and confirm location**.
-  Scanning alone performs a lookup; it does not move equipment.
+- For existing equipment, review the proposed destination and click **Save and
+  confirm location**. Scanning a known barcode does not move it or create a copy.
 - The destination stays selected after saving, so scan another unit to place it
-  there, then confirm that unit separately. Scan a new location label to change
+  there. New units register automatically; confirm moves for existing units. Scan a new location label to change
   the destination. **Clear destination** clears the destination and pending item.
   Reloading the page or leaving Scan & Track also clears the selected destination.
 
@@ -43,6 +51,10 @@ Equipment-first scanning still works. When a destination is selected first,
 unknown barcodes keep it during registration and linking. Linking a barcode only
 links the equipment record; use **Save and confirm location** afterward to move
 it. **Register equipment** creates a new item directly at the chosen destination.
+Failed automatic registration shows an error and offers **Register barcode here**
+to retry. The retry looks up the barcode again before creating a record, so a
+lost success response or a record created by another client does not create a
+duplicate. Ambiguous existing identifiers still require choosing the correct item.
 
 The page tracks rack equipment, such as switches and independently registered
 computers. Existing OPT records derived from PDU outlet labels and their cable,
@@ -59,7 +71,8 @@ without an external barcode service.
 
 Each label encodes `LOC:<URL-encoded rack>:<shelf number>:<URL-encoded position>`.
 The `LOC:` prefix is reserved for locations. A location label fills the proposed
-destination; it still requires the save button. Rack names in labels must match
+destination. Existing equipment moves require Save; a pending new barcode is
+registered there immediately when automatic registration is on. Rack names in labels must match
 existing DCIM racks. Reprint labels after renaming a rack.
 
 Select **Whole rack** to print `RACK:<URL-encoded rack>`. It selects the rack
