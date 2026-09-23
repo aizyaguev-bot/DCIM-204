@@ -3,7 +3,7 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,17 +12,24 @@ from ..models import Device
 from .. import inventory_store as store
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
+MAIN_STORAGE = "Storage-Main"
 
 
 class Placement(BaseModel):
     rack: str = Field(min_length=1, max_length=120)
-    u: int = Field(ge=1, le=42, strict=True)
+    u: int = Field(ge=0, le=42, strict=True)
     position: str = Field(default="", max_length=80)
 
     @field_validator("rack", "position")
     @classmethod
     def trim(cls, value):
         return value.strip()
+
+    @model_validator(mode="after")
+    def storage_is_one_unit(self):
+        if self.rack == MAIN_STORAGE and (self.u != 0 or self.position):
+            raise ValueError("Main storage is one location without individual shelves or positions")
+        return self
 
 
 class Barcode(BaseModel):
@@ -34,8 +41,8 @@ class Barcode(BaseModel):
         value = value.strip()
         if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
             raise ValueError("Scan one barcode without control characters")
-        if value.upper().startswith("LOC:"):
-            raise ValueError("Shelf labels cannot be assigned to equipment")
+        if value.upper().startswith(("LOC:", "RACK:", "STORE:")):
+            raise ValueError("Location labels cannot be assigned to equipment")
         return value
 
 
@@ -54,7 +61,7 @@ class RegisterItem(Placement, Barcode):
 
 async def known_racks(db):
     result = await db.execute(select(Device.rack).where(Device.rack != ""))
-    return set(result.scalars().all())
+    return set(result.scalars().all()) | {MAIN_STORAGE}
 
 
 def view_item(rack, item):

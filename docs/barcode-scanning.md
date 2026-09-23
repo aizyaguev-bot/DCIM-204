@@ -36,9 +36,9 @@ computers. Existing OPT records derived from PDU outlet labels and their cable,
 power and KVM connections remain managed in DCIM. Inventory moves do not issue
 power commands or change those connections.
 
-## Shelf labels
+## Location labels
 
-Use **Shelf labels** to select a rack, a shelf range and an optional position,
+Use **Location labels** to select a rack, a shelf range and an optional position,
 then print. Attach the labels to the corresponding physical shelves or slots.
 Short position names keep labels easy to scan. Labels use Code 128, rendered
 locally with [JsBarcode](https://github.com/lindell/JsBarcode); generation works
@@ -48,6 +48,29 @@ Each label encodes `LOC:<URL-encoded rack>:<shelf number>:<URL-encoded position>
 The `LOC:` prefix is reserved for locations. A location label fills the proposed
 destination; it still requires the save button. Rack names in labels must match
 existing DCIM racks. Reprint labels after renaming a rack.
+
+Select **Whole rack** to print `RACK:<URL-encoded rack>`. It selects the rack
+without assigning a shelf (`u: 0`). You can then scan a shelf label to refine
+the destination before saving. The existing `LOC:` shelf labels remain valid.
+
+Select **Main storage (one label)** to print `STORE:MAIN`. It selects one shared
+`Storage-Main` inventory location for the entire storage unit, without shelves
+or positions. No new device credentials or PDU records are created. The same
+equipment ID and history are kept when moving between a shelf, a whole rack and
+main storage. Storage contents also appear in DCIM after the first item is saved.
+The physical storage unit is whichever unit receives this single label; this
+does not automatically map it to a cabinet in the 3D floor plan.
+
+Rack and storage labels require the location-label update on the VM. Older
+scanner versions only understand the `LOC:` shelf format. All three prefixes
+(`LOC:`, `RACK:`, `STORE:`) are reserved and cannot be linked to equipment.
+
+For the Lab 204 printable set, the physical model lists Rack-01 through Rack-07,
+four shelves each except Rack-05 with three: 7 rack labels, 27 shelf labels and
+one main-storage label. Rack-08 is marked planned/unplaced in that model and is
+not included. Confirm the physical shelf counts before attaching the labels.
+Print the A4 PDF at 100% / Actual size; its 92 x 46 mm cut lines are for plain
+paper or full-sheet adhesive A4, not a particular pre-cut label stock.
 
 ## Shared state and history
 

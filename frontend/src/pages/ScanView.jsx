@@ -1,15 +1,15 @@
 import { cloneElement, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import JsBarcode from "jsbarcode";
-import { loadInventory, updateInventory, locationCode, parseLocationCode } from "../api/inventory";
+import { loadInventory, updateInventory, locationCode, parseLocationCode, rackCode, mainStorageCode, MAIN_STORAGE } from "../api/inventory";
 
 const input = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-nv-400 disabled:opacity-50";
 const primary = "rounded-lg px-4 py-2.5 text-sm font-semibold bg-nv-400 text-zinc-950 hover:bg-nv-300 disabled:opacity-40";
 const secondary = "rounded-lg px-4 py-2.5 text-sm border border-zinc-700 text-zinc-200 hover:bg-zinc-800 disabled:opacity-40";
 const types = ["switch", "computer", "patchpanel", "cable", "pdu", "kvm", "ups", "other"];
 const emptyLocation = { rack: "", u: 1, position: "" };
-const place = item => ({ rack: item.rack, u: item.u || 1, position: item.shelf_position || "" });
-function where(p) { return p ? `${p.rack} · ${p.u ? `Shelf ${String(p.u).padStart(2, "0")}` : "Shelf unassigned"}${p.position ? ` · ${p.position}` : ""}` : "Not registered"; }
+const place = item => ({ rack: item.rack, u: item.u ?? 0, position: item.shelf_position || "" });
+function where(p) { return p ? p.rack === MAIN_STORAGE ? "Main storage · whole unit" : `${p.rack} · ${p.u ? `Shelf ${String(p.u).padStart(2, "0")}` : "Whole rack / no shelf"}${p.position ? ` · ${p.position}` : ""}` : "Not registered"; }
 function when(value) { return value ? new Date(value).toLocaleString() : "Not confirmed by scan yet"; }
 
 function Field({ label, children }) {
@@ -18,12 +18,13 @@ function Field({ label, children }) {
 }
 
 function LocationFields({ value, onChange, racks, disabled }) {
+  const storage = value.rack === MAIN_STORAGE;
   return <div className="grid gap-3 sm:grid-cols-[1fr_110px_1fr]">
-    <Field label="Rack"><select aria-label="Destination rack" className={input} disabled={disabled} value={value.rack} onChange={e => onChange({ ...value, rack: e.target.value })}>
-      <option value="">Choose rack…</option>{racks.map(r => <option key={r}>{r}</option>)}
+    <Field label="Rack / storage"><select aria-label="Destination rack" className={input} disabled={disabled} value={value.rack} onChange={e => onChange({ rack: e.target.value, u: 0, position: "" })}>
+      <option value="">Choose location…</option>{racks.map(r => <option key={r} value={r}>{r === MAIN_STORAGE ? "Main storage" : r}</option>)}
     </select></Field>
-    <Field label="Shelf / U"><input aria-label="Destination shelf" className={input} disabled={disabled} type="number" min="1" max="42" value={value.u} onChange={e => onChange({ ...value, u: e.target.value === "" ? "" : Number(e.target.value) })}/></Field>
-    <Field label="Position on shelf"><input aria-label="Position on shelf" className={input} disabled={disabled} maxLength={80} value={value.position} placeholder="e.g. left / front / slot A" onChange={e => onChange({ ...value, position: e.target.value })}/></Field>
+    <Field label={storage ? "Whole unit" : "Shelf / U (0 = whole rack)"}><input aria-label="Destination shelf" className={input} disabled={disabled || storage} type="number" min="0" max="42" value={value.u} onChange={e => onChange({ ...value, u: e.target.value === "" ? "" : Number(e.target.value) })}/></Field>
+    <Field label="Position on shelf"><input aria-label="Position on shelf" className={input} disabled={disabled || storage} maxLength={80} value={value.position} placeholder="e.g. left / front / slot A" onChange={e => onChange({ ...value, position: e.target.value })}/></Field>
   </div>;
 }
 
@@ -34,25 +35,28 @@ function BarcodeSvg({ value }) {
 }
 
 function ShelfLabels({ racks, onClose }) {
-  const [rack, setRack] = useState(racks[0] || "");
+  const physicalRacks = racks.filter(r => r !== MAIN_STORAGE);
+  const [rack, setRack] = useState(physicalRacks[0] || "");
+  const [kind, setKind] = useState("shelf");
   const [first, setFirst] = useState(1);
   const [last, setLast] = useState(4);
   const [position, setPosition] = useState("");
-  const valid = rack && Number.isInteger(first) && Number.isInteger(last) && first >= 1 && last <= 42 && last >= first;
-  const labels = valid ? Array.from({ length: last - first + 1 }, (_, i) => ({ rack, u: first + i, position: position.trim() })) : [];
+  const valid = kind === "storage" || rack && (kind === "rack" || Number.isInteger(first) && Number.isInteger(last) && first >= 1 && last <= 42 && last >= first);
+  const labels = !valid ? [] : kind === "storage" ? [{ rack: MAIN_STORAGE, u: 0, position: "" }] : kind === "rack" ? [{ rack, u: 0, position: "" }] : Array.from({ length: last - first + 1 }, (_, i) => ({ rack, u: first + i, position: position.trim() }));
   const cards = labels.map(label => <div key={label.u} className="scan-label-card bg-white text-black rounded-lg p-4">
-    <strong>{where(label)}</strong><BarcodeSvg value={locationCode(label.rack, label.u, label.position)}/><small>Shelf 01 is the top shelf · Lab Manager</small>
+    <strong>{where(label)}</strong><BarcodeSvg value={label.rack === MAIN_STORAGE ? mainStorageCode : label.u === 0 ? rackCode(label.rack) : locationCode(label.rack, label.u, label.position)}/><small>{kind === "shelf" ? "Shelf 01 is the top shelf" : "Whole location - no shelf assigned"} · Lab Manager</small>
   </div>);
   return <>
-    <div role="dialog" aria-modal="true" aria-label="Shelf labels" className="fixed inset-0 z-50 bg-black/80 p-4 flex items-center justify-center" onKeyDown={e => { if (e.key === "Escape") onClose(); }}>
+    <div role="dialog" aria-modal="true" aria-label="Location labels" className="fixed inset-0 z-50 bg-black/80 p-4 flex items-center justify-center" onKeyDown={e => { if (e.key === "Escape") onClose(); }}>
       <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 max-w-3xl w-full max-h-[90vh] overflow-auto space-y-4">
-        <div className="flex justify-between gap-4 items-center"><h2 className="text-lg font-semibold">Print shelf labels</h2><button className={secondary} onClick={onClose}>Close</button></div>
-        <p className="text-sm text-zinc-400">Attach each label to its shelf. Scan equipment first, then scan its destination label. Use a position to label a specific spot on the shelf.</p>
+        <div className="flex justify-between gap-4 items-center"><h2 className="text-lg font-semibold">Print location labels</h2><button className={secondary} onClick={onClose}>Close</button></div>
+        <p className="text-sm text-zinc-400">Scan equipment first, then its destination label. Rack labels select the whole rack; main storage has one label for the entire unit. Save to confirm the move.</p>
+        <Field label="Label type"><select className={input} value={kind} onChange={e => setKind(e.target.value)}><option value="shelf">Shelf</option><option value="rack">Whole rack</option><option value="storage">Main storage (one label)</option></select></Field>
         <div className="grid sm:grid-cols-4 gap-3">
-          <Field label="Rack"><select className={input} value={rack} onChange={e => setRack(e.target.value)}>{racks.map(r => <option key={r}>{r}</option>)}</select></Field>
-          <Field label="First shelf"><input className={input} type="number" min="1" max="42" value={first} onChange={e => setFirst(Number(e.target.value))}/></Field>
-          <Field label="Last shelf"><input className={input} type="number" min="1" max="42" value={last} onChange={e => setLast(Number(e.target.value))}/></Field>
-          <Field label="Position (optional)"><input className={input} value={position} maxLength={80} onChange={e => setPosition(e.target.value)}/></Field>
+          <Field label="Rack"><select className={input} disabled={kind === "storage"} value={rack} onChange={e => setRack(e.target.value)}>{physicalRacks.map(r => <option key={r}>{r}</option>)}</select></Field>
+          <Field label="First shelf"><input className={input} disabled={kind !== "shelf"} type="number" min="1" max="42" value={first} onChange={e => setFirst(Number(e.target.value))}/></Field>
+          <Field label="Last shelf"><input className={input} disabled={kind !== "shelf"} type="number" min="1" max="42" value={last} onChange={e => setLast(Number(e.target.value))}/></Field>
+          <Field label="Position (optional)"><input className={input} disabled={kind !== "shelf"} value={position} maxLength={80} onChange={e => setPosition(e.target.value)}/></Field>
         </div>
         <button className={primary} disabled={!valid} onClick={() => window.print()}>Print labels</button>
         <div className="grid sm:grid-cols-2 gap-3">{cards}</div>
@@ -123,7 +127,7 @@ export default function ScanView() {
     await run(async () => {
       const location = parseLocationCode(code);
       if (location) {
-        if (!selected && !unknown) throw new Error("Scan an equipment barcode before scanning a shelf label.");
+        if (!selected && !unknown) throw new Error("Scan an equipment barcode before scanning a location label.");
         if (!racks.includes(location.rack)) throw new Error("This rack is not in the inventory. Add it in DCIM first.");
         setDestination(location); setScan(""); setMessage("Destination selected. Review it below, then save to confirm.");
         return;
@@ -171,18 +175,18 @@ export default function ScanView() {
     });
   }
 
-  const locationValid = destination.rack && Number.isInteger(destination.u) && destination.u >= 1 && destination.u <= 42;
+  const locationValid = destination.rack && Number.isInteger(destination.u) && destination.u >= 0 && destination.u <= 42 && (destination.rack !== MAIN_STORAGE || destination.u === 0 && !destination.position);
   const neighbors = items.filter(i => i.id !== selected?.id && i.rack === destination.rack && i.u === destination.u);
   const visible = items.filter(i => [i.name, i.barcode, i.serial_number, i.rack, i.shelf_position].some(v => String(v || "").toLowerCase().includes(filter.toLowerCase())));
 
   return <main className="flex-1 max-w-[1400px] w-full mx-auto px-4 sm:px-6 py-6 space-y-5">
     <div className="flex flex-wrap justify-between items-start gap-3">
       <div><h1 className="text-2xl font-semibold">Scan & Track</h1><p className="text-sm text-zinc-400 mt-1">Equipment → rack → exact shelf position. Every saved move stays with the item.</p></div>
-      <div className="flex gap-2"><button className={secondary} disabled={busy} onClick={reload}>Refresh</button><button className={secondary} disabled={!racks.length || busy} onClick={() => setLabelsOpen(true)}>Shelf labels</button></div>
+      <div className="flex gap-2"><button className={secondary} disabled={busy} onClick={reload}>Refresh</button><button className={secondary} disabled={!racks.length || busy} onClick={() => setLabelsOpen(true)}>Location labels</button></div>
     </div>
     <section className="bg-zinc-900/60 rounded-2xl border border-zinc-800 p-5 space-y-3">
       <form onSubmit={scanCode} className="flex flex-wrap gap-3 items-end">
-        <div className="flex-1 min-w-[220px]"><Field label="Scan equipment or a shelf label"><input ref={inputRef} aria-label="Scan barcode" value={scan} onChange={e => setScan(e.target.value)} onKeyDown={e => { if (e.key === "Tab" && scan.trim()) scanCode(e); }} disabled={busy || labelsOpen} autoComplete="off" spellCheck={false} maxLength={600} placeholder="Click here, then scan…" className={`${input} text-lg font-mono py-3`}/></Field></div>
+        <div className="flex-1 min-w-[220px]"><Field label="Scan equipment or a location label"><input ref={inputRef} aria-label="Scan barcode" value={scan} onChange={e => setScan(e.target.value)} onKeyDown={e => { if (e.key === "Tab" && scan.trim()) scanCode(e); }} disabled={busy || labelsOpen} autoComplete="off" spellCheck={false} maxLength={600} placeholder="Click here, then scan…" className={`${input} text-lg font-mono py-3`}/></Field></div>
         <button type="submit" className={primary} disabled={busy || !scan.trim()}>{busy ? "Please wait…" : "Find barcode"}</button>
         <button type="button" className={secondary} onClick={() => inputRef.current?.focus()} disabled={busy}>Focus scanner</button>
       </form>
