@@ -2,7 +2,7 @@ import sys, os, base64, secrets, asyncio, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
@@ -11,7 +11,8 @@ import pathlib
 
 from .database import init_db, AsyncSessionLocal
 from .models import Device
-from .routers import devices, pdus, kvms, kvm_proxy
+from .routers import devices, pdus, kvms, kvm_proxy, inventory
+from . import inventory_store
 from .config import get_settings
 from sqlalchemy import select
 
@@ -23,7 +24,6 @@ _CHANGELOG_FILE      = pathlib.Path(__file__).parent.parent.parent / "CHANGELOG.
 _RACK_POSITIONS_FILE = pathlib.Path(__file__).parent.parent / "rack_positions.json"
 _RACK_SLOTS_FILE     = pathlib.Path(__file__).parent.parent / "rack_slots.json"
 _SWITCH_ASSIGN_FILE  = pathlib.Path(__file__).parent.parent / "switch_assignments.json"
-_RACK_ITEMS_FILE     = pathlib.Path(__file__).parent.parent / "rack_items.json"
 _RACK_OVERRIDES_FILE = pathlib.Path(__file__).parent.parent / "rack_overrides.json"
 _OPT_OWNERS_FILE     = pathlib.Path(__file__).parent.parent / "opt_owners.json"
 _CHILLERS_FILE       = pathlib.Path(__file__).parent.parent / "chillers.json"
@@ -59,7 +59,7 @@ async def basic_auth(request: Request, call_next):
     password = get_settings().lab_manager_password
     if not password:
         return await call_next(request)
-    if request.url.path in ("/api/version", "/api/changelog", "/api/rack-positions", "/api/rack-slots", "/api/switch-assignments", "/api/rack-items", "/api/rack-overrides", "/api/opt-owners", "/api/chillers"):  # public endpoints
+    if request.method in ("GET", "HEAD") and request.url.path in ("/api/version", "/api/changelog", "/api/rack-positions", "/api/rack-slots", "/api/switch-assignments", "/api/rack-items", "/api/rack-overrides", "/api/opt-owners", "/api/chillers"):  # public reads
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
@@ -81,12 +81,14 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["ETag"],
 )
 
 app.include_router(devices.router)
 app.include_router(pdus.router)
 app.include_router(kvms.router)
 app.include_router(kvm_proxy.router)
+app.include_router(inventory.router)
 
 
 @app.get("/api/version")
@@ -157,19 +159,17 @@ async def save_switch_assignments(payload: dict):
 
 
 @app.get("/api/rack-items")
-async def get_rack_items():
-    try:
-        return json.loads(_RACK_ITEMS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+async def get_rack_items(response: Response):
+    data = inventory_store.read_items()
+    response.headers["ETag"] = inventory_store.revision(data)
+    response.headers["Cache-Control"] = "no-store"
+    return data
 
 @app.put("/api/rack-items")
-async def save_rack_items(payload: dict):
-    try:
-        _RACK_ITEMS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return {"ok": True}
+async def save_rack_items(payload: dict, response: Response, if_match: str | None = Header(default=None)):
+    saved = inventory_store.replace_items(payload, if_match)
+    response.headers["ETag"] = inventory_store.revision(saved)
+    return saved
 
 
 @app.get("/api/rack-overrides")

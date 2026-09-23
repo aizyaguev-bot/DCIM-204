@@ -1,5 +1,15 @@
 # Lab Manager
 
+## Barcode scanning and equipment location
+
+The **Scan & Track** tab supports USB / Bluetooth keyboard scanners, existing
+serial numbers, barcode linking, rack and shelf positions, printable shelf labels
+and movement history shared with DCIM and the 3D Twin.
+See [scanner setup, installation and API compatibility](docs/barcode-scanning.md).
+
+The Phase 1 notes below describe the original mockup; the current application is
+in `backend/` and `frontend/`.
+
 One pane of glass for the lab — control Raritan **PX4 PDUs** and view/launch **Dominion KX III / LX II KVMs** without juggling per-device browser tabs.
 
 ## Current state — Phase 1: UI mockup

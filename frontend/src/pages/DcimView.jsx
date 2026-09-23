@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
+import { loadRackItems, saveRackItems } from "../api/inventory";
 
 function Portal({ children }) {
   return createPortal(children, document.body);
@@ -43,6 +44,7 @@ const Spinner = () => (
 // ─── custom item types ────────────────────────────────────────────────────────
 const ITEM_TYPES = {
   switch:     { label: "Switch",       bg: "bg-cyan-900/25",   border: "border-cyan-800/50",   text: "text-cyan-300"   },
+  computer:   { label: "Computer",     bg: "bg-blue-900/25",   border: "border-blue-800/50",   text: "text-blue-300"   },
   patchpanel: { label: "Patch Panel",  bg: "bg-slate-800/40",  border: "border-slate-700/50",  text: "text-slate-300"  },
   cable:      { label: "Cable Mgmt",   bg: "bg-zinc-800/30",   border: "border-zinc-700/40",   text: "text-zinc-400"   },
   pdu:        { label: "PDU",          bg: "bg-amber-900/20",  border: "border-amber-800/50",  text: "text-amber-300"  },
@@ -89,22 +91,9 @@ function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
     groups.get(u).push({ kind: "server", data: s });
   });
 
-  // Place each custom item next to the nearest server; if no servers, keep own U
-  const serverUList = sorted.map(s => ({ id: s.id, u: uMap[s.id] }));
+  // Equipment belongs on its recorded shelf, including shelves without an OPT.
   custom.forEach(item => {
-    let u;
-    if (serverUList.length === 0) {
-      u = item.u || 99;
-    } else {
-      const itemU = item.u || 1;
-      let nearestU = serverUList[0].u;
-      let minDist = Math.abs(nearestU - itemU);
-      for (const sv of serverUList) {
-        const d = Math.abs(sv.u - itemU);
-        if (d < minDist) { minDist = d; nearestU = sv.u; }
-      }
-      u = nearestU;
-    }
+    const u = Number(item.u) || 0;
     if (!groups.has(u)) groups.set(u, []);
     groups.get(u).push({ kind: "custom", data: item });
   });
@@ -115,6 +104,7 @@ function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
   for (let u = 1; u <= totalU; u++) {
     rows.push({ u, items: groups.get(u) || [] });
   }
+  if (groups.has(0)) rows.push({ u: 0, items: groups.get(0) });
   return { rows, uMap, sorted };
 }
 
@@ -244,6 +234,7 @@ function EquipCell({ item, onSelect, onRename }) {
         <span className={`text-[7px] font-bold uppercase tracking-widest ${meta.text} opacity-60 leading-tight`}>{meta.label}</span>
         <InlineName value={item.name} onRename={onRename}
           className={`text-[9px] font-mono font-semibold ${meta.text} leading-tight block truncate`}/>
+        {(item.shelf_position || item.serial_number || item.barcode) && <span className="text-[8px] text-zinc-400 truncate leading-tight" title={[item.shelf_position, item.serial_number, item.barcode].filter(Boolean).join(" · ")}>{[item.shelf_position, item.serial_number || item.barcode].filter(Boolean).join(" · ")}</span>}
         {item.notes && <span className="text-[7px] text-zinc-600 truncate leading-tight">{item.notes}</span>}
       </div>
     </div>
@@ -275,7 +266,7 @@ function USlotGroup({ u, items, switchAssignments, optOwners, chillerAtU, onChil
     <div data-u-slot={u} style={{ minHeight: SLOT_H }} className="flex items-stretch border-b border-zinc-900/40 last:border-0">
       <div className="w-10 flex-shrink-0 bg-zinc-900/70 border-r border-zinc-800/50 flex flex-col items-center justify-center select-none gap-0.5">
         <div className="w-1 h-1 rounded-full bg-zinc-700/40 flex-shrink-0"/>
-        <span className="text-[8px] font-mono font-bold text-zinc-500">{String(u).padStart(2,"0")}</span>
+        <span title={u ? `Shelf ${u}` : "Shelf unassigned"} className="text-[8px] font-mono font-bold text-zinc-500">{u ? String(u).padStart(2,"0") : "—"}</span>
         <div className="w-1 h-1 rounded-full bg-zinc-700/40 flex-shrink-0"/>
       </div>
       {serverItem ? (
@@ -737,6 +728,12 @@ function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelet
           <div><SL>Notes</SL>
             <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 resize-none"/>
+          </div>
+          <div className="text-xs text-zinc-400 space-y-1">
+            {item.serial_number && <div>SN: <span className="font-mono">{item.serial_number}</span></div>}
+            {item.barcode && <div>Barcode: <span className="font-mono">{item.barcode}</span></div>}
+            {item.shelf_position && <div>Position: {item.shelf_position}</div>}
+            <div className="text-zinc-500">Use Scan & Track for barcode linking and shelf positions.</div>
           </div>
           {allRacks && allRacks.filter(r => r !== rackName).length > 0 && (
             <div><SL>Move to rack</SL>
@@ -1617,13 +1614,8 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
 
   async function handleSaveEquip(rackName, item) {
     const updated = { ...customItems, [rackName]: [...(customItems[rackName]||[]), item] };
-    const res = await fetch("/api/rack-items", {
-      method: "PUT",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify(updated),
-    });
-    if (!res.ok) throw new Error(`Server returned ${res.status}`);
-    onCustomItemsChange(updated);
+    const saved = await saveRackItems(updated, customItems);
+    onCustomItemsChange(saved);
     setAddEquipFor(null);
   }
 
@@ -1943,7 +1935,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       fetch("/api/rack-positions").then(r=>r.json()).catch(()=>({})),
       fetch("/api/rack-slots").then(r=>r.json()).catch(()=>({})),
       fetch("/api/switch-assignments").then(r=>r.json()).catch(()=>({})),
-      fetch("/api/rack-items").then(r=>r.json()).catch(()=>({})),
+      loadRackItems().catch(()=>({})),
       fetch("/api/rack-overrides").then(r=>r.json()).catch(()=>({})),
       fetch("/api/opt-owners").then(r=>r.json()).catch(()=>({})),
       fetch("/api/chillers").then(r=>r.json()).catch(()=>({units:[],connections:[]})),
@@ -2060,8 +2052,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
     if (!rackName) return;
     const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===item.id ? {...i, name: newName} : i) };
-    setCustomItems(updated);
-    await fetch("/api/rack-items",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
+    setCustomItems(await saveRackItems(updated, customItems));
   }, [customItems]);
 
   // Save custom item edits
@@ -2069,10 +2060,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
     if (!rackName) return;
     const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===item.id ? item : i) };
-    setCustomItems(updated);
+    const saved = await saveRackItems(updated, customItems);
+    setCustomItems(saved);
     // update selectedCustom so panel reflects changes
-    setSelectedCustom(item);
-    await fetch("/api/rack-items",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
+    setSelectedCustom(saved[rackName].find(i => i.id === item.id));
   }, [customItems]);
 
   // Delete custom item
@@ -2080,8 +2071,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
     if (!rackName) return;
     const updated = { ...customItems, [rackName]: customItems[rackName].filter(i => i.id !== item.id) };
-    setCustomItems(updated);
-    await fetch("/api/rack-items",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
+    setCustomItems(await saveRackItems(updated, customItems));
   }, [customItems]);
 
   // Move custom item to a different rack
@@ -2093,8 +2083,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       [srcRack]: customItems[srcRack].filter(i => i.id !== item.id),
       [targetRack]: [...(customItems[targetRack] || []), { ...item, u: null }],
     };
-    setCustomItems(updated);
-    await fetch("/api/rack-items",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
+    setCustomItems(await saveRackItems(updated, customItems));
   }, [customItems]);
 
   // Derive live server data from servers list — no stale closure race possible

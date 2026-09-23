@@ -18,7 +18,7 @@
   const TYPE_BODY = { opt: '#2b2d33', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#1a1d24', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
   const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
   const CABLE_COLORS = ['#d92b2b', '#d92b2b', '#1a1a1a', '#d92b2b', '#22c1a6', '#d92b2b', '#f4f4f5'];
-  const EQUIP_LABEL = { switch: 'Switch', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
+  const EQUIP_LABEL = { switch: 'Switch', computer: 'Computer', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
   const POLL_MS = 15000;
 
   const LS = {
@@ -503,7 +503,7 @@
     const setups = d.setups.map(s => ({ ...s, dcimRack: dcimRackOf(s) }));
     const setupByRack = {}; setups.forEach(s => { if (s.dcimRack) setupByRack[s.dcimRack] = s.id; });
     const shelvesOf = sid => d.shelves.filter(sh => sh.setup === sid).sort((a, b) => a.level - b.level);
-    const shelfForU = (sid, u) => { const sh = shelvesOf(sid); if (!sh.length) return null; const n = sh.length; const idx = uTopDown ? (n - 1 - ((u - 1) % n)) : ((u - 1) % n); return sh[idx].id; };
+    const shelfForU = (sid, u) => { const sh = shelvesOf(sid); const n = sh.length; if (!Number.isInteger(Number(u)) || u < 1 || u > n) return null; const idx = uTopDown ? n - Number(u) : Number(u) - 1; return sh[idx].id; };
 
     let items = d.items.map(it => ({ ...it, ...pickOv(it.id) }));
 
@@ -565,7 +565,7 @@
       // 3) rack_items (custom equipment: switches, patch panels …)
       Object.entries(live.rackItems || {}).forEach(([rack, list]) => (list || []).forEach(ci => {
         const sid = setupByRack[rack] || null; const id = 'LIVE-' + ci.id;
-        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid ? shelfForU(sid, ci.u || 1) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
+        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
       }));
       // 4) chillers from DCIM
       if (live.chillers?.units?.length) {
@@ -604,7 +604,7 @@
   // ───────────────────────────────────────────────────────────── filters / search
   function matchesQuery(rec, query) {
     const q = query.toLowerCase();
-    return [rec.id, rec.def.name, rec.item?.serial_number || rec.def.serial_number].some(value => String(value || '').toLowerCase().includes(q));
+    return [rec.id, rec.def.name, rec.item?.serial_number || rec.def.serial_number, rec.item?.barcode, rec.item?.shelf_position].some(value => String(value || '').toLowerCase().includes(q));
   }
   function matches(rec) {
     const f = S.filters;
@@ -777,6 +777,8 @@
     html += `<div class="sec"><div class="sec-h">Identity</div><div class="kv">
       <span class="k">Category</span><span class="v">${rec.cat}${it?.typeLabel ? ' · ' + esc(it.typeLabel) : it?.type ? ' · ' + esc(it.type) : def.type ? ' · ' + esc(def.type) : ''}</span>
       ${it?.serial_number ? `<span class="k">SN</span><span class="v mono">${esc(it.serial_number)}</span>` : ''}
+      ${it?.barcode ? `<span class="k">Barcode</span><span class="v mono">${esc(it.barcode)}</span>` : ''}
+      ${it?.shelf_position ? `<span class="k">Shelf position</span><span class="v">${esc(it.shelf_position)}</span>` : ''}
       <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${it.live.state}${it.live.watts ? ' · ' + Math.round(it.live.watts) + ' W' : ''}</span>` : ''}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(ov(rec.id).dcimRack !== undefined ? 'medium' : def.dcimMappingConfidence)}` : ''}</span>
       <span class="k">Owner</span><span class="v">${esc(it?.owner || def.owner || '—')}${it?.live?.owner ? ' <span class="muted small">(DCIM)</span>' : ''}</span>
@@ -950,12 +952,16 @@
 
   // ───────────────────────────────────────────────────────────── live backend
   function pill(cls, text) { const p = $('#livePill'); p.className = 'live-pill ' + cls; $('#liveText').textContent = text; }
+  const rackItemVersions = new WeakMap();
   async function api(path, opts = {}) {
     const base = (S.settings.url || '').replace(/\/$/, '');
-    const headers = {}; if (opts.body) headers['Content-Type'] = 'application/json'; if (S.settings.pass) headers.Authorization = 'Basic ' + btoa('x:' + S.settings.pass);
+    const headers = { ...(opts.headers || {}) }; if (opts.body) headers['Content-Type'] = 'application/json'; if (S.settings.pass) headers.Authorization = 'Basic ' + btoa('x:' + S.settings.pass);
     const r = await fetch(base + path, { ...opts, headers });
     if (!r.ok) throw new Error(`${r.status} ${await r.text().catch(() => '')}`.trim());
-    if (r.status === 204) return null; return r.json();
+    if (r.status === 204) return null;
+    const data = await r.json();
+    if (path === '/api/rack-items' && data && typeof data === 'object') rackItemVersions.set(data, r.headers.get('ETag'));
+    return data;
   }
   const INVENTORY_PATHS = {
     devices: '/api/devices/', rackSlots: '/api/rack-slots', rackOrder: '/api/rack-positions',
@@ -1315,7 +1321,9 @@
     Object.keys(items).forEach(r => { const i = (items[r] || []).findIndex(x => String(x.id) === ciId); if (i >= 0) { ci = items[r][i]; items[r].splice(i, 1); } });
     if (!ci) throw new Error('rack item not found in Lab Manager data');
     ci.u = u; (items[rack] = items[rack] || []).push(ci);
-    await api('/api/rack-items', { method: 'PUT', body: JSON.stringify(items) }); S.live.rackItems = items;
+    const version = rackItemVersions.get(S.live.rackItems);
+    if (!version) throw new Error('Refresh the backend connection before moving equipment');
+    const saved = await api('/api/rack-items', { method: 'PUT', headers: { 'If-Match': version }, body: JSON.stringify(items) }); S.live.rackItems = saved;
     return `${rack} · U${u}`;
   }
   async function finishMove(target) {
