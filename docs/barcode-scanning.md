@@ -19,17 +19,30 @@ The physical scanner must support the barcode symbology on the equipment.
 
 ## Find and track equipment
 
+- Scan the destination shelf, whole-rack or main-storage label first. The page
+  displays the selected destination and asks for the equipment barcode.
 - Scan an existing serial number, assigned barcode, or equipment ID to find its
   record. Matches are exact, case-insensitive strings; leading zeros are kept.
+  The selected destination is kept instead of being replaced by the item's
+  current saved location.
 - Unknown codes can be linked to an existing rack item. Match the name, ID,
   rack and shelf before linking. Its serial number and other properties remain.
 - To register equipment that is not in DCIM, enter its name, type, rack, shelf
   and optional position. It will appear in the DCIM rack view too.
-- Scan the destination shelf label, or select the rack and shelf manually.
+- To change the destination, scan another label or select the rack and shelf manually.
   **Shelf 01 / U01 means the top shelf.** The optional position identifies a
   particular spot, for example `left / front`, `right`, or `slot A`.
 - Review the proposed destination and click **Save and confirm location**.
   Scanning alone performs a lookup; it does not move equipment.
+- The destination stays selected after saving, so scan another unit to place it
+  there, then confirm that unit separately. Scan a new location label to change
+  the destination. **Clear destination** clears the destination and pending item.
+  Reloading the page or leaving Scan & Track also clears the selected destination.
+
+Equipment-first scanning still works. When a destination is selected first,
+unknown barcodes keep it during registration and linking. Linking a barcode only
+links the equipment record; use **Save and confirm location** afterward to move
+it. **Register equipment** creates a new item directly at the chosen destination.
 
 The page tracks rack equipment, such as switches and independently registered
 computers. Existing OPT records derived from PDU outlet labels and their cable,
