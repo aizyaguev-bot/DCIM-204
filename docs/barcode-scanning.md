@@ -92,6 +92,21 @@ Download the installer from that same reviewed commit first. It:
 The installer keeps the existing inventory and Python environment. Reload open
 browser tabs after installation. It does not configure startup after a VM reboot.
 
+If installation stops because of local `frontend/package-lock.json` edits, use
+`--backup-frontend-lock` to save that file under the private backup's
+`local-source/frontend/package-lock.json` and install the reviewed lockfile.
+The bundled frontend is already built; no npm install is performed on the VM.
+The option preserves the original bytes for review and restores them if the
+update fails. Staged changes and edits to any other source file still stop the
+installer before the running backend is stopped.
+
+For the barcode feature branch, fetch the installer and run it from the same
+commit (without sudo):
+
+```bash
+cd "$HOME/DCIM-204" && git fetch origin feat/barcode-inventory && git show FETCH_HEAD:scripts/install-barcode.py | backend/.venv/bin/python - "$(git rev-parse FETCH_HEAD)" --backup-frontend-lock
+```
+
 ## API compatibility
 
 `GET /api/rack-items` still returns the existing rack-to-items mapping and now

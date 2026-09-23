@@ -3,6 +3,8 @@
 
 No sudo, package installation, database seeding, or remote Git write is performed.
 The checkout must be clean except for live twin data and the deployment version.
+Use --backup-frontend-lock to preserve a locally modified npm lockfile in the
+backup and install the reviewed lockfile alongside the prebuilt frontend.
 """
 import argparse
 from contextlib import contextmanager
@@ -22,6 +24,7 @@ import urllib.request
 
 REPOSITORY = "https://github.com/aizyaguev-bot/DCIM-204.git"
 LIVE_TRACKED = {"lab-twin/lab-data.json", "backend/version.txt"}
+FRONTEND_LOCK = "frontend/package-lock.json"
 
 
 def git(root, *args):
@@ -153,7 +156,7 @@ def install_lock(root):
         yield
 
 
-def install(root, commit):
+def install(root, commit, backup_frontend_lock=False):
     root = root.resolve()
     if Path(git(root, "rev-parse", "--show-toplevel")).resolve() != root:
         raise RuntimeError("Choose the DCIM-204 Git repository itself")
@@ -165,8 +168,14 @@ def install(root, commit):
         if file_set(root, "diff", "--cached", "--name-only"):
             raise RuntimeError("There are staged changes. Commit or unstage them before installing.")
         dirty = file_set(root, "diff", "--name-only", "HEAD") - LIVE_TRACKED
+        local_source = {FRONTEND_LOCK} & dirty if backup_frontend_lock else set()
+        dirty -= local_source
         if dirty:
             raise RuntimeError("Local source edits need review before installing: " + ", ".join(sorted(dirty)))
+        for relative in local_source:
+            path = root / relative
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError("Only an existing regular frontend/package-lock.json can be backed up")
         print("Fetching the reviewed update…", flush=True)
         git(root, "fetch", REPOSITORY, commit)
         git(root, "merge-base", "--is-ancestor", old, commit)
@@ -200,11 +209,21 @@ def install(root, commit):
         safe_extract(archive, source)
         print("Checking startup with the VM's Python environment…", flush=True)
         smoke_test(source, python, backup)
+        for relative in local_source:
+            path = root / relative
+            original = path.read_bytes()
+            saved = backup / "local-source" / relative
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, saved)
+            if saved.read_bytes() != original or path.read_bytes() != original:
+                raise RuntimeError("The local lockfile changed during backup; installation stopped")
+            print("Local npm lockfile saved to: " + str(saved), flush=True)
         print("Preflight passed. Saving the current inventory and updating…", flush=True)
 
         stopped = False
         updated = False
         new_process = None
+        cleared_source = set()
         try:
             if pids:
                 stop_existing(pids[0])
@@ -221,6 +240,11 @@ def install(root, commit):
                     (root / relative).unlink()  # Its verified copy is in the private backup above.
                 elif relative in file_set(root, "diff", "--name-only", "HEAD"):
                     git(root, "checkout", "--", relative)
+            for relative in local_source:
+                if (root / relative).read_bytes() != (backup / "local-source" / relative).read_bytes():
+                    raise RuntimeError("The local lockfile changed after backup; installation stopped")
+                cleared_source.add(relative)
+                git(root, "checkout", "--", relative)
             git(root, "merge", "--ff-only", "--no-edit", commit)
             updated = True
             restore_live(root, backup)
@@ -238,6 +262,8 @@ def install(root, commit):
                     raise RuntimeError("New local source edits prevent automatic rollback. Backup: " + str(backup))
                 git(root, "reset", "--hard", old)
             restore_live(root, backup)
+            for relative in cleared_source:
+                shutil.copy2(backup / "local-source" / relative, root / relative)
             if stopped:
                 previous = start(root, python, root / "backend" / "server.log")
                 wait_ready(8000, previous)
@@ -252,12 +278,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("commit", help="Reviewed full Git commit SHA")
     parser.add_argument("--project", type=Path, default=Path.home() / "DCIM-204")
+    parser.add_argument(
+        "--backup-frontend-lock", action="store_true",
+        help="Back up local frontend/package-lock.json edits and replace them with the reviewed version",
+    )
     args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("Run this installer inside the Linux VM")
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("Pass a full 40-character commit SHA")
-    install(args.project, args.commit)
+    install(args.project, args.commit, backup_frontend_lock=args.backup_frontend_lock)
 
 
 if __name__ == "__main__":
