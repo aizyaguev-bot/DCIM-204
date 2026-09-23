@@ -127,6 +127,11 @@ Download the installer from that same reviewed commit first. It:
 
 The installer keeps the existing inventory and Python environment. Reload open
 browser tabs after installation. It does not configure startup after a VM reboot.
+Shutdown checks distinguish a running process from an exited process still listed
+as a Linux zombie. The installer waits up to 20 seconds for graceful shutdown and
+checks that port 8000 is free before changing application files. It does not
+force-kill an existing backend. If shutdown finishes while an error is raised,
+rollback restarts the previous backend when the port is free.
 
 If installation stops because of local `frontend/package-lock.json` edits, use
 `--backup-frontend-lock` to save that file under the private backup's

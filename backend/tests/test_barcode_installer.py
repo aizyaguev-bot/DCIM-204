@@ -60,6 +60,7 @@ def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(installer, "git", local_git)
     monkeypatch.setattr(installer, "install_lock", lambda root: nullcontext())
     monkeypatch.setattr(installer, "service_pids", lambda root: [12345])
+    monkeypatch.setattr(installer, "port_occupied", lambda: False)
     monkeypatch.setattr(installer, "stop_existing", lambda pid: events.append("stop"))
     monkeypatch.setattr(installer, "smoke_test", lambda *args: events.append("preflight"))
     class Process:
@@ -88,6 +89,85 @@ def test_installer_preserves_inventory_env_and_live_twin(deployment):
     assert len(backups) == 1
     assert (backups[0] / "runtime" / "backend" / "lab_manager.db").read_bytes() == b"existing database"
     assert events == ["preflight", "stop", "start"]
+
+
+@pytest.mark.parametrize("state,expected", [("S", "123456"), ("R", "123456"), ("Z", None), ("X", None)])
+def test_process_state_distinguishes_running_from_unreaped_zombie(tmp_path, state, expected):
+    process = tmp_path / "12345"
+    process.mkdir()
+    fields = [state] + ["0"] * 18 + ["123456"]
+    (process / "stat").write_text("12345 (python ) worker) " + " ".join(fields))
+    assert installer.active_process(12345, tmp_path) == expected
+    assert installer.active_process(99999, tmp_path) is None
+
+
+def test_unreadable_process_state_does_not_count_as_stopped(tmp_path):
+    process = tmp_path / "12345"
+    process.mkdir()
+    (process / "stat").write_text("invalid process status")
+    with pytest.raises(RuntimeError, match="process state"):
+        installer.active_process(12345, tmp_path)
+
+
+@pytest.mark.parametrize("final_state", [None, "different-process-start-time"])
+def test_shutdown_completes_when_process_exits_or_pid_is_reused(monkeypatch, final_state):
+    states = iter(["original-start-time", "original-start-time", final_state])
+    signals = []
+    monkeypatch.setattr(installer, "active_process", lambda pid: next(states))
+    monkeypatch.setattr(installer.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(installer.time, "sleep", lambda delay: None)
+    installer.stop_existing(12345)
+    assert signals == [(12345, installer.signal.SIGTERM)]
+
+
+def test_already_stopped_backend_is_not_signalled(monkeypatch):
+    monkeypatch.setattr(installer, "active_process", lambda pid: None)
+    monkeypatch.setattr(installer.os, "kill", lambda *args: pytest.fail("Stopped process must not be signalled"))
+    installer.stop_existing(12345)
+
+
+def test_backend_exit_before_signal_is_success(monkeypatch):
+    monkeypatch.setattr(installer, "active_process", lambda pid: "original-start-time")
+    def exited(*args):
+        raise ProcessLookupError()
+    monkeypatch.setattr(installer.os, "kill", exited)
+    installer.stop_existing(12345)
+
+
+def test_running_backend_is_not_force_killed_on_timeout(monkeypatch):
+    signals = []
+    monkeypatch.setattr(installer, "active_process", lambda pid: "original-start-time")
+    monkeypatch.setattr(installer.os, "kill", lambda pid, sig: signals.append(sig))
+    monkeypatch.setattr(installer.time, "sleep", lambda delay: None)
+    with pytest.raises(RuntimeError, match="has not stopped"):
+        installer.stop_existing(12345)
+    assert signals == [installer.signal.SIGTERM]
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_shutdown_failure_recovers_only_after_old_process_exits(deployment, monkeypatch, running):
+    target, commit, old, events = deployment
+    def stop(pid):
+        events.append("stop")
+        raise RuntimeError("shutdown error")
+    monkeypatch.setattr(installer, "stop_existing", stop)
+    monkeypatch.setattr(installer, "active_process", lambda pid: "original-start-time" if running else None)
+    with pytest.raises(RuntimeError, match="shutdown error"):
+        installer.install(target, commit)
+    assert git(target, "rev-parse", "HEAD") == old
+    assert (target / "backend" / "version.txt").read_text() == "deployed-old\n"
+    assert (target / "backend" / "rack_items.json").read_text() == '{"Rack-01":[{"id":"existing"}]}'
+    assert events == ["preflight", "stop"] + ([] if running else ["start"])
+
+
+def test_port_still_occupied_prevents_update_and_duplicate_start(deployment, monkeypatch):
+    target, commit, old, events = deployment
+    monkeypatch.setattr(installer, "port_occupied", lambda: True)
+    with pytest.raises(RuntimeError, match="still occupied"):
+        installer.install(target, commit)
+    assert git(target, "rev-parse", "HEAD") == old
+    assert (target / "lab-twin" / "lab-data.json").read_text() == '{"source":"live edits"}'
+    assert events == ["preflight", "stop"]
 
 
 def test_failed_startup_restores_previous_commit_and_version(deployment, monkeypatch):

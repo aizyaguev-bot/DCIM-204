@@ -125,15 +125,41 @@ def service_pids(root, proc_root=Path("/proc")):
     return matches
 
 
+def active_process(pid, proc_root=Path("/proc")):
+    """Return a live process's start time; an unreaped zombie is already stopped."""
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    try:
+        # The executable name in parentheses can itself contain spaces or ')'.
+        fields = stat.rsplit(")", 1)[1].split()
+        state, started = fields[0], fields[19]  # /proc stat fields 3 and 22.
+    except IndexError as exc:
+        raise RuntimeError("Cannot determine the backend process state") from exc
+    return None if state in {"Z", "X", "x"} else started
+
+
+def port_occupied(port=8000):
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
 def stop_existing(pid):
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(40):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
+    started = active_process(pid)
+    if started is None:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for _ in range(80):
+        if active_process(pid) != started:
+            return  # Exited, zombie, or a different process now has this PID.
         time.sleep(.25)
-    raise RuntimeError("The old backend has not stopped; no application files were changed")
+    if active_process(pid) == started:
+        raise RuntimeError("The old backend has not stopped; no application files were changed")
 
 
 def restore_live(root, backup):
@@ -191,8 +217,7 @@ def install(root, commit, backup_frontend_lock=False):
         pids = service_pids(root)
         if len(pids) > 1:
             raise RuntimeError("Multiple matching backends found; choose the running service manually")
-        with socket.socket() as probe:
-            occupied = probe.connect_ex(("127.0.0.1", 8000)) == 0
+        occupied = port_occupied()
         if occupied and not pids:
             raise RuntimeError("Port 8000 belongs to a process outside this project; it was left running")
 
@@ -221,13 +246,17 @@ def install(root, commit, backup_frontend_lock=False):
         print("Preflight passed. Saving the current inventory and updating…", flush=True)
 
         stopped = False
+        stop_attempted = False
         updated = False
         new_process = None
         cleared_source = set()
         try:
             if pids:
+                stop_attempted = True
                 stop_existing(pids[0])
                 stopped = True
+            if port_occupied():
+                raise RuntimeError("Port 8000 is still occupied; no application files were changed")
             runtime = [root / ".env", root / "backend" / "version.txt", root / "lab-twin" / "lab-data.json"]
             runtime += list((root / "backend").glob("*.json")) + list((root / "backend").glob("*.db*"))
             for path in runtime:
@@ -264,7 +293,11 @@ def install(root, commit, backup_frontend_lock=False):
             restore_live(root, backup)
             for relative in cleared_source:
                 shutil.copy2(backup / "local-source" / relative, root / relative)
-            if stopped:
+            # A shutdown can finish as an error is raised. Recover the old site
+            # in that case too, without starting a second server on an occupied port.
+            if stop_attempted and not stopped:
+                stopped = active_process(pids[0]) is None
+            if stopped and not port_occupied():
                 previous = start(root, python, root / "backend" / "server.log")
                 wait_ready(8000, previous)
             print("Update failed. Original source and live twin data restored. Backup: " + str(backup), file=sys.stderr)
