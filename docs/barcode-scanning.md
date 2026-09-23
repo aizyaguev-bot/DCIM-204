@@ -19,26 +19,51 @@ The physical scanner must support the barcode symbology on the equipment.
 
 ## Find and track equipment
 
+- Scan the destination shelf, whole-rack or main-storage label first. The page
+  displays the selected destination and asks for the equipment barcode.
 - Scan an existing serial number, assigned barcode, or equipment ID to find its
   record. Matches are exact, case-insensitive strings; leading zeros are kept.
-- Unknown codes can be linked to an existing rack item. Match the name, ID,
-  rack and shelf before linking. Its serial number and other properties remain.
-- To register equipment that is not in DCIM, enter its name, type, rack, shelf
-  and optional position. It will appear in the DCIM rack view too.
-- Scan the destination shelf label, or select the rack and shelf manually.
+  The selected destination is kept instead of being replaced by the item's
+  current saved location.
+- **Automatically register new equipment** is enabled by default. After choosing
+  a destination, scan a new barcode to create and save the unit there immediately.
+  No registration form or extra save is required. The initial name is the barcode
+  (up to 160 characters), type is **Other**, and the complete barcode is retained.
+  Edit its name and type later in DCIM if needed.
+- A new barcode scanned without a chosen destination waits for a location label.
+  Scanning that label then registers it automatically. The default rack shown in
+  a manual form is never used as an implicit automatic destination.
+- To link an unrecognized barcode to equipment already listed under another
+  identifier, turn off automatic registration before scanning it. Match the name,
+  ID, rack and shelf before linking. Manual registration is also available when
+  automatic registration is off.
+- To change the destination, scan another label or select the rack and shelf manually.
   **Shelf 01 / U01 means the top shelf.** The optional position identifies a
   particular spot, for example `left / front`, `right`, or `slot A`.
-- Review the proposed destination and click **Save and confirm location**.
-  Scanning alone performs a lookup; it does not move equipment.
+- For existing equipment, review the proposed destination and click **Save and
+  confirm location**. Scanning a known barcode does not move it or create a copy.
+- The destination stays selected after saving, so scan another unit to place it
+  there. New units register automatically; confirm moves for existing units. Scan a new location label to change
+  the destination. **Clear destination** clears the destination and pending item.
+  Reloading the page or leaving Scan & Track also clears the selected destination.
+
+Equipment-first scanning still works. When a destination is selected first,
+unknown barcodes keep it during registration and linking. Linking a barcode only
+links the equipment record; use **Save and confirm location** afterward to move
+it. **Register equipment** creates a new item directly at the chosen destination.
+Failed automatic registration shows an error and offers **Register barcode here**
+to retry. The retry looks up the barcode again before creating a record, so a
+lost success response or a record created by another client does not create a
+duplicate. Ambiguous existing identifiers still require choosing the correct item.
 
 The page tracks rack equipment, such as switches and independently registered
 computers. Existing OPT records derived from PDU outlet labels and their cable,
 power and KVM connections remain managed in DCIM. Inventory moves do not issue
 power commands or change those connections.
 
-## Shelf labels
+## Location labels
 
-Use **Shelf labels** to select a rack, a shelf range and an optional position,
+Use **Location labels** to select a rack, a shelf range and an optional position,
 then print. Attach the labels to the corresponding physical shelves or slots.
 Short position names keep labels easy to scan. Labels use Code 128, rendered
 locally with [JsBarcode](https://github.com/lindell/JsBarcode); generation works
@@ -46,8 +71,32 @@ without an external barcode service.
 
 Each label encodes `LOC:<URL-encoded rack>:<shelf number>:<URL-encoded position>`.
 The `LOC:` prefix is reserved for locations. A location label fills the proposed
-destination; it still requires the save button. Rack names in labels must match
+destination. Existing equipment moves require Save; a pending new barcode is
+registered there immediately when automatic registration is on. Rack names in labels must match
 existing DCIM racks. Reprint labels after renaming a rack.
+
+Select **Whole rack** to print `RACK:<URL-encoded rack>`. It selects the rack
+without assigning a shelf (`u: 0`). You can then scan a shelf label to refine
+the destination before saving. The existing `LOC:` shelf labels remain valid.
+
+Select **Main storage (one label)** to print `STORE:MAIN`. It selects one shared
+`Storage-Main` inventory location for the entire storage unit, without shelves
+or positions. No new device credentials or PDU records are created. The same
+equipment ID and history are kept when moving between a shelf, a whole rack and
+main storage. Storage contents also appear in DCIM after the first item is saved.
+The physical storage unit is whichever unit receives this single label; this
+does not automatically map it to a cabinet in the 3D floor plan.
+
+Rack and storage labels require the location-label update on the VM. Older
+scanner versions only understand the `LOC:` shelf format. All three prefixes
+(`LOC:`, `RACK:`, `STORE:`) are reserved and cannot be linked to equipment.
+
+For the Lab 204 printable set, the physical model lists Rack-01 through Rack-07,
+four shelves each except Rack-05 with three: 7 rack labels, 27 shelf labels and
+one main-storage label. Rack-08 is marked planned/unplaced in that model and is
+not included. Confirm the physical shelf counts before attaching the labels.
+Print the A4 PDF at 100% / Actual size; its 92 x 46 mm cut lines are for plain
+paper or full-sheet adhesive A4, not a particular pre-cut label stock.
 
 ## Shared state and history
 
@@ -91,6 +140,26 @@ Download the installer from that same reviewed commit first. It:
 
 The installer keeps the existing inventory and Python environment. Reload open
 browser tabs after installation. It does not configure startup after a VM reboot.
+Shutdown checks distinguish a running process from an exited process still listed
+as a Linux zombie. The installer waits up to 20 seconds for graceful shutdown and
+checks that port 8000 is free before changing application files. It does not
+force-kill an existing backend. If shutdown finishes while an error is raised,
+rollback restarts the previous backend when the port is free.
+
+If installation stops because of local `frontend/package-lock.json` edits, use
+`--backup-frontend-lock` to save that file under the private backup's
+`local-source/frontend/package-lock.json` and install the reviewed lockfile.
+The bundled frontend is already built; no npm install is performed on the VM.
+The option preserves the original bytes for review and restores them if the
+update fails. Staged changes and edits to any other source file still stop the
+installer before the running backend is stopped.
+
+For the barcode feature branch, fetch the installer and run it from the same
+commit (without sudo):
+
+```bash
+cd "$HOME/DCIM-204" && git fetch origin feat/barcode-inventory && git show FETCH_HEAD:scripts/install-barcode.py | backend/.venv/bin/python - "$(git rev-parse FETCH_HEAD)" --backup-frontend-lock
+```
 
 ## API compatibility
 

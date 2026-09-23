@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { loadRackItems, saveRackItems } from "../api/inventory";
+import { loadRackItems, saveRackItems, MAIN_STORAGE } from "../api/inventory";
 
 function Portal({ children }) {
   return createPortal(children, document.body);
@@ -99,7 +99,7 @@ function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
   });
 
   const maxU   = groups.size ? Math.max(...groups.keys()) : 0;
-  const totalU = Math.max(maxU + 2, 8);
+  const totalU = rackName === MAIN_STORAGE ? 0 : Math.max(maxU + 2, 8);
   const rows   = [];
   for (let u = 1; u <= totalU; u++) {
     rows.push({ u, items: groups.get(u) || [] });
@@ -619,7 +619,7 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
   useEscClose(onClose);
   const [name,  setName]  = useState("");
   const [type,  setType]  = useState("switch");
-  const [u,     setU]     = useState("");
+  const [u,     setU]     = useState(rackName === MAIN_STORAGE ? "0" : "");
   const [notes, setNotes] = useState("");
   const [busy,  setBusy]  = useState(false);
 
@@ -651,8 +651,8 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
               {Object.entries(ITEM_TYPES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
             </select>
           </div>
-          <div><SL>U slot</SL>
-            <input type="number" min="1" max="42" value={u} onChange={e => setU(e.target.value)}
+          <div><SL>{rackName === MAIN_STORAGE ? "Whole storage unit" : "U slot (0 = whole rack)"}</SL>
+            <input type="number" min="0" max="42" value={u} disabled={rackName === MAIN_STORAGE} onChange={e => setU(e.target.value)}
               placeholder="e.g. 7"
               className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
           </div>
@@ -679,7 +679,7 @@ function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelet
   useEscClose(onClose);
   const [name,      setName]      = useState(item.name);
   const [type,      setType]      = useState(item.type || "other");
-  const [u,         setU]         = useState(item.u ? String(item.u) : "");
+  const [u,         setU]         = useState(String(item.u ?? 0));
   const [notes,     setNotes]     = useState(item.notes || "");
   const [busy,      setBusy]      = useState(false);
   const [saved,     setSaved]     = useState(false);
@@ -688,7 +688,7 @@ function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelet
 
   async function submit() {
     setBusy(true);
-    try { await onSave({ ...item, name: name.trim(), type, u: parseInt(u,10)||item.u, notes: notes.trim() }); setSaved(true); setTimeout(()=>setSaved(false),2000); }
+    try { await onSave({ ...item, name: name.trim(), type, u: u === "" ? item.u : parseInt(u,10), notes: notes.trim() }); setSaved(true); setTimeout(()=>setSaved(false),2000); }
     finally { setBusy(false); }
   }
 
@@ -721,8 +721,8 @@ function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelet
               {Object.entries(ITEM_TYPES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
             </select>
           </div>
-          <div><SL>U slot</SL>
-            <input type="number" min="1" max="42" value={u} onChange={e=>setU(e.target.value)}
+          <div><SL>{rackName === MAIN_STORAGE ? "Whole storage unit" : "U slot (0 = whole rack)"}</SL>
+            <input type="number" min="0" max="42" value={u} disabled={rackName === MAIN_STORAGE} onChange={e=>setU(e.target.value)}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
           </div>
           <div><SL>Notes</SL>
@@ -1959,7 +1959,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const pdus       = devices.filter(d=>d.kind==="pdu");
   // kind="rack" = DCIM-only racks (added via DCIM, never shown on Dashboard)
   const rackDevices = devices.filter(d=>d.kind==="pdu"||d.kind==="rack");
-  const racks = useMemo(()=>[...new Set(rackDevices.map(d=>d.rack).filter(Boolean))].sort(),[rackDevices]);
+  const racks = useMemo(()=>[...new Set([...rackDevices.map(d=>d.rack).filter(Boolean), ...Object.keys(customItems)])].sort(),[rackDevices, customItems]);
 
   const servers = useMemo(()=>{
     const map=new Map();
@@ -2007,7 +2007,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const rServers=servers.filter(s=>s.rack===rn);
     const pduOnline=allPdus.length>0?(pduStatuses[allPdus[0].id]?.reachable!==false&&!!pduStatuses[allPdus[0].id]):false;
     const maxWatts=pduData.reduce((a,p)=>a+p.maxWatts,0)||outletsTotal*150;
-    const rackType=rPdus[0]?.model==="Storage"?"storage":"compute";
+    const rackType=rn===MAIN_STORAGE||rPdus[0]?.model==="Storage"?"storage":"compute";
     return{rack:rn,pdus:allPdus,pduData,servers:rServers,totalWatts,totalAmps,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
   }),[racks,rackDevices,pduStatuses,servers]);
 
@@ -2081,7 +2081,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const updated = {
       ...customItems,
       [srcRack]: customItems[srcRack].filter(i => i.id !== item.id),
-      [targetRack]: [...(customItems[targetRack] || []), { ...item, u: null }],
+      [targetRack]: [...(customItems[targetRack] || []), { ...item, u: 0, shelf_position: "" }],
     };
     setCustomItems(await saveRackItems(updated, customItems));
   }, [customItems]);
