@@ -3,6 +3,8 @@
 
 No sudo, package installation, database seeding, or remote Git write is performed.
 The checkout must be clean except for live twin data and the deployment version.
+Use --backup-frontend-lock to preserve a locally modified npm lockfile in the
+backup and install the reviewed lockfile alongside the prebuilt frontend.
 """
 import argparse
 from contextlib import contextmanager
@@ -22,6 +24,7 @@ import urllib.request
 
 REPOSITORY = "https://github.com/aizyaguev-bot/DCIM-204.git"
 LIVE_TRACKED = {"lab-twin/lab-data.json", "backend/version.txt"}
+FRONTEND_LOCK = "frontend/package-lock.json"
 
 
 def git(root, *args):
@@ -122,15 +125,41 @@ def service_pids(root, proc_root=Path("/proc")):
     return matches
 
 
+def active_process(pid, proc_root=Path("/proc")):
+    """Return a live process's start time; an unreaped zombie is already stopped."""
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    try:
+        # The executable name in parentheses can itself contain spaces or ')'.
+        fields = stat.rsplit(")", 1)[1].split()
+        state, started = fields[0], fields[19]  # /proc stat fields 3 and 22.
+    except IndexError as exc:
+        raise RuntimeError("Cannot determine the backend process state") from exc
+    return None if state in {"Z", "X", "x"} else started
+
+
+def port_occupied(port=8000):
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
 def stop_existing(pid):
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(40):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
+    started = active_process(pid)
+    if started is None:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for _ in range(80):
+        if active_process(pid) != started:
+            return  # Exited, zombie, or a different process now has this PID.
         time.sleep(.25)
-    raise RuntimeError("The old backend has not stopped; no application files were changed")
+    if active_process(pid) == started:
+        raise RuntimeError("The old backend has not stopped; no application files were changed")
 
 
 def restore_live(root, backup):
@@ -153,7 +182,7 @@ def install_lock(root):
         yield
 
 
-def install(root, commit):
+def install(root, commit, backup_frontend_lock=False):
     root = root.resolve()
     if Path(git(root, "rev-parse", "--show-toplevel")).resolve() != root:
         raise RuntimeError("Choose the DCIM-204 Git repository itself")
@@ -165,8 +194,14 @@ def install(root, commit):
         if file_set(root, "diff", "--cached", "--name-only"):
             raise RuntimeError("There are staged changes. Commit or unstage them before installing.")
         dirty = file_set(root, "diff", "--name-only", "HEAD") - LIVE_TRACKED
+        local_source = {FRONTEND_LOCK} & dirty if backup_frontend_lock else set()
+        dirty -= local_source
         if dirty:
             raise RuntimeError("Local source edits need review before installing: " + ", ".join(sorted(dirty)))
+        for relative in local_source:
+            path = root / relative
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError("Only an existing regular frontend/package-lock.json can be backed up")
         print("Fetching the reviewed update…", flush=True)
         git(root, "fetch", REPOSITORY, commit)
         git(root, "merge-base", "--is-ancestor", old, commit)
@@ -182,8 +217,7 @@ def install(root, commit):
         pids = service_pids(root)
         if len(pids) > 1:
             raise RuntimeError("Multiple matching backends found; choose the running service manually")
-        with socket.socket() as probe:
-            occupied = probe.connect_ex(("127.0.0.1", 8000)) == 0
+        occupied = port_occupied()
         if occupied and not pids:
             raise RuntimeError("Port 8000 belongs to a process outside this project; it was left running")
 
@@ -200,15 +234,29 @@ def install(root, commit):
         safe_extract(archive, source)
         print("Checking startup with the VM's Python environment…", flush=True)
         smoke_test(source, python, backup)
+        for relative in local_source:
+            path = root / relative
+            original = path.read_bytes()
+            saved = backup / "local-source" / relative
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, saved)
+            if saved.read_bytes() != original or path.read_bytes() != original:
+                raise RuntimeError("The local lockfile changed during backup; installation stopped")
+            print("Local npm lockfile saved to: " + str(saved), flush=True)
         print("Preflight passed. Saving the current inventory and updating…", flush=True)
 
         stopped = False
+        stop_attempted = False
         updated = False
         new_process = None
+        cleared_source = set()
         try:
             if pids:
+                stop_attempted = True
                 stop_existing(pids[0])
                 stopped = True
+            if port_occupied():
+                raise RuntimeError("Port 8000 is still occupied; no application files were changed")
             runtime = [root / ".env", root / "backend" / "version.txt", root / "lab-twin" / "lab-data.json"]
             runtime += list((root / "backend").glob("*.json")) + list((root / "backend").glob("*.db*"))
             for path in runtime:
@@ -221,6 +269,11 @@ def install(root, commit):
                     (root / relative).unlink()  # Its verified copy is in the private backup above.
                 elif relative in file_set(root, "diff", "--name-only", "HEAD"):
                     git(root, "checkout", "--", relative)
+            for relative in local_source:
+                if (root / relative).read_bytes() != (backup / "local-source" / relative).read_bytes():
+                    raise RuntimeError("The local lockfile changed after backup; installation stopped")
+                cleared_source.add(relative)
+                git(root, "checkout", "--", relative)
             git(root, "merge", "--ff-only", "--no-edit", commit)
             updated = True
             restore_live(root, backup)
@@ -238,7 +291,13 @@ def install(root, commit):
                     raise RuntimeError("New local source edits prevent automatic rollback. Backup: " + str(backup))
                 git(root, "reset", "--hard", old)
             restore_live(root, backup)
-            if stopped:
+            for relative in cleared_source:
+                shutil.copy2(backup / "local-source" / relative, root / relative)
+            # A shutdown can finish as an error is raised. Recover the old site
+            # in that case too, without starting a second server on an occupied port.
+            if stop_attempted and not stopped:
+                stopped = active_process(pids[0]) is None
+            if stopped and not port_occupied():
                 previous = start(root, python, root / "backend" / "server.log")
                 wait_ready(8000, previous)
             print("Update failed. Original source and live twin data restored. Backup: " + str(backup), file=sys.stderr)
@@ -252,12 +311,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("commit", help="Reviewed full Git commit SHA")
     parser.add_argument("--project", type=Path, default=Path.home() / "DCIM-204")
+    parser.add_argument(
+        "--backup-frontend-lock", action="store_true",
+        help="Back up local frontend/package-lock.json edits and replace them with the reviewed version",
+    )
     args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("Run this installer inside the Linux VM")
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("Pass a full 40-character commit SHA")
-    install(args.project, args.commit)
+    install(args.project, args.commit, backup_frontend_lock=args.backup_frontend_lock)
 
 
 if __name__ == "__main__":

@@ -94,6 +94,12 @@ the barcode install lock to prevent concurrent deployments. Existing VM reboot
 startup configuration is left in place; this script does not create a boot service.
 Local source changes, diverged history or an unrelated process on port 8000 cause
 installation to stop without overwriting those changes or stopping that process.
+The release must include the commit currently deployed on the VM, including any
+barcode updates installed from another branch. If this ancestry check fails, use
+an integrated release; do not reset the VM to an older version to bypass it.
+For a locally modified npm lockfile, the optional `--backup-frontend-lock` flag
+saves its exact contents in the private backup before installing the reviewed
+lockfile. Other local source edits still prevent installation.
 
 ### Manual installation
 
