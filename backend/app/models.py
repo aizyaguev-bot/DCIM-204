@@ -82,3 +82,15 @@ class PingMonitorState(Base):
     lease_owner: Mapped[str] = mapped_column(String, default="")
     lease_until: Mapped[float] = mapped_column(Float, default=0)
     error: Mapped[str] = mapped_column(String, default="")
+
+
+class MonitorDeviceSnapshot(Base):
+    """Latest scheduled device observation, shared across API workers/restarts."""
+    __tablename__ = "monitor_device_snapshots"
+
+    device_id: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String)
+    ip: Mapped[str] = mapped_column(String)
+    checked_at: Mapped[float] = mapped_column(Float)
+    reachable: Mapped[bool] = mapped_column(Boolean)
+    ports_json: Mapped[str] = mapped_column(String, default="[]")

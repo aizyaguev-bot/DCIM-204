@@ -45,6 +45,7 @@ class KvmPort(BaseModel):
     label: str
     status: str         # "active" | "idle" | "empty"
     in_use: bool = False  # our tracking overlay (dismissible)
+    status_source: str = "unknown"  # live | configured | unknown
 
 class KvmStatus(BaseModel):
     device_id: str

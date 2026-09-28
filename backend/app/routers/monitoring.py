@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import get_settings
 from ..database import get_db
 from ..models import PingIncident, PingMonitorState, PingSample, PingTarget
+from ..monitor_links import connection_index
 from ..ping_monitor import close_incident, interval_minutes, iso, next_slot, server_identity, validate_host
 
 router = APIRouter(prefix="/api/monitoring", tags=["ping monitoring"])
@@ -81,6 +82,7 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
         if state.error:
             service = "error"
     response.headers["Cache-Control"] = "no-store"
+    connections = await connection_index(db, tz, now)
     return {
         "timezone": settings.ping_monitor_timezone, "service": service,
         "interval_minutes": interval_minutes(now, tz), "server_time": iso(now),
@@ -88,7 +90,7 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
         "last_started_at": iso(state.last_started_at) if state else None,
         "last_completed_at": iso(state.last_completed_at) if state else None,
         "error": state.error if state else "",
-        "targets": [target_view(t, tz) for t in targets],
+        "targets": [{**target_view(t, tz), **connections.get(t.source_key, {"pdu": [], "kvm": []})} for t in targets],
     }
 
 

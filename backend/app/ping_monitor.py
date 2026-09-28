@@ -132,19 +132,9 @@ async def discover_targets(db):
 
 
 async def refresh_device_labels(session_factory):
-    """Discover live port labels even when no dashboard is open."""
-    from .routers import pdus, kvms
-    async with session_factory() as db:
-        devices = (await db.execute(select(Device).where(Device.kind.in_(("pdu", "kvm"))))).scalars().all()
-    gate = asyncio.Semaphore(CONCURRENCY)
-    async def refresh(dev):
-        async with gate:
-            fn = pdus._refresh_background if dev.kind == "pdu" else kvms._refresh_background
-            try:
-                await asyncio.wait_for(fn(dev.id, dev), timeout=12)
-            except Exception:
-                log.warning("Could not refresh port labels for device %s; using stored labels", dev.id)
-    await asyncio.gather(*(refresh(d) for d in devices))
+    """Check device/port states and labels even when no dashboard is open."""
+    from .monitor_links import refresh_devices
+    await refresh_devices(session_factory)
 
 
 @dataclass(frozen=True)

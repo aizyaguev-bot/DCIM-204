@@ -41,6 +41,41 @@ claiming the old address recovered. Old checks retain the address actually teste
 
 ## Results and retention
 
+### PDU and KVM columns
+
+Each scheduled round also reads each enabled PDU/KVM once, with up to eight devices
+in parallel and a twelve-second deadline per device. **Check all now** refreshes
+these observations too. Port associations use the same normalized server names as
+discovery, with current saved labels taking precedence. A matching rack or a device
+management address alone never establishes a server-to-port association.
+
+All matching feeds/ports are displayed, including multiple PDU outlets for a server.
+Each entry identifies the device and outlet/port number. **Details** shows its check
+time and explanation. The **Needs attention** filter includes failed, missing,
+disabled, unverified and overdue connections even when the server answers ping.
+
+- PDU **Power on/off/cycling** describes the actual reported outlet state. It is not
+  inferred from the PDU management interface responding or a nonzero watt reading.
+- KVM **Port active/idle** requires a recognized live state and explicit port number
+  from the device API. It does not test a working video/keyboard console session.
+- Older KVMs may expose only configured ports. **Configured · unverified** means
+  the device responded and lists the port, but live console health is unknown.
+  A static fallback list or an unknown state displays **Port unverified**, never green.
+- **Check failed** can mean a network, authentication or API failure. The previous
+  success is not reused. **Not linked** means no matching port label was found;
+  configure the correct server name on its PDU/KVM port in the existing device UI.
+- After a missed schedule plus two minutes, a device observation becomes **Overdue**.
+  Associations learned from live labels survive device check failures. Changing a
+  device address requires a new check; disabling it does not show an old success.
+
+Latest device observations persist in a separate additive database table, shared
+by all workers and retained across restarts. The history and failure/recovery log
+remain **ICMP-only**; PDU/KVM observations are latest snapshots, not incident history.
+These three signals help investigate failures but cannot establish 100% server or
+application health. The monitoring code performs no power operations.
+
+### Ping observations
+
 One ICMP echo request is sent per target per round, with a 3-second reply timeout
 and a 10-second total subprocess/DNS timeout. Up to 8 probes run concurrently.
 
