@@ -27,3 +27,4 @@ backend/rack_items.lock
 backend/.rack-items-*.tmp
 .barcode-backups/
 .barcode-install.lock
+.monitor-backups/

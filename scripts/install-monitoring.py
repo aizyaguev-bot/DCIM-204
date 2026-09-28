@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""Install Ping Monitor on the existing Linux VM using its existing Python venv.
+
+No sudo, package installation, database seeding, or remote Git write is performed.
+The checkout must be clean except for live twin data and the deployment version.
+"""
+import argparse
+from contextlib import contextmanager
+from datetime import datetime
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.request
+
+REPOSITORY = "https://github.com/aizyaguev-bot/DCIM-204.git"
+LIVE_TRACKED = {"lab-twin/lab-data.json", "backend/version.txt"}
+
+# Read credentials in the application environment without exposing them in argv,
+# stdout, shell history or logs. The only HTTP destination is the local backend.
+MONITOR_HEALTH = r'''
+import base64, json, urllib.request
+from app.config import get_settings
+settings = get_settings()
+headers = {}
+if settings.lab_manager_password:
+    token = base64.b64encode((":" + settings.lab_manager_password).encode()).decode()
+    headers["Authorization"] = "Basic " + token
+request = urllib.request.Request("http://127.0.0.1:8000/api/monitoring", headers=headers)
+with urllib.request.urlopen(request, timeout=5) as response:
+    data = json.load(response)
+print(json.dumps({key: data.get(key) for key in ("service", "timezone", "last_started_at", "error")}))
+'''
+
+PROBE_ENVIRONMENT = r'''
+import asyncio
+from zoneinfo import ZoneInfo
+from app.ping_monitor import ping
+ZoneInfo("Asia/Jerusalem")
+result = asyncio.run(ping("127.0.0.1"))
+if result.status != "up":
+    raise SystemExit("Local ICMP preflight failed: " + result.detail)
+print("Local ICMP and Israel timezone checks passed")
+'''
+
+
+def verify_monitoring(root, python):
+    last = "Monitoring has not started yet"
+    for _ in range(20):
+        try:
+            data = json.loads(subprocess.check_output(
+                [str(python), "-c", MONITOR_HEALTH], cwd=root / "backend",
+                text=True, stderr=subprocess.PIPE, timeout=10,
+            ))
+            if data.get("timezone") != "Asia/Jerusalem":
+                raise RuntimeError("PING_MONITOR_TIMEZONE must be Asia/Jerusalem for the requested schedule")
+            if data.get("service") == "disabled":
+                raise RuntimeError("PING_MONITOR_ENABLED is false in the application configuration")
+            if data.get("service") in ("scheduled", "running") and data.get("last_started_at"):
+                return
+            last = data.get("error") or data.get("service") or last
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+            last = "The authenticated monitoring health check failed"
+        time.sleep(.5)
+    raise RuntimeError("Ping Monitor did not become healthy: " + last)
+
+
+def git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+
+def file_set(root, *args):
+    return set(filter(None, git(root, *args).splitlines()))
+
+
+def safe_extract(archive, destination):
+    destination = destination.resolve()
+    with tarfile.open(archive) as source:
+        for member in source.getmembers():
+            target = (destination / member.name).resolve()
+            if destination not in target.parents or not (member.isdir() or member.isfile()):
+                raise RuntimeError("Unexpected path in the source archive")
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source.extractfile(member) as incoming, target.open("wb") as out:
+                    shutil.copyfileobj(incoming, out)
+
+
+def wait_ready(port, process=None, expected_version=None, inventory=False):
+    for _ in range(40):
+        if process is not None and process.poll() is not None:
+            raise RuntimeError("The backend exited during startup")
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/version", timeout=1) as r:
+                version = json.load(r).get("version")
+            if expected_version is not None and version != expected_version:
+                raise RuntimeError("Another application is answering on the selected port")
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/rack-items", timeout=1) as r:
+                if inventory and not r.headers.get("ETag"):
+                    raise RuntimeError("The inventory update is not active")
+                json.load(r)
+            return
+        except (OSError, ValueError):
+            time.sleep(.5)
+    raise RuntimeError("The backend did not become ready within 20 seconds")
+
+
+def start(root, python, log_path, port=8000, env=None):
+    with log_path.open("ab") as log:
+        return subprocess.Popen(
+            [str(python), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1" if env else "0.0.0.0", "--port", str(port)],
+            cwd=root / "backend", stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            start_new_session=True, env=env,
+        )
+
+
+def smoke_test(source, python, backup):
+    # All checks happen against the extracted source before stopping the live app.
+    env = {**os.environ, "DATABASE_URL": "sqlite+aiosqlite:///:memory:", "LAB_MANAGER_PASSWORD": "",
+           "PING_MONITOR_ENABLED": "true", "PING_MONITOR_TIMEZONE": "Asia/Jerusalem"}
+    probe = subprocess.run([str(python), "-c", PROBE_ENVIRONMENT], cwd=source / "backend",
+                           env=env, text=True, capture_output=True, timeout=20)
+    if probe.returncode:
+        raise RuntimeError("VM preflight failed before any service was stopped. Check the existing venv dependencies, "
+                           "system ping utility and ICMP permissions.\n" + (probe.stderr or probe.stdout)[-2000:])
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    process = start(source, python, backup / "preflight.log", port, env)
+    try:
+        wait_ready(port, process=process, inventory=True)
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/inventory", timeout=3) as response:
+            if json.load(response).get("items") != []:
+                raise RuntimeError("Preflight must use an empty test inventory")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/monitoring", timeout=3) as response:
+            monitoring = json.load(response)
+        if monitoring.get("timezone") != "Asia/Jerusalem" or monitoring.get("targets") != []:
+            raise RuntimeError("Ping Monitor preflight failed its timezone or isolated inventory check")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=3) as response:
+            html = response.read().decode()
+        assets = re.findall(r'(?:src|href)="(/assets/[^\"]+)"', html)
+        if not assets:
+            raise RuntimeError("The reviewed commit has no built frontend")
+        for asset in assets:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}{asset}", timeout=3).close()
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            process.kill()  # Only the isolated child started above.
+            process.wait()
+
+
+def service_pids(root, proc_root=Path("/proc")):
+    expected_cwd = (root / "backend").resolve()
+    matches = []
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if proc.stat().st_uid != os.getuid() or (proc / "cwd").resolve() != expected_cwd:
+                continue
+            command = (proc / "cmdline").read_bytes().decode().strip("\0").split("\0")
+            if "uvicorn" not in command or "app.main:app" not in command:
+                continue
+            if "--port" in command and command[command.index("--port") + 1] != "8000":
+                continue
+            matches.append(int(proc.name))
+        except (OSError, IndexError):
+            continue
+    return matches
+
+
+def stop_existing(pid):
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(40):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(.25)
+    raise RuntimeError("The old backend has not stopped; no application files were changed")
+
+
+def restore_live(root, backup):
+    for relative in LIVE_TRACKED:
+        saved = backup / "runtime" / relative
+        if saved.exists():
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(saved, target)
+
+
+@contextmanager
+def install_lock(root):
+    import fcntl
+    # Share the existing deployment lock so barcode and monitor updates cannot overlap.
+    with (root / ".barcode-install.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Another installation is already running") from exc
+        yield
+
+
+def install(root, commit):
+    root = root.resolve()
+    if Path(git(root, "rev-parse", "--show-toplevel")).resolve() != root:
+        raise RuntimeError("Choose the DCIM-204 Git repository itself")
+    python = root / "backend" / ".venv" / "bin" / "python"
+    if not python.exists():
+        raise RuntimeError("The existing backend/.venv/bin/python was not found")
+    with install_lock(root):
+        old = git(root, "rev-parse", "HEAD")
+        if file_set(root, "diff", "--cached", "--name-only"):
+            raise RuntimeError("There are staged changes. Commit or unstage them before installing.")
+        dirty = file_set(root, "diff", "--name-only", "HEAD") - LIVE_TRACKED
+        if dirty:
+            raise RuntimeError("Local source edits need review before installing: " + ", ".join(sorted(dirty)))
+        print("Fetching the reviewed update…", flush=True)
+        git(root, "fetch", REPOSITORY, commit)
+        git(root, "merge-base", "--is-ancestor", old, commit)
+        changed = file_set(root, "diff", "--name-only", old, commit)
+        protected = {".env", "backend/lab_manager.db"}
+        protected.update(p.relative_to(root).as_posix() for p in (root / "backend").glob("*.json"))
+        if changed & protected:
+            raise RuntimeError("This update changes runtime data files; installation stopped for review")
+        untracked = file_set(root, "ls-files", "--others", "--exclude-standard")
+        collisions = (untracked & changed) - LIVE_TRACKED
+        if collisions:
+            raise RuntimeError("Untracked files would be replaced: " + ", ".join(sorted(collisions)))
+        pids = service_pids(root)
+        if len(pids) > 1:
+            raise RuntimeError("Multiple matching backends found; choose the running service manually")
+        with socket.socket() as probe:
+            occupied = probe.connect_ex(("127.0.0.1", 8000)) == 0
+        if occupied and not pids:
+            raise RuntimeError("Port 8000 belongs to a process outside this project; it was left running")
+
+        backup = root / ".monitor-backups" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "-" + commit[:7])
+        backup.mkdir(parents=True, mode=0o700)
+        os.chmod(backup.parent, 0o700)
+        os.chmod(backup, 0o700)
+        (backup / "previous-commit.txt").write_text(old + "\n")
+        archive = backup / "source.tar"
+        with archive.open("wb") as out:
+            subprocess.run(["git", "-C", str(root), "archive", commit], stdout=out, check=True)
+        source = backup / "source"
+        source.mkdir()
+        safe_extract(archive, source)
+        print("Checking startup with the VM's Python environment…", flush=True)
+        smoke_test(source, python, backup)
+        print("Preflight passed. Saving the current inventory and updating…", flush=True)
+
+        stopped = False
+        updated = False
+        new_process = None
+        try:
+            if pids:
+                stop_existing(pids[0])
+                stopped = True
+            runtime = [root / ".env", root / "backend" / "version.txt", root / "lab-twin" / "lab-data.json"]
+            runtime += list((root / "backend").glob("*.json")) + list((root / "backend").glob("*.db*"))
+            for path in runtime:
+                if path.is_file():
+                    saved = backup / "runtime" / path.relative_to(root)
+                    saved.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, saved)
+            for relative in LIVE_TRACKED:
+                if relative in untracked and (root / relative).exists() and relative in changed:
+                    (root / relative).unlink()  # Its verified copy is in the private backup above.
+                elif relative in file_set(root, "diff", "--name-only", "HEAD"):
+                    git(root, "checkout", "--", relative)
+            git(root, "merge", "--ff-only", "--no-edit", commit)
+            updated = True
+            restore_live(root, backup)
+            (root / "backend" / "version.txt").write_text(commit[:7] + "\n")
+            new_process = start(root, python, root / "backend" / "server.log")
+            wait_ready(8000, new_process, expected_version=commit[:7], inventory=True)
+            verify_monitoring(root, python)
+        except Exception:
+            if new_process is not None and new_process.poll() is None:
+                new_process.terminate()
+                new_process.wait(timeout=10)
+            if updated:
+                # Roll back only our fast-forward, with all original edits/data backed up.
+                unexpected = file_set(root, "diff", "--name-only", "HEAD") - LIVE_TRACKED
+                if unexpected:
+                    raise RuntimeError("New local source edits prevent automatic rollback. Backup: " + str(backup))
+                git(root, "reset", "--hard", old)
+            restore_live(root, backup)
+            if stopped:
+                previous = start(root, python, root / "backend" / "server.log")
+                wait_ready(8000, previous)
+            print("Update failed. Original source and live twin data restored. Backup: " + str(backup), file=sys.stderr)
+            raise
+        print("Installed " + commit[:7] + ". Inventory preserved. Backup: " + str(backup))
+        print("Open the site with ?tab=monitoring and refresh existing DCIM / 3D Twin tabs.")
+        print("Ping Monitor: every 5 minutes 07:00-20:00; every 30 minutes overnight; Asia/Jerusalem.")
+        print("Check imported server names/IPs in Ping Monitor. DNS and lab reachability need verification there.")
+        print("The backend is running in the background. VM boot startup remains unchanged.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("commit", help="Reviewed full Git commit SHA")
+    parser.add_argument("--project", type=Path, default=Path.home() / "DCIM-204")
+    args = parser.parse_args()
+    if sys.platform != "linux":
+        parser.error("Run this installer inside the Linux VM")
+    if sys.version_info < (3, 10):
+        parser.error("Use the application's backend/.venv/bin/python (Python 3.10+), not the old system Python")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
+        parser.error("Pass a full 40-character commit SHA")
+    install(args.project, args.commit)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        print("Installation stopped: " + str(error), file=sys.stderr)
+        sys.exit(1)

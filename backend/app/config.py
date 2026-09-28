@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     kvm_password: str = ""
     lab_manager_master_key: str = ""
     lab_manager_password: str = ""          # shared team password; empty = no auth
+    ping_monitor_enabled: bool = True
+    ping_monitor_timezone: str = "Asia/Jerusalem"
     database_url: str = f"sqlite+aiosqlite:///{pathlib.Path(__file__).parent.parent / 'lab_manager.db'}"
 
     model_config = SettingsConfigDict(

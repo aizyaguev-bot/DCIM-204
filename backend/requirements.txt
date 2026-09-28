@@ -6,3 +6,4 @@ aiosqlite==0.20.0
 cryptography==43.0.3
 python-dotenv==1.0.1
 pydantic-settings==2.6.1
+tzdata>=2025.2

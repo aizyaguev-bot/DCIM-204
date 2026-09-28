@@ -11,7 +11,8 @@ import pathlib
 
 from .database import init_db, AsyncSessionLocal
 from .models import Device
-from .routers import devices, pdus, kvms, kvm_proxy, inventory
+from .routers import devices, pdus, kvms, kvm_proxy, inventory, monitoring
+from .ping_monitor import monitor_loop
 from . import inventory_store
 from .config import get_settings
 from sqlalchemy import select
@@ -48,8 +49,14 @@ async def _warm_cache():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    asyncio.create_task(_warm_cache())
-    yield
+    warmup = asyncio.create_task(_warm_cache())
+    monitor = asyncio.create_task(monitor_loop())
+    try:
+        yield
+    finally:
+        warmup.cancel()
+        monitor.cancel()
+        await asyncio.gather(warmup, monitor, return_exceptions=True)
 
 
 app = FastAPI(title="Lab Manager", lifespan=lifespan)
@@ -89,6 +96,7 @@ app.include_router(pdus.router)
 app.include_router(kvms.router)
 app.include_router(kvm_proxy.router)
 app.include_router(inventory.router)
+app.include_router(monitoring.router)
 
 
 @app.get("/api/version")
