@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-spec = importlib.util.spec_from_file_location("barcode_installer", Path(__file__).resolve().parents[2] / "scripts" / "install-barcode.py")
+spec = importlib.util.spec_from_file_location("monitoring_installer", Path(__file__).resolve().parents[2] / "scripts" / "install-monitoring.py")
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
 
@@ -29,7 +29,7 @@ def deployment(tmp_path, monkeypatch):
     (upstream / "lab-twin").mkdir()
     (upstream / "frontend").mkdir()
     (upstream / "frontend" / "package-lock.json").write_text('{"version":"original"}\n')
-    (upstream / ".gitignore").write_text(".env\nbackend/*.db\nbackend/*.json\nbackend/.venv/\n.barcode-backups/\n.barcode-install.lock\n")
+    (upstream / ".gitignore").write_text(".env\nbackend/*.db\nbackend/*.json\nbackend/.venv/\n.monitor-backups/\n.barcode-install.lock\n")
     (upstream / "backend" / "app" / "main.py").write_text("# original backend\n")
     (upstream / "backend" / "version.txt").write_text("old-version\n")
     (upstream / "lab-twin" / "lab-data.json").write_text('{"source":"old seed"}')
@@ -72,6 +72,7 @@ def deployment(tmp_path, monkeypatch):
         return Process()
     monkeypatch.setattr(installer, "start", start)
     monkeypatch.setattr(installer, "wait_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(installer, "verify_monitoring", lambda *args: None)
     return target, commit, old, events
 
 
@@ -85,10 +86,126 @@ def test_installer_preserves_inventory_env_and_live_twin(deployment):
     assert (target / "backend" / "lab_manager.db").read_bytes() == b"existing database"
     assert (target / "backend" / "rack_items.json").read_text() == '{"Rack-01":[{"id":"existing"}]}'
     assert (target / "backend" / "version.txt").read_text().strip() == commit[:7]
-    backups = list((target / ".barcode-backups").iterdir())
+    backups = list((target / ".monitor-backups").iterdir())
     assert len(backups) == 1
     assert (backups[0] / "runtime" / "backend" / "lab_manager.db").read_bytes() == b"existing database"
     assert events == ["preflight", "stop", "start"]
+
+
+def test_failed_startup_restores_previous_commit_and_version(deployment, monkeypatch):
+    target, commit, old, events = deployment
+    def readiness(*args, **kwargs):
+        if kwargs.get("expected_version"):
+            raise RuntimeError("Simulated startup failure")
+    monkeypatch.setattr(installer, "wait_ready", readiness)
+    with pytest.raises(RuntimeError, match="startup failure"):
+        installer.install(target, commit)
+    assert git(target, "rev-parse", "HEAD") == old
+    assert (target / "backend" / "app" / "main.py").read_text() == "# original backend\n"
+    assert (target / "backend" / "version.txt").read_text() == "deployed-old\n"
+    assert (target / "lab-twin" / "lab-data.json").read_text() == '{"source":"live edits"}'
+    assert (target / "backend" / "lab_manager.db").read_bytes() == b"existing database"
+    assert events == ["preflight", "stop", "start", "terminate child", "start"]
+
+
+def test_local_source_edits_abort_before_stopping_service(deployment):
+    target, commit, old, events = deployment
+    (target / "backend" / "app" / "main.py").write_text("# user work\n")
+    with pytest.raises(RuntimeError, match="Local source edits"):
+        installer.install(target, commit)
+    assert git(target, "rev-parse", "HEAD") == old
+    assert (target / "backend" / "app" / "main.py").read_text() == "# user work\n"
+    assert events == []
+
+
+@pytest.fixture
+def diverged_vm(deployment):
+    target, commit, old, events = deployment
+    git(target, "config", "user.email", "test@example.invalid")
+    git(target, "config", "user.name", "Installer Test")
+    (target / "backend" / "app" / "scan_update.py").write_text("# existing VM feature\n")
+    git(target, "add", "backend/app/scan_update.py")
+    git(target, "commit", "-m", "VM barcode update on another branch")
+    vm_commit = git(target, "rev-parse", "HEAD")
+    return target, commit, vm_commit, events
+
+
+def test_diverged_vm_stops_before_preflight_or_service_changes(diverged_vm):
+    target, commit, vm_commit, events = diverged_vm
+    with pytest.raises(RuntimeError, match="does not include the current VM commit " + vm_commit):
+        installer.install(target, commit)
+    assert git(target, "rev-parse", "HEAD") == vm_commit
+    assert (target / "backend" / "app" / "scan_update.py").read_text() == "# existing VM feature\n"
+    assert (target / "lab-twin" / "lab-data.json").read_text() == '{"source":"live edits"}'
+    assert not (target / ".monitor-backups").exists()
+    assert events == []
+
+
+def test_integrated_release_fast_forwards_vm_and_preserves_both_features(diverged_vm):
+    target, commit, vm_commit, events = diverged_vm
+    upstream = target.parent / "upstream"
+    git(upstream, "fetch", str(target), vm_commit)
+    git(upstream, "merge", "--no-edit", vm_commit)
+    release = git(upstream, "rev-parse", "HEAD")
+    installer.install(target, release)
+    assert git(target, "rev-parse", "HEAD") == release
+    git(target, "merge-base", "--is-ancestor", vm_commit, release)
+    git(target, "merge-base", "--is-ancestor", commit, release)
+    assert (target / "backend" / "app" / "scan_update.py").read_text() == "# existing VM feature\n"
+    assert (target / "backend" / "app" / "main.py").read_text() == "# barcode backend\n"
+    assert (target / "lab-twin" / "lab-data.json").read_text() == '{"source":"live edits"}'
+    assert (target / "backend" / "lab_manager.db").read_bytes() == b"existing database"
+    assert events == ["preflight", "stop", "start"]
+
+
+def test_monitor_health_failure_rolls_back_before_reporting_success(deployment, monkeypatch):
+    target, commit, old, events = deployment
+    def fail(*args):
+        raise RuntimeError("Monitoring health check failed")
+    monkeypatch.setattr(installer, "verify_monitoring", fail)
+    with pytest.raises(RuntimeError, match="Monitoring health"):
+        installer.install(target, commit)
+    assert git(target, "rev-parse", "HEAD") == old
+    assert (target / "backend" / "lab_manager.db").read_bytes() == b"existing database"
+    assert (target / "lab-twin" / "lab-data.json").read_text() == '{"source":"live edits"}'
+    assert events == ["preflight", "stop", "start", "terminate child", "start"]
+
+
+def test_failed_preflight_keeps_live_application_running(deployment, monkeypatch):
+    target, commit, old, events = deployment
+    def fail(*args):
+        raise RuntimeError("ICMP unavailable")
+    monkeypatch.setattr(installer, "smoke_test", fail)
+    with pytest.raises(RuntimeError, match="ICMP unavailable"):
+        installer.install(target, commit)
+    assert git(target, "rev-parse", "HEAD") == old
+    assert (target / "backend" / "version.txt").read_text() == "deployed-old\n"
+    assert events == []
+
+
+def test_health_check_uses_existing_python_without_password_in_arguments(tmp_path, monkeypatch):
+    seen = []
+    def output(args, **kwargs):
+        seen.append((args, kwargs))
+        return '{"service":"scheduled","timezone":"Asia/Jerusalem","last_started_at":"2026-09-28T00:00:00Z"}'
+    monkeypatch.setattr(installer.subprocess, "check_output", output)
+    interpreter = tmp_path / "backend/.venv/bin/python"
+    installer.verify_monitoring(tmp_path, interpreter)
+    assert seen[0][0] == [str(interpreter), "-c", installer.MONITOR_HEALTH]
+    assert seen[0][1]["cwd"] == tmp_path / "backend"
+
+
+@pytest.mark.parametrize("state,message", [
+    ('{"service":"disabled","timezone":"Asia/Jerusalem"}', "PING_MONITOR_ENABLED"),
+    ('{"service":"scheduled","timezone":"UTC"}', "PING_MONITOR_TIMEZONE"),
+])
+def test_wrong_monitor_configuration_is_not_reported_as_success(tmp_path, monkeypatch, state, message):
+    monkeypatch.setattr(installer.subprocess, "check_output", lambda *args, **kwargs: state)
+    with pytest.raises(RuntimeError, match=message):
+        installer.verify_monitoring(tmp_path, tmp_path / "python")
+
+
+LOCAL_LOCK = b'{"version":"local", "preserve":"exact bytes"}\r\n'
 
 
 @pytest.mark.parametrize("state,expected", [("S", "123456"), ("R", "123456"), ("Z", None), ("X", None)])
@@ -170,35 +287,6 @@ def test_port_still_occupied_prevents_update_and_duplicate_start(deployment, mon
     assert events == ["preflight", "stop"]
 
 
-def test_failed_startup_restores_previous_commit_and_version(deployment, monkeypatch):
-    target, commit, old, events = deployment
-    def readiness(*args, **kwargs):
-        if kwargs.get("expected_version"):
-            raise RuntimeError("Simulated startup failure")
-    monkeypatch.setattr(installer, "wait_ready", readiness)
-    with pytest.raises(RuntimeError, match="startup failure"):
-        installer.install(target, commit)
-    assert git(target, "rev-parse", "HEAD") == old
-    assert (target / "backend" / "app" / "main.py").read_text() == "# original backend\n"
-    assert (target / "backend" / "version.txt").read_text() == "deployed-old\n"
-    assert (target / "lab-twin" / "lab-data.json").read_text() == '{"source":"live edits"}'
-    assert (target / "backend" / "lab_manager.db").read_bytes() == b"existing database"
-    assert events == ["preflight", "stop", "start", "terminate child", "start"]
-
-
-def test_local_source_edits_abort_before_stopping_service(deployment):
-    target, commit, old, events = deployment
-    (target / "backend" / "app" / "main.py").write_text("# user work\n")
-    with pytest.raises(RuntimeError, match="Local source edits"):
-        installer.install(target, commit)
-    assert git(target, "rev-parse", "HEAD") == old
-    assert (target / "backend" / "app" / "main.py").read_text() == "# user work\n"
-    assert events == []
-
-
-LOCAL_LOCK = b'{"version":"local", "preserve":"exact bytes"}\r\n'
-
-
 def test_local_lockfile_requires_explicit_backup_option(deployment):
     target, commit, old, events = deployment
     lock = target / "frontend" / "package-lock.json"
@@ -217,7 +305,7 @@ def test_lockfile_backup_installs_reviewed_version_and_preserves_exact_original(
     installer.install(target, commit, backup_frontend_lock=True)
     assert git(target, "rev-parse", "HEAD") == commit
     assert lock.read_text() == '{"version":"reviewed"}\n'
-    backups = list((target / ".barcode-backups").glob("*/local-source/frontend/package-lock.json"))
+    backups = list((target / ".monitor-backups").glob("*/local-source/frontend/package-lock.json"))
     assert len(backups) == 1
     assert backups[0].read_bytes() == LOCAL_LOCK
     assert (target / "backend" / "lab_manager.db").read_bytes() == b"existing database"

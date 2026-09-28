@@ -41,7 +41,7 @@ async def test_serial_scan_is_read_only_and_exact(inventory_client):
     response = await inventory_client.get("/api/inventory", params={"code": " mt00123\r\n"})
     assert response.status_code == 200
     assert response.json()["matches"][0]["id"] == "ci-existing"
-    assert response.json()["racks"] == ["Rack-01", "Rack-02", "Rack-03"]
+    assert response.json()["racks"] == ["Rack-01", "Rack-02", "Rack-03", "Storage-Main"]
     assert response.headers["cache-control"] == "no-store"
     partial = await inventory_client.get("/api/inventory", params={"code": "MT001"})
     assert partial.json()["matches"] == []
@@ -117,7 +117,7 @@ async def test_dcim_and_twin_edits_record_history_and_keep_server_fields(invento
     assert saved["tracking_history"][-1]["note"] == "Edited in DCIM or 3D Twin"
 
 
-@pytest.mark.parametrize("patch", [{"u": 0}, {"u": 43}, {"u": 1.2}, {"u": True}, {"rack": "Missing"}, {"position": "x" * 81}])
+@pytest.mark.parametrize("patch", [{"u": -1}, {"u": 43}, {"u": 1.2}, {"u": True}, {"rack": "Missing"}, {"position": "x" * 81}, {"rack": "Storage-Main", "u": 1}, {"rack": "Storage-Main", "u": 0, "position": "shelf"}])
 async def test_invalid_location_changes_nothing(inventory_client, patch):
     c = inventory_client
     before = store.ITEMS_FILE.read_bytes()
@@ -126,7 +126,7 @@ async def test_invalid_location_changes_nothing(inventory_client, patch):
     assert store.ITEMS_FILE.read_bytes() == before
 
 
-@pytest.mark.parametrize("code", [" ", "abc\nxyz", "LOC:Rack-01:1:", "x" * 201])
+@pytest.mark.parametrize("code", [" ", "abc\nxyz", "LOC:Rack-01:1:", "RACK:Rack-01", "STORE:MAIN", "x" * 201])
 async def test_invalid_barcode_changes_nothing(inventory_client, code):
     before = store.ITEMS_FILE.read_bytes()
     result = await inventory_client.post("/api/inventory/ci-existing/barcode", json={"code": code}, headers=await headers(inventory_client))
@@ -198,3 +198,24 @@ def test_history_is_bounded_without_losing_latest():
         store.record(item, "confirmed", None, {"u": n})
     assert len(item["tracking_history"]) == 100
     assert item["tracking_history"][-1]["to"] == {"u": 119}
+
+
+async def test_rack_and_main_storage_moves_preserve_identity_and_record_exact_scope(inventory_client):
+    c = inventory_client
+    for rack, u in [("Rack-02", 0), ("Storage-Main", 0), ("Rack-01", 3)]:
+        result = await c.post("/api/inventory/ci-existing/location", json={"rack": rack, "u": u}, headers=await headers(c))
+        assert result.status_code == 200
+        item = result.json()
+        assert (item["rack"], item["u"], item["serial_number"]) == (rack, u, "MT00123")
+        assert item["tracking_history"][-1]["to"] == {"rack": rack, "u": u, "position": ""}
+        saved = (await c.get("/api/rack-items")).json()
+        assert sum(i["id"] == "ci-existing" for group in saved.values() for i in group) == 1
+        assert saved[rack][0]["id"] == "ci-existing"
+
+
+async def test_register_directly_in_main_storage(inventory_client):
+    c = inventory_client
+    result = await c.post("/api/inventory", json={"code": "SPARE-001", "name": "Spare switch", "rack": "Storage-Main", "u": 0}, headers=await headers(c))
+    assert result.status_code == 201
+    assert result.json()["u"] == 0
+    assert store.read_items()["Storage-Main"][0]["barcode"] == "SPARE-001"

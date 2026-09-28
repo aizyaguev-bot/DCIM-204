@@ -69,7 +69,7 @@ class RaritanKvmDriver:
         except Exception:
             pass
         # Final fallback: static list (can't distinguish empty from idle)
-        return [{"number": i + 1, "label": f"Port {i + 1}", "status": "idle"}
+        return [{"number": i + 1, "label": f"Port {i + 1}", "status": "idle", "status_source": "unknown"}
                 for i in range(port_count)]
 
     async def _get_ports_sidebar(self, port_count: int) -> list[dict]:
@@ -89,7 +89,7 @@ class RaritanKvmDriver:
         def _build(configured: set[int]) -> list[dict]:
             return [
                 {"number": i + 1, "label": f"Port {i + 1}",
-                 "status": "idle" if (i + 1) in configured else "empty"}
+                 "status": "idle" if (i + 1) in configured else "empty", "status_source": "configured"}
                 for i in range(port_count)
             ]
 
@@ -134,9 +134,22 @@ class RaritanKvmDriver:
         ports = []
         for i, t in enumerate(targets):
             label = t.get("name", t.get("label", t.get("targetName", f"Port {i+1}")))
-            raw_status = t.get("connectionStatus", t.get("status", t.get("state", "idle")))
+            raw_status = t.get("connectionStatus", t.get("status", t.get("state")))
             status = _parse_kvm_status(raw_status)
-            ports.append({"number": i + 1, "label": label, "status": status})
+            raw_number = t.get("portNumber", t.get("number"))
+            number = int(raw_number) if str(raw_number).isdigit() and int(raw_number) > 0 else i + 1
+            # An inferred row number or an undocumented state cannot establish
+            # the health of a particular physical port.
+            known = raw_status is not None and str(raw_status).strip().lower() in {
+                "connected", "active", "in-use", "inuse", "1", "true", "busy",
+                "idle", "available", "up", "online", "free", "ready",
+                "empty", "none", "no-target", "notarget", "0", "false",
+                "disconnected", "down", "not-connected", "not connected",
+                "unavailable", "not available", "notconfigured", "not configured", "not_configured",
+            }
+            numbered = str(raw_number).isdigit() and int(raw_number) > 0
+            ports.append({"number": number, "label": label, "status": status,
+                          "status_source": "live" if numbered and known else "unknown"})
         return ports
 
     def get_viewer_url(self, port_number: int) -> dict:
@@ -165,12 +178,12 @@ class RaritanKvmDriver:
 
 
 def _parse_kvm_status(raw) -> str:
-    if not raw:
+    if raw is None or raw == "":
         return "idle"
     s = str(raw).lower().strip()
     if s in ("connected", "active", "in-use", "inuse", "1", "true", "busy"):
         return "active"
-    if s in ("empty", "none", "no-target", "notarget", "0",
+    if s in ("empty", "none", "no-target", "notarget", "0", "false",
              "disconnected", "down", "not-connected", "not connected",
              "unavailable", "not available", "notconfigured",
              "not configured", "not_configured"):

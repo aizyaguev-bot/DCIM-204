@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install a reviewed commit on the existing Linux VM, using its existing venv.
+"""Install Ping Monitor on the existing Linux VM using its existing Python venv.
 
 No sudo, package installation, database seeding, or remote Git write is performed.
 The checkout must be clean except for live twin data and the deployment version.
@@ -25,6 +25,54 @@ import urllib.request
 REPOSITORY = "https://github.com/aizyaguev-bot/DCIM-204.git"
 LIVE_TRACKED = {"lab-twin/lab-data.json", "backend/version.txt"}
 FRONTEND_LOCK = "frontend/package-lock.json"
+
+# Read credentials in the application environment without exposing them in argv,
+# stdout, shell history or logs. The only HTTP destination is the local backend.
+MONITOR_HEALTH = r'''
+import base64, json, urllib.request
+from app.config import get_settings
+settings = get_settings()
+headers = {}
+if settings.lab_manager_password:
+    token = base64.b64encode((":" + settings.lab_manager_password).encode()).decode()
+    headers["Authorization"] = "Basic " + token
+request = urllib.request.Request("http://127.0.0.1:8000/api/monitoring", headers=headers)
+with urllib.request.urlopen(request, timeout=5) as response:
+    data = json.load(response)
+print(json.dumps({key: data.get(key) for key in ("service", "timezone", "last_started_at", "error")}))
+'''
+
+PROBE_ENVIRONMENT = r'''
+import asyncio
+from zoneinfo import ZoneInfo
+from app.ping_monitor import ping
+ZoneInfo("Asia/Jerusalem")
+result = asyncio.run(ping("127.0.0.1"))
+if result.status != "up":
+    raise SystemExit("Local ICMP preflight failed: " + result.detail)
+print("Local ICMP and Israel timezone checks passed")
+'''
+
+
+def verify_monitoring(root, python):
+    last = "Monitoring has not started yet"
+    for _ in range(20):
+        try:
+            data = json.loads(subprocess.check_output(
+                [str(python), "-c", MONITOR_HEALTH], cwd=root / "backend",
+                text=True, stderr=subprocess.PIPE, timeout=10,
+            ))
+            if data.get("timezone") != "Asia/Jerusalem":
+                raise RuntimeError("PING_MONITOR_TIMEZONE must be Asia/Jerusalem for the requested schedule")
+            if data.get("service") == "disabled":
+                raise RuntimeError("PING_MONITOR_ENABLED is false in the application configuration")
+            if data.get("service") in ("scheduled", "running") and data.get("last_started_at"):
+                return
+            last = data.get("error") or data.get("service") or last
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+            last = "The authenticated monitoring health check failed"
+        time.sleep(.5)
+    raise RuntimeError("Ping Monitor did not become healthy: " + last)
 
 
 def git(root, *args):
@@ -79,16 +127,27 @@ def start(root, python, log_path, port=8000, env=None):
 
 
 def smoke_test(source, python, backup):
+    # All checks happen against the extracted source before stopping the live app.
+    env = {**os.environ, "DATABASE_URL": "sqlite+aiosqlite:///:memory:", "LAB_MANAGER_PASSWORD": "",
+           "PING_MONITOR_ENABLED": "true", "PING_MONITOR_TIMEZONE": "Asia/Jerusalem"}
+    probe = subprocess.run([str(python), "-c", PROBE_ENVIRONMENT], cwd=source / "backend",
+                           env=env, text=True, capture_output=True, timeout=20)
+    if probe.returncode:
+        raise RuntimeError("VM preflight failed before any service was stopped. Check the existing venv dependencies, "
+                           "system ping utility and ICMP permissions.\n" + (probe.stderr or probe.stdout)[-2000:])
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    env = {**os.environ, "DATABASE_URL": "sqlite+aiosqlite:///:memory:", "LAB_MANAGER_PASSWORD": ""}
     process = start(source, python, backup / "preflight.log", port, env)
     try:
         wait_ready(port, process=process, inventory=True)
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/inventory", timeout=3) as response:
             if json.load(response).get("items") != []:
                 raise RuntimeError("Preflight must use an empty test inventory")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/monitoring", timeout=3) as response:
+            monitoring = json.load(response)
+        if monitoring.get("timezone") != "Asia/Jerusalem" or monitoring.get("targets") != []:
+            raise RuntimeError("Ping Monitor preflight failed its timezone or isolated inventory check")
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=3) as response:
             html = response.read().decode()
         assets = re.findall(r'(?:src|href)="(/assets/[^\"]+)"', html)
@@ -174,6 +233,7 @@ def restore_live(root, backup):
 @contextmanager
 def install_lock(root):
     import fcntl
+    # Share the existing deployment lock so barcode and monitor updates cannot overlap.
     with (root / ".barcode-install.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -204,7 +264,16 @@ def install(root, commit, backup_frontend_lock=False):
                 raise RuntimeError("Only an existing regular frontend/package-lock.json can be backed up")
         print("Fetching the reviewed update…", flush=True)
         git(root, "fetch", REPOSITORY, commit)
-        git(root, "merge-base", "--is-ancestor", old, commit)
+        try:
+            git(root, "merge-base", "--is-ancestor", old, commit)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 1:
+                raise
+            raise RuntimeError(
+                "The update does not include the current VM commit " + old + ". "
+                "Use a release that includes this version; no application files were changed "
+                "and the running service was not stopped."
+            ) from exc
         changed = file_set(root, "diff", "--name-only", old, commit)
         protected = {".env", "backend/lab_manager.db"}
         protected.update(p.relative_to(root).as_posix() for p in (root / "backend").glob("*.json"))
@@ -221,7 +290,7 @@ def install(root, commit, backup_frontend_lock=False):
         if occupied and not pids:
             raise RuntimeError("Port 8000 belongs to a process outside this project; it was left running")
 
-        backup = root / ".barcode-backups" / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + commit[:7])
+        backup = root / ".monitor-backups" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "-" + commit[:7])
         backup.mkdir(parents=True, mode=0o700)
         os.chmod(backup.parent, 0o700)
         os.chmod(backup, 0o700)
@@ -280,6 +349,7 @@ def install(root, commit, backup_frontend_lock=False):
             (root / "backend" / "version.txt").write_text(commit[:7] + "\n")
             new_process = start(root, python, root / "backend" / "server.log")
             wait_ready(8000, new_process, expected_version=commit[:7], inventory=True)
+            verify_monitoring(root, python)
         except Exception:
             if new_process is not None and new_process.poll() is None:
                 new_process.terminate()
@@ -303,7 +373,9 @@ def install(root, commit, backup_frontend_lock=False):
             print("Update failed. Original source and live twin data restored. Backup: " + str(backup), file=sys.stderr)
             raise
         print("Installed " + commit[:7] + ". Inventory preserved. Backup: " + str(backup))
-        print("Open the site with ?tab=scan and refresh existing DCIM / 3D Twin tabs.")
+        print("Open the site with ?tab=monitoring and refresh existing DCIM / 3D Twin tabs.")
+        print("Ping Monitor: every 5 minutes 07:00-20:00; every 30 minutes overnight; Asia/Jerusalem.")
+        print("Check imported server names/IPs in Ping Monitor. DNS and lab reachability need verification there.")
         print("The backend is running in the background. VM boot startup remains unchanged.")
 
 
@@ -318,6 +390,8 @@ def main():
     args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("Run this installer inside the Linux VM")
+    if sys.version_info < (3, 10):
+        parser.error("Use the application's backend/.venv/bin/python (Python 3.10+), not the old system Python")
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("Pass a full 40-character commit SHA")
     install(args.project, args.commit, backup_frontend_lock=args.backup_frontend_lock)

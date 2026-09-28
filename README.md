@@ -1,5 +1,16 @@
 # Lab Manager
 
+## Server ping monitoring
+
+The **Ping Monitor** tab checks server reachability in the backend, including when
+the browser is closed. Checks run every 5 minutes from 07:00 to 20:00 and every
+30 minutes overnight, every day in `Asia/Jerusalem` (including daylight saving).
+It imports server labels from PDUs/KVMs and computer inventory, supports IP/hostname
+overrides, and records check history and failure/recovery observations.
+Each server also shows its associated PDU outlets and KVM ports, with explicit
+power/port states, failed checks, missing associations and overdue observations.
+See [setup, schedule, and monitoring limitations](docs/ping-monitoring.md).
+
 ## Barcode scanning and equipment location
 
 The **Scan & Track** tab supports USB / Bluetooth keyboard scanners, existing

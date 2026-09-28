@@ -1,4 +1,10 @@
 const versions = new WeakMap();
+export const MAIN_STORAGE = "Storage-Main";
+export const mainStorageCode = "STORE:MAIN";
+
+export function rackCode(rack) {
+  return `RACK:${encodeURIComponent(rack)}`;
+}
 
 async function parse(response) {
   const body = await response.json().catch(() => ({}));
@@ -54,6 +60,20 @@ export function locationCode(rack, u, position = "") {
 }
 
 export function parseLocationCode(code) {
+  if (/^STORE:/i.test(code)) {
+    if (code.toUpperCase() !== mainStorageCode) throw new Error("Unknown storage label. Use the Main storage label.");
+    return { rack: MAIN_STORAGE, u: 0, position: "" };
+  }
+  if (/^RACK:/i.test(code)) {
+    try {
+      const pieces = code.split(":");
+      const rack = decodeURIComponent(pieces[1]);
+      if (pieces.length !== 2 || !rack.trim() || rack.length > 120 || rack === MAIN_STORAGE || /[\x00-\x1f\x7f]/.test(rack)) throw new Error();
+      return { rack, u: 0, position: "" };
+    } catch {
+      throw new Error("Invalid rack label. Choose the destination manually.");
+    }
+  }
   if (!/^LOC:/i.test(code)) return null;
   const pieces = code.split(":");
   if (pieces.length !== 4) throw new Error("This shelf label is incomplete. Print a new label from Shelf labels.");
@@ -61,7 +81,7 @@ export function parseLocationCode(code) {
     const rack = decodeURIComponent(pieces[1]);
     const u = Number(pieces[2]);
     const position = decodeURIComponent(pieces[3]);
-    if (!rack.trim() || !Number.isInteger(u) || u < 1 || u > 42 || position.length > 80) throw new Error();
+    if (!rack.trim() || rack.length > 120 || rack === MAIN_STORAGE || !Number.isInteger(u) || u < 1 || u > 42 || position.length > 80) throw new Error();
     return { rack, u, position };
   } catch {
     throw new Error("Invalid shelf label. Choose a rack and shelf manually.");

@@ -9,6 +9,7 @@ import KvmDetail from "./pages/KvmDetail";
 import DcimView from "./pages/DcimView";
 import SyncView from "./pages/SyncView";
 import ScanView from "./pages/ScanView";
+import MonitoringView from "./pages/MonitoringView";
 import AddDeviceModal from "./components/AddDeviceModal";
 
 export default function App() {
@@ -16,7 +17,10 @@ export default function App() {
   const [pduStatuses, setPduStatuses] = useState({});   // { id: PduStatus }
   const [kvmStatuses, setKvmStatuses] = useState({});   // { id: KvmStatus }
   const [view, setView] = useState({ kind: "dashboard" });
-  const [mainTab, setMainTab] = useState(() => new URLSearchParams(window.location.search).get("tab") === "scan" ? "scan" : "dashboard");
+  const [mainTab, setMainTab] = useState(() => {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return ["scan", "monitoring"].includes(tab) ? tab : "dashboard";
+  });
 
   function openDetail(newView) {
     history.pushState({ view: newView }, "");
@@ -207,16 +211,17 @@ export default function App() {
       {/* top-level tab bar — only visible on the root dashboard level */}
       {view.kind === "dashboard" && (
         <div className="border-b border-zinc-800/60 bg-zinc-950/40">
-          <div className="max-w-[1600px] mx-auto px-6 flex gap-1 pt-2">
+          <div className="max-w-[1600px] mx-auto px-6 flex gap-1 pt-2 overflow-x-auto">
             {[
               { id: "dashboard", label: "Dashboard" },
               { id: "dcim",      label: "DCIM" },
               { id: "sync",      label: "Sync Map" },
               { id: "scan",      label: "Scan & Track" },
+              { id: "monitoring", label: "Ping Monitor" },
               { id: "twin",      label: "3D Twin" },
             ].map(t => (
               <button key={t.id} onClick={() => setMainTab(t.id)}
-                className={`px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition ${
+                className={`px-4 py-2 text-sm font-medium whitespace-nowrap shrink-0 rounded-t-lg border-b-2 transition ${
                   mainTab === t.id
                     ? "text-nv-400 border-nv-400 bg-nv-400/5"
                     : "text-zinc-500 border-transparent hover:text-zinc-300 hover:bg-zinc-800/40"
@@ -248,6 +253,7 @@ export default function App() {
       )}
 
       {view.kind === "dashboard" && mainTab === "scan" && <ScanView />}
+      {view.kind === "dashboard" && mainTab === "monitoring" && <MonitoringView />}
 
       {view.kind === "dashboard" && mainTab === "twin" && (
         <iframe title="3D Digital Twin" src="/twin/index.html?embed=1" className="w-full flex-1 border-0"
