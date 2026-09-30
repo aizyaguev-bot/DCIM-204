@@ -83,7 +83,9 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
             service = "error"
     response.headers["Cache-Control"] = "no-store"
     connections = await connection_index(db, tz, now)
+    from ..alerts import overview as alert_overview
     return {
+        "email_alerts": await alert_overview(db, settings),
         "timezone": settings.ping_monitor_timezone, "service": service,
         "interval_minutes": interval_minutes(now, tz), "server_time": iso(now),
         "next_run_at": iso(state.next_run_at) if state and settings.ping_monitor_enabled else None,

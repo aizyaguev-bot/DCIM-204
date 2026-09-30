@@ -995,7 +995,7 @@
       computeModel(); buildItems(); await refreshStatuses();
       if (session !== liveSession) return;
       if (S.live.timer) clearInterval(S.live.timer);
-      if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, POLL_MS);
+      if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, (window.DCIM_ACCOUNT_PREFS.refresh_seconds || 15) * 1000);
       toast('Backend connected', 'ok');
     } catch (e) {
       if (session !== liveSession) return;
@@ -1028,6 +1028,8 @@
     }
   }
   async function outletAction(pduId, outlet, action, btn) {
+    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
+    if (window.DCIM_ACCOUNT_PREFS.confirm_power && ['off', 'cycle'].includes(action) && !confirm(`Power ${action} outlet ${outlet}?`)) return;
     if (!S.live.connected) { toast('Connect the backend first', 'err'); return; }
     const old = btn ? btn.innerHTML : null; if (btn) { btn.disabled = true; btn.innerHTML = `<span class="busy"></span> ${action}…`; }
     try {
@@ -1038,6 +1040,7 @@
     finally { if (btn) { btn.disabled = false; btn.innerHTML = old; } }
   }
   function openKvm(kvmId, port) {
+    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
     const base = (S.settings.url || '').replace(/\/$/, '');
     api(`/api/kvms/${kvmId}/ports/${port}/mark-in-use`, { method: 'POST' }).catch(() => {});
     const popup = window.open(`${base}/api/kvms/${kvmId}/autologin?port=${port}`, '_blank');
@@ -1267,7 +1270,7 @@
 
   // ───────────────────────────────────────────────────────────── EDIT MODE (touch-friendly editor for the lab screen)
   const STATUS_ICON = { active: '●', building: '◐', inactive: '○', dismantled: '✕', unknown: '?' };
-  function toggleEdit(force) { S.editMode = force !== undefined ? force : !S.editMode; LS.set('editMode', S.editMode); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit'; if (!S.editMode) cancelMove(); if (S.selected) select(S.selected, { keepCamera: true }); toast(S.editMode ? 'Edit mode — tap any rack, shelf or item' : 'Edit mode off', 'ok'); }
+  function toggleEdit(force) { if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; } S.editMode = force !== undefined ? force : !S.editMode; LS.set('editMode', S.editMode); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit'; if (!S.editMode) cancelMove(); if (S.selected) select(S.selected, { keepCamera: true }); toast(S.editMode ? 'Edit mode — tap any rack, shelf or item' : 'Edit mode off', 'ok'); }
   function toggleKiosk(force) { S.kiosk = force !== undefined ? force : !S.kiosk; LS.set('kiosk', S.kiosk); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); if (S.kiosk && S.labelMode === 'none') setLabelMode('setups'); resize(); }
   $('#btnEdit').onclick = () => toggleEdit(); $('#btnKiosk').onclick = () => toggleKiosk();
 
@@ -1510,6 +1513,7 @@
 
   // ───────────────────────────────────────────────────────────── boot
   function init(data) {
+    if (!window.DCIM_CAN_OPERATE) S.editMode = false;
     // a browser draft is only restored if it was made on top of THIS exact dataset (otherwise a newer lab-data.json would be hidden by stale edits)
     S.dataBase = dataFingerprint(data);
     const draft = LS.get('draft', null);
@@ -1528,7 +1532,7 @@
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
   window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-  boot.then(init).catch(err => {
+  Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
     $('#loadFallback').classList.remove('hidden');
     $('#fileJson').onchange = e => { const f = e.target.files[0]; if (!f) return; f.text().then(t => { $('#loadFallback').classList.add('hidden'); init(JSON.parse(t)); }).catch(er => toast('Invalid JSON: ' + er.message, 'err')); };

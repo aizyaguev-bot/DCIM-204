@@ -2,6 +2,27 @@
 
 ---
 
+## v3.0.0 — 2026-09-30
+
+### Added
+- Real accounts with Admin, Operator and Viewer permissions, account settings,
+  temporary passwords and user management. Activation reuses the existing site
+  password for the first administrator and preserves the existing inventory.
+- Optional email alerts for observed network outages and configured PDU inlet
+  limits. Delivery remains disabled until SMTP and thresholds are configured.
+- The Linux installer can activate accounts, test sign-in before changing the
+  running site, and restore the previous login configuration on failure.
+
+### Changed
+- Integrated the v3 design into the existing application. Dashboard remains the
+  default page; Racks, Inventory, monitoring, console controls and 3D Twin remain
+  connected to the real APIs.
+- Storage racks appear on Dashboard with their saved equipment. Compute rack
+  placeholders do not create additional Dashboard cards for Rack 6 or Rack 7.
+- Rack editing is explicit; opening a rack no longer adds cooling assignments.
+
+---
+
 ## v2.36.0 — 2026-07-30
 
 ### Fixed

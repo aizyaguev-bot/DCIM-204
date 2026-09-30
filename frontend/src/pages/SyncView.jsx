@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { api } from "../api/client";
+import {useAccounts} from "../accounts";
 
 function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, onCancel }) {
   const [label,       setLabel]       = useState(row.label);
@@ -64,6 +65,7 @@ function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, on
 }
 
 export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
+  const {canOperate} = useAccounts();
   const [editing, setEditing] = useState(null); // { pdu_id, outlet_number }
   const [saving,  setSaving]  = useState(false);
   const [search,  setSearch]  = useState("");
@@ -294,7 +296,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
                     <td className="px-3 py-2.5 text-zinc-400 text-sm">{row.kvm?.device_name || <span className="text-zinc-700">—</span>}</td>
                     <td className="px-3 py-2.5 text-zinc-400 font-mono text-sm">{row.kvm ? `#${row.kvm.port}` : <span className="text-zinc-700">—</span>}</td>
                     <td className="px-3 py-2.5 text-right">
-                      <button onClick={() => setEditing(key)}
+                      <button disabled={!canOperate} onClick={() => setEditing(key)}
                         className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded transition">
                         Edit
                       </button>

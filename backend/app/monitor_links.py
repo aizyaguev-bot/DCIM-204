@@ -63,6 +63,9 @@ async def refresh_devices(session_factory):
                 snapshot.kind, snapshot.ip = device.kind, device.ip
                 snapshot.checked_at, snapshot.reachable = checked_at, reachable
                 snapshot.ports_json = json.dumps(list(ports.values()))
+                if device.kind == "pdu":
+                    from .alerts import observe_power
+                    await observe_power(db, current, result, checked_at)
                 await db.commit()
     finally:
         for task in tasks:

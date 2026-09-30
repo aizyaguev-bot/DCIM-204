@@ -1,7 +1,9 @@
 import { Fragment, useState } from "react";
 import StatusDot from "../components/StatusDot";
+import {useAccounts} from "../accounts";
 
 export default function KvmDetail({ device, status, onBack, onPortClick, onDelete, onLabelsSave, onMarkFree }) {
+  const {canOperate,canAdmin} = useAccounts();
   if (!device) return null;
   const ports = status?.ports || [];
   const active = ports.filter(p => p.status === "active").length;
@@ -47,7 +49,7 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
             <div className="px-4 py-2.5 bg-emerald-500/10 border-b border-emerald-500/20 text-emerald-300 text-xs flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
               <span className="flex-1">KVM in use — {inUsePorts.map(p => p.label || `Port ${p.number}`).join(", ")}</span>
-              <button onClick={e => { e.stopPropagation(); onMarkFree && onMarkFree(); }}
+              <button disabled={!canOperate} onClick={e => { e.stopPropagation(); onMarkFree && onMarkFree(); }}
                 title="Mark as free"
                 className="text-emerald-600 hover:text-emerald-300 transition leading-none px-1">✕</button>
             </div>
@@ -61,7 +63,7 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-zinc-500">Ports</div>
               {!editMode ? (
-                <button onClick={startEdit}
+                <button disabled={!canOperate} onClick={startEdit}
                   className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition">
                   <PencilIcon /> Edit Labels
                 </button>
@@ -122,7 +124,7 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-xs text-amber-200">ⓘ {device.notes}</div>
           )}
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4">
-            <button onClick={onDelete} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400">
+            <button disabled={!canAdmin} onClick={onDelete} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400">
               Remove device
             </button>
           </div>
@@ -133,10 +135,11 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
 }
 
 function PortCard({ port, onClick }) {
+  const {canOperate} = useAccounts();
   const active = port.status === "active";
   const occupied = !!port.label && !/^port\s*\d+$/i.test(port.label);
   return (
-    <button onClick={onClick}
+    <button disabled={!canOperate} onClick={onClick}
       className={`w-full relative rounded border cursor-pointer overflow-hidden aspect-[4/3] transition
         ${active
           ? "bg-emerald-950/40 border-emerald-500/70 shadow-[0_0_14px_rgba(52,211,153,0.25)]"

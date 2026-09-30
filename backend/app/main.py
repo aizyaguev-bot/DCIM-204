@@ -13,6 +13,8 @@ from .database import init_db, AsyncSessionLocal
 from .models import Device
 from .routers import devices, pdus, kvms, kvm_proxy, inventory, monitoring
 from .ping_monitor import monitor_loop
+from .alerts import alert_loop
+from .accounts import AccountAccess, bootstrap_admin, router as accounts_router
 from . import inventory_store
 from .config import get_settings
 from sqlalchemy import select
@@ -49,20 +51,25 @@ async def _warm_cache():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await bootstrap_admin()
     warmup = asyncio.create_task(_warm_cache())
     monitor = asyncio.create_task(monitor_loop())
+    alerts = asyncio.create_task(alert_loop())
     try:
         yield
     finally:
         warmup.cancel()
         monitor.cancel()
-        await asyncio.gather(warmup, monitor, return_exceptions=True)
+        alerts.cancel()
+        await asyncio.gather(warmup, monitor, alerts, return_exceptions=True)
 
 
 app = FastAPI(title="Lab Manager", lifespan=lifespan)
 
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
+    if get_settings().accounts_enabled or request.url.path == "/api/auth/status":
+        return await call_next(request)
     password = get_settings().lab_manager_password
     if not password:
         return await call_next(request)
@@ -85,11 +92,12 @@ async def basic_auth(request: Request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[] if get_settings().accounts_enabled else ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["ETag"],
 )
+app.add_middleware(AccountAccess)
 
 app.include_router(devices.router)
 app.include_router(pdus.router)
@@ -97,6 +105,7 @@ app.include_router(kvms.router)
 app.include_router(kvm_proxy.router)
 app.include_router(inventory.router)
 app.include_router(monitoring.router)
+app.include_router(accounts_router)
 
 
 @app.get("/api/version")

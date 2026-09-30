@@ -238,6 +238,8 @@ async def record_result(db, target_id, revision, host, result, checked_at):
     # Local/DNS errors do not invent an outage or a recovery.
     target.checked_at, target.status = checked_at, result.status
     target.rtt_ms, target.detail = result.rtt_ms, result.detail
+    from .alerts import observe_network
+    await observe_network(db, target, result, checked_at)
 
 
 async def ensure_state(session_factory=AsyncSessionLocal):

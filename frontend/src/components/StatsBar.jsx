@@ -3,7 +3,7 @@ export default function StatsBar({ stats }) {
     { label: "Devices",      value: stats.deviceCount },
     { label: "Outlets on",   value: `${stats.outletsOn} / ${stats.outletsTotal}` },
     { label: "Total draw",   value: `${(stats.watts / 1000).toFixed(2)} kW` },
-    { label: "KVM ports up", value: `${stats.portsActive} / ${stats.portsTotal}` },
+    { label: "KVM ports mapped", value: `${stats.portsMapped} / ${stats.portsTotal}` },
     { label: "Alerts",       value: stats.alerts, danger: stats.alerts > 0 },
   ];
 

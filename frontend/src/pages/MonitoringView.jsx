@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import {useAccounts} from "../accounts";
 
 const input = "w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:border-nv-400";
 const button = "rounded-lg border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800 disabled:opacity-40";
@@ -119,6 +120,7 @@ function AddServer({ onSaved, onClose }) {
 }
 
 function ServerHistory({ target, timezone, onSaved, onClose }) {
+  const {canOperate,preferences} = useAccounts();
   const [history, setHistory] = useState(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -131,9 +133,9 @@ function ServerHistory({ target, timezone, onSaved, onClose }) {
       catch (e) { if (!controller.signal.aborted) setError(e.message); }
       finally { pending = false; }
     }
-    load(); const timer = setInterval(load, 15000);
+    load(); const timer = setInterval(load, preferences.refresh_seconds * 1000);
     return () => { controller.abort(); clearInterval(timer); };
-  }, [target.id]);
+  }, [target.id, preferences.refresh_seconds]);
   return <aside className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5 min-w-0">
     <div className="flex justify-between items-start mb-4 gap-3">
       <div><h2 className="font-semibold text-lg break-words">{target.name}</h2><p className="text-xs text-zinc-500 mt-1">{target.rack || "No rack"} · <span className="font-mono">{target.host || "Address needed"}</span></p></div>
@@ -141,7 +143,7 @@ function ServerHistory({ target, timezone, onSaved, onClose }) {
     </div>
     <div className="mb-4"><Badge status={target.status} />{target.detail && <p className="text-xs text-zinc-400 mt-2 break-words">{target.detail}</p>}</div>
     <div className="space-y-4 mb-5 border-b border-zinc-800 pb-5">{["pdu", "kvm"].map(kind => <section key={kind} aria-label={`${kind.toUpperCase()} connections for ${target.name}`}><h3 className="text-sm font-semibold mb-2">{kind.toUpperCase()}</h3><Connections links={target[kind]} kind={kind} timezone={timezone} expanded /></section>)}</div>
-    <TargetSettings key={`${target.id}-${target.revision}`} target={target} onSaved={onSaved} />
+    {canOperate && <TargetSettings key={`${target.id}-${target.revision}`} target={target} onSaved={onSaved} />}
     <h3 className="text-sm font-semibold">Recent checks</h3>
     <p className="text-xs text-zinc-500 mt-1">Latest 200 checks · stored for 30 days</p>
     {error && <p role="alert" className="text-sm text-rose-300 mt-3">History could not refresh: {error}</p>}
@@ -161,6 +163,7 @@ function ServerHistory({ target, timezone, onSaved, onClose }) {
 }
 
 export default function MonitoringView() {
+  const {canOperate,preferences} = useAccounts();
   const [data, setData] = useState(null);
   const [incidents, setIncidents] = useState([]);
   const [error, setError] = useState("");
@@ -185,9 +188,9 @@ export default function MonitoringView() {
       catch (e) { if (!controller.signal.aborted) setError(e.message); }
       finally { pending = false; }
     }
-    load(); const timer = setInterval(load, 15000);
+    load(); const timer = setInterval(load, preferences.refresh_seconds * 1000);
     return () => { controller.abort(); clearInterval(timer); };
-  }, []);
+  }, [preferences.refresh_seconds]);
 
   async function check() {
     setBusy(true); setError(""); setNotice("");
@@ -204,7 +207,7 @@ export default function MonitoringView() {
   return <main className="w-full max-w-[1600px] mx-auto px-4 sm:px-6 py-6 space-y-5">
     <div className="flex flex-wrap justify-between items-start gap-4">
       <div><div className="text-xs text-nv-400 uppercase tracking-widest font-semibold mb-2">Network monitoring</div><h1 className="text-2xl font-semibold text-zinc-100">Server health</h1><p className="text-sm text-zinc-400 mt-2 max-w-2xl">Ping, PDU outlet power and KVM port observations for each server. Device connections are matched by server name.</p></div>
-      <div className="flex gap-2"><button className={button} onClick={() => setAdding(!adding)}>+ Add server</button><button className={primary} onClick={check} disabled={busy || !data || data.service === "running" || data.service === "disabled"}>{busy ? "Queueing…" : data?.service === "running" ? "Checking…" : "Check all now"}</button></div>
+      {canOperate && <div className="flex gap-2"><button className={button} onClick={() => setAdding(!adding)}>+ Add server</button><button className={primary} onClick={check} disabled={busy || !data || data.service === "running" || data.service === "disabled"}>{busy ? "Queueing…" : data?.service === "running" ? "Checking…" : "Check all now"}</button></div>}
     </div>
     {error && <div role="alert" className="rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Monitoring could not refresh: {error}. Previously displayed results may be out of date.</div>}
     {notice && <div role="status" className="text-sm text-nv-400">{notice}</div>}
@@ -214,6 +217,16 @@ export default function MonitoringView() {
       <div className="flex flex-wrap gap-x-8 gap-y-3 text-sm"><div><span className="text-zinc-500 text-xs block mb-1">07:00–20:00</span><strong className="font-medium">Every 5 minutes</strong></div><div><span className="text-zinc-500 text-xs block mb-1">20:00–07:00</span><strong className="font-medium">Every 30 minutes</strong></div><div><span className="text-zinc-500 text-xs block mb-1">Timezone · every day</span><strong className="font-medium">{timezone}</strong></div></div>
       <div className="text-xs text-zinc-400 space-y-1"><p>Next check: <span className="text-zinc-200">{when(data?.next_run_at, timezone)}</span></p><p>Last round completed: {when(data?.last_completed_at, timezone)}</p></div>
     </section>
+    {data?.email_alerts && <section aria-label="Email alerts" className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+      <div className="flex flex-wrap justify-between gap-3"><h2 className="font-semibold">Email alerts</h2><span className={`text-xs ${data.email_alerts.ready ? "text-nv-300" : "text-amber-300"}`}>{data.email_alerts.enabled ? data.email_alerts.ready ? `Configured · worker ${data.email_alerts.worker.replaceAll("_", " ")}` : "Setup required" : "Not enabled"}</span></div>
+      <p className="mt-2 text-sm text-zinc-400 break-words">Recipient: {data.email_alerts.recipient}</p>
+      <p className="mt-2 text-xs text-zinc-500">{data.email_alerts.minute_probes ? "Additional ping checks every minute, 24/7. Alert after failures span more than 5 minutes." : "Uses scheduled checks. Nighttime outage alerts can be delayed by the 30-minute interval."} One notification per incident, followed by a recovery message.</p>
+      <p className="mt-2 text-xs text-zinc-500">{data.email_alerts.power_rules.length ? `PDU inlet thresholds: ${data.email_alerts.power_rules.map(r=>`${r.metric} ${r.side} ${r.value} ${r.unit}`).join(" · ")}` : "Electrical alerts await configured voltage, current or power thresholds."}</p>
+      {!data.email_alerts.ready && data.email_alerts.problems.length > 0 && <p className="mt-2 text-xs text-amber-300">{data.email_alerts.problems.join(" · ")}</p>}
+      <details className="mt-3 text-xs text-zinc-400"><summary className="cursor-pointer">Delivery log · {data.email_alerts.pending} pending</summary>
+        <div className="mt-3 space-y-2">{data.email_alerts.recent.length ? data.email_alerts.recent.map(row=><div key={row.id} className="border-t border-zinc-800 pt-2"><p className="break-words">{row.subject}</p><p className="text-zinc-500 mt-1">{when(row.created_at, timezone)} · {row.sent_at ? "Accepted by mail relay" : row.error ? `Retry pending (${row.error})` : "Queued"}</p></div>) : <p>No emails queued yet.</p>}</div>
+      </details>
+    </section>}
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
       {[["Registered servers", targets.length, "text-zinc-100"], ["Ping reachable", targets.filter(t => t.status === "up").length, "text-emerald-300"], ["No reply", targets.filter(t => t.status === "down").length, "text-rose-300"], ["Needs attention", targets.filter(attention).length, "text-amber-300"]].map(([label, count, color]) => <div key={label} className="rounded-xl border border-zinc-800 p-4"><div className="text-xs text-zinc-500">{label}</div><div className={`text-3xl font-semibold mt-2 tabular-nums ${color}`}>{data ? count : "—"}</div></div>)}
     </div>

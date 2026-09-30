@@ -1,6 +1,9 @@
-import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
 import { loadRackItems, saveRackItems, MAIN_STORAGE } from "../api/inventory";
+import {useAccounts} from "../accounts";
+
+const EditContext = createContext(false);
 
 function Portal({ children }) {
   return createPortal(children, document.body);
@@ -156,6 +159,7 @@ const EMPTY_H = 20;  // height of an empty U row
 
 // Inline-rename text span
 function InlineName({ value, onRename, className }) {
+  const editMode = useContext(EditContext);
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(value);
   const ref = useRef(null);
@@ -164,21 +168,22 @@ function InlineName({ value, onRename, className }) {
 
   function commit() {
     const v = draft.trim();
-    if (v && v !== value) onRename?.(v);
+    if (editMode && v && v !== value) onRename?.(v);
     setEditing(false);
   }
 
-  if (editing) {
+  if (editing && editMode) {
     return (
       <input ref={ref} value={draft} onChange={e => setDraft(e.target.value)}
-        onKeyDown={e => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
+        onKeyDown={e => { e.stopPropagation(); if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
         onBlur={commit} onClick={e => e.stopPropagation()}
         className="flex-1 min-w-0 bg-transparent border-b border-nv-400/70 outline-none text-[11px] font-mono text-zinc-100"/>
     );
   }
   return (
-    <span onDoubleClick={e => { e.stopPropagation(); setEditing(true); }}
-      title="Double-click to rename"
+    <span onDoubleClick={e => { e.stopPropagation(); if (editMode) setEditing(true); }}
+      onClick={e => { if (editMode) e.stopPropagation(); }}
+      title={editMode ? "Double-click to rename" : value}
       className={`${className} cursor-text select-none`}>
       {value}
     </span>
@@ -187,129 +192,54 @@ function InlineName({ value, onRename, className }) {
 
 // Individual server cell (takes flex-1 in the row)
 function ServerCell({ server, sw, owner, onSelect, onRename }) {
-  const isOn = server.state === "on", isOff = server.state === "off";
-  const stateStripe = isOn ? "bg-nv-400/80" : isOff ? "bg-red-800/80" : "bg-zinc-700/50";
-  const ledColor    = isOn ? "bg-nv-400 shadow-[0_0_8px_#76b900]" : isOff ? "bg-red-700" : "bg-zinc-700";
-  return (
-    <div onClick={() => onSelect?.(server)}
-      className={`flex-1 min-w-0 flex items-stretch rounded overflow-hidden cursor-pointer transition-all
-        ${isOn ? "bg-gradient-to-r from-nv-400/20 via-nv-400/8 to-transparent border border-nv-400/35 hover:border-nv-400/60 hover:from-nv-400/28"
-               : isOff ? "bg-zinc-800/60 border border-zinc-700/40 hover:bg-zinc-800/80"
-               : "bg-zinc-900/50 border border-zinc-800/30 hover:bg-zinc-900/80"}`}
-      style={{ minHeight: SLOT_H - 6 }}>
-      {/* left state stripe */}
-      <div className={`w-1 flex-shrink-0 ${stateStripe}`}/>
-      {/* content */}
-      <div className="flex flex-1 items-center gap-2 px-2 min-w-0">
-        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${ledColor}`}/>
-        <div className="flex-1 min-w-0">
-          <InlineName value={server.name} onRename={onRename}
-            className={`text-[11px] font-mono font-bold leading-tight block truncate
-              ${isOn ? "text-zinc-100" : isOff ? "text-zinc-500" : "text-zinc-600"}`}/>
-          {(sw?.switch || server.watts > 0) && (
-            <div className="flex items-center gap-1 mt-0.5">
-              {sw?.switch && <span className="text-[7px] font-mono text-cyan-400/70 bg-cyan-950/60 px-1 rounded border border-cyan-900/40 leading-tight truncate max-w-[80px]">{sw.switch}{sw.port ? `·${sw.port}` : ""}</span>}
-              {server.watts > 0 && <span className={`text-[8px] font-mono tabular-nums leading-tight ${isOn ? "text-nv-400/80" : "text-zinc-600"}`}>{server.watts.toFixed(0)}W</span>}
-              {owner && <span className="text-[7px] font-mono text-purple-400/70 bg-purple-950/40 px-1 rounded border border-purple-900/40 leading-tight truncate max-w-[80px]">{owner}</span>}
-            </div>
-          )}
-        </div>
-        {isOn  && <span className="text-[7px] font-bold text-nv-400/60 uppercase tracking-widest flex-shrink-0 pr-1">ON</span>}
-        {isOff && <span className="text-[7px] font-bold text-red-900/80 uppercase tracking-widest flex-shrink-0 pr-1">OFF</span>}
+  const isOn = server.state === "on";
+  return <div className={`server-cell ${isOn ? "on" : ""}`} onClick={() => onSelect?.(server)}
+    role="button" tabIndex={0} aria-label={`View ${server.name}`} onKeyDown={e => { if (e.key === "Enter") onSelect?.(server); }}>
+    <span className="server-led"/>
+    <div className="flex-1 min-w-0">
+      <InlineName value={server.name} onRename={onRename} className="server-name"/>
+      <div className="server-meta"><span className="whitespace-nowrap">{server.state === "unknown" ? "—" : `${Math.round(server.watts || 0)} W`}</span>
+        {owner && <span className="owner-pill" title={owner}>{owner}</span>}
+        {sw?.switch && !owner && <span className="truncate" title={sw.switch}>{sw.switch}</span>}
       </div>
     </div>
-  );
+    <span className="server-state">{isOn ? "ON" : server.state === "off" ? "OFF" : "?"}</span>
+  </div>;
 }
 
 // Individual equipment cell (fixed compact width)
 function EquipCell({ item, onSelect, onRename }) {
   const meta = ITEM_TYPES[item.type] || ITEM_TYPES.other;
-  return (
-    <div onClick={() => onSelect?.(item)}
-      className={`flex-shrink-0 flex items-stretch rounded overflow-hidden cursor-pointer hover:brightness-125 transition-all border ${meta.border}`}
-      style={{ minHeight: SLOT_H - 6, width: 96 }}>
-      {/* left type stripe */}
-      <div className={`w-1 flex-shrink-0 ${meta.bg} opacity-80`}/>
-      <div className={`flex-1 flex flex-col justify-center px-1.5 ${meta.bg}`}>
-        <span className={`text-[7px] font-bold uppercase tracking-widest ${meta.text} opacity-60 leading-tight`}>{meta.label}</span>
-        <InlineName value={item.name} onRename={onRename}
-          className={`text-[9px] font-mono font-semibold ${meta.text} leading-tight block truncate`}/>
-        {(item.shelf_position || item.serial_number || item.barcode) && <span className="text-[8px] text-zinc-400 truncate leading-tight" title={[item.shelf_position, item.serial_number, item.barcode].filter(Boolean).join(" · ")}>{[item.shelf_position, item.serial_number || item.barcode].filter(Boolean).join(" · ")}</span>}
-        {item.notes && <span className="text-[7px] text-zinc-600 truncate leading-tight">{item.notes}</span>}
-      </div>
-    </div>
-  );
+  return <div className="equipment-cell" data-type={item.type} onClick={() => onSelect?.(item)}
+    role="button" tabIndex={0} aria-label={`View ${item.name}`} onKeyDown={e => { if (e.key === "Enter") onSelect?.(item); }}>
+    <span className="equipment-type">{meta.label}</span>
+    <InlineName value={item.name} onRename={onRename} className="equipment-name"/>
+    {(item.serial_number || item.barcode) && <span className="equipment-serial" title={item.serial_number || item.barcode}>SN: {item.serial_number || item.barcode}</span>}
+    {item.shelf_position && <span className="equipment-serial">{item.shelf_position}</span>}
+  </div>;
 }
 
 // One U row — server + equipment side by side, or just equipment, or empty
 function USlotGroup({ u, items, switchAssignments, optOwners, chillerAtU, onChillerUnassign, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, dragHandleProps }) {
-  const serverItem = items.find(i => i.kind === "server");
-  const equipItems = items.filter(i => i.kind === "custom");
-
-  if (items.length === 0) {
-    return (
-      <div data-u-slot={u} style={{ height: EMPTY_H }} className="flex items-center select-none group/empty">
-        <div className="w-10 flex-shrink-0 h-full bg-zinc-900/70 border-r border-zinc-800/50 flex items-center justify-end pr-1.5">
-          <span className="text-[7px] font-mono text-zinc-800 group-hover/empty:text-zinc-700 transition">{String(u).padStart(2,"0")}</span>
-        </div>
-        <div className="w-5 flex-shrink-0"/>
-        <div className="flex-1 h-px bg-zinc-900/80"/>
-        {/* chiller slot — right */}
-        <div className="w-14 flex-shrink-0 flex items-center justify-center border-l border-zinc-900/60 h-full">
-          {chillerAtU && <span className="text-[8px] font-mono text-cyan-600 truncate px-1">❄{chillerAtU.name}</span>}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div data-u-slot={u} style={{ minHeight: SLOT_H }} className="flex items-stretch border-b border-zinc-900/40 last:border-0">
-      <div className="w-10 flex-shrink-0 bg-zinc-900/70 border-r border-zinc-800/50 flex flex-col items-center justify-center select-none gap-0.5">
-        <div className="w-1 h-1 rounded-full bg-zinc-700/40 flex-shrink-0"/>
-        <span title={u ? `Shelf ${u}` : "Shelf unassigned"} className="text-[8px] font-mono font-bold text-zinc-500">{u ? String(u).padStart(2,"0") : "—"}</span>
-        <div className="w-1 h-1 rounded-full bg-zinc-700/40 flex-shrink-0"/>
-      </div>
-      {serverItem ? (
-        <div {...(dragHandleProps || {})} onClick={e => e.stopPropagation()}
-          className="flex items-center justify-center w-5 flex-shrink-0 text-zinc-800 hover:text-zinc-500 cursor-grab active:cursor-grabbing transition-colors">
-          {Icon.grip}
-        </div>
-      ) : <div className="w-5 flex-shrink-0"/>}
-      {/* content */}
-      <div className="flex-1 flex items-stretch gap-1.5 py-1.5 min-w-0 overflow-hidden">
-        {serverItem && (
-          <ServerCell server={serverItem.data}
-            sw={switchAssignments[serverItem.data.id]}
-            owner={optOwners?.[serverItem.data.id]}
-            onSelect={onSelectServer}
-            onRename={v => onRenameServer?.(serverItem.data, v)}/>
-        )}
-        {equipItems.map(({ data }) => (
-          <EquipCell key={data.id} item={data}
-            onSelect={onSelectCustom}
-            onRename={v => onRenameCustom?.(data, v)}/>
-        ))}
-      </div>
-      {/* chiller slot — right side of row */}
-      <div className="w-14 flex-shrink-0 flex items-center justify-center border-l border-zinc-800/40 pr-1">
-        {chillerAtU ? (
-          <button onClick={() => onChillerUnassign?.(chillerAtU.id)}
-            title="לחץ לניתוק צ'ילר"
-            className="flex flex-col items-center gap-0.5 group/ch hover:opacity-70 transition cursor-pointer">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-            <span className="text-[7px] font-mono text-cyan-500 leading-tight truncate max-w-[48px]">{chillerAtU.name}</span>
-            <span className="text-[6px] text-rose-700 opacity-0 group-hover/ch:opacity-100 transition leading-none">✕ נתק</span>
-          </button>
-        ) : null}
-      </div>
+  const editMode = useContext(EditContext);
+  const servers = items.filter(i => i.kind === "server");
+  if (!items.length) return <div data-u-slot={u} className="shelf-empty"><span className="shelf-index">{String(u).padStart(2, "0")}</span><span className="shelf-empty-line"/>{chillerAtU && <span className="shelf-chiller">❄ {chillerAtU.name}</span>}</div>;
+  return <div data-u-slot={u} className="shelf-row">
+    <span className="shelf-index" title={u ? `Shelf ${u}` : "Shelf unassigned"}>{u ? String(u).padStart(2, "0") : "—"}</span>
+    {editMode && servers.length > 0 && <div {...(dragHandleProps || {})} className="shelf-grip" aria-label={`Move shelf ${u}`} onClick={e => e.stopPropagation()}>{Icon.grip}</div>}
+    <div className="shelf-content">
+      {servers.map(({data}) => <ServerCell key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]} onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)}/>)}
+      {items.filter(i => i.kind === "custom").map(({data}) => <EquipCell key={data.id} item={data} onSelect={onSelectCustom} onRename={v => onRenameCustom?.(data, v)}/>)}
     </div>
-  );
+    {chillerAtU && <div className="shelf-chiller"><button title={editMode ? "Unassign cooling unit" : chillerAtU.name} onClick={() => { if (editMode) onChillerUnassign?.(chillerAtU.id); }}><span className="block">❄</span>{chillerAtU.name}</button></div>}
+  </div>;
 }
 
 // Sortable wrapper — applies DnD to the server in a U group
 function SortableURow({ u, items, switchAssignments, optOwners, chillerAtU, onChillerUnassign, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, isDragging }) {
+  const editMode = useContext(EditContext);
   const serverId = items.find(i => i.kind === "server")?.data.id;
-  const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: serverId || "noop" });
+  const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: serverId || "noop", disabled: !editMode });
   const dragHandleProps = serverId ? { ...listeners, ...attributes } : {};
 
   return (
@@ -383,175 +313,47 @@ function DraggableChiller({ chiller, onAssign, onUnassign }) {
 }
 
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
-function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, rackChillers, onChillerAssign, onChillerUnassign, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, width = 400, fixed = false, external = false, externalActiveId = null }) {
+function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, rackChillers, onChillerUnassign, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, width = 400, fixed = false, external = false, externalActiveId = null }) {
+  const {preferences,canAdmin} = useAccounts();
+  const editMode = useContext(EditContext);
   const [localActiveId, setLocalActiveId] = useState(null);
-  const containerRef = useRef(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
-  const { setNodeRef: setDropRef, isOver } = useDroppable({ id: "rack:" + r.rack });
-
-  const { rows, uMap, sorted } = useMemo(
-    () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems),
-    [r.servers, r.rack, rackOrder, rackSlots, customItems]
-  );
-
-  const serverIds    = sorted.map(s => s.id);
-  const activeId     = external ? externalActiveId : localActiveId;
-  const activeServer = sorted.find(s => s.id === activeId);
-  const pduOnline    = r.pduOnline;
-  const isStorage    = r.rackType === "storage";
-  const capPct       = r.maxWatts > 0 ? Math.min(100, r.totalWatts / r.maxWatts * 100) : 0;
-  const capColor     = capPct > 80 ? "#ef4444" : capPct > 55 ? "#f59e0b" : isStorage ? "#22d3ee" : "#76b900";
-  const borderCls    = isStorage
-    ? (pduOnline ? "border-cyan-800/60" : r.pdus.length ? "border-cyan-900/30" : "border-cyan-900/20")
-    : (pduOnline ? "border-zinc-700" : r.pdus.length ? "border-zinc-800" : "border-zinc-900");
-
-  function handleDragEnd({ active, over }) {
+  const { setNodeRef, isOver } = useDroppable({ id: "rack:" + r.rack, disabled: !editMode });
+  const { rows, sorted } = useMemo(() => buildRackRows(r.servers, r.rack, rackOrder, rackSlots, customItems), [r.servers, r.rack, rackOrder, rackSlots, customItems]);
+  const ids = sorted.map(s => s.id);
+  const activeId = external ? externalActiveId : localActiveId;
+  const status = r.rackType === "storage" ? "storage" : !r.pduData.length ? "no PDU" : r.pduData.some(p => p.reachable === false) ? "offline" : r.pduData.every(p => p.reachable === true) ? "online" : "pending";
+  const percent = r.maxWatts > 0 ? Math.min(100, r.totalWatts / r.maxWatts * 100) : 0;
+  const color = percent > 80 ? "#fe3f3f" : percent > 60 ? "#ef9100" : "#76b900";
+  const chillerByU = Object.fromEntries((rackChillers || []).filter(c => c.u != null).map(c => [c.u, c]));
+  function endDrag({ active, over }) {
     setLocalActiveId(null);
-    if (!active || !over || active.id === over.id) return;
-    onReorder(r.rack, arrayMove(serverIds, serverIds.indexOf(active.id), serverIds.indexOf(over.id)));
+    if (!editMode || !over || active.id === over.id) return;
+    const from = ids.indexOf(active.id), to = ids.indexOf(over.id);
+    if (from >= 0 && to >= 0) onReorder(r.rack, arrayMove(ids, from, to));
   }
-
-  const chillerByU = {};
-  (rackChillers || []).forEach(ch => {
-    if (ch.u != null) { if (!chillerByU[ch.u]) chillerByU[ch.u] = []; chillerByU[ch.u].push(ch); }
-  });
-
-  const sortableRows = (
-    <SortableContext items={serverIds} strategy={verticalListSortingStrategy}>
-      {rows.map(({ u, items }) => {
-        const serverItem = items.find(i => i.kind === "server");
-        const chillerAtU = isStorage ? null : (chillerByU[u]?.[0] ?? null);
-        if (serverItem) {
-          return (
-            <SortableURow key={`u${u}`} u={u} items={items}
-              switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU} onChillerUnassign={onChillerUnassign}
-              onSelectServer={onSelect} onSelectCustom={onSelectCustom}
-              onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
-              isDragging={serverItem.data.id === activeId}/>
-          );
-        }
-        return (
-          <USlotGroup key={`u${u}`} u={u} items={items}
-            switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU} onChillerUnassign={onChillerUnassign}
-            onSelectServer={onSelect} onSelectCustom={onSelectCustom}
-            onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}/>
-        );
-      })}
-    </SortableContext>
-  );
-
-  return (
-    <div data-rack-id={r.rack} ref={containerRef} className={fixed ? "flex-shrink-0" : "w-full min-w-0"} style={fixed ? { width } : undefined}>
-      {/* label plate */}
-      <div className={`mb-0 rounded-t-xl border-2 border-b-0 px-4 py-2.5 bg-zinc-900
-        ${pduOnline ? "border-zinc-700" : r.pdus.length ? "border-red-900/60" : "border-zinc-800"}`}>
-        <div className="flex items-center justify-between gap-2">
-          <button onClick={onHeaderClick} className="flex items-center gap-1.5 min-w-0 group/rh">
-            <span className="text-[13px] font-bold font-mono text-zinc-100 group-hover/rh:text-nv-400 transition truncate tracking-wide">{r.rack}</span>
-            {onHeaderClick && <span className="text-[10px] text-zinc-600 group-hover/rh:text-nv-400 transition">↗</span>}
-          </button>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            {onEdit && (
-              <button onClick={e => { e.stopPropagation(); onEdit(); }}
-                title="Edit rack"
-                className="text-zinc-600 hover:text-nv-400 transition p-0.5">
-                {Icon.edit}
-              </button>
-            )}
-            <div className="flex items-center gap-1">
-              {isStorage
-              ? <span className="text-[9px] font-mono font-bold text-cyan-400 bg-cyan-950/60 border border-cyan-800/40 px-1.5 py-0.5 rounded">STORAGE</span>
-              : <>
-                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${pduOnline ? "bg-nv-400 shadow-[0_0_6px_#76b900]" : r.pdus.length ? "bg-red-600" : "bg-zinc-700"}`}/>
-                  <span className={`text-[9px] font-mono font-bold ${pduOnline ? "text-nv-400" : r.pdus.length ? "text-red-500" : "text-zinc-600"}`}>
-                    {pduOnline ? "ONLINE" : r.pdus.length ? "OFFLINE" : "NO PDU"}
-                  </span>
-                </>
-            }
-            </div>
-          </div>
-        </div>
-        <div className="flex gap-3 text-[9px] font-mono mt-1">
-          <span className="text-zinc-500">{r.servers.length} OPT{r.servers.length!==1?"s":""}</span>
-          {(customItems[r.rack]||[]).length > 0 && <span className="text-zinc-600">{(customItems[r.rack]||[]).length} equip</span>}
-          {r.totalWatts > 0 && <span className="text-zinc-500">{r.totalWatts.toFixed(0)} W</span>}
-          {r.totalAmps > 0 && <span className="text-purple-500/70">{r.totalAmps.toFixed(1)} A</span>}
-          {r.pdus.map(p => <span key={p.id} className="text-zinc-700">{p.ip}</span>)}
-        </div>
-      </div>
-
-      {/* chassis body */}
-      <div ref={external ? setDropRef : undefined} className={`border-l-4 border-r-4 bg-zinc-950 ${borderCls}${external && isOver ? " ring-2 ring-nv-400/40 ring-inset" : ""}`}>
-        {/* top cap bar with screw dots */}
-        <div className="bg-zinc-900 border-b border-zinc-800/80 h-3 flex items-center justify-between px-2">
-          <div className="flex gap-1">
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
-          </div>
-          <div className="flex gap-1">
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
-          </div>
-        </div>
-        {external ? sortableRows : (
-          <DndContext sensors={sensors} collisionDetection={closestCenter}
-            onDragStart={e => setLocalActiveId(e.active.id)}
-            onDragEnd={handleDragEnd}
-            onDragCancel={() => setLocalActiveId(null)}>
-            {sortableRows}
-            <DragOverlay dropAnimation={null}>
-              {activeServer && (
-                <div style={{ width: (containerRef.current?.offsetWidth || width) - 8, background: "#0d0d0d", border: "1px solid #76b90040" }}
-                  className="rounded shadow-xl opacity-90 overflow-hidden">
-                  <ServerCell server={activeServer} sw={switchAssignments[activeServer.id]}/>
-                </div>
-              )}
-            </DragOverlay>
-          </DndContext>
-        )}
-        {/* unassigned chillers — draggable from within rack (not for storage racks) */}
-        {!isStorage && (rackChillers||[]).filter(c=>c.u==null).length > 0 && (
-          <div className="border-t border-cyan-900/30 bg-cyan-950/15 px-2 py-1.5 flex flex-wrap gap-1.5">
-            <span className="text-[8px] font-mono text-cyan-800 uppercase tracking-widest self-center mr-1">❄ drag to shelf →</span>
-            {(rackChillers||[]).filter(c=>c.u==null).map(ch => (
-              <DraggableChiller key={ch.id} chiller={ch} onAssign={onChillerAssign} onUnassign={onChillerUnassign}/>
-            ))}
-          </div>
-        )}
-        {/* bottom cap bar with screw dots */}
-        <div className="bg-zinc-900 border-t border-zinc-800/80 h-3 flex items-center justify-between px-2">
-          <div className="flex gap-1">
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
-          </div>
-          <div className="flex gap-1">
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
-            <div className="w-1.5 h-1.5 rounded-full bg-zinc-700/60"/>
-          </div>
-        </div>
-      </div>
-
-      {/* footer */}
-      <div className={`border-l-4 border-r-4 border-b-4 rounded-b-xl bg-zinc-900 px-4 py-2.5 ${borderCls}`}>
-        {r.pdus.length ? (
-          <>
-            <div className="flex justify-between items-center text-[9px] font-mono mb-1.5">
-              <span className="text-zinc-600 font-bold uppercase tracking-widest">Power</span>
-              <div className="flex items-center gap-2">
-                {r.totalAmps > 0 && <span className="text-purple-400/80 font-bold">{r.totalAmps.toFixed(1)} A</span>}
-                <span style={{ color: capColor }} className="font-bold">
-                  {r.totalWatts > 0 ? `${r.totalWatts.toFixed(0)} W · ${capPct.toFixed(0)}%` : "offline"}
-                </span>
-              </div>
-            </div>
-            <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-              <div className="h-full rounded-full transition-all duration-700" style={{ width: `${capPct}%`, background: capColor }}/>
-            </div>
-          </>
-        ) : <div className="text-[9px] font-mono text-zinc-800 text-center uppercase tracking-widest">No PDU attached</div>}
-      </div>
+  const content = <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+    {rows.filter(({u,items}) => !(preferences.compact_racks && !editMode && u >= 5 && u <= 8 && !items.length)).map(({u, items}) => {
+      const props = {u, items, switchAssignments, optOwners, chillerAtU: chillerByU[u], onChillerUnassign, onSelectServer: onSelect, onSelectCustom, onRenameServer, onRenameCustom};
+      return items.some(i => i.kind === "server") ? <SortableURow key={u} {...props} isDragging={editMode && items.some(i => i.data.id === activeId)}/> : <USlotGroup key={u} {...props}/>;
+    })}
+    {!rows.length && <p className="text-xs text-zinc-500 py-12 text-center">No equipment stored here</p>}
+  </SortableContext>;
+  return <div data-rack-id={r.rack} data-status={status} ref={external ? setNodeRef : undefined}
+    className={`rack-card min-w-0 ${fixed ? "w-full lg:shrink-0 lg:max-w-[480px]" : "w-full"} ${editMode && isOver ? "ring-2 ring-nv-400/40" : ""}`}>
+    <div className="rack-card-header"><button className="rack-card-name" onClick={onHeaderClick}><span>{r.rack}</span>{onHeaderClick && <small>↗</small>}</button>
+      <div className="flex items-center gap-2 shrink-0">{editMode && canAdmin && onEdit && <button title="Edit rack" onClick={onEdit}>{Icon.edit}</button>}<span className={`rack-status ${status}`}>{status[0].toUpperCase() + status.slice(1)}</span></div>
     </div>
-  );
+    <div className="rack-meta"><span>{r.servers.length} OPTs</span><span>· {(customItems[r.rack] || []).length} equip</span>
+      {r.pduOnline && <><span className="text-zinc-300">· {Math.round(r.totalWatts)} W</span><span style={{color:"#fff"}}>· {r.currentEstimated ? "≈" : ""}{r.totalAmps.toFixed(1)} A</span></>}
+      {r.pduData.map(p => <span key={p.id}>· {p.ip}</span>)}
+    </div>
+    <div className="rack-shelves">{external ? content : <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={e => { if (editMode) setLocalActiveId(e.active.id); }} onDragEnd={endDrag} onDragCancel={() => setLocalActiveId(null)}>{content}</DndContext>}</div>
+    <div className="rack-power" title="Load estimate uses the existing 16 A per inlet assumption; email alert thresholds are configured separately.">
+      <div className="rack-power-label"><span className="tracking-widest">POWER</span><span>{r.pduOnline ? <><span style={{color:"#fff"}}>{r.currentEstimated ? "≈" : ""}{r.totalAmps.toFixed(1)} A</span> <span style={{color}}>{Math.round(r.totalWatts)} W</span> · ≈{Math.round(percent)}%</> : status === "storage" || status === "no PDU" ? "No PDU reading" : status}</span></div>
+      <div className="rack-power-track"><div style={{width:`${r.pduOnline ? percent : 0}%`, background:color, boxShadow:`0 0 8px ${color}`}}/></div>
+    </div>
+  </div>;
 }
 
 // ─── ADD OPT MODAL ────────────────────────────────────────────────────────────
@@ -1031,6 +833,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
     () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems),
     [r.servers, r.rack, rackOrder, rackSlots, customItems]
   );
+  const editMode = useContext(EditContext);
   const pduOnline = r.pduOnline;
   const capPct    = r.maxWatts > 0 ? Math.min(100, r.totalWatts/r.maxWatts*100) : 0;
   const capColor  = capPct>80?"#ef4444":capPct>55?"#f59e0b":"#76b900";
@@ -1046,10 +849,10 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
         </button>
         <span className="text-zinc-700">/</span>
         <span className="text-sm font-bold text-zinc-100">{r.rack}</span>
-        <Pill color={pduOnline?"nv":r.pdus.length?"red":"zinc"} sm>{pduOnline?"online":r.pdus.length?"offline":"no PDU"}</Pill>
+        <Pill color={pduOnline?"nv":r.pduData.length?"red":"zinc"} sm>{pduOnline?"online":r.pduData.length?"offline":"no PDU"}</Pill>
       </div>
 
-      <div className="flex gap-6 items-start min-w-0 overflow-x-auto">
+      <div className="flex flex-col lg:flex-row gap-6 items-start min-w-0">
         {/* Large rack diagram */}
         <RackDiagram r={r} rackSlots={rackSlots} switchAssignments={switchAssignments}
           rackOrder={rackOrder} customItems={customItems}
@@ -1060,18 +863,18 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
         {/* Right panel */}
         <div className="flex-1 min-w-0 space-y-4">
           {/* Action buttons */}
-          <div className="flex gap-2">
+          {editMode && <div className="flex gap-2">
             <button onClick={() => onRequestAddEquip(r.rack)}
               className="flex items-center gap-1.5 text-sm font-semibold text-zinc-300 border border-zinc-700/50 hover:border-zinc-500 hover:text-zinc-100 px-4 py-2 rounded-xl transition">
               {Icon.plus} Equipment
             </button>
-            {r.pdus.length > 0 && (
+            {r.pduData.length > 0 && (
               <button onClick={() => onRequestAddOpt(r)}
                 className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-4 py-2 rounded-xl transition">
                 {Icon.plus} OPT
               </button>
             )}
-          </div>
+          </div>}
 
           {/* Stats */}
           <div className="grid grid-cols-2 gap-3">
@@ -1080,9 +883,9 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
               ["Equipment", (customItems[r.rack]||[]).length],
               ["Power draw", r.totalWatts > 0 ? `${r.totalWatts.toFixed(0)} W` : "—"],
               ["Current", r.totalAmps > 0 ? `${r.totalAmps.toFixed(1)} A` : "—"],
-              ["PDU capacity", `${capPct.toFixed(0)}%`],
-              ["Outlets on", `${r.outletsOn} / ${r.outletsTotal}`],
-              ["Status", pduOnline ? "Online" : r.pdus.length ? "Offline" : "No PDU"],
+              ["PDU capacity", r.pduData.length ? `${capPct.toFixed(0)}%` : "—"],
+              ["Outlets on", r.pduData.length ? `${r.outletsOn} / ${r.outletsTotal}` : "—"],
+              ["Status", pduOnline ? "Online" : r.pduData.length ? "Offline" : "No PDU"],
             ].map(([k, v]) => (
               <div key={k} className="bg-zinc-900/60 border border-zinc-800/50 rounded-xl px-4 py-3">
                 <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-1">{k}</div>
@@ -1092,10 +895,10 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
           </div>
 
           {/* PDUs */}
-          {r.pdus.length > 0 && (
+          {r.pduData.length > 0 && (
             <div className="bg-zinc-900/50 border border-zinc-800/60 rounded-xl px-4 py-3">
               <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-2">PDUs</div>
-              {r.pdus.map(p => (
+              {r.pdus.filter(p => p.kind === "pdu").map(p => (
                 <div key={p.id} className="flex items-center gap-3 py-1.5 border-b border-zinc-800/30 last:border-0">
                   <span className={`w-2 h-2 rounded-full flex-shrink-0 ${pduOnline ? "bg-nv-400 shadow-[0_0_4px_#76b900]" : "bg-zinc-600"}`}/>
                   <span className="text-sm font-semibold text-zinc-200">{p.name}</span>
@@ -1191,7 +994,7 @@ function AddRackModal({ onClose, onSave }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name:     pduName.trim() || `${rackType}-${rackName.trim()}`,
-          kind:     "rack",          // DCIM-only — never shows on Dashboard
+          kind:     "rack",          // Inventory only; Storage also appears on Dashboard.
           model:    rackType,        // "Compute" or "Storage"
           ip:       pduIp.trim()   || "0.0.0.0",
           rack:     rackName.trim(),
@@ -1539,32 +1342,24 @@ function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClo
 
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
 function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus, rackDevices, chillers, chillersLoaded, onChillersChange, optOwners }) {
-  const [selectedRack,   setSelectedRack]   = useState(null);
+  const {canAdmin} = useAccounts();
+  const [selectedRack,   setSelectedRack]   = useState(() => new URLSearchParams(location.search).get("rack"));
   const [addOptFor,      setAddOptFor]      = useState(null);
   const [addEquipFor,    setAddEquipFor]    = useState(null);
   const [addRackOpen,    setAddRackOpen]    = useState(false);
   const [editRackTarget, setEditRackTarget] = useState(null); // rack name string
   const [activeId,       setActiveId]       = useState(null);
   const [pendingMove,    setPendingMove]    = useState(null);
-  // coolingMode removed — chillers always visible
-
-  // Auto-seed chillers — only after API load completes (prevents overwriting saved data)
-  useEffect(() => {
-    if (!chillersLoaded || !onChillersChange || !chillers || (chillers.units||[]).length > 0 || rackStats.length === 0) return;
-    const units = rackStats.filter(rs => rs.rackType !== "storage").flatMap(rs => {
-      const count = rs.rack === "Rack-04" ? 2 : 1;
-      return Array.from({length: count}, (_,i) => ({
-        id: `ch-${rs.rack}-${i+1}`, name: `Chiller-${i+1}`, rack: rs.rack,
-      }));
-    });
-    onChillersChange({ units, connections: [] });
-  }, [rackStats, chillers, chillersLoaded, onChillersChange]);
+  const editMode = useContext(EditContext);
+  // Cooling assignments are loaded from the server.
 
   function handleAssignChiller(chillerId, rack, u) {
+    if (!editMode) return;
     const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, rack, u: u ?? null} : c)};
     onChillersChange?.(updated);
   }
   function handleUnassignChiller(chillerId) {
+    if (!editMode) return;
     const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, u: null} : c)};
     onChillersChange?.(updated);
   }
@@ -1583,7 +1378,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
 
   function handleCrossRackDragEnd({ active, over }) {
     setActiveId(null);
-    if (!active || !over || active.id === over.id) return;
+    if (!editMode || !active || !over || active.id === over.id) return;
     const sourceRack = serverRackMap[active.id];
     const targetRack = over.id.startsWith("rack:") ? over.id.slice(5) : serverRackMap[over.id];
     if (!sourceRack || !targetRack) return;
@@ -1619,16 +1414,6 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
     setAddEquipFor(null);
   }
 
-  if (!rackStats.length) return (
-    <div className="flex flex-col items-center justify-center py-32 gap-3 text-zinc-600">
-      <div className="text-sm">No racks discovered yet.</div>
-      <button onClick={() => setAddRackOpen(true)}
-        className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-4 py-2 rounded-xl transition">
-        {Icon.plus} Add Rack
-      </button>
-    </div>
-  );
-
   return (
     <div>
       {r ? (
@@ -1642,20 +1427,21 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
           onRequestAddEquip={setAddEquipFor}/>
       ) : (
         <>
+          {editMode && <div role="status" className="edit-mode-notice"><strong>Edit mode.</strong> Drag an OPT to another shelf or rack. Click Done when finished.</div>}
           <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-            <div className="text-[10px] text-zinc-700">Click rack name ↗ to open · drag grip to reorder · double-click name to rename · drag OPT across racks to move</div>
+            <div className="text-xs text-zinc-500">{editMode ? "Drag a grip to reorder or move across racks · Double-click a name to rename" : "Select a rack or asset for details · Turn on Edit to change the layout"}</div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <button onClick={() => setAddRackOpen(true)}
+              {editMode && canAdmin && <button onClick={() => setAddRackOpen(true)}
                 className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-3 py-1.5 rounded-xl transition">
                 {Icon.plus} Add Rack
-              </button>
+              </button>}
             </div>
           </div>
           <DndContext sensors={crossSensors} collisionDetection={closestCenter}
-            onDragStart={e => setActiveId(e.active.id)}
+            onDragStart={e => { if (editMode) setActiveId(e.active.id); }}
             onDragEnd={handleCrossRackDragEnd}
             onDragCancel={() => setActiveId(null)}>
-            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}>
+            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 100%), 1fr))" }}>
               {rackStats.map(rs => {
                 const rackChillers = chillerUnits.filter(c => c.rack === rs.rack);
                 return (
@@ -1733,6 +1519,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
 
 // ─── INVENTORY VIEW ───────────────────────────────────────────────────────────
 function InventoryView({ servers, switchAssignments, rackSlots, customItems, optOwners, onOwnerChange }) {
+  const editMode = useContext(EditContext);
   const [rack,  setRack]  = useState("all");
   const [state, setState] = useState("all");
   const [q, setQ]         = useState("");
@@ -1750,8 +1537,8 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
     return [...list].sort((a,b)=>{const av=a[sk]??"",bv=b[sk]??"";return typeof av==="number"?sd*(av-bv):sd*String(av).localeCompare(String(bv));});
   },[servers,rack,state,q,sk,sd,switchAssignments,optOwners]);
 
-  function startOwnerEdit(s){setEditingOwner(s.id);setOwnerDraft(optOwners?.[s.id]||"");}
-  async function commitOwner(){if(onOwnerChange&&editingOwner!=null)await onOwnerChange(editingOwner,ownerDraft.trim());setEditingOwner(null);}
+  function startOwnerEdit(s){if(!editMode)return;setEditingOwner(s.id);setOwnerDraft(optOwners?.[s.id]||"");}
+  async function commitOwner(){if(editMode&&onOwnerChange&&editingOwner!=null)await onOwnerChange(editingOwner,ownerDraft.trim());setEditingOwner(null);}
 
   const Th=({k,label,right})=>(<th onClick={()=>{if(sk===k)setSd(d=>-d);else{setSk(k);setSd(1);}}} className={`text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 whitespace-nowrap select-none cursor-pointer hover:text-zinc-300 transition ${right?"text-right":"text-left"} text-zinc-600`}>{label}{sk===k&&<span className="ml-0.5 opacity-50">{sd>0?"↑":"↓"}</span>}</th>);
   return (
@@ -1783,16 +1570,16 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
                   <td className="px-3 py-2 font-mono text-xs text-zinc-700">{s.pduIp||"—"}</td>
                   <td className="px-3 py-2 text-xs">{sw?.switch?<Pill color="cyan" sm>{sw.switch}{sw.port?`·${sw.port}`:""}</Pill>:<span className="text-zinc-800">—</span>}</td>
                   <td className="px-3 py-2 text-xs min-w-[110px]">
-                    {editingOwner===s.id?(
+                    {editingOwner===s.id&&editMode?(
                       <input autoFocus value={ownerDraft} onChange={e=>setOwnerDraft(e.target.value)}
                         onKeyDown={e=>{if(e.key==="Enter")commitOwner();if(e.key==="Escape")setEditingOwner(null);}}
                         onBlur={commitOwner}
                         list="inv-owner-list"
                         className="w-full bg-zinc-800 border border-purple-700/60 rounded px-2 py-0.5 text-xs text-zinc-200 focus:outline-none"/>
                     ):(
-                      <button onClick={()=>startOwnerEdit(s)}
+                      <button disabled={!editMode} onClick={()=>startOwnerEdit(s)}
                         className={`text-left w-full rounded px-1.5 py-0.5 hover:bg-zinc-800 transition ${ow?"text-purple-400":"text-zinc-700 hover:text-zinc-500"}`}>
-                        {ow||"+ assign"}
+                        {ow||(editMode ? "+ assign" : "Owner not set")}
                       </button>
                     )}
                   </td>
@@ -1809,9 +1596,9 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
 
 // ─── POWER VIEW ───────────────────────────────────────────────────────────────
 function PowerView({ rackStats }) {
-  const total=rackStats.reduce((a,r)=>a+r.totalWatts,0);
-  const totalA=rackStats.reduce((a,r)=>a+(r.totalAmps||0),0);
-  const allPdus=rackStats.flatMap(r=>r.pduData||[]);
+  const allPdus=[...new Map(rackStats.flatMap(r=>r.pduData||[]).map(p=>[p.id,p])).values()];
+  const total=allPdus.reduce((a,p)=>a+p.watts,0);
+  const totalA=allPdus.reduce((a,p)=>a+p.amps,0);
   const maxR=Math.max(...rackStats.map(r=>r.totalWatts),1);
   const sorted=[...rackStats].sort((a,b)=>b.totalWatts-a.totalWatts);
   const top=rackStats.flatMap(r=>r.servers).filter(s=>s.watts>0).sort((a,b)=>b.watts-a.watts).slice(0,10);
@@ -1822,6 +1609,7 @@ function PowerView({ rackStats }) {
   const recs=[...allPdus].filter(p=>p.reachable!==false&&p.outletsTotal>0).sort((a,b)=>b.headroomAmps-a.headroomAmps).slice(0,8);
   return(
     <div className="space-y-6">
+      <p className="text-xs text-zinc-500">Load and headroom are estimates using the existing 16 A rating assumption. Current uses inlet measurements when available and a watts / voltage estimate otherwise. Email alert thresholds are configured separately.</p>
       <div className="flex flex-wrap gap-3">
         <Tile label="Floor draw" val={`${(total/1000).toFixed(2)} kW`} sub={`${total.toFixed(0)} W`} hi/>
         <Tile label="Floor current" val={totalA>0?`${totalA.toFixed(1)} A`:"—"} sub="sum of all PDUs"/>
@@ -1831,7 +1619,7 @@ function PowerView({ rackStats }) {
       </div>
       <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
         <div className="px-5 py-3 border-b border-zinc-800/50 text-sm font-semibold text-zinc-200 flex justify-between"><span>Per rack</span><span className="text-[10px] text-zinc-600 font-normal">highest draw first</span></div>
-        <div className="p-5 space-y-3">{sorted.map(r=>{const cap=r.maxWatts>0?Math.min(100,r.totalWatts/r.maxWatts*100):0;const col=aCol(cap);const rA=r.totalAmps||0;return(<div key={r.rack}><div className="flex items-center justify-between mb-1"><div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${r.pduOnline?"bg-nv-400":"bg-zinc-700"}`}/><span className="text-xs font-mono text-zinc-300 w-20 truncate">{r.rack}</span><Pill color={r.pduOnline?"nv":r.pdus.length?"red":"zinc"} sm>{r.pduOnline?"online":r.pdus.length?"offline":"no PDU"}</Pill></div><div className="flex items-center gap-4 text-xs font-mono">{rA>0&&<span className="text-zinc-500">{rA.toFixed(1)} A</span>}<span className="text-zinc-400">{r.totalWatts>0?`${r.totalWatts.toFixed(0)} W`:<span className="text-zinc-700">—</span>}</span></div></div><div className="relative h-3.5 bg-zinc-800/50 rounded overflow-hidden"><div className="h-full rounded transition-all duration-700" style={{width:`${(r.totalWatts/maxR)*100}%`,background:col}}/>{r.totalWatts>0&&<span className="absolute inset-0 flex items-center pl-2 text-[8px] font-semibold text-zinc-950">{(r.totalWatts/1000).toFixed(2)} kW · {cap.toFixed(0)}%</span>}</div></div>);})}</div>
+        <div className="p-5 space-y-3">{sorted.map(r=>{const cap=r.maxWatts>0?Math.min(100,r.totalWatts/r.maxWatts*100):0;const col=aCol(cap);const rA=r.totalAmps||0;return(<div key={r.rack}><div className="flex items-center justify-between mb-1"><div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${r.pduOnline?"bg-nv-400":"bg-zinc-700"}`}/><span className="text-xs font-mono text-zinc-300 w-20 truncate">{r.rack}</span><Pill color={r.pduOnline?"nv":r.pduData.length?"red":"zinc"} sm>{r.pduOnline?"online":r.pduData.length?"offline":"no PDU"}</Pill></div><div className="flex items-center gap-4 text-xs font-mono">{rA>0&&<span className="text-zinc-500">{rA.toFixed(1)} A</span>}<span className="text-zinc-400">{r.totalWatts>0?`${r.totalWatts.toFixed(0)} W`:<span className="text-zinc-700">—</span>}</span></div></div><div className="relative h-3.5 bg-zinc-800/50 rounded overflow-hidden"><div className="h-full rounded transition-all duration-700" style={{width:`${(r.totalWatts/maxR)*100}%`,background:col}}/>{r.totalWatts>0&&<span className="absolute inset-0 flex items-center pl-2 text-[8px] font-semibold text-zinc-950">{(r.totalWatts/1000).toFixed(2)} kW · {cap.toFixed(0)}%</span>}</div></div>);})}</div>
       </div>
       {allPdus.length>0&&<div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
         <div className="px-5 py-3 border-b border-zinc-800/50 flex items-baseline justify-between"><span className="text-sm font-semibold text-zinc-200">Amperage per PDU</span><span className="text-[10px] text-zinc-600">rated 16 A per circuit</span></div>
@@ -1899,26 +1687,35 @@ function ChangelogView() {
 
 // ─── KPI BAR ──────────────────────────────────────────────────────────────────
 function KpiBar({servers,rackStats,pdus,pduStatuses}) {
-  const totalW=rackStats.reduce((a,r)=>a+r.totalWatts,0);
-  const totalA=rackStats.reduce((a,r)=>a+(r.totalAmps||0),0);
-  const on=servers.filter(s=>s.state==="on").length;
-  const alerts=pdus.filter(p=>pduStatuses[p.id]&&pduStatuses[p.id].reachable===false).length;
-  const Kpi=({label,value,sub,hi})=>(<div className="flex flex-col min-w-[100px]"><div className={`text-lg font-bold tabular-nums leading-none ${hi?"text-nv-400":"text-zinc-100"}`}>{value}</div><div className="text-[10px] text-zinc-600 mt-px">{label}</div>{sub&&<div className="text-[9px] text-zinc-700 mt-px">{sub}</div>}</div>);
-  return(
-    <div className="flex flex-wrap items-center gap-x-8 gap-y-3 mb-6 px-5 py-3.5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
-      <Kpi label="Total draw" value={totalW>0?`${(totalW/1000).toFixed(2)} kW`:"—"} hi/>
-      <Kpi label="Floor current" value={totalA>0?`${totalA.toFixed(1)} A`:"—"} sub="all PDUs"/>
-      <div className="w-px h-8 bg-zinc-800 hidden sm:block"/>
-      <Kpi label="Servers on" value={`${on}/${servers.length}`} sub={`${servers.length-on} off or unknown`}/>
-      <Kpi label="Racks" value={rackStats.length} sub={`${rackStats.filter(r=>r.pduOnline).length} online`}/>
-      {alerts>0&&<><div className="w-px h-8 bg-zinc-800 hidden sm:block"/><div className="flex items-center gap-1.5 text-red-500"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"/><span className="text-sm font-semibold">{alerts} alert{alerts!==1?"s":""}</span><span className="text-[10px] text-red-700">PDU unreachable</span></div></>}
-    </div>
-  );
+  const unique = [...new Map(rackStats.flatMap(r => r.pduData).map(p => [p.id,p])).values()];
+  const online = unique.filter(p => p.reachable);
+  const totalW = online.reduce((sum,p) => sum + p.watts, 0);
+  const totalA = online.reduce((sum,p) => sum + p.amps, 0);
+  const on = servers.filter(s => s.state === "on").length;
+  const partial = online.length !== unique.length;
+  return <div className="rack-kpis">
+    {[["Total draw", online.length ? `${(totalW/1000).toFixed(2)} kW` : "—", partial ? "partial readings" : "all PDUs"],
+      ["Floor current", online.length ? `${online.some(p=>p.currentEstimated) ? "≈" : ""}${totalA.toFixed(1)} A` : "—", partial ? "partial readings" : "all PDUs"],
+      ["Servers on", `${on}/${servers.length}`, `${servers.length-on} off or unknown`],
+      ["Racks", rackStats.length, `${rackStats.filter(r=>r.pduOnline).length} online`]].map(([label,value,sub], i) => <div key={label} className="rack-kpi"><strong style={i===0 ? {color:"#76b900"} : undefined}>{value}</strong><span>{label}</span><small>{sub}</small></div>)}
+  </div>;
+}
+
+function ReadOnlyAsset({ item, owner, onClose }) {
+  useEscClose(onClose);
+  return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+    <section role="dialog" aria-modal="true" aria-label="Asset details" onClick={e=>e.stopPropagation()} className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+      <div className="flex justify-between gap-3"><h2 className="font-mono text-xl text-white break-all">{item.name}</h2><CloseBtn onClose={onClose}/></div>
+      <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts, "Serial number":item.serial_number, Barcode:item.barcode, Shelf:item.u, Owner:owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words">{value}</dd></div>)}</dl>
+      <p className="text-xs text-zinc-400">Close this panel and turn on Edit to change this asset.</p>
+    </section>
+  </div>;
 }
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh}) {
-  const [section,           setSection]           = useState("racks");
+export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, section: controlledSection, editMode = false, onSummary}) {
+  const [localSection, setSection] = useState("racks");
+  const section = controlledSection || localSection;
   const [rackOrder,         setRackOrder]         = useState({});
   const [rackSlots,         setRackSlots]         = useState({});
   const [switchAssignments, setSwitchAssignments] = useState({});
@@ -1957,7 +1754,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   },[optOwners]);
 
   const pdus       = devices.filter(d=>d.kind==="pdu");
-  // kind="rack" = DCIM-only racks (added via DCIM, never shown on Dashboard)
+  // Inventory racks have no device status; Dashboard links to their saved layout.
   const rackDevices = devices.filter(d=>d.kind==="pdu"||d.kind==="rack");
   const racks = useMemo(()=>[...new Set([...rackDevices.map(d=>d.rack).filter(Boolean), ...Object.keys(customItems)])].sort(),[rackDevices, customItems]);
 
@@ -1965,12 +1762,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const map=new Map();
     pdus.forEach(pdu=>{
       const stored=pdu.labels||{},live=pduStatuses[pdu.id]?.outlets||[];
-      const liveByN=Object.fromEntries(live.map(o=>[String(o.number),o]));
+      const liveByN=Object.fromEntries((pduStatuses[pdu.id]?.reachable ? live : []).map(o=>[String(o.number),o]));
       Object.entries(stored).forEach(([num,label])=>{
         if(isDefaultOutletLabel(label))return;const key=label.trim().toLowerCase();if(map.has(key))return;
         const lo=liveByN[num];map.set(key,{id:key,name:label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:lo?.state??"unknown",watts:lo?.watts??0});
       });
-      live.forEach(o=>{
+      (pduStatuses[pdu.id]?.reachable ? live : []).forEach(o=>{
         if(isDefaultOutletLabel(o.label))return;const key=o.label.trim().toLowerCase();
         if(map.has(key)){const e=map.get(key);e.state=o.state;e.watts=o.watts||0;return;}
         map.set(key,{id:key,name:o.label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts||0});
@@ -1990,13 +1787,15 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       const st=pduStatuses[pdu.id];
       const voltage=st?.inlet_voltage>0?st.inlet_voltage:208;
       const watts=st?.total_watts||0;
-      const amps=parseFloat((voltage>0?watts/voltage:0).toFixed(2));
+      const readings = st?.inlet_readings || [];
+      const measured = readings.length > 0 && readings.every(i => i.current != null);
+      const amps = measured ? readings.reduce((sum, i) => sum + i.current, 0) : parseFloat((voltage>0?watts/voltage:0).toFixed(2));
       const ratedAmps=16;
       const outlets=st?.outlets||[];
       const onCount=outlets.filter(o=>o.state==="on").length;
       const freeOutlets=outlets.filter(o=>isDefaultOutletLabel(o.label)).length;
       return{id:pdu.id,name:pdu.name,ip:pdu.ip,rack:rn,reachable:st?.reachable??null,
-        watts,voltage,amps,ratedAmps,maxWatts:ratedAmps*voltage,
+        watts,voltage,amps,currentEstimated:!measured,ratedAmps,maxWatts:ratedAmps*voltage,
         outletsOn:onCount,outletsTotal:outlets.length,freeOutlets,
         headroomAmps:parseFloat(Math.max(0,ratedAmps-amps).toFixed(2)),
         headroomPct:Math.max(0,1-amps/ratedAmps)};
@@ -2005,16 +1804,19 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     pduData.forEach(p=>{totalWatts+=p.watts;outletsOn+=p.outletsOn;outletsTotal+=p.outletsTotal;});
     const totalAmps=parseFloat(pduData.reduce((a,p)=>a+p.amps,0).toFixed(2));
     const rServers=servers.filter(s=>s.rack===rn);
-    const pduOnline=allPdus.length>0?(pduStatuses[allPdus[0].id]?.reachable!==false&&!!pduStatuses[allPdus[0].id]):false;
+    const pduOnline=pduData.length>0 && pduData.every(p=>p.reachable===true);
     const maxWatts=pduData.reduce((a,p)=>a+p.maxWatts,0)||outletsTotal*150;
     const rackType=rn===MAIN_STORAGE||rPdus[0]?.model==="Storage"?"storage":"compute";
-    return{rack:rn,pdus:allPdus,pduData,servers:rServers,totalWatts,totalAmps,outletsOn,outletsTotal,maxWatts,pduOnline,rackType};
+    return{rack:rn,pdus:allPdus,pduData,servers:rServers,totalWatts,totalAmps,outletsOn,outletsTotal,maxWatts,pduOnline,rackType,currentEstimated:pduData.some(p=>p.currentEstimated)};
   }),[racks,rackDevices,pduStatuses,servers]);
 
+  useEffect(() => { onSummary?.(`${racks.length} racks · ${servers.length} OPTs · ${Object.values(customItems).flat().length} equipment items`); }, [racks.length, servers.length, customItems, onSummary]);
+
   const handleReorder = useCallback((rackName,newIds)=>{
+    if (!editMode) return;
     const n={...rackOrder,[rackName]:newIds};setRackOrder(n);
     fetch("/api/rack-positions",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(n)}).catch(()=>{});
-  },[rackOrder]);
+  },[rackOrder,editMode]);
 
   async function _reloadPositions() {
     const [positions, slots, switches] = await Promise.all([
@@ -2102,8 +1904,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     : null;
 
   return (
-    <main className="flex-1 px-6 py-5 max-w-[1600px] w-full mx-auto">
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+    <EditContext.Provider value={editMode}><main className="flex-1 px-4 pb-5 w-full mx-auto">
+      {!controlledSection && <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
           <h2 className="text-sm font-bold tracking-tight text-zinc-100">DCIM</h2>
           <p className="text-[11px] text-zinc-600">{racks.length} rack{racks.length!==1?"s":""} · {servers.length} OPTs · {Object.values(customItems).flat().length} equipment items</p>
@@ -2111,7 +1913,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         <div className="flex items-center gap-1 p-1 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
           {tabs.map(t=><TabBtn key={t.id} label={t.label} icon={t.icon} active={section===t.id} onClick={()=>setSection(t.id)}/>)}
         </div>
-      </div>
+      </div>}
 
       {section!=="changelog"&&(
         <KpiBar servers={servers} rackStats={rackStats} pdus={pdus} pduStatuses={pduStatuses}/>
@@ -2131,7 +1933,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       {section==="power"&&<PowerView rackStats={rackStats}/>}
       {section==="changelog"&&<ChangelogView/>}
 
-      {selectedServer&&(
+      {selectedServer&&!editMode&&<Portal><ReadOnlyAsset item={selectedServer} owner={optOwners[selectedServer.id]} onClose={()=>setSelectedServerId(null)}/></Portal>}
+      {selectedServer&&editMode&&(
         <Portal>
           <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
             switchAssignments={switchAssignments} rackOverrides={rackOverrides} optOwners={optOwners} onOwnerChange={handleOwnerChange}
@@ -2145,13 +1948,14 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         </Portal>
       )}
 
-      {selectedCustom&&selectedCustomRack&&(
+      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} onClose={()=>setSelectedCustom(null)}/></Portal>}
+      {selectedCustom&&selectedCustomRack&&editMode&&(
         <Portal>
           <EditEquipmentPanel item={selectedCustom} rackName={selectedCustomRack}
             allRacks={racks} onClose={()=>setSelectedCustom(null)}
             onSave={handleSaveCustom} onDelete={handleDeleteCustom} onMove={handleMoveCustom}/>
         </Portal>
       )}
-    </main>
+    </main></EditContext.Provider>
   );
 }
