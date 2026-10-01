@@ -13,6 +13,38 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 _BACKEND_DIR = pathlib.Path(__file__).parent.parent.parent
 
 
+async def _rename_monitor_and_owner(db, old_name, new_name):
+    """Keep stable monitor IDs/history and owner assignments across inventory renames."""
+    from ..models import AssetOwner, PingTarget
+    from ..ping_monitor import server_identity
+    from ..engineers import owner_map
+    old, new = server_identity(old_name), server_identity(new_name)
+    if not old or not new:
+        return
+    target = await db.scalar(select(PingTarget).where(PingTarget.source_key == "server:" + old[0]))
+    if old[0] != new[0]:
+        collision = await db.scalar(select(PingTarget).where(PingTarget.source_key == "server:" + new[0]))
+        if collision:
+            raise HTTPException(409, "This server name already has a monitor. Choose a different name.")
+        owners = await owner_map(db)
+        if new[0] in owners:
+            raise HTTPException(409, "This server name already has an owner. Choose a different name.")
+        assignment = await db.get(AssetOwner, old[0])
+        if assignment or old[0] in owners:
+            destination = await db.get(AssetOwner, new[0])
+            if destination is None:
+                destination = AssetOwner(asset_key=new[0]); db.add(destination)
+            destination.engineer_id = assignment.engineer_id if assignment else None
+            destination.legacy_name = assignment.legacy_name if assignment else owners[old[0]]
+            if assignment is None:
+                assignment = AssetOwner(asset_key=old[0]); db.add(assignment)
+            # Tombstone prevents the old JSON fallback from resurrecting an owner.
+            assignment.engineer_id, assignment.legacy_name = None, ""
+    if target:
+        target.source_key, target.name = "server:" + new[0], new[1]
+        target.revision += 1  # Ignore a probe still in flight for the old identity.
+
+
 def _rename_server_ids_in_file(path: pathlib.Path, id_renames: dict[str, str]) -> None:
     """Rename server IDs inside rack_positions / rack_slots / switch_assignments JSON files."""
     try:
@@ -114,6 +146,8 @@ async def update_labels(
         and old_labels[port]
     }
 
+    for old_name, new_name in renames.items():
+        await _rename_monitor_and_owner(db, old_name, new_name)
     dev.labels_json = json.dumps(new_labels)
 
     if renames:
@@ -186,6 +220,8 @@ async def rename_opt(body: dict, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="old_name and new_name required")
     if old_name.lower() == new_name.lower():
         raise HTTPException(status_code=400, detail="Names are identical")
+
+    await _rename_monitor_and_owner(db, old_name, new_name)
 
     result = await db.execute(select(Device))
     updated = []

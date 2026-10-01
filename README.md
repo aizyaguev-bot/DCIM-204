@@ -1,5 +1,9 @@
 # Lab Manager
 
+Current repository: [DCIM-204-Lab-Manager](https://github.com/aizyaguev-bot/DCIM-204-Lab-Manager) (private).
+
+The v3.1 update includes stable Twin navigation, an engineer directory and Owner selection, synchronized monitor names, PDU failure details and automatic KVM sign-in through the site proxy. See [verification and deployment notes](docs/navigation-and-owners.md).
+
 ## Server ping monitoring
 
 The **Ping Monitor** tab checks server reachability in the backend, including when

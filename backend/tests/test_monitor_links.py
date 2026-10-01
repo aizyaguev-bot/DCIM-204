@@ -254,3 +254,99 @@ async def test_additive_upgrade_preserves_existing_monitor_and_device_data(tmp_p
             assert (await db.execute(select(MonitorDeviceSnapshot))).scalars().all() == []
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("401 credentials secret-password", "authentication"),
+    ("ConnectError secret-password", "connect"),
+    ("request timed out secret-password", "timeout"),
+    ("invalid response secret-password", "no usable status"),
+])
+async def test_failed_checks_explain_safe_reason_and_clear_on_recovery(lab, monkeypatch, message, expected):
+    factory, client = lab
+    await add_devices(factory, device("pdu", labels={"1":"Optn84"}))
+    fetch = AsyncMock(return_value=PduStatus(device_id="pdu",reachable=False,error=message))
+    monkeypatch.setattr(pdus, "_fetch_status", fetch)
+    await monitor_links.refresh_devices(factory)
+    link = (await target_view(client))["pdu"][0]
+    assert expected in link["detail"] and "secret-password" not in link["detail"]
+    assert link["status"] == "error"
+    fetch.return_value = PduStatus(device_id="pdu",reachable=True,outlets=[OutletState(number=1,label="Optn84",state="on")])
+    await monitor_links.refresh_devices(factory)
+    link = (await target_view(client))["pdu"][0]
+    assert link["status"] == "on" and "failed" not in link["detail"]
+
+
+async def test_device_poll_has_budget_for_multi_outlet_pdu(lab, monkeypatch):
+    factory, client = lab
+    await add_devices(factory, device("pdu",labels={"1":"Optn84"}),device("kvm","kvm",{"1":"Optn84"}))
+    budgets = []
+    real_wait = monitor_links.asyncio.wait_for
+    async def record_wait(coro, timeout):
+        budgets.append(timeout)
+        return await real_wait(coro, timeout)
+    monkeypatch.setattr(monitor_links.asyncio, "wait_for", record_wait)
+    monkeypatch.setattr(pdus, "_fetch_status", AsyncMock(return_value=PduStatus(device_id="pdu",reachable=False,error="timeout")))
+    monkeypatch.setattr(kvms, "_fetch_status", AsyncMock(return_value=KvmStatus(device_id="kvm",reachable=False,error="timeout")))
+    await monitor_links.refresh_devices(factory)
+    assert sorted(budgets) == [20,45]
+
+
+async def test_blank_http_timeout_is_not_misreported_as_connection_failure(monkeypatch):
+    import httpx
+    from drivers.raritan_pdu import RaritanPduDriver, RaritanPduError
+    driver = RaritanPduDriver("example.invalid", "", "")
+    monkeypatch.setattr(driver, "_client_ctx", AsyncMock(return_value=SimpleNamespace(post=AsyncMock(side_effect=httpx.ReadTimeout("")))))
+    with pytest.raises(RaritanPduError) as error:
+        await driver._rpc("/model/pdu/0", "getOutlets")
+    assert "request timeout" in str(error.value)
+    assert "request timeout" in monitor_links.failure_reason(str(error.value))
+
+
+async def test_current_inventory_name_and_manual_override_preserve_host_and_links(lab):
+    factory, client = lab
+    await add_devices(factory, device("pdu",labels={"1":"OPTN84"}))
+    target = await target_view(client)
+    assert target["name"] == "OPTN84" and target["name_synced"] is True
+    body = {"name":"Bench GPU","sync_name":False,"host":target["host"],"enabled":True,"revision":target["revision"]}
+    assert (await client.put("/api/monitoring/targets/target",json=body)).status_code == 200
+    async with factory() as db: await ping_monitor.discover_targets(db)
+    target = await target_view(client)
+    assert target["name"] == "Bench GPU" and target["inventory_name"] == "OPTN84"
+    assert target["host"] == "10.0.0.84" and target["pdu"][0]["port"] == "1"
+    assert (await client.put("/api/monitoring/targets/target",json=body)).status_code == 409
+    body.update(sync_name=True,revision=target["revision"])
+    assert (await client.put("/api/monitoring/targets/target",json=body)).status_code == 200
+    assert (await target_view(client))["name"] == "OPTN84"
+
+
+async def test_inventory_rename_keeps_monitor_identity_samples_paused_host_and_owner(lab, monkeypatch, tmp_path):
+    import app.main as main
+    from app.routers import devices
+    from app.models import PingSample, AssetOwner, PingTargetName
+    factory, client = lab
+    monkeypatch.setattr(main, "_OPT_OWNERS_FILE",tmp_path / "owners.json")
+    monkeypatch.setattr(devices, "_BACKEND_DIR",tmp_path)
+    (tmp_path / "owners.json").write_text(json.dumps({"optn84":"Old owner"}))
+    (tmp_path / "rack_slots.json").write_text(json.dumps({"Rack-01":{"optn84":2}}))
+    await add_devices(factory, device("pdu",labels={"1":"Optn84"}), device("kvm","kvm",{"2":"Optn84"}))
+    async with factory() as db:
+        target = await db.get(PingTarget,"target"); target.enabled = False
+        db.add(PingSample(target_id="target",host=target.host,checked_at=1000,status="up"))
+        db.add(PingTargetName(target_id="target",override="Display alias"))
+        await db.commit()
+    r = await client.post("/api/devices/rename-opt",json={"old_name":"Optn84","new_name":"Optn85"})
+    assert r.status_code == 200, r.text
+    async with factory() as db:
+        await ping_monitor.discover_targets(db)
+        targets = (await db.execute(select(PingTarget))).scalars().all()
+        assert len(targets) == 1 and targets[0].id == "target"
+        assert targets[0].host == "10.0.0.84" and targets[0].enabled is False
+        assert targets[0].source_key == "server:optn85"
+        assert (await db.execute(select(PingSample))).scalar_one().target_id == "target"
+        from app.engineers import owner_map
+        assert await owner_map(db) == {"optn85":"Old owner"}
+    target = await target_view(client)
+    assert target["name"] == "Display alias" and target["inventory_name"] == "Optn85"
+    assert len(target["pdu"]) == len(target["kvm"]) == 1
+    assert json.loads((tmp_path / "rack_slots.json").read_text())["Rack-01"] == {"optn85":2}

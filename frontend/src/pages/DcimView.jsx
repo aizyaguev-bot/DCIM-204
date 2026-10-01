@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
 import { loadRackItems, saveRackItems, MAIN_STORAGE } from "../api/inventory";
-import {useAccounts} from "../accounts";
+import {useAccounts, accountRequest} from "../accounts";
+import {OwnerSelect, useEngineers} from "../engineers";
 
 const EditContext = createContext(false);
 
@@ -477,7 +478,7 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
 }
 
 // ─── EDIT EQUIPMENT PANEL (custom items) ──────────────────────────────────────
-function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelete, onMove }) {
+function EditEquipmentPanel({ item, rackName, allRacks, owner, onOwnerChange, onClose, onSave, onDelete, onMove }) {
   useEscClose(onClose);
   const [name,      setName]      = useState(item.name);
   const [type,      setType]      = useState(item.type || "other");
@@ -513,6 +514,7 @@ function EditEquipmentPanel({ item, rackName, allRacks, onClose, onSave, onDelet
           <CloseBtn onClose={onClose}/>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          <div><SL>Owner / Engineer</SL><OwnerSelect owner={owner} label={`Owner for ${item.name}`} onChange={id=>onOwnerChange(`item:${item.id}`,id)}/></div>
           <div><SL>Name</SL>
             <input value={name} onChange={e=>setName(e.target.value)}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
@@ -667,7 +669,6 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   const [uSlot,  setUSlot]  = useState(curU != null ? String(curU) : "");
   const [swName, setSwName] = useState(curSw.switch || "");
   const [swPort, setSwPort] = useState(curSw.port != null ? String(curSw.port) : "");
-  const [owner,  setOwner]  = useState(optOwners?.[server.id] || "");
   const [doing,  setDoing]  = useState(null);
   const [saved,  setSaved]  = useState(null);
 
@@ -680,7 +681,6 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;setDoing("outlet");const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await onLabelChange(server.pduId,updated);setDoing(null);tick("outlet");}
   async function saveSlot(){const u=parseInt(uSlot,10);if(isNaN(u)||u<1)return;setDoing("slot");const up={...rackSlots,[server.rack]:{...(rackSlots[server.rack]||{}),[server.id]:u}};onSlotsChange(up);await fetch("/api/rack-slots",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("slot");}
   async function saveSw(){setDoing("sw");const up={...switchAssignments};if(swName.trim()||swPort)up[server.id]={switch:swName.trim(),port:swPort?parseInt(swPort,10):null};else delete up[server.id];onSwitchChange(up);await fetch("/api/switch-assignments",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("sw");}
-  async function saveOwner(){if(onOwnerChange){await onOwnerChange(server.id,owner.trim());tick("owner");}}
   async function remove(){if(!pdu||!onLabelChange)return;if(!confirm(`Remove "${server.name}" from DCIM?`))return;const l={...pdu.labels};delete l[String(server.outlet)];await onLabelChange(server.pduId,l);onClose();}
 
   const SetBtn=({id,onClick,disabled})=>(
@@ -797,18 +797,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
           </div>
 
           <div><SL>Owner / Engineer</SL>
-            <div className="relative">
-              <input value={owner} onChange={e=>setOwner(e.target.value)}
-                onKeyDown={e=>e.key==="Enter"&&saveOwner()}
-                onBlur={saveOwner}
-                placeholder="Engineer name"
-                list="owner-suggestions"
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-purple-700/50 placeholder:text-zinc-700"/>
-              <datalist id="owner-suggestions">
-                {[...new Set(Object.values(optOwners||{}).filter(Boolean))].map(n=><option key={n} value={n}/>)}
-              </datalist>
-              {saved==="owner"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400">{Icon.check}</span>}
-            </div>
+            <OwnerSelect owner={optOwners?.[server.id]||""} label={`Owner for ${server.name}`} onChange={id=>onOwnerChange(server.id,id)}/>
             {optOwners?.[server.id]&&<div className="mt-1 text-[10px] text-purple-600">{optOwners[server.id]}</div>}
           </div>
 
@@ -1525,10 +1514,7 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
   const [q, setQ]         = useState("");
   const [sk, setSk]       = useState("rack");
   const [sd, setSd]       = useState(1);
-  const [editingOwner, setEditingOwner] = useState(null); // serverId being edited
-  const [ownerDraft,   setOwnerDraft]   = useState("");
   const racks = useMemo(()=>[...new Set(servers.map(s=>s.rack))].sort(),[servers]);
-  const ownerSuggestions = useMemo(()=>[...new Set(Object.values(optOwners||{}).filter(Boolean))].sort(),[optOwners]);
   const rows  = useMemo(()=>{
     let list=servers;
     if(rack!=="all")list=list.filter(s=>s.rack===rack);
@@ -1537,8 +1523,6 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
     return [...list].sort((a,b)=>{const av=a[sk]??"",bv=b[sk]??"";return typeof av==="number"?sd*(av-bv):sd*String(av).localeCompare(String(bv));});
   },[servers,rack,state,q,sk,sd,switchAssignments,optOwners]);
 
-  function startOwnerEdit(s){if(!editMode)return;setEditingOwner(s.id);setOwnerDraft(optOwners?.[s.id]||"");}
-  async function commitOwner(){if(editMode&&onOwnerChange&&editingOwner!=null)await onOwnerChange(editingOwner,ownerDraft.trim());setEditingOwner(null);}
 
   const Th=({k,label,right})=>(<th onClick={()=>{if(sk===k)setSd(d=>-d);else{setSk(k);setSd(1);}}} className={`text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 whitespace-nowrap select-none cursor-pointer hover:text-zinc-300 transition ${right?"text-right":"text-left"} text-zinc-600`}>{label}{sk===k&&<span className="ml-0.5 opacity-50">{sd>0?"↑":"↓"}</span>}</th>);
   return (
@@ -1550,7 +1534,6 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
         <select value={state} onChange={e=>setState(e.target.value)} className="bg-zinc-900 border border-zinc-800 rounded-lg text-sm px-2.5 py-1.5 focus:outline-none focus:border-nv-400/50"><option value="all">All states</option><option value="on">On</option><option value="off">Off</option><option value="unknown">Unknown</option></select>
         <span className="ml-auto text-[10px] text-zinc-700">{rows.length} / {servers.length}</span>
       </div>
-      <datalist id="inv-owner-list">{ownerSuggestions.map(n=><option key={n} value={n}/>)}</datalist>
       <div className="border border-zinc-800/60 rounded-xl overflow-hidden bg-zinc-900/30">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -1570,18 +1553,7 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
                   <td className="px-3 py-2 font-mono text-xs text-zinc-700">{s.pduIp||"—"}</td>
                   <td className="px-3 py-2 text-xs">{sw?.switch?<Pill color="cyan" sm>{sw.switch}{sw.port?`·${sw.port}`:""}</Pill>:<span className="text-zinc-800">—</span>}</td>
                   <td className="px-3 py-2 text-xs min-w-[110px]">
-                    {editingOwner===s.id&&editMode?(
-                      <input autoFocus value={ownerDraft} onChange={e=>setOwnerDraft(e.target.value)}
-                        onKeyDown={e=>{if(e.key==="Enter")commitOwner();if(e.key==="Escape")setEditingOwner(null);}}
-                        onBlur={commitOwner}
-                        list="inv-owner-list"
-                        className="w-full bg-zinc-800 border border-purple-700/60 rounded px-2 py-0.5 text-xs text-zinc-200 focus:outline-none"/>
-                    ):(
-                      <button disabled={!editMode} onClick={()=>startOwnerEdit(s)}
-                        className={`text-left w-full rounded px-1.5 py-0.5 hover:bg-zinc-800 transition ${ow?"text-purple-400":"text-zinc-700 hover:text-zinc-500"}`}>
-                        {ow||(editMode ? "+ assign" : "Owner not set")}
-                      </button>
-                    )}
+                    {editMode?<OwnerSelect owner={ow||""} label={`Owner for ${s.name}`} onChange={id=>onOwnerChange(s.id,id)}/>:<span className={ow?"text-zinc-200":"text-zinc-600"}>{ow||"Owner not set"}</span>}
                   </td>
                 </tr>
               );})}
@@ -1714,6 +1686,7 @@ function ReadOnlyAsset({ item, owner, onClose }) {
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
 export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, section: controlledSection, editMode = false, onSummary}) {
+  const {revision: engineerRevision} = useEngineers();
   const [localSection, setSection] = useState("racks");
   const section = controlledSection || localSection;
   const [rackOrder,         setRackOrder]         = useState({});
@@ -1746,12 +1719,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     await fetch("/api/chillers",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
   },[]);
 
-  const handleOwnerChange = useCallback(async (serverId, owner) => {
-    const upd = {...optOwners, [serverId]: owner};
-    if(!owner) delete upd[serverId];
-    setOptOwners(upd);
-    await fetch("/api/opt-owners",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(upd)}).catch(()=>{});
-  },[optOwners]);
+  useEffect(()=>{let active=true;accountRequest("/opt-owners").then(data=>{if(active)setOptOwners(data);}).catch(()=>{});return()=>{active=false;};},[engineerRevision]);
+  const handleOwnerChange = useCallback(async (assetKey, engineerId) => {
+    setOptOwners(await accountRequest(`/opt-owners/${encodeURIComponent(assetKey)}`,"PUT",{engineer_id:engineerId}));
+  },[]);
 
   const pdus       = devices.filter(d=>d.kind==="pdu");
   // Inventory racks have no device status; Dashboard links to their saved layout.
@@ -1948,10 +1919,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         </Portal>
       )}
 
-      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} onClose={()=>setSelectedCustom(null)}/></Portal>}
+      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={optOwners[`item:${selectedCustom.id}`]} onClose={()=>setSelectedCustom(null)}/></Portal>}
       {selectedCustom&&selectedCustomRack&&editMode&&(
         <Portal>
           <EditEquipmentPanel item={selectedCustom} rackName={selectedCustomRack}
+            owner={optOwners[`item:${selectedCustom.id}`]||""} onOwnerChange={handleOwnerChange}
             allRacks={racks} onClose={()=>setSelectedCustom(null)}
             onSave={handleSaveCustom} onDelete={handleDeleteCustom} onMove={handleMoveCustom}/>
         </Portal>

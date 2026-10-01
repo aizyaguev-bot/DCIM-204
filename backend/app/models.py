@@ -3,6 +3,21 @@ from sqlalchemy import String, Integer, Boolean, Float, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
+class Engineer(Base):
+    __tablename__ = "engineers"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    name_key: Mapped[str] = mapped_column(String, unique=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class AssetOwner(Base):
+    __tablename__ = "asset_owners"
+    asset_key: Mapped[str] = mapped_column(String, primary_key=True)
+    engineer_id: Mapped[str | None] = mapped_column(ForeignKey("engineers.id"), nullable=True)
+    legacy_name: Mapped[str] = mapped_column(String, default="")
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -84,6 +99,19 @@ class PingSample(Base):
     checked_at: Mapped[float] = mapped_column(Float, index=True)
     status: Mapped[str] = mapped_column(String)
     rtt_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    detail: Mapped[str] = mapped_column(String, default="")
+
+
+class PingTargetName(Base):
+    __tablename__ = "ping_target_names"
+    target_id: Mapped[str] = mapped_column(ForeignKey("ping_targets.id"), primary_key=True)
+    override: Mapped[str] = mapped_column(String, default="")
+
+
+class MonitorDeviceError(Base):
+    __tablename__ = "monitor_device_errors"
+    device_id: Mapped[str] = mapped_column(String, primary_key=True)
+    checked_at: Mapped[float] = mapped_column(Float)
     detail: Mapped[str] = mapped_column(String, default="")
 
 

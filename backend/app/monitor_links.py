@@ -5,7 +5,7 @@ import time
 
 from sqlalchemy import select
 
-from .models import Device, MonitorDeviceSnapshot
+from .models import Device, MonitorDeviceSnapshot, MonitorDeviceError
 from .ping_monitor import CONCURRENCY, iso, next_slot, server_identity
 
 
@@ -25,16 +25,22 @@ async def refresh_devices(session_factory):
         router = pdus if device.kind == "pdu" else kvms
         async with gate:
             try:
-                result = await asyncio.wait_for(router._fetch_status(device.id, device), timeout=12)
-            except Exception:
+                budget = 45 if device.kind == "pdu" else 20
+                result = await asyncio.wait_for(router._fetch_status(device.id, device), timeout=budget)
+                reason = failure_reason(getattr(result,"error", "")) if not result.reachable else ""
+            except asyncio.TimeoutError:
+                reason = f"Device status timed out after {budget} seconds. Check device load and VM network access."
+                result = None
+            except Exception as exc:
+                reason = failure_reason(str(exc))
                 result = None  # Never reuse a successful cache entry after a failed check.
-            return device, result, time.time()
+            return device, result, time.time(), reason
 
     tasks = [asyncio.create_task(fetch(device)) for device in devices]
     try:
         # Network requests are bounded and parallel; SQLite writes are serialized.
         for task in asyncio.as_completed(tasks):
-            device, result, checked_at = await task
+            device, result, checked_at, reason = await task
             async with session_factory() as db:
                 current = await db.get(Device, device.id)
                 if not current or _configuration(current) != _configuration(device):
@@ -63,6 +69,11 @@ async def refresh_devices(session_factory):
                 snapshot.kind, snapshot.ip = device.kind, device.ip
                 snapshot.checked_at, snapshot.reachable = checked_at, reachable
                 snapshot.ports_json = json.dumps(list(ports.values()))
+                diagnostic = await db.get(MonitorDeviceError, device.id)
+                if not diagnostic:
+                    diagnostic = MonitorDeviceError(device_id=device.id)
+                    db.add(diagnostic)
+                diagnostic.checked_at, diagnostic.detail = checked_at, reason
                 if device.kind == "pdu":
                     from .alerts import observe_power
                     await observe_power(db, current, result, checked_at)
@@ -78,6 +89,7 @@ async def connection_index(db, tz, now):
     devices = (await db.execute(select(Device).where(Device.kind.in_(("pdu", "kvm")))
                                 .order_by(Device.name, Device.id))).scalars().all()
     snapshots = {s.device_id: s for s in (await db.execute(select(MonitorDeviceSnapshot))).scalars()}
+    diagnostics = {d.device_id:d for d in (await db.execute(select(MonitorDeviceError))).scalars()}
     index = {}
     for device in devices:
         snapshot = snapshots.get(device.id)
@@ -100,6 +112,9 @@ async def connection_index(db, tz, now):
                 status, detail = "stale", "The last observation is overdue. Run Check all now to refresh."
             elif not snapshot.reachable:
                 status, detail = "error", "Device check failed. Network, credentials or device API may be unavailable."
+                diagnostic = diagnostics.get(device.id)
+                if diagnostic and diagnostic.checked_at == snapshot.checked_at and diagnostic.detail:
+                    detail = diagnostic.detail
             elif port and not port.get("missing"):
                 if device.kind == "pdu":
                     status = port.get("state", "unknown")
@@ -126,3 +141,15 @@ async def connection_index(db, tz, now):
             }
             index.setdefault("server:" + identity[0], {"pdu": [], "kvm": []})[device.kind].append(connection)
     return index
+
+
+def failure_reason(message):
+    """Explain the failure without storing device response bodies or credentials."""
+    lowered = str(message or "").lower()
+    if "401" in lowered or "403" in lowered or "auth" in lowered:
+        return "Device authentication failed. Check the saved username, password and permissions."
+    if "timeout" in lowered or "timed out" in lowered:
+        return "The device API did not respond before its request timeout."
+    if "connection" in lowered or "connect" in lowered or "unreachable" in lowered:
+        return "Could not connect to the device API from the VM. Check the address and network."
+    return "The device API returned no usable status. Check the device service and configuration."

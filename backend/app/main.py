@@ -2,14 +2,14 @@ import sys, os, base64, secrets, asyncio, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 from contextlib import asynccontextmanager
 import pathlib
 
-from .database import init_db, AsyncSessionLocal
+from .database import init_db, AsyncSessionLocal, get_db
 from .models import Device
 from .routers import devices, pdus, kvms, kvm_proxy, inventory, monitoring
 from .ping_monitor import monitor_loop
@@ -51,6 +51,8 @@ async def _warm_cache():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    from .engineers import bootstrap_engineers
+    await bootstrap_engineers()
     await bootstrap_admin()
     warmup = asyncio.create_task(_warm_cache())
     monitor = asyncio.create_task(monitor_loop())
@@ -106,6 +108,8 @@ app.include_router(kvm_proxy.router)
 app.include_router(inventory.router)
 app.include_router(monitoring.router)
 app.include_router(accounts_router)
+from . import engineers
+app.include_router(engineers.router)
 
 
 @app.get("/api/version")
@@ -206,19 +210,12 @@ async def save_rack_overrides(payload: dict):
 
 
 @app.get("/api/opt-owners")
-async def get_opt_owners():
-    try:
-        return json.loads(_OPT_OWNERS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+async def get_opt_owners(db=Depends(get_db)):
+    return await engineers.owner_map(db)
 
 @app.put("/api/opt-owners")
-async def save_opt_owners(payload: dict):
-    try:
-        _OPT_OWNERS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return {"ok": True}
+async def save_opt_owners(payload: dict, db=Depends(get_db)):
+    return await engineers.replace_legacy_owners(payload, db)
 
 
 @app.get("/api/chillers")

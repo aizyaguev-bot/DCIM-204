@@ -2,6 +2,27 @@
 
 ---
 
+## v3.1.0 — 2026-10-01
+
+### Added
+- An engineer directory seeded with the requested ten names, and Owner selection
+  in Inventory, rack editors and the Twin. Admins can add, rename or disable
+  engineers; Operators can assign owners. Existing ownership remains preserved.
+- Reset View, Fit Lab and Focus Selection controls, with Hebrew navigation hints.
+
+### Fixed
+- Twin mouse input now uses the bundled official OrbitControls. Rotation, screen
+  pan and bounded zoom share one controller; releasing or cancelling a drag stops
+  navigation. Equipment only moves through explicit Edit → Move → destination.
+- Monitor names follow inventory changes and can use a saved display alias.
+  Server renames preserve monitoring history, port associations and ownership.
+- PDU checks have sufficient time for multiple outlet requests and expose safe
+  failure details instead of hiding the reason behind Check failed.
+- KVM sign-in redirects to the same-origin viewer proxy; its HTTP/WebSocket
+  traffic no longer requires opening the device's certificate warning page.
+
+---
+
 ## v3.0.0 — 2026-09-30
 
 ### Added
@@ -42,7 +63,7 @@
 - **Sensor name matching** — flexible keyword matching (handles `temperature1`, `relativeHumidity`, `leakDetector` etc. across Raritan firmware versions)
 
 ### Added
-- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:FTSW2026 http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
+- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:YOUR_SITE_PASSWORD http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
 
 ---
 

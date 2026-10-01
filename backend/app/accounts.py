@@ -77,6 +77,7 @@ async def identity(connection):
 
 
 def required_role(path, method):
+    if (path == "/api/engineers" or path.startswith("/api/engineers/")) and method not in ("GET", "HEAD", "OPTIONS"): return "Admin"
     if path == "/api/users" or path.startswith("/api/users/"): return "Admin"
     if path.startswith("/api/kvms/") and any(part in path for part in ("/proxy", "/autologin", "/console-url", "/viewer")):
         return "Operator"

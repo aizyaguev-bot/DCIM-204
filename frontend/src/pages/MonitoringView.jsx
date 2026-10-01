@@ -66,12 +66,15 @@ function Connections({ links = [], kind, timezone, expanded = false }) {
     return <div key={`${link.device_id}-${link.port}`} title={`${link.detail} Checked: ${when(link.checked_at, timezone)}`}>
       <span className={`inline-block rounded-full px-2.5 py-1 text-xs whitespace-nowrap ${color}`}>{label}</span>
       <p className="mt-1 text-xs text-zinc-400 break-words">{link.device_name} · {kind === "pdu" ? "Outlet" : "Port"} {link.port}</p>
-      {expanded && <><p className="text-xs text-zinc-500 mt-1">{link.device_ip} · Checked {when(link.checked_at, timezone)}</p><p className="text-xs text-zinc-400 mt-1">{link.detail}</p></>}
+      {expanded && <p className="text-xs text-zinc-500 mt-1">{link.device_ip} · Checked {when(link.checked_at, timezone)}</p>}
+      {(expanded || link.status === "error") && <p className="text-xs text-zinc-400 mt-1 max-w-64">{link.detail}</p>}
     </div>;
   })}</div>;
 }
 
 function TargetSettings({ target, onSaved }) {
+  const [name,setName] = useState(target.name);
+  const [syncName,setSyncName] = useState(target.name_synced !== false);
   const [host, setHost] = useState(target.host);
   const [enabled, setEnabled] = useState(target.enabled);
   const [busy, setBusy] = useState(false);
@@ -79,12 +82,17 @@ function TargetSettings({ target, onSaved }) {
   async function save(event) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      await request(`/targets/${target.id}`, "PUT", { host, enabled, revision: target.revision });
+      await request(`/targets/${target.id}`, "PUT", { host, enabled, name, sync_name:syncName, revision: target.revision });
       await onSaved();
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   }
   return <form onSubmit={save} className="space-y-3 border-b border-zinc-800 pb-5 mb-5">
+    <label className="block text-xs text-zinc-400">שם השרת לתצוגה
+      <input aria-label="שם השרת לתצוגה" className={`${input} mt-2`} value={syncName&&target.source==="inventory"?target.inventory_name:name} onChange={e=>setName(e.target.value)} readOnly={syncName&&target.source==="inventory"} required maxLength={160} disabled={busy}/>
+    </label>
+    {target.source==="inventory"&&<label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={syncName} onChange={e=>{setSyncName(e.target.checked);setName(target.name);}} disabled={busy}/>סנכרון שם אוטומטי מהמלאי</label>}
+    <p className="text-xs text-zinc-500">שם התצוגה לא משנה את כתובת הבדיקה או את חיבורי ה־PDU וה־KVM.</p>
     <label className="block text-xs text-zinc-400">IP address or DNS hostname
       <input aria-label={`Address for ${target.name}`} className={`${input} mt-2`} value={host} onChange={e => setHost(e.target.value)} maxLength={253} placeholder="e.g. opt133 or 10.7.30.25" disabled={busy} />
     </label>

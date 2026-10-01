@@ -22,11 +22,12 @@ WebSocket:
   FastAPI's WebSocket endpoint tunnels them through to the device.
 """
 
-import asyncio, re, ssl, logging, html
+import asyncio, re, ssl, logging, html, inspect
+from urllib.parse import urlencode
 import httpx
 import websockets
 from fastapi import APIRouter, Request, Response, WebSocket, Depends, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -63,7 +64,7 @@ _ssl_ctx.verify_mode = ssl.CERT_NONE
 async def _get_device(device_id: str, db: AsyncSession) -> Device:
     result = await db.execute(select(Device).where(Device.id == device_id))
     dev = result.scalar_one_or_none()
-    if not dev:
+    if not dev or dev.kind != "kvm":
         raise HTTPException(404, "KVM not found")
     return dev
 
@@ -92,11 +93,11 @@ async def _login(device_id: str, dev: Device, client: httpx.AsyncClient) -> None
         cookies = "; ".join(f"{k}={v}" for k, v in client.cookies.items())
         if cookies:
             _sessions[device_id] = cookies
-            log.info("KVM %s: authenticated, cookies: %s", device_id, cookies[:80])
+            log.info("KVM %s: authenticated", device_id)
         else:
             log.warning("KVM %s: login response %s, no cookies set", device_id, resp.status_code)
     except Exception as e:
-        log.warning("KVM %s: login failed: %s", device_id, e)
+        log.warning("KVM %s: login failed (%s)", device_id, type(e).__name__)
 
 
 def _norm_location(location: str, dev_ip: str, device_id: str) -> str:
@@ -133,8 +134,9 @@ _OVERRIDE_TMPL = (
     '  var _W=window.WebSocket;\n'
     '  var _pws=(O.protocol==="https:"?"wss":"ws")+"://"+O.host+P+"/ws";\n'
     '  window.WebSocket=function PW(u,p){\n'
-    '    u=String(u);\n'
-    '    if(u.indexOf(_pws)!==0)u=_pws+u.replace(/^wss?:\\/\\/[^\\/]*/,"");\n'
+    '    var a=new URL(String(u),O.href),path=a.pathname+a.search;\n'
+    '    if(path.indexOf(P+"/ws/")===0)u=_pws+path.slice((P+"/ws").length);\n'
+    '    else{if(path.indexOf(P+"/")===0)path=path.slice(P.length);u=_pws+path;}\n'
     '    return p!==undefined?new _W(u,p):new _W(u);\n'
     '  };\n'
     '  window.WebSocket.prototype=_W.prototype;\n'
@@ -289,7 +291,7 @@ async def kvm_console_url(
     if fragment_parts:
         url += "#" + "&".join(fragment_parts)
 
-    log.info("KVM %s console URL (proxy): %s", device_id, url)
+    log.info("KVM %s: console URL prepared", device_id)
     return {"url": url}
 
 
@@ -299,12 +301,7 @@ async def kvm_autologin(
     port: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    1. Server logs in and fetches SESSION_ID + portIds from sidebar.asp.
-    2. Returns a page that probes the KVM TLS cert (cert card if not trusted).
-    3. On cert OK: navigates browser directly to jsclient with sessionId in hash
-       so jsclient can authenticate without a separate login step.
-    """
+    """Authenticate on the server and open the viewer through the same-origin proxy."""
     dev = await _get_device(device_id, db)
 
     # Always force a fresh login so the SESSION_ID is guaranteed valid.
@@ -316,97 +313,27 @@ async def kvm_autologin(
         await _login(device_id, dev, client)
 
     cookie_str = _sessions.get(device_id, "")
-    info = await _get_kvm_session_info(device_id, dev, cookie_str)
+    if not cookie_str:
+        raise HTTPException(502, "KVM sign-in failed. Check VM connectivity and saved credentials.")
+    try:
+        info = await _get_kvm_session_info(device_id, dev, cookie_str)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "The KVM did not return console session details. Check VM connectivity and the device service.") from exc
     session_id = info.get("session_id")
     port_ids   = info.get("port_ids", {})
     _port_ids[device_id] = port_ids
 
     if not session_id:
-        log.warning("KVM %s: sidebar.asp returned no SESSION_ID after fresh login", device_id)
-
-
-    port_id = port_ids.get(port) if port else None
-
-    frag_parts = []
-    if session_id:
-        frag_parts.append(f"sessionId={session_id}")
-    if port_id:
-        frag_parts.append(f"portId={port_id}")
+        raise HTTPException(502, "KVM sign-in did not establish a console session. Check the saved credentials and KVM permissions.")
+    fragment = {"sessionId":session_id}
     if port:
-        frag_parts.append(f"portNo={port}")
-
-    kvm_ip       = dev.ip
-    jsclient_url = f"https://{kvm_ip}/jsclient/Client.asp" + ("#" + "&".join(frag_parts) if frag_parts else "")
-    dev_name_esc = html.escape(dev.name)
-
-    # Per-port mark-free URL — clears only this port, not the whole device
-    mark_free_url = f"/api/kvms/{device_id}/ports/{port}/mark-free" if port else f"/api/kvms/{device_id}/mark-free"
-
-    log.info("KVM %s autologin → %s", device_id, jsclient_url)
-
-    page = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Connecting…</title>
-<style>
-body{{margin:0;background:#0a0a0a;display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui,sans-serif;color:#a1a1aa;flex-direction:column;gap:12px}}
-.dot{{width:10px;height:10px;border-radius:50%;background:#76b900;animation:p .8s ease-in-out infinite}}
-@keyframes p{{0%,100%{{opacity:.3}}50%{{opacity:1}}}}
-#cert{{display:none;flex-direction:column;align-items:center;max-width:420px;text-align:center;gap:16px}}
-.card{{background:#18181b;border:1px solid #3f3f46;border-radius:12px;padding:24px 28px}}
-.btn{{display:inline-block;background:#76b900;color:#111;font-weight:600;padding:10px 20px;border-radius:8px;text-decoration:none;font-size:14px;cursor:pointer;border:none}}
-</style></head>
-<body>
-<div id="loading">
-  <div class="dot"></div>
-  <div id="loading-msg" style="font-size:14px">Connecting to {dev_name_esc}…</div>
-</div>
-<div id="cert">
-  <div class="card">
-    <div style="font-size:16px;font-weight:600;margin-bottom:10px;color:#e4e4e7">Certificate Setup Required</div>
-    <div style="font-size:13px;line-height:1.65;margin-bottom:16px">
-      Your browser hasn't trusted this KVM's certificate yet.<br>
-      Click below — a new tab will open. Accept the warning there,<br>
-      then <strong style="color:#e4e4e7">come back here</strong> — it will connect automatically.
-    </div>
-    <button class="btn" onclick="openCert()">Open KVM &amp; Accept Certificate →</button>
-  </div>
-</div>
-<script>
-var KVM = "https://{kvm_ip}";
-var dst = "{jsclient_url}";
-
-function go() {{
-  window.location.replace(dst);
-}}
-
-function poll() {{
-  fetch(KVM + "/", {{mode:"no-cors",cache:"no-store"}})
-    .then(function() {{
-      document.getElementById("cert").style.display = "none";
-      document.getElementById("loading").style.display = "flex";
-      document.getElementById("loading-msg").textContent = "Connecting to {dev_name_esc}…";
-      go();
-    }})
-    .catch(function() {{ setTimeout(poll, 1500); }});
-}}
-
-function openCert() {{
-  window.open(KVM + "/", "_blank");
-  document.getElementById("cert").style.display = "none";
-  document.getElementById("loading").style.display = "flex";
-  document.getElementById("loading-msg").textContent = "Waiting for certificate acceptance…";
-  setTimeout(poll, 2500);
-}}
-
-fetch(KVM + "/", {{mode:"no-cors",cache:"no-store"}})
-  .then(function() {{ go(); }})
-  .catch(function() {{
-    document.getElementById("loading").style.display = "none";
-    document.getElementById("cert").style.display = "flex";
-  }});
-</script>
-</body></html>"""
-
-    return HTMLResponse(page)
+        fragment["portNo"] = port
+        if port_ids.get(port): fragment["portId"] = port_ids[port]
+    # HTTP assets and WS traffic share the site's origin. The browser never has
+    # to visit the device's self-signed HTTPS endpoint or trust its certificate.
+    destination = f"/api/kvms/{device_id}/proxy/jsclient/Client.asp#" + urlencode(fragment)
+    return RedirectResponse(destination, status_code=302,
+                            headers={"Cache-Control":"no-store", "Referrer-Policy":"no-referrer"})
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +408,7 @@ async def kvm_proxy(
         # Build clean response headers (strip X-Frame-Options, CSP, Set-Cookie)
         resp_headers = {
             k: v for k, v in resp.headers.items()
-            if k.lower() not in STRIP_RESP_HEADERS and k.lower() != "set-cookie"
+            if k.lower() not in STRIP_RESP_HEADERS and k.lower() not in {"set-cookie", "content-encoding", "content-length"}
         }
 
         ct = resp.headers.get("content-type", "")
@@ -499,6 +426,9 @@ async def kvm_proxy(
                     }
                 text = _rewrite(text, device_id, dev.ip, inject_head=inject)
                 content = text.encode("utf-8")
+                resp_headers.pop("etag", None)
+                if "text/html" in ct:
+                    resp_headers["cache-control"] = "no-store"
                 resp_headers.pop("content-length", None)
                 resp_headers.pop("Content-Length", None)
             except Exception:
@@ -525,50 +455,42 @@ async def kvm_proxy_ws(
 ):
     dev = await _get_device(device_id, db)
 
-    # Forward subprotocols so KVM handshake succeeds (e.g. binary KVM protocols)
     proto_header = websocket.headers.get("sec-websocket-protocol", "")
     subprotocols = [s.strip() for s in proto_header.split(",") if s.strip()]
-    await websocket.accept(subprotocol=subprotocols[0] if subprotocols else None)
-
     target_ws = f"wss://{dev.ip}/{path}"
-    if websocket.url.query:
-        target_ws += f"?{websocket.url.query}"
-
-    extra_headers = []
-    if device_id in _sessions:
-        extra_headers.append(("Cookie", _sessions[device_id]))
-
+    if websocket.url.query: target_ws += f"?{websocket.url.query}"
+    accepted = False
     try:
-        async with websockets.connect(
-            target_ws,
-            ssl=_ssl_ctx,
-            additional_headers=extra_headers,
-            subprotocols=subprotocols or None,
-            ping_interval=None,
-            close_timeout=5,
-        ) as ws:
+        if device_id not in _sessions:
+            await ensure_session(device_id, dev)
+        headers = [("Cookie", _sessions[device_id])] if device_id in _sessions else []
+        # Uvicorn allows different websockets versions; support their header API.
+        header_option = "additional_headers" if "additional_headers" in inspect.signature(websockets.connect).parameters else "extra_headers"
+        async with websockets.connect(target_ws, ssl=_ssl_ctx, origin=f"https://{dev.ip}",
+                                      subprotocols=subprotocols or None, ping_interval=None,
+                                      open_timeout=15, close_timeout=5, max_size=None,
+                                      **{header_option:headers}) as upstream:
+            await websocket.accept(subprotocol=upstream.subprotocol)
+            accepted = True
             async def to_device():
-                try:
-                    async for msg in websocket.iter_bytes():
-                        await ws.send(msg)
-                except Exception:
-                    pass
-
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect": return
+                    if message.get("bytes") is not None: await upstream.send(message["bytes"])
+                    elif message.get("text") is not None: await upstream.send(message["text"])
             async def to_client():
-                try:
-                    async for msg in ws:
-                        if isinstance(msg, bytes):
-                            await websocket.send_bytes(msg)
-                        else:
-                            await websocket.send_text(msg)
-                except Exception:
-                    pass
-
-            await asyncio.gather(to_device(), to_client())
-    except Exception as e:
-        log.debug("KVM %s WS proxy error: %s", device_id, e)
+                async for message in upstream:
+                    if isinstance(message, bytes): await websocket.send_bytes(message)
+                    else: await websocket.send_text(message)
+            tasks = [asyncio.create_task(to_device()), asyncio.create_task(to_client())]
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in tasks: task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as exc:
+        # Session cookies and sessionId URLs must not be written to logs.
+        log.warning("KVM %s: console tunnel failed (%s)", device_id, type(exc).__name__)
     finally:
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+        try: await websocket.close(code=1000 if accepted else 1011)
+        except Exception: pass
