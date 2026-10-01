@@ -1,7 +1,7 @@
 # Lab 204 Digital Twin — project notes for Claude / new sessions
 
 Standalone Three.js (r128, classic scripts, **no build step**) app served by the Lab Manager FastAPI backend at `/twin/`.
-Repo: `aizyaguev-bot/DCIM-204`, folder `lab-twin/`. Production: VM `yokbvdiprd955`, `~/DCIM-204`, uvicorn on :8000 (venv: `backend/.venv`).
+Deployment repo: `aizyaguev-bot/DCIM-204`, folder `lab-twin/`. Additional private copy: `A7asaf-cloud/DCIM-204-Lab-Manager`. Production: VM `yokbvdiprd955`, `~/DCIM-204`, uvicorn on :8000 (venv: `backend/.venv`).
 
 ## Files
 - `index.html` — layout: header (search, Edit, Screen, Backend), stats bar, left sidebar (filters/legend/tree), 3D viewport (toolbar, rack bar, zoom buttons, save bar, move banner), right detail/editor panel, modals.

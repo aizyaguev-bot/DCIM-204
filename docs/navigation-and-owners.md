@@ -69,8 +69,10 @@ KVM console permissions are still required.
 - KVM protocol tests passed using simulated connections; no live KVM console,
   lab network outage or SMTP delivery was induced. See `tests/browser/README.md`.
 
-The repository contains the built UI. Use its pinned installer on the existing
+The repositories contain the built UI. Deployment continues from
+`aizyaguev-bot/DCIM-204`; `A7asaf-cloud/DCIM-204-Lab-Manager` is an additional
+private copy. Use the original repository's pinned installer on the existing
 VM checkout; it preserves runtime inventory and backs it up before updating.
-The new GitHub repository is private, so VM Git access requires authentication.
+The VM project, deployment source and runtime data remain in their original locations.
 Live KVM video/input, hardware reachability and any SMTP settings still need
 verification in the lab. The site URL remains http://ftlab.nvidia.com:8000/.

@@ -29,7 +29,7 @@ import time
 import urllib.request
 from http.cookiejar import CookieJar
 
-REPOSITORY = "https://github.com/aizyaguev-bot/DCIM-204-Lab-Manager.git"
+REPOSITORY = "https://github.com/aizyaguev-bot/DCIM-204.git"
 LIVE_TRACKED = {"lab-twin/lab-data.json", "backend/version.txt"}
 FRONTEND_LOCK = "frontend/package-lock.json"
 
