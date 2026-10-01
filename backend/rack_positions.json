@@ -1,0 +1,31 @@
+{
+  "Rack-01": [
+    "opt133",
+    "optn85 (ssd)",
+    "opt183",
+    "opt207"
+  ],
+  "Rack-04": [
+    "opt94",
+    "opt (unlabeled)",
+    "optn144",
+    "opt60"
+  ],
+  "Rack-05": [
+    "optn108",
+    "kvm power"
+  ],
+  "Rack-03": [
+    "optn88",
+    "opt106",
+    "optn51",
+    "optn45",
+    "optn36"
+  ],
+  "Rack-02": [
+    "optn130",
+    "optn84",
+    "opt208",
+    "optn84 (2)"
+  ]
+}

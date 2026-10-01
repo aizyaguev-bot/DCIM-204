@@ -17,6 +17,7 @@ class DeviceCreate(DeviceBase):
 class DeviceOut(DeviceBase):
     id: str
     enabled: bool
+    labels: dict = {}       # parsed from Device.labels_json via the ORM property
 
     model_config = {"from_attributes": True}
 
