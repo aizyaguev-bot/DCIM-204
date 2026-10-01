@@ -74,6 +74,8 @@ async def refresh_devices(session_factory):
                     diagnostic = MonitorDeviceError(device_id=device.id)
                     db.add(diagnostic)
                 diagnostic.checked_at, diagnostic.detail = checked_at, reason
+                from .alerts import observe_device_api
+                await observe_device_api(db, current, reachable, reason, checked_at)
                 if device.kind == "pdu":
                     from .alerts import observe_power
                     await observe_power(db, current, result, checked_at)
@@ -148,6 +150,12 @@ def failure_reason(message):
     lowered = str(message or "").lower()
     if "401" in lowered or "403" in lowered or "auth" in lowered:
         return "Device authentication failed. Check the saved username, password and permissions."
+    if "connecttimeout" in lowered or "connection timeout" in lowered:
+        return "Connection timeout: the VM could not establish a connection to the device API. Check the address, HTTPS access and network."
+    if "readtimeout" in lowered:
+        return "Device API request timeout: receiving data from the device took too long. Check device load and network stability."
+    if "pooltimeout" in lowered:
+        return "Device API request timeout: a local connection slot was not available in time. This does not establish a device outage."
     if "timeout" in lowered or "timed out" in lowered:
         return "The device API did not respond before its request timeout."
     if "connection" in lowered or "connect" in lowered or "unreachable" in lowered:

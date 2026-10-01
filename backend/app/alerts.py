@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formatdate
+import hashlib
 import json
 import logging
 import math
@@ -102,6 +103,32 @@ async def observe_network(db, target, result, now, *, minute=False):
                   delay=300, title=f"{target.name}: network reachability",
                   detail=f"Server: {target.name}\nAddress: {target.host}\nRack: {target.rack or 'Unassigned'}\n"
                          f"ICMP result: {result.status}. {result.detail}", settings=settings)
+
+
+async def observe_device_api(db, device, reachable, detail, now):
+    """A failed API check is distinct from a server outage or an outlet being off."""
+    settings = get_settings()
+    if not settings.email_alerts_enabled or not device.enabled:
+        return
+    from .ping_monitor import next_slot
+    key = "device-api:" + device.id
+    previous = await db.get(AlertCondition, key)
+    gap = (next_slot(previous.checked_at, ZoneInfo(settings.ping_monitor_timezone))
+           - previous.checked_at + 120 if previous else 1920)
+    # Credential changes reset confirmation without copying secrets to alert tables.
+    credentials = json.dumps([
+        device.username_enc, device.password_enc,
+        getattr(settings, device.kind + "_username"), getattr(settings, device.kind + "_password"),
+    ])
+    configuration = json.dumps([device.kind, device.ip, hashlib.sha256(credentials.encode()).hexdigest()])
+    await observe(db, key=key, configuration=configuration, failed=not reachable,
+                  now=now, max_gap=gap, delay=300,
+                  title=f"{device.name}: {device.kind.upper()} API availability",
+                  detail=f"Device: {device.name}\nType: {device.kind.upper()}\nAddress: {device.ip}\n"
+                         f"Rack: {device.rack or 'Unassigned'}\n"
+                         f"API check: {'responding' if reachable else detail}\n"
+                         "This describes device management API access, not server power or console health.",
+                  settings=settings)
 
 
 async def observe_power(db, device, result, now):

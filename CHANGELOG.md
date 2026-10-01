@@ -2,6 +2,19 @@
 
 ---
 
+## v3.1.1 — 2026-10-01
+
+### Added
+- Optional email alerts for persistent PDU/KVM API-check failures, with one
+  notification per episode and a recovery message. Existing device-check schedules
+  remain in use; SMTP configuration is still required to enable delivery.
+
+### Fixed
+- Monitor diagnostics distinguish connection, read and connection-pool timeouts.
+  Connection failures no longer imply that the device replied too slowly.
+
+---
+
 ## v3.1.0 — 2026-10-01
 
 ### Added

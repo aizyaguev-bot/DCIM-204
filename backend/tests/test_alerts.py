@@ -112,6 +112,90 @@ async def test_scheduled_night_checks_can_alert_but_detection_is_delayed(lab):
     assert len(await emails(factory)) == 1
 
 
+async def device_observation(factory, stamp, reachable=False, kind="pdu"):
+    async with factory() as db:
+        device = await db.get(Device, "api-device")
+        if not device:
+            device = Device(id="api-device", name="Rack API", kind=kind, ip="192.0.2.10", rack="R1")
+            db.add(device)
+            await db.flush()
+        await alerts.observe_device_api(db, device, reachable, "Connection timeout: VM could not connect.", stamp)
+        await db.commit()
+
+
+@pytest.mark.parametrize("kind", ["pdu", "kvm"])
+async def test_api_failure_confirms_once_recovers_and_survives_restart(lab, kind):
+    factory, _ = lab
+    for stamp in range(1000, 1301, 60):
+        await device_observation(factory, stamp, kind=kind)
+    assert not await emails(factory), "An API failure at exactly five minutes is not confirmed"
+    await device_observation(factory, 1360, kind=kind)
+    await alerts.ensure_worker(factory)
+    await device_observation(factory, 1420, kind=kind)
+    rows = await emails(factory)
+    assert len(rows) == 1
+    assert rows[0].condition_key == "device-api:api-device"
+    assert rows[0].recipient == "aizyaguev@nvidia.com"
+    assert kind.upper() + " API availability" in rows[0].subject
+    assert "192.0.2.10" in rows[0].body and "Rack: R1" in rows[0].body
+    assert "not server power" in rows[0].body
+    await device_observation(factory, 1480, reachable=True, kind=kind)
+    await device_observation(factory, 1540, reachable=True, kind=kind)
+    rows = await emails(factory)
+    assert len(rows) == 2 and "recovered" in rows[1].subject
+    assert "API check: responding" in rows[1].body
+    # A new episode after recovery can send a new alert.
+    for stamp in range(1600, 2021, 60):
+        await device_observation(factory, stamp, kind=kind)
+    assert len(await emails(factory)) == 3
+
+
+@pytest.mark.parametrize("interruption", ["short", "gap", "address", "credentials"])
+async def test_api_confirmation_does_not_count_short_gaps_or_reconfiguration(lab, interruption):
+    factory, _ = lab
+    for stamp in range(1000, 1241, 60):
+        await device_observation(factory, stamp)
+    if interruption == "short":
+        await device_observation(factory, 1300, reachable=True)
+    elif interruption in {"address", "credentials"}:
+        async with factory() as db:
+            device = await db.get(Device, "api-device")
+            if interruption == "address":
+                device.ip = "192.0.2.11"
+            else:
+                device.password_enc = "encrypted-test-secret"
+            await db.commit()
+    await device_observation(factory, 2000 if interruption == "gap" else 1360)
+    assert not await emails(factory)
+    async with factory() as db:
+        state = await db.get(AlertCondition, "device-api:api-device")
+        assert "encrypted-test-secret" not in state.configuration
+
+
+async def test_api_alerts_skip_disabled_devices_and_disabled_email(lab):
+    factory, settings = lab
+    settings.email_alerts_enabled = False
+    await device_observation(factory, 1000)
+    settings.email_alerts_enabled = True
+    async with factory() as db:
+        (await db.get(Device, "api-device")).enabled = False
+        await db.commit()
+    for stamp in range(1060, 1481, 60):
+        await device_observation(factory, stamp)
+    assert not await emails(factory)
+    async with factory() as db:
+        assert await db.get(AlertCondition, "device-api:api-device") is None
+
+
+async def test_api_night_alert_uses_device_schedule_even_with_minute_ping(lab):
+    from datetime import datetime
+    factory, _ = lab
+    base = datetime.fromisoformat("2026-09-30T22:00:00+03:00").timestamp()
+    await device_observation(factory, base)
+    await device_observation(factory, base + 1800)
+    assert len(await emails(factory)) == 1
+
+
 async def test_power_unknown_not_zero_all_inlets_and_one_message_per_episode(lab):
     factory, settings = lab
     settings.email_voltage_min, settings.email_watts_max = 200, 1000

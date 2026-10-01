@@ -1,8 +1,8 @@
 # Email alerts
 
 Alerts are implemented but **disabled by default**. The recipient defaults to
-`aizyaguev@nvidia.com`. Mail relay details, an approved sender, electrical limits,
-and the desired network-check cadence must be supplied before enabling delivery.
+`aizyaguev@nvidia.com`. Mail relay details and an approved sender must be supplied
+before enabling delivery. Electrical limits are only needed for electrical alerts.
 No real message is sent during the automated tests or isolated design preview.
 
 ## Configure on the existing Linux VM
@@ -43,6 +43,23 @@ Address/revision changes reset confirmation. Paused and unconfigured targets are
 Before confirmation, a missed observation window or probe error restarts the
 confirmation period. Confirmed episodes persist across restarts; an unknown result
 never sends a recovery. Sampling cannot establish continuous downtime between checks.
+
+## PDU and KVM API availability alerts
+
+Enabled PDU/KVM devices also send one alert when failed API checks span strictly
+more than five minutes, followed by one recovery email when a fresh check succeeds.
+Timeouts, rejected credentials and unusable API responses count as API-check failures;
+they are not proof that a server is down, an outlet is off, or a console works.
+Messages identify the device, address, rack and a sanitized failure reason.
+
+These observations use the existing five/thirty-minute device schedule and
+"Check all now". The extra minute probes only check server ICMP, not device APIs.
+Consequently device alerts can take two or more checks and are delayed at night;
+short failures between checks can be missed. A gap longer than the expected next
+check plus two minutes restarts an unconfirmed episode. Reconfiguration of an
+address or credentials restarts confirmation, and disabled devices are skipped.
+Confirmation and queued mail persist across backend restarts; repeated failures
+in the same episode do not send additional messages.
 
 ## Electrical alerts
 
@@ -85,7 +102,7 @@ previously queued mail; check observation timestamps on delayed messages.
 
 ## Validation
 
-`backend/tests/test_alerts.py` exercises outage confirmation, short failures, restart,
+`backend/tests/test_alerts.py` exercises outage/API confirmation, short failures, restart,
 unknown readings, all-inlet evaluation, pause/edit races, worker leases, SMTP retry,
 TLS and configuration validation, using test databases and mocked mail/hardware.
 A real relay/inbox delivery check is still needed after VM configuration.

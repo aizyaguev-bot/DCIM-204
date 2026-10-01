@@ -260,6 +260,9 @@ async def test_additive_upgrade_preserves_existing_monitor_and_device_data(tmp_p
     ("401 credentials secret-password", "authentication"),
     ("ConnectError secret-password", "connect"),
     ("request timed out secret-password", "timeout"),
+    ("Device API request timeout (ConnectTimeout) secret-password", "could not establish"),
+    ("Device API request timeout (ReadTimeout) secret-password", "receiving data"),
+    ("Device API request timeout (PoolTimeout) secret-password", "local connection slot"),
     ("invalid response secret-password", "no usable status"),
 ])
 async def test_failed_checks_explain_safe_reason_and_clear_on_recovery(lab, monkeypatch, message, expected):
@@ -301,6 +304,54 @@ async def test_blank_http_timeout_is_not_misreported_as_connection_failure(monke
         await driver._rpc("/model/pdu/0", "getOutlets")
     assert "request timeout" in str(error.value)
     assert "request timeout" in monitor_links.failure_reason(str(error.value))
+
+
+async def test_pdu_connect_timeout_explains_missing_connection_without_raw_error(monkeypatch):
+    import httpx
+    from drivers.raritan_pdu import RaritanPduDriver, RaritanPduError
+    driver = RaritanPduDriver("example.invalid", "", "")
+    monkeypatch.setattr(driver, "_client_ctx", AsyncMock(return_value=SimpleNamespace(
+        post=AsyncMock(side_effect=httpx.ConnectTimeout("secret-password")))))
+    with pytest.raises(RaritanPduError) as error:
+        await driver._rpc("/model/pdu/1", "getOutlets")
+    assert "could not connect" in str(error.value)
+    assert "ConnectTimeout" in str(error.value) and "secret-password" not in str(error.value)
+    assert "could not establish" in monitor_links.failure_reason(str(error.value))
+
+
+@pytest.mark.parametrize("kind", ["pdu", "kvm"])
+async def test_device_poll_commits_api_alert_and_recovery_without_server_outage(lab, monkeypatch, kind):
+    from datetime import datetime
+    from app import alerts
+    from app.config import Settings
+    from app.models import AlertEmail, PingSample
+    factory, _ = lab
+    monkeypatch.setattr(alerts, "get_settings", lambda: Settings(
+        _env_file=None, email_alerts_enabled=True, email_alerts_minute_probes=True,
+        smtp_host="mail.example.test", email_alerts_from="dcim@example.test"))
+    await add_devices(factory, device("api", kind, {"1":"Optn84"}))
+    status = PduStatus if kind == "pdu" else KvmStatus
+    router = pdus if kind == "pdu" else kvms
+    fetch = AsyncMock(return_value=status(device_id="api", reachable=False,
+                                         error="Device API request timeout (ConnectTimeout) secret-password"))
+    monkeypatch.setattr(router, "_fetch_status", fetch)
+    base = datetime.fromisoformat("2026-10-01T10:00:00+03:00").timestamp()
+    for offset in (0, 300, 600):
+        monkeypatch.setattr(monitor_links.time, "time", lambda: base + offset)
+        await monitor_links.refresh_devices(factory)
+    async with factory() as db:
+        rows = (await db.execute(select(AlertEmail))).scalars().all()
+        assert len(rows) == 1 and rows[0].condition_key == "device-api:api"
+        assert "could not establish" in rows[0].body
+        assert "secret-password" not in rows[0].body
+        assert (await db.get(PingTarget, "target")).status == "pending"
+        assert not (await db.execute(select(PingSample))).scalars().all()
+    fetch.return_value = status(device_id="api", reachable=True)
+    monkeypatch.setattr(monitor_links.time, "time", lambda: base + 900)
+    await monitor_links.refresh_devices(factory)
+    async with factory() as db:
+        rows = (await db.execute(select(AlertEmail).order_by(AlertEmail.created_at))).scalars().all()
+        assert len(rows) == 2 and "recovered" in rows[1].subject
 
 
 async def test_current_inventory_name_and_manual_override_preserve_host_and_links(lab):

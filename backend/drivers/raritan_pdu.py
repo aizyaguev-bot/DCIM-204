@@ -65,6 +65,8 @@ class RaritanPduDriver:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise RaritanPduError(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
+        except httpx.ConnectTimeout as e:
+            raise RaritanPduError("Device API connection timeout (ConnectTimeout): the VM could not connect to the PDU HTTPS API") from e
         except httpx.TimeoutException as e:
             raise RaritanPduError(f"Device API request timeout ({type(e).__name__})") from e
         except httpx.RequestError as e:
