@@ -34,7 +34,12 @@ when a monitoring target is first created. Later discovery preserves overrides.
 Use **Add server** for machines without port labels or computer inventory entries.
 
 Discovery retains imported targets and history even if an inventory entry is
-removed or renamed. Pause an old target in **Details** when retiring/renaming it.
+removed. Renaming through Lab Manager's server rename or cascading port label
+editor retains the monitor ID, address, pause state, history and owner. A rename
+that would collide with another monitor or assigned owner is rejected.
+The displayed name follows the current inventory. In **Details**, turn off
+automatic name synchronization to set a display alias, or turn it back on to
+restore the inventory name. Aliases do not change probe addresses or port links.
 This prevents a failed device discovery from silently removing monitoring.
 Pausing or changing an address closes an open incident with that reason, without
 claiming the old address recovered. Old checks retain the address actually tested.
@@ -44,7 +49,9 @@ claiming the old address recovered. Old checks retain the address actually teste
 ### PDU and KVM columns
 
 Each scheduled round also reads each enabled PDU/KVM once, with up to eight devices
-in parallel and a twelve-second deadline per device. **Check all now** refreshes
+in parallel and a 45-second deadline per PDU / 20-second deadline per KVM. A PDU
+read can require several waves of outlet requests; the former 12-second deadline
+could cut a healthy but slow device read short. **Check all now** refreshes
 these observations too. Port associations use the same normalized server names as
 discovery, with current saved labels taking precedence. A matching rack or a device
 management address alone never establishes a server-to-port association.
@@ -61,7 +68,10 @@ disabled, unverified and overdue connections even when the server answers ping.
 - Older KVMs may expose only configured ports. **Configured · unverified** means
   the device responded and lists the port, but live console health is unknown.
   A static fallback list or an unknown state displays **Port unverified**, never green.
-- **Check failed** can mean a network, authentication or API failure. The previous
+- **Check failed** can mean a network, authentication or API failure. New checks
+  save a sanitized explanation (authentication, connection, timeout or unusable
+  API response), shown directly in the table and in Details. Before the first
+  new check, old snapshots still show the generic message. The previous
   success is not reused. **Not linked** means no matching port label was found;
   configure the correct server name on its PDU/KVM port in the existing device UI.
 - After a missed schedule plus two minutes, a device observation becomes **Overdue**.
@@ -98,8 +108,10 @@ These are observations, not exact continuous downtime: an outage can start after
 the previous successful probe and end before the next one. Failures lasting a few
 minutes can fall entirely between probes, particularly during the 30-minute night
 schedule. An ICMP failure alone does not prove a server crashed; network or firewall
-changes can also prevent replies. There are no email/chat notifications in this
-version; incidents and current states are visible in the tab and CSV.
+changes can also prevent replies. Optional email notifications, including an
+additional one-minute probe mode, are described in [Email alerts](email-alerts.md).
+They are disabled until configured. Incidents and current states remain visible
+in the tab and CSV regardless of email configuration.
 
 ## Installation / update
 
@@ -135,6 +147,26 @@ an integrated release; do not reset the VM to an older version to bypass it.
 For a locally modified npm lockfile, the optional `--backup-frontend-lock` flag
 saves its exact contents in the private backup before installing the reviewed
 lockfile. Other local source edits still prevent installation.
+
+For the v3 design and real user accounts, also pass `--enable-accounts`. The
+installer verifies account-mode startup and sign-in with an isolated test admin
+before changing the running site. It then enables accounts using the existing
+site password for the first admin and checks version, inventory and monitoring
+through an authenticated session. The previous `.env` is restored on failure.
+The lab's deployment URL is http://ftlab.nvidia.com:8000/; open Dashboard after
+installation. See [user accounts](user-accounts.md) for roles and sign-in.
+
+If installation reports `The old backend has not stopped`, the graceful shutdown
+timed out before any application files changed. The optional
+`--finish-stuck-shutdown` takes a consistent online SQLite snapshot and copies the
+runtime configuration into the private backup's `before-stop/` directory before
+sending any shutdown signal. After a normal 20-second shutdown attempt, it
+rechecks process ownership, the project's backend directory, uvicorn arguments
+and process start time, and finishes stopping only that verified process. It
+still aborts if the snapshot fails, the process no longer matches, or port 8000
+remains occupied. Normal post-shutdown backups and rollback checks remain in use.
+Newly started backends limit uvicorn's wait for connections and background
+requests during shutdown to 10 seconds.
 
 ### Manual installation
 

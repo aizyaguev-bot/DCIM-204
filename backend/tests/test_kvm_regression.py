@@ -108,93 +108,27 @@ def test_kvm_status_reachable(reachable_kvms):
 # Autologin — core regression (baseline 25560de)
 # ---------------------------------------------------------------------------
 
-def test_autologin_returns_html(reachable_kvms):
-    """Autologin endpoint returns 200 HTML for every reachable KVM."""
-    for kvm in reachable_kvms:
-        r = requests.get(
-            f"{BASE_URL}/api/kvms/{kvm['id']}/autologin?port=1",
-            auth=AUTH, timeout=20,
-        )
-        assert r.status_code == 200, f"{kvm['name']}: autologin returned {r.status_code}"
-        assert "text/html" in r.headers.get("content-type", ""), \
-            f"{kvm['name']}: response is not HTML"
-
-
-def test_autologin_contains_session_id(reachable_kvms):
-    """
-    REGRESSION (c73e69e): autologin HTML must contain sessionId= in the jsclient URL.
-
-    Without sessionId jsclient shows: 0x10000003 Authentication failed.
-    Without a FRESH sessionId (stale session reused): 0x10000001 Permission denied.
-    Fixed in 25560de: always force fresh login before fetching SESSION_ID.
-    """
-    for kvm in reachable_kvms:
-        r = requests.get(
-            f"{BASE_URL}/api/kvms/{kvm['id']}/autologin?port=1",
-            auth=AUTH, timeout=20,
-        )
-        assert r.status_code == 200
-        html = r.text
-
-        assert "sessionId=" in html, (
-            f"{kvm['name']}: sessionId missing from autologin HTML — "
-            "jsclient will show 'Authentication failed' without it"
-        )
-
-        m = re.search(r"sessionId=([0-9a-fA-F]+)", html)
-        assert m, f"{kvm['name']}: sessionId= found but no hex value follows it"
-        sid = m.group(1)
-        assert len(sid) >= 20, (
-            f"{kvm['name']}: sessionId '{sid}' is too short ({len(sid)} chars) — "
-            "expected 40+ hex chars from sidebar.asp SESSION_ID"
-        )
-        print(f"\n  {kvm['name']}: sessionId={sid[:12]}… ({len(sid)} chars)")
-
-
-def test_autologin_direct_to_kvm_not_proxy(reachable_kvms):
-    """
-    Autologin must navigate the browser DIRECTLY to the KVM's jsclient URL,
-    not through our backend proxy path (/api/kvms/.../proxy/...).
-    """
-    for kvm in reachable_kvms:
-        r = requests.get(
-            f"{BASE_URL}/api/kvms/{kvm['id']}/autologin?port=1",
-            auth=AUTH, timeout=20,
-        )
-        html = r.text
-        kvm_ip = kvm["ip"]
-
-        assert f"https://{kvm_ip}/jsclient/Client.asp" in html, (
-            f"{kvm['name']}: autologin should point directly to "
-            f"https://{kvm_ip}/jsclient/Client.asp, not through proxy"
-        )
-        assert "/proxy/jsclient" not in html, (
-            f"{kvm['name']}: autologin is incorrectly routing through the proxy"
-        )
-
-
-def test_autologin_contains_port_number(reachable_kvms):
-    """Autologin URL must include portNo= for the requested port."""
+def test_autologin_redirects_to_same_origin_viewer(reachable_kvms):
+    """Browser certificate trust is unnecessary when assets and WS use the proxy."""
+    from urllib.parse import urlsplit, parse_qs
     for kvm in reachable_kvms:
         for port in [1, 2]:
             r = requests.get(
                 f"{BASE_URL}/api/kvms/{kvm['id']}/autologin?port={port}",
-                auth=AUTH, timeout=20,
+                auth=AUTH, timeout=45, allow_redirects=False,
             )
-            assert r.status_code == 200
-            assert f"portNo={port}" in r.text, \
-                f"{kvm['name']}: portNo={port} missing from autologin HTML"
-
-
-def test_autologin_has_cert_probe(reachable_kvms):
-    """Autologin page must include a TLS cert probe (fetch no-cors) for UX."""
-    for kvm in reachable_kvms:
-        r = requests.get(
-            f"{BASE_URL}/api/kvms/{kvm['id']}/autologin?port=1",
-            auth=AUTH, timeout=20,
-        )
-        assert 'no-cors' in r.text, \
-            f"{kvm['name']}: cert probe (fetch no-cors) missing from autologin page"
+            assert r.status_code == 302, f"{kvm['name']}: sign-in failed ({r.status_code})"
+            location = urlsplit(r.headers["location"])
+            assert not location.netloc
+            assert location.path == f"/api/kvms/{kvm['id']}/proxy/jsclient/Client.asp"
+            fragment = parse_qs(location.fragment)
+            assert len(fragment["sessionId"][0]) >= 40
+            assert fragment["portNo"] == [str(port)]
+            assert r.headers["cache-control"] == "no-store"
+            viewer = requests.get(BASE_URL + location.path, auth=AUTH, timeout=45)
+            assert viewer.status_code == 200
+            assert "window.WebSocket" in viewer.text
+            assert "Certificate Setup Required" not in viewer.text
 
 
 # ---------------------------------------------------------------------------

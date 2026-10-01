@@ -1,7 +1,9 @@
 import { Fragment, useState } from "react";
 import StatusDot from "../components/StatusDot";
+import {useAccounts} from "../accounts";
 
 export default function PduDetail({ device, status, onBack, onOutletAction, onDelete, onLabelsSave }) {
+  const {canOperate,canAdmin,preferences} = useAccounts();
   if (!device) return null;
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;
@@ -45,7 +47,7 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-zinc-500">Outlets</div>
               {!editMode ? (
-                <button onClick={startEdit}
+                <button disabled={!canOperate} onClick={startEdit}
                   className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition">
                   <PencilIcon /> Edit Labels
                 </button>
@@ -135,16 +137,16 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
           <EnvSensorsPanel status={status} />
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4 space-y-1">
             <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Quick actions</div>
-            <button className="w-full text-left text-sm px-3 py-2 rounded hover:bg-zinc-800 text-zinc-200"
+            <button disabled={!canOperate} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-zinc-800 text-zinc-200"
               onClick={() => { if (confirm("Turn ON all outlets?")) outlets.forEach(o => o.state !== "on" && onOutletAction(o.number, "on")); }}>
               ⏻ Turn on all outlets
             </button>
-            <button className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/15 text-rose-300"
-              onClick={() => { if (confirm("Turn OFF all outlets on this PDU? This affects connected devices.")) outlets.forEach(o => o.state === "on" && onOutletAction(o.number, "off")); }}>
+            <button disabled={!canOperate} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/15 text-rose-300"
+              onClick={() => { if (!preferences.confirm_power || confirm("Turn OFF all outlets on this PDU? This affects connected devices.")) outlets.forEach(o => o.state === "on" && onOutletAction(o.number, "off", true)); }}>
               ⏻ Turn off all outlets
             </button>
             <div className="border-t border-zinc-800 my-2" />
-            <button onClick={onDelete} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400">
+            <button disabled={!canAdmin} onClick={onDelete} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400">
               Remove device
             </button>
           </div>
@@ -201,13 +203,15 @@ function PencilIcon() {
 }
 
 function PowerButtons({ outlet, onAction }) {
+  const {canOperate} = useAccounts();
+  if (!canOperate) return <span className="text-xs text-zinc-600">Read only</span>;
   const on = outlet.state === "on";
   return (
     <div className="flex gap-1">
       {on ? (
         <>
           <button onClick={() => onAction("cycle")} title="Cycle" className="w-7 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-sm">↻</button>
-          <button onClick={() => { if (confirm(`Turn OFF outlet ${outlet.number}?`)) onAction("off"); }} title="Off" className="w-7 h-7 rounded border border-zinc-700 hover:border-rose-500/60 hover:bg-rose-500/10 text-zinc-300 text-sm">⏻</button>
+          <button onClick={() => onAction("off")} title="Off" className="w-7 h-7 rounded border border-zinc-700 hover:border-rose-500/60 hover:bg-rose-500/10 text-zinc-300 text-sm">⏻</button>
         </>
       ) : (
         <button onClick={() => onAction("on")} className="px-2 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-xs">on</button>

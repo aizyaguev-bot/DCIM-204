@@ -2,6 +2,61 @@
 
 ---
 
+## v3.1.1 — 2026-10-01
+
+### Added
+- Optional email alerts for persistent PDU/KVM API-check failures, with one
+  notification per episode and a recovery message. Existing device-check schedules
+  remain in use; SMTP configuration is still required to enable delivery.
+
+### Fixed
+- Monitor diagnostics distinguish connection, read and connection-pool timeouts.
+  Connection failures no longer imply that the device replied too slowly.
+
+---
+
+## v3.1.0 — 2026-10-01
+
+### Added
+- An engineer directory seeded with the requested ten names, and Owner selection
+  in Inventory, rack editors and the Twin. Admins can add, rename or disable
+  engineers; Operators can assign owners. Existing ownership remains preserved.
+- Reset View, Fit Lab and Focus Selection controls, with Hebrew navigation hints.
+
+### Fixed
+- Twin mouse input now uses the bundled official OrbitControls. Rotation, screen
+  pan and bounded zoom share one controller; releasing or cancelling a drag stops
+  navigation. Equipment only moves through explicit Edit → Move → destination.
+- Monitor names follow inventory changes and can use a saved display alias.
+  Server renames preserve monitoring history, port associations and ownership.
+- PDU checks have sufficient time for multiple outlet requests and expose safe
+  failure details instead of hiding the reason behind Check failed.
+- KVM sign-in redirects to the same-origin viewer proxy; its HTTP/WebSocket
+  traffic no longer requires opening the device's certificate warning page.
+
+---
+
+## v3.0.0 — 2026-09-30
+
+### Added
+- Real accounts with Admin, Operator and Viewer permissions, account settings,
+  temporary passwords and user management. Activation reuses the existing site
+  password for the first administrator and preserves the existing inventory.
+- Optional email alerts for observed network outages and configured PDU inlet
+  limits. Delivery remains disabled until SMTP and thresholds are configured.
+- The Linux installer can activate accounts, test sign-in before changing the
+  running site, and restore the previous login configuration on failure.
+
+### Changed
+- Integrated the v3 design into the existing application. Dashboard remains the
+  default page; Racks, Inventory, monitoring, console controls and 3D Twin remain
+  connected to the real APIs.
+- Storage racks appear on Dashboard with their saved equipment. Compute rack
+  placeholders do not create additional Dashboard cards for Rack 6 or Rack 7.
+- Rack editing is explicit; opening a rack no longer adds cooling assignments.
+
+---
+
 ## v2.36.0 — 2026-07-30
 
 ### Fixed
@@ -21,7 +76,7 @@
 - **Sensor name matching** — flexible keyword matching (handles `temperature1`, `relativeHumidity`, `leakDetector` etc. across Raritan firmware versions)
 
 ### Added
-- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:FTSW2026 http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
+- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:YOUR_SITE_PASSWORD http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
 
 ---
 

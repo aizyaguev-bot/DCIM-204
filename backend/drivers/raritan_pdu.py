@@ -14,6 +14,7 @@ Discovered API (reverse-engineered from Angular bundle):
 """
 
 import asyncio
+import math
 import httpx
 from typing import Any
 
@@ -64,6 +65,10 @@ class RaritanPduDriver:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise RaritanPduError(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
+        except httpx.ConnectTimeout as e:
+            raise RaritanPduError("Device API connection timeout (ConnectTimeout): the VM could not connect to the PDU HTTPS API") from e
+        except httpx.TimeoutException as e:
+            raise RaritanPduError(f"Device API request timeout ({type(e).__name__})") from e
         except httpx.RequestError as e:
             raise RaritanPduError(f"Connection error: {e}")
 
@@ -284,24 +289,30 @@ class RaritanPduDriver:
         return out
 
     async def get_inlet(self) -> dict:
-        """Returns inlet voltage/current/power summary."""
+        """Read all inlets; missing/invalid sensor readings stay unknown for alerts."""
         inlet_rids = await self._get_inlet_rids()
-        if not inlet_rids:
-            return {"voltage": 0.0, "current": 0.0, "watts": 0.0}
 
-        inlet_rid = inlet_rids[0]
-        result = {"voltage": 0.0, "current": 0.0, "watts": 0.0}
-        try:
-            sensors = await self._rpc(inlet_rid, "getSensors")
-            if not sensors:
+        async def read_inlet(number, inlet_rid):
+            result = {"number": number, "voltage": None, "current": None, "watts": None}
+            try:
+                sensors = await self._rpc(inlet_rid, "getSensors") or {}
+            except RaritanPduError:
                 return result
             for sname, metric in [("activePower", "watts"), ("current", "current"), ("voltage", "voltage")]:
                 sinfo = sensors.get(sname)
                 if sinfo and sinfo.get("rid"):
-                    reading = await self._rpc(sinfo["rid"], "getReading")
-                    val = (reading or {}).get("value")
-                    if val is not None:
-                        result[metric] = round(float(val), 2 if metric == "current" else 1)
-        except RaritanPduError:
-            pass
-        return result
+                    try:
+                        reading = await self._rpc(sinfo["rid"], "getReading") or {}
+                        # NumericSensor.Reading.valid / available are documented by Xerus.
+                        if reading.get("valid") is True and reading.get("available") is True:
+                            value = float(reading["value"])
+                            if math.isfinite(value):
+                                result[metric] = value
+                    except (RaritanPduError, ValueError, TypeError, KeyError):
+                        pass  # One unavailable sensor must not hide the others.
+            return result
+
+        readings = await asyncio.gather(*(read_inlet(n, rid) for n, rid in enumerate(inlet_rids, 1)))
+        first = readings[0] if readings else {}
+        # Preserve the existing display fields; alerts use the nullable readings.
+        return {**{key: first.get(key) or 0.0 for key in ("voltage", "current", "watts")}, "readings": readings}
