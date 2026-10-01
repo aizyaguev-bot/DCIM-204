@@ -261,6 +261,125 @@ def test_running_backend_is_not_force_killed_on_timeout(monkeypatch):
     assert signals == [installer.signal.SIGTERM]
 
 
+def test_stuck_backend_can_be_finished_only_after_project_recheck(tmp_path, monkeypatch):
+    signals, checks = [], []
+    monkeypatch.setattr(installer.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(installer.time, "sleep", lambda delay: None)
+    monkeypatch.setattr(installer, "active_process", lambda pid: None if 9 in signals else "original")
+    monkeypatch.setattr(installer.os, "kill", lambda pid, sig: signals.append(sig))
+    monkeypatch.setattr(installer, "service_pids", lambda root: checks.append(root) or [12345])
+    installer.stop_existing(12345, force=True, root=tmp_path)
+    assert signals == [installer.signal.SIGTERM, 9]
+    assert checks == [tmp_path]
+
+
+def test_force_option_cannot_stop_a_process_outside_this_project(tmp_path, monkeypatch):
+    signals = []
+    monkeypatch.setattr(installer.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(installer.time, "sleep", lambda delay: None)
+    monkeypatch.setattr(installer, "active_process", lambda pid: "original")
+    monkeypatch.setattr(installer.os, "kill", lambda pid, sig: signals.append(sig))
+    monkeypatch.setattr(installer, "service_pids", lambda root: [])
+    with pytest.raises(RuntimeError, match="no longer matches"):
+        installer.stop_existing(12345, force=True, root=tmp_path)
+    assert signals == [installer.signal.SIGTERM]
+
+
+def test_force_option_cannot_kill_a_pid_reused_during_project_recheck(tmp_path, monkeypatch):
+    signals, state = [], {"start": "original"}
+    monkeypatch.setattr(installer.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(installer.time, "sleep", lambda delay: None)
+    monkeypatch.setattr(installer, "active_process", lambda pid: state["start"])
+    monkeypatch.setattr(installer.os, "kill", lambda pid, sig: signals.append(sig))
+    def recheck(root):
+        state["start"] = "replacement"
+        return [12345]
+    monkeypatch.setattr(installer, "service_pids", recheck)
+    installer.stop_existing(12345, force=True, root=tmp_path)
+    assert signals == [installer.signal.SIGTERM]
+
+
+def test_unstoppable_backend_still_prevents_update(tmp_path, monkeypatch):
+    signals = []
+    monkeypatch.setattr(installer.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(installer.time, "sleep", lambda delay: None)
+    monkeypatch.setattr(installer, "active_process", lambda pid: "original")
+    monkeypatch.setattr(installer.os, "kill", lambda pid, sig: signals.append(sig))
+    monkeypatch.setattr(installer, "service_pids", lambda root: [12345])
+    with pytest.raises(RuntimeError, match="could not be stopped"):
+        installer.stop_existing(12345, force=True, root=tmp_path)
+    assert signals == [installer.signal.SIGTERM, 9]
+
+
+def test_live_snapshot_includes_committed_wal_data_without_uncommitted_writes(tmp_path):
+    import sqlite3
+    root, backup = tmp_path / "project", tmp_path / "backup"
+    (root / "backend").mkdir(parents=True)
+    backup.mkdir()
+    (root / ".env").write_text("PRIVATE_CONFIGURATION=value\n")
+    database = root / "backend" / "lab_manager.db"
+    with sqlite3.connect(database) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("CREATE TABLE equipment (serial TEXT)")
+        live.execute("INSERT INTO equipment VALUES ('saved-server')")
+        live.commit()
+        live.execute("INSERT INTO equipment VALUES ('unfinished-write')")
+        installer.snapshot_before_shutdown(root, backup)
+        with sqlite3.connect(backup / "before-stop" / "backend" / "lab_manager.db") as snapshot:
+            assert snapshot.execute("SELECT serial FROM equipment").fetchall() == [("saved-server",)]
+            assert snapshot.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+        live.rollback()
+    assert (backup / "before-stop" / ".env").read_text() == "PRIVATE_CONFIGURATION=value\n"
+
+
+def test_failed_live_snapshot_never_signals_or_changes_the_backend(deployment):
+    target, commit, old, events = deployment
+    # The fixture's database is deliberately not a valid SQLite database.
+    with pytest.raises(RuntimeError, match="Live database backup failed"):
+        installer.install(target, commit, finish_stuck_shutdown=True)
+    assert git(target, "rev-parse", "HEAD") == old
+    assert (target / "backend" / "lab_manager.db").read_bytes() == b"existing database"
+    assert events == ["preflight"]
+
+
+def test_locked_live_backup_has_a_deadline_and_does_not_silently_continue(tmp_path, monkeypatch):
+    root, backup = tmp_path / "project", tmp_path / "backup"
+    (root / "backend").mkdir(parents=True)
+    (root / "backend" / "lab_manager.db").touch()
+    backup.mkdir()
+    ticks = iter([0, 16])
+    monkeypatch.setattr(installer.time, "monotonic", lambda: next(ticks))
+    class Connection:
+        def backup(self, target, **kwargs): kwargs["progress"](5, 1, 1)
+        def close(self): pass
+    monkeypatch.setattr(installer.sqlite3, "connect", lambda *args, **kwargs: Connection())
+    with pytest.raises(RuntimeError, match="backup timed out"):
+        installer.snapshot_before_shutdown(root, backup)
+
+
+def test_force_recovery_takes_snapshot_before_stopping_and_keeps_runtime_data(deployment, monkeypatch):
+    import sqlite3
+    target, commit, old, events = deployment
+    database = target / "backend" / "lab_manager.db"
+    database.unlink()
+    with sqlite3.connect(database) as db:
+        db.execute("CREATE TABLE equipment (serial TEXT)")
+        db.execute("INSERT INTO equipment VALUES ('existing-server')")
+    def stop(pid, *, force=False, root=None):
+        assert force is True and root == target
+        snapshots = list((target / ".monitor-backups").glob("*/before-stop/backend/lab_manager.db"))
+        assert len(snapshots) == 1
+        with sqlite3.connect(snapshots[0]) as snapshot:
+            assert snapshot.execute("SELECT serial FROM equipment").fetchall() == [("existing-server",)]
+        events.append("stop")
+    monkeypatch.setattr(installer, "stop_existing", stop)
+    installer.install(target, commit, finish_stuck_shutdown=True)
+    assert git(target, "rev-parse", "HEAD") == commit
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT serial FROM equipment").fetchall() == [("existing-server",)]
+    assert events == ["preflight", "stop", "start"]
+
+
 @pytest.mark.parametrize("running", [True, False])
 def test_shutdown_failure_recovers_only_after_old_process_exits(deployment, monkeypatch, running):
     target, commit, old, events = deployment

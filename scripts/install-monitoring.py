@@ -6,9 +6,11 @@ The checkout must be clean except for live twin data and the deployment version.
 Use --backup-frontend-lock to preserve a locally modified npm lockfile in the
 backup and install the reviewed lockfile alongside the prebuilt frontend.
 Use --enable-accounts to activate real users with the existing login password.
+Use --finish-stuck-shutdown to back up live SQLite data and finish stopping this
+project's backend if it does not exit after a normal shutdown request.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 import json
 import os
@@ -18,6 +20,7 @@ import shutil
 import secrets
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -190,7 +193,8 @@ def wait_ready(port, process=None, expected_version=None, inventory=False, root=
 def start(root, python, log_path, port=8000, env=None):
     with log_path.open("ab") as log:
         return subprocess.Popen(
-            [str(python), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1" if env else "0.0.0.0", "--port", str(port)],
+            [str(python), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1" if env else "0.0.0.0", "--port", str(port),
+             "--timeout-graceful-shutdown", "10"],
             cwd=root / "backend", stdin=subprocess.DEVNULL, stdout=log, stderr=log,
             start_new_session=True, env=env,
         )
@@ -297,7 +301,7 @@ def port_occupied(port=8000):
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
-def stop_existing(pid):
+def stop_existing(pid, *, force=False, root=None):
     started = active_process(pid)
     if started is None:
         return
@@ -310,7 +314,56 @@ def stop_existing(pid):
             return  # Exited, zombie, or a different process now has this PID.
         time.sleep(.25)
     if active_process(pid) == started:
-        raise RuntimeError("The old backend has not stopped; no application files were changed")
+        if not force:
+            raise RuntimeError("The old backend has not stopped; no application files were changed. "
+                               "Use --finish-stuck-shutdown to take a live database backup and finish stopping this project's backend")
+        # Recheck ownership, directory, command and process identity after waiting.
+        # A reused PID or another project's process must never receive SIGKILL.
+        if root is None or pid not in service_pids(root):
+            raise RuntimeError("The stuck process no longer matches this project; it was not force-stopped")
+        if active_process(pid) != started:
+            return
+        print("Finishing shutdown of the verified project backend; a live database snapshot was saved before stopping…", flush=True)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        for _ in range(40):
+            if active_process(pid) != started:
+                return
+            time.sleep(.25)
+        raise RuntimeError("The verified backend could not be stopped; no application files were changed")
+
+
+def snapshot_before_shutdown(root, backup):
+    """Save a coherent SQLite snapshot while the old application is still alive."""
+    destination = backup / "before-stop"
+    destination.mkdir(mode=0o700)
+    runtime = [root / ".env", root / "backend" / "version.txt", root / "lab-twin" / "lab-data.json"]
+    runtime += list((root / "backend").glob("*.json"))
+    for path in runtime:
+        if path.is_file():
+            saved = destination / path.relative_to(root)
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, saved)
+    for path in (root / "backend").glob("*.db"):
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError("Live database backup requires a regular SQLite database file")
+        saved = destination / path.relative_to(root)
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 15
+        def progress(status, remaining, total):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Live database backup timed out; the running backend was not stopped")
+        try:
+            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as source:
+                with closing(sqlite3.connect(saved)) as target:
+                    source.backup(target, pages=256, progress=progress, sleep=.05)
+                    if target.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                        raise RuntimeError("The live database snapshot failed its integrity check")
+        except sqlite3.Error as exc:
+            raise RuntimeError("Live database backup failed; the running backend was not stopped") from exc
+    print("Live data snapshot saved to: " + str(destination), flush=True)
 
 
 def restore_live(root, backup):
@@ -369,7 +422,7 @@ def install_lock(root):
         yield
 
 
-def install(root, commit, backup_frontend_lock=False, enable_accounts=False):
+def install(root, commit, backup_frontend_lock=False, enable_accounts=False, finish_stuck_shutdown=False):
     root = root.resolve()
     if Path(git(root, "rev-parse", "--show-toplevel")).resolve() != root:
         raise RuntimeError("Choose the DCIM-204 Git repository itself")
@@ -442,6 +495,8 @@ def install(root, commit, backup_frontend_lock=False, enable_accounts=False):
                 raise RuntimeError("The local lockfile changed during backup; installation stopped")
             print("Local npm lockfile saved to: " + str(saved), flush=True)
         print("Preflight passed. Saving the current inventory and updating…", flush=True)
+        if finish_stuck_shutdown and pids:
+            snapshot_before_shutdown(root, backup)
 
         stopped = False
         stop_attempted = False
@@ -452,7 +507,10 @@ def install(root, commit, backup_frontend_lock=False, enable_accounts=False):
         try:
             if pids:
                 stop_attempted = True
-                stop_existing(pids[0])
+                if finish_stuck_shutdown:
+                    stop_existing(pids[0], force=True, root=root)
+                else:
+                    stop_existing(pids[0])
                 stopped = True
             if port_occupied():
                 raise RuntimeError("Port 8000 is still occupied; no application files were changed")
@@ -529,6 +587,7 @@ def main():
         help="Back up local frontend/package-lock.json edits and replace them with the reviewed version",
     )
     parser.add_argument("--enable-accounts", action="store_true", help="Enable real users after testing account-mode startup; preserve existing credentials and back up .env")
+    parser.add_argument("--finish-stuck-shutdown", action="store_true", help="Take a live database snapshot and finish stopping only this project's backend if graceful shutdown times out")
     args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("Run this installer inside the Linux VM")
@@ -536,7 +595,8 @@ def main():
         parser.error("Use the application's backend/.venv/bin/python (Python 3.10+), not the old system Python")
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("Pass a full 40-character commit SHA")
-    install(args.project, args.commit, backup_frontend_lock=args.backup_frontend_lock, enable_accounts=args.enable_accounts)
+    install(args.project, args.commit, backup_frontend_lock=args.backup_frontend_lock, enable_accounts=args.enable_accounts,
+            finish_stuck_shutdown=args.finish_stuck_shutdown)
 
 
 if __name__ == "__main__":

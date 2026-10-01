@@ -146,6 +146,18 @@ through an authenticated session. The previous `.env` is restored on failure.
 The lab's deployment URL is http://ftlab.nvidia.com:8000/; open Dashboard after
 installation. See [user accounts](user-accounts.md) for roles and sign-in.
 
+If installation reports `The old backend has not stopped`, the graceful shutdown
+timed out before any application files changed. The optional
+`--finish-stuck-shutdown` takes a consistent online SQLite snapshot and copies the
+runtime configuration into the private backup's `before-stop/` directory before
+sending any shutdown signal. After a normal 20-second shutdown attempt, it
+rechecks process ownership, the project's backend directory, uvicorn arguments
+and process start time, and finishes stopping only that verified process. It
+still aborts if the snapshot fails, the process no longer matches, or port 8000
+remains occupied. Normal post-shutdown backups and rollback checks remain in use.
+Newly started backends limit uvicorn's wait for connections and background
+requests during shutdown to 10 seconds.
+
 ### Manual installation
 
 Update this application's code and built frontend on the existing Lab Manager

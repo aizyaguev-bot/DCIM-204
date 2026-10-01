@@ -67,9 +67,11 @@ Google Fonts loading remains optional; functionality does not depend on it.
 - Storage Dashboard checks cover populated/empty/failed inventory reads, serial
   search, rack/type filters, direct detail navigation and browser Back, mobile
   layout, Viewer access, and absence of storage-device polling or write requests.
-- Release installer: 41 tests passed, including account activation, preserving
+- Release installer: 49 tests passed, including account activation, preserving
   credential configuration, rollback to the previous login, authenticated health
-  checks and removal of temporary health-check sessions.
+  checks and removal of temporary health-check sessions. Stuck-shutdown recovery
+  checks project ownership and process identity, preserves committed SQLite WAL
+  data in an online snapshot, and aborts before shutdown if the snapshot fails.
 
 Installation must be run on the VM with the pinned release installer. The main
 design preview reads actual VM data through a local
