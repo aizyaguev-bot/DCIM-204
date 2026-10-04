@@ -54,6 +54,13 @@ handles already-rewritten URLs once, compressed assets, binary/text messages,
 selected subprotocols and peer disconnect cleanup. Saved device credentials and
 KVM console permissions are still required.
 
+If the browser refuses a new console tab, a port click opens a full-size viewer
+inside Lab Manager. Closing the viewer clears only that port's in-use marker;
+the application view and unsaved UI state remain in place. Viewer accounts show
+an explanation of the required Operator/Admin role instead of unexplained
+disabled port buttons. This recovery does not change device credentials or
+console authorization. Hardware video/input still requires lab verification.
+
 ## Verification and deployment
 
 - Full backend/installer suite: 273 tests passed, excluding physical KVM tests.

@@ -2,6 +2,17 @@
 
 ---
 
+## Unreleased — KVM console launch recovery
+
+### Fixed
+- When a browser refuses a new KVM tab, a port click opens the console inside
+  the application instead of silently doing nothing. Closing it releases that
+  port's in-use marker and keeps the existing application view intact.
+- KVM cards and detail pages explain why Viewer accounts cannot open consoles.
+  Operator/Admin permissions and saved device connections are unchanged.
+
+---
+
 ## v3.1.1 — 2026-10-01
 
 ### Added

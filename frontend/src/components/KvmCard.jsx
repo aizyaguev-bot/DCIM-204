@@ -45,6 +45,7 @@ export default function KvmCard({ device, status, onOpen, onPortClick, onMarkFre
         </div>
       )}
       <div className="px-4 py-3">
+        {!canOperate && <p dir="rtl" className="text-xs text-amber-300 mb-3">לפתיחת קונסול KVM נדרשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.</p>}
         {ports.length > 0 ? (
           <div className="grid grid-cols-4 gap-2">
             {ports.map(p => <PortThumb key={p.number} port={p} onClick={() => onPortClick(p)} />)}
@@ -70,7 +71,7 @@ function PortThumb({ port, onClick }) {
   return (
     <button onClick={onClick} disabled={!canOperate}
       className="kvm-port-tile" data-mapped={occupied} data-active={active}
-      title={`${port.label || `Port ${port.number}`} · ${port.in_use ? "In use" : port.status || "Unknown"}`}>
+      title={!canOperate ? "KVM console requires an Operator or Admin account" : `${port.label || `Port ${port.number}`} · ${port.in_use ? "In use" : port.status || "Unknown"}`}>
       <div className="absolute inset-0 flex items-center justify-center px-2 pb-2">
         {occupied ? (
           <span className="font-mono font-bold text-center text-[11px] truncate text-nv-300">

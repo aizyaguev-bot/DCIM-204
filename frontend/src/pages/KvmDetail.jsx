@@ -60,6 +60,7 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
             </div>
           )}
           <div className="p-4">
+            {!canOperate && <p dir="rtl" className="text-sm text-amber-300 mb-3">לפתיחת קונסול KVM נדרשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.</p>}
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-zinc-500">Ports</div>
               {!editMode ? (

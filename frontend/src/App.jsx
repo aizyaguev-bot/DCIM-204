@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Fragment } from "react";
+import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import { api } from "./api/client";
 import Header from "./components/Header";
 import StatsBar from "./components/StatsBar";
@@ -15,6 +15,7 @@ import MonitoringView from "./pages/MonitoringView";
 import AddDeviceModal from "./components/AddDeviceModal";
 import { useAccounts, AccountSettings, UsersView } from "./accounts";
 import { EngineersView } from "./engineers";
+import InlineKvmConsole from "./components/InlineKvmConsole";
 
 export default function App() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
@@ -32,6 +33,9 @@ export default function App() {
   const [version, setVersion] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
   const [deviceError, setDeviceError] = useState("");
+  const [kvmOpenError, setKvmOpenError] = useState("");
+  const [inlineConsole, setInlineConsole] = useState(null);
+  const kvmTimers = useRef(new Set());
   const [rackItems, setRackItems] = useState(null);
   const [rackItemsError, setRackItemsError] = useState("");
   const [adminSection, setAdminSection] = useState(new URLSearchParams(location.search).get("tab") === "sync" ? "mapping" : "devices");
@@ -61,18 +65,45 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   function openKvmConsole(deviceId, portNumber) {
-    if (!canOperate) return;
-    fetch(`/api/kvms/${deviceId}/ports/${portNumber}/mark-in-use`, { method: "POST" });
-    const popup = window.open(`/api/kvms/${deviceId}/autologin?port=${portNumber}`, "_blank");
+    setKvmOpenError("");
+    if (!canOperate) {
+      setKvmOpenError("פתיחת KVM דורשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.");
+      return;
+    }
+    const base = `/api/kvms/${encodeURIComponent(deviceId)}`;
+    const url = `${base}/autologin?port=${encodeURIComponent(portNumber)}`;
+    // Keep window.open in the click handler, before any asynchronous request.
+    // A blocked popup must still open a console without discarding app state.
+    let popup = null;
+    try { popup = window.open(url, "_blank"); } catch {}
+    if (!popup) {
+      setInlineConsole({ deviceId, port: portNumber, url,
+        name: devices.find(device => device.id === deviceId)?.name || "KVM" });
+    }
+    fetch(`${base}/ports/${portNumber}/mark-in-use`, { method: "POST" })
+      .then(response => { if (!response.ok) throw new Error(); })
+      .catch(() => setKvmOpenError("הקונסול נפתח, אבל סימון הפורט כבשימוש נכשל. בדוק שההתחברות לאתר עדיין בתוקף."));
     if (popup) {
       const t = setInterval(() => {
         if (popup.closed) {
           clearInterval(t);
-          fetch(`/api/kvms/${deviceId}/ports/${portNumber}/mark-free`, { method: "POST" })
-            .then(() => loadKvmStatus(deviceId));
+          kvmTimers.current.delete(t);
+          fetch(`${base}/ports/${portNumber}/mark-free`, { method: "POST" })
+            .then(() => loadKvmStatus(deviceId)).catch(() => {});
         }
       }, 2000);
+      kvmTimers.current.add(t);
     }
+  }
+
+  useEffect(() => () => { for (const timer of kvmTimers.current) clearInterval(timer); }, []);
+
+  function closeInlineConsole() {
+    if (!inlineConsole) return;
+    const { deviceId, port } = inlineConsole;
+    setInlineConsole(null);
+    fetch(`/api/kvms/${encodeURIComponent(deviceId)}/ports/${port}/mark-free`, { method: "POST" })
+      .then(() => loadKvmStatus(deviceId)).catch(() => {});
   }
 
   const pdus = devices.filter(d => d.kind === "pdu");
@@ -262,6 +293,7 @@ export default function App() {
       <Header activeTab={mainTab} onNavigate={navigate} summary={summary} editMode={editMode} onEditChange={value => setEditMode(canOperate && value)} onHome={() => navigate("dashboard")}
         onAccount={() => navigate("account")} onUsers={() => {navigate("admin");setAdminSection("users");}} />
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
+      {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
       {mainTab === "admin" && view.kind === "dashboard" && <nav className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>setAdminSection(id)}>{label}</button>)}</nav>}
       {view.kind === "dashboard" && pageInfo && <div className="page-intro"><h1>{pageInfo[0]}</h1><p>{pageInfo[1]} {updatedText}</p></div>}
       {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
@@ -383,6 +415,7 @@ export default function App() {
       )}
 
       {addOpen && <AddDeviceModal racks={racks} onClose={() => setAddOpen(false)} onAdd={handleAddDevice} />}
+      {inlineConsole && <InlineKvmConsole console={inlineConsole} onClose={closeInlineConsole} />}
 
       <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>
     </div>
