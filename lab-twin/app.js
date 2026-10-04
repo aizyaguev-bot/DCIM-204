@@ -35,9 +35,9 @@
     filters: { zone: '', setup: '', statuses: new Set(STATUSES), onlyLow: false, q: '' },
     dirty: false,                        // unsaved edits to S.data (draft mirrored in localStorage)
     settings: LS.get('settings', { url: '', pass: '', poll: true }),
-    live: { connected: false, devices: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
+    live: { connected: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
-    heat: LS.get('heat', true), embed: /[?&]embed=1/.test(location.search), editMode: LS.get('editMode', false), kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
+    heat: LS.get('heat', true), embed: /[?&]embed=1/.test(location.search), editMode: false, kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
   };
@@ -50,70 +50,50 @@
   const scene = new THREE.Scene();
   scene.fog = null;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
-  // ── MapControls: navigation like facility-management / digital-twin viewers (dollhouse style)
-  //   one finger / left-drag   → orbit around the point you touched (object or floor) — the room turns under your finger
-  //   two fingers / right-drag → grab the floor and slide it (the touched point stays under the finger)
-  //   pinch / wheel            → zoom towards the point under the fingers / cursor
-  //   two-finger twist         → rotate around the pinch point · tap a rack → fly to it
-  //   Keeps OrbitControls' `.target` API (camera looks at target) so tweens / fly-to / buttons work unchanged.
-  class MapControls {
-    constructor(camera, dom, pickFn) {
-      this.camera = camera; this.dom = dom; this.pick = pickFn; this.target = new THREE.Vector3(0, 1, -3); this.enabled = true;
-      this.autoRotate = false; this.autoRotateSpeed = 0.6; this.minDistance = 0.4; this.maxDistance = 30; this.maxPolarAngle = Math.PI;
-      this.rotateSpeed = 0.0055; this.minPitch = -Math.PI / 2 + 0.02; this.maxPitch = 0.35;   // pitch of the view direction: straight down … slightly up
-      this._p = new Map(); this._pivot = null; this._plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); this._ray = new THREE.Raycaster();
-      this._v = new THREE.Vector3(); this._v2 = new THREE.Vector3(); this._q = new THREE.Quaternion(); this._pinch = null;
-      dom.style.touchAction = 'none';
-      dom.addEventListener('pointerdown', e => { if (!this.enabled) return; this._p.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button }); try { dom.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
-        if (this._p.size === 1) { this._pivot = this.pointUnder(e.clientX, e.clientY); this._plane.constant = -this._pivot.y; }
-        if (this._p.size === 2) { const a = [...this._p.values()]; this._pinch = { d: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), ang: Math.atan2(a[1].y - a[0].y, a[1].x - a[0].x), cx: (a[0].x + a[1].x) / 2, cy: (a[0].y + a[1].y) / 2 }; this._pivot = this.pointUnder(this._pinch.cx, this._pinch.cy); this._plane.constant = -this._pivot.y; } });
-      dom.addEventListener('pointermove', e => { if (!this.enabled || !this._p.has(e.pointerId)) return; const p = this._p.get(e.pointerId); const x0 = p.x, y0 = p.y; p.x = e.clientX; p.y = e.clientY;
-        if (this._p.size === 1) { if (p.b === 2 || p.b === 1 || e.shiftKey) this.grab(x0, y0, p.x, p.y); else this.orbit((p.x - x0), (p.y - y0)); }
-        else if (this._p.size === 2 && this._pinch) { const a = [...this._p.values()]; const d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), ang = Math.atan2(a[1].y - a[0].y, a[1].x - a[0].x), cx = (a[0].x + a[1].x) / 2, cy = (a[0].y + a[1].y) / 2;
-          this.grab(this._pinch.cx, this._pinch.cy, cx, cy); if (this._pinch.d > 0) this.zoomAt(cx, cy, this._pinch.d / d); let da = ang - this._pinch.ang; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI; this.rotateAround(this._pivot, da);
-          this._pinch = { d, ang, cx, cy }; } });
-      const end = e => { this._p.delete(e.pointerId); if (this._p.size < 2) this._pinch = null; if (this._p.size === 1) { const a = [...this._p.values()][0]; this._pivot = this.pointUnder(a.x, a.y); this._plane.constant = -this._pivot.y; } };
-      dom.addEventListener('pointerup', end); dom.addEventListener('pointercancel', end); dom.addEventListener('lostpointercapture', end);
-      dom.addEventListener('wheel', e => { if (!this.enabled) return; e.preventDefault(); const k = Math.exp((e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY) * 0.0012); this.zoomAt(e.clientX, e.clientY, k); }, { passive: false });
-      dom.addEventListener('contextmenu', e => e.preventDefault());
-    }
-    _ndc(x, y) { const r = this.dom.getBoundingClientRect(); return new THREE.Vector2(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1); }
-    pointUnder(x, y) { // 3D point under the screen position: nearest object, else the floor, else the current target
-      const hit = this.pick ? this.pick({ clientX: x, clientY: y }) : null; if (hit && hit.point) return hit.point.clone();
-      this._ray.setFromCamera(this._ndc(x, y), this.camera); const fl = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); const out = new THREE.Vector3();
-      return this._ray.ray.intersectPlane(fl, out) ? out : this.target.clone();
-    }
-    onPlane(x, y, out) { this._ray.setFromCamera(this._ndc(x, y), this.camera); return this._ray.ray.intersectPlane(this._plane, out); }
-    dist() { return this.camera.position.distanceTo(this.target); }
-    pitch() { this._v.copy(this.target).sub(this.camera.position); return Math.atan2(this._v.y, Math.hypot(this._v.x, this._v.z)); }
-    rotateAround(P, yaw, pitch = 0) { // rigid rotation of camera + target around the pivot P (yaw about vertical, pitch about the camera's right axis)
-      if (!P) P = this.target;
-      if (yaw) { this._q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw); this.camera.position.sub(P).applyQuaternion(this._q).add(P); this.target.sub(P).applyQuaternion(this._q).add(P); }
-      if (pitch) {
-        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion); right.y = 0; if (right.lengthSq() < 1e-6) return; right.normalize();
-        const pos0 = this.camera.position.clone(), tgt0 = this.target.clone();
-        this._q.setFromAxisAngle(right, pitch); this.camera.position.sub(P).applyQuaternion(this._q).add(P); this.target.sub(P).applyQuaternion(this._q).add(P);
-        const pt = this.pitch(); if (pt < this.minPitch || pt > this.maxPitch || this.camera.position.y < 0.3) { this.camera.position.copy(pos0); this.target.copy(tgt0); }
-      }
-    }
-    orbit(dx, dy) { this.rotateAround(this._pivot, -dx * this.rotateSpeed, -dy * this.rotateSpeed); }
-    grab(x0, y0, x1, y1) { // slide so that the floor point under the finger follows the finger
-      const a = new THREE.Vector3(), b = new THREE.Vector3();
-      if (this.onPlane(x0, y0, a) && this.onPlane(x1, y1, b) && a.distanceTo(b) < 30) { a.sub(b); this.camera.position.add(a); this.target.add(a); return; }
-      // fallback (looking at the horizon): screen-space slide
-      const k = this.dist() * 0.0015; const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion); const up = new THREE.Vector3(0, 1, 0);
-      const d = right.multiplyScalar(-(x1 - x0) * k).add(up.multiplyScalar((y1 - y0) * k)); this.camera.position.add(d); this.target.add(d);
-    }
-    zoomAt(x, y, k) { // scale the view about the point under the cursor: k < 1 zooms in
-      const Q = this.pointUnder(x, y); const dQ = this.camera.position.distanceTo(Q);
-      if (k < 1 && dQ * k < this.minDistance) k = Math.max(k, this.minDistance / Math.max(dQ, 1e-6));
-      if (k > 1 && this.dist() * k > this.maxDistance) k = Math.min(k, this.maxDistance / Math.max(this.dist(), 1e-6));
-      this.camera.position.sub(Q).multiplyScalar(k).add(Q); this.target.sub(Q).multiplyScalar(k).add(Q);
-    }
-    update() { if (this.autoRotate) this.rotateAround(this.target, this.autoRotateSpeed * 0.0015, 0); this.camera.lookAt(this.target); return true; }
-    dispose() {}
+  // Official OrbitControls matches the bundled Three.js r128 build.
+  // One navigation controller owns input; equipment moves use the explicit Move tool.
+  camera.up.set(0, 1, 0);
+  const controls = new THREE.OrbitControls(camera, canvas);
+  controls.rotateSpeed = 0.45;
+  controls.panSpeed = 0.65;
+  controls.zoomSpeed = 0.65;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.18;
+  controls.screenSpacePanning = true;
+  controls.minDistance = 0.8;
+  controls.maxDistance = 35;
+  controls.minPolarAngle = 0.035;
+  controls.maxPolarAngle = Math.PI / 2 - 0.025;
+  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+  controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+  canvas.style.touchAction = 'none';
+  const activePointers = new Set();
+  function cancelNavigation() {
+    controls.cancel();
+    S.tween = null;
+    downPos = null;
+    activePointers.forEach(id => { try { canvas.releasePointerCapture(id); } catch {} });
+    activePointers.clear();
   }
-  const controls = new MapControls(camera, canvas, e => (typeof pickAt === 'function' ? pickAt(e) : null));
+  canvas.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch' && ![0, 1, 2].includes(e.button)) return;
+    controls.cancel(); S.tween = null; S.lastInput = performance.now();
+    activePointers.add(e.pointerId);
+    if (e.pointerType !== 'touch') { try { canvas.setPointerCapture(e.pointerId); } catch {} }
+    canvas.focus({ preventScroll: true });
+  }, true);
+  window.addEventListener('pointerup', e => {
+    activePointers.delete(e.pointerId);
+    if (!activePointers.size) controls.cancel();
+    try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    downPos = null;
+  });
+  canvas.addEventListener('wheel', () => { S.tween = null; S.lastInput = performance.now(); }, { capture: true, passive: true });
+  window.addEventListener('pointercancel', cancelNavigation);
+  canvas.addEventListener('lostpointercapture', () => { if (activePointers.size) cancelNavigation(); });
+  window.addEventListener('blur', () => { cancelNavigation(); cancelMove(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { cancelNavigation(); cancelMove(); } });
+  window.addEventListener('pointerdown', e => { if (e.target !== canvas && activePointers.size) cancelNavigation(); }, true);
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x50555c, 1.0));
   const sun = new THREE.DirectionalLight(0xffffff, 0.55); sun.position.set(-6, 9, 4); scene.add(sun);
@@ -136,10 +116,12 @@
   const ndc = new THREE.Vector2();
 
   function resize() {
-    const vp = $('#viewport'); const w = vp.clientWidth, h = vp.clientHeight;
+    const vp = $('#viewport'); const w = Math.max(1, vp.clientWidth), h = Math.max(1, vp.clientHeight);
     renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
   }
-  window.addEventListener('resize', resize);
+  window.addEventListener('resize', () => { cancelNavigation(); resize(); });
+  const viewportObserver = new ResizeObserver(resize); viewportObserver.observe($('#viewport'));
+  window.addEventListener('pagehide', () => { cancelNavigation(); controls.dispose(); viewportObserver.disconnect(); });
 
   // ───────────────────────────────────────────────────────────── geometry helpers
   const matCache = new Map();
@@ -734,7 +716,7 @@
   function anchorOf(rec) { if (!rec.anchor) return null; return typeof rec.anchor === 'function' ? rec.anchor() : rec.anchor; }
   function select(id, opts = {}) {
     const rec = S.recs.get(id); if (!rec) return;
-    S.selected = id;
+    S.selected = id; $('#vFocus').disabled = !id;
     if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
     if (rec.group) {
       const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (rec.cat === 'setup' || rec.cat === 'storage') b.setFromObject(rec.group);
@@ -745,7 +727,7 @@
     if (S.editMode) renderEditor(rec); else renderDetail(rec); renderTree(); renderRackBar();
     $('#detail').classList.remove('hidden'); resize();
   }
-  function closeDetail() { S.selected = null; if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; } $('#detail').classList.add('hidden'); $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); resize(); }
+  function closeDetail() { S.selected = null; $('#vFocus').disabled = true; if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; } $('#detail').classList.add('hidden'); $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); resize(); }
   $('#dClose').onclick = closeDetail;
   $('#dFocus').onclick = () => { const r = S.recs.get(S.selected); if (r) flyTo(r, true); };
 
@@ -866,7 +848,7 @@
         <span>Type</span><select id="eType">${TYPES.map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         <span>Type label</span><input id="eTypeLabel" value="${esc(it.typeLabel || '')}" placeholder="e.g. Spectrum-4 SN5600 under test" />
         <span>Status</span><select id="eStatus">${STATUSES.map(x => `<option value="${x}" ${(it.status || 'unknown') === x ? 'selected' : ''}>${STATUS_LABEL[x]}</option>`).join('')}</select>
-        <span>Owner</span><input id="eOwner" value="${esc(it.owner || '')}" placeholder="engineer" />
+        <span>Owner</span>${ownerPicker(it.owner)}
         <span>Confidence</span><select id="eConf">${['high', 'medium', 'low'].map(x => `<option value="${x}" ${(it.confidence || 'medium') === x ? 'selected' : ''}>${x}</option>`).join('')}</select>
         <span>Location</span><select id="eLoc"><option value="">— free position —</option>${S.data.setups.map(x => `<option value="setup:${x.id}" ${locVal === 'setup:' + x.id ? 'selected' : ''}>${x.id} · ${esc(x.name.split('—')[0].replace('Rack', '').trim())}</option>`).join('')}${S.data.storage.map(x => `<option value="storage:${x.id}" ${locVal === 'storage:' + x.id ? 'selected' : ''}>${x.id} · ${esc(x.name)}</option>`).join('')}</select>
         <span>Shelf</span><select id="eShelf" ${it.setup ? '' : 'disabled'}>${it.setup ? shelfOpts(it.setup) : '<option value="">—</option>'}</select>
@@ -880,7 +862,7 @@
       html += `<div class="sec"><div class="sec-h">Edit</div><div class="edit-grid">
         <span>Name</span><input id="eName" value="${esc(def.name || '')}" />
         <span>Status</span><select id="eStatus">${STATUSES.map(x => `<option value="${x}" ${(def.status || 'unknown') === x ? 'selected' : ''}>${STATUS_LABEL[x]}</option>`).join('')}</select>
-        <span>Owner</span><input id="eOwner" value="${esc(def.owner || '')}" placeholder="engineer" />
+        <span>Owner</span>${ownerPicker(def.owner)}
       </div><textarea id="eNotes" placeholder="notes…" style="margin-top:6px">${esc(def.notes || '')}</textarea>
       <div class="ctl-row" style="margin-top:8px"><button class="btn btn-primary" id="eSave">Save</button>${rec.cat === 'shelf' ? `<button class="btn btn-xs" id="eAddHere">+ Add item on this shelf</button>` : rec.cat === 'setup' ? `<button class="btn btn-xs" id="eAddBay">+ Add rack-level item</button>` : ''}</div></div>`;
     } else if (def.notes) html += `<div class="sec"><div class="sec-h">Notes</div><div class="note">${esc(def.notes)}</div></div>`;
@@ -919,6 +901,11 @@
     const eMat = $('#eMaterialize'); if (eMat) eMat.onclick = () => { const c = { id: nextItemId(), name: it.name, category: 'item', type: it.type, typeLabel: it.typeLabel, setup: it.setup || null, shelf: it.shelf || null, placement: it.placement, zone: it.zone || null, status: it.status || 'active', owner: it.owner || null, confidence: 'high', placementConfidence: 'medium', photos: [], notes: 'Added from live DCIM data.', dcim: it.dcim ? { optKey: it.dcim.optKey, pdu: it.dcim.pdu, pduName: it.dcim.pduName, outlet: it.dcim.outlet, deviceId: it.dcim.deviceId } : undefined }; S.data.items.push(c); markDirty(); rebuildAll(); select(c.id, { keepCamera: true }); };
   }
   // ── data editing helpers
+  function ownerPicker(current = '') {
+    const people = S.live.engineers.filter(p => p.active || p.name === current);
+    const known = people.some(p => p.name === current);
+    return `<select id="eOwner" aria-label="Owner"><option value="">— ללא בעלים —</option>${current && !known ? `<option value="${esc(current)}" selected>${esc(current)} (קיים)</option>` : ''}${people.map(p => `<option value="${esc(p.name)}" ${p.name === current ? 'selected' : ''} ${!p.active ? 'disabled' : ''}>${esc(p.name)}${p.active ? '' : ' (לא פעיל)'}</option>`).join('')}</select>`;
+  }
   function findDef(id) { const d = S.data; return d.setups.find(x => x.id === id) || d.shelves.find(x => x.id === id) || d.storage.find(x => x.id === id) || d.items.find(x => x.id === id) || null; }
   function patchDef(id, patch) { const def = findDef(id); if (!def) return false; Object.entries(patch).forEach(([k, v]) => { if (v === undefined) delete def[k]; else def[k] = v; }); markDirty(); return true; }
   function nextItemId() { let n = 0; S.data.items.forEach(i => { const m = /^ITEM-(\d+)$/.exec(i.id); if (m) n = Math.max(n, +m[1]); }); return 'ITEM-' + String(n + 1).padStart(4, '0'); }
@@ -966,7 +953,7 @@
   const INVENTORY_PATHS = {
     devices: '/api/devices/', rackSlots: '/api/rack-slots', rackOrder: '/api/rack-positions',
     sw: '/api/switch-assignments', owners: '/api/opt-owners', rackItems: '/api/rack-items',
-    chillers: '/api/chillers', rackOverrides: '/api/rack-overrides',
+    chillers: '/api/chillers', rackOverrides: '/api/rack-overrides', engineers: '/api/engineers',
   };
   async function readLiveInventory() {
     // Share the same inventory source on connection and every live refresh.
@@ -995,7 +982,7 @@
       computeModel(); buildItems(); await refreshStatuses();
       if (session !== liveSession) return;
       if (S.live.timer) clearInterval(S.live.timer);
-      if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, POLL_MS);
+      if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, (window.DCIM_ACCOUNT_PREFS.refresh_seconds || 15) * 1000);
       toast('Backend connected', 'ok');
     } catch (e) {
       if (session !== liveSession) return;
@@ -1028,6 +1015,8 @@
     }
   }
   async function outletAction(pduId, outlet, action, btn) {
+    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
+    if (window.DCIM_ACCOUNT_PREFS.confirm_power && ['off', 'cycle'].includes(action) && !confirm(`Power ${action} outlet ${outlet}?`)) return;
     if (!S.live.connected) { toast('Connect the backend first', 'err'); return; }
     const old = btn ? btn.innerHTML : null; if (btn) { btn.disabled = true; btn.innerHTML = `<span class="busy"></span> ${action}…`; }
     try {
@@ -1038,6 +1027,7 @@
     finally { if (btn) { btn.disabled = false; btn.innerHTML = old; } }
   }
   function openKvm(kvmId, port) {
+    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
     const base = (S.settings.url || '').replace(/\/$/, '');
     api(`/api/kvms/${kvmId}/ports/${port}/mark-in-use`, { method: 'POST' }).catch(() => {});
     const popup = window.open(`${base}/api/kvms/${kvmId}/autologin?port=${port}`, '_blank');
@@ -1070,27 +1060,31 @@
   $('#sbDiscard').onclick = () => { if (confirm('Discard all unsaved edits and reload the saved lab-data.json?')) { LS.set('draft', null); location.reload(); } };
   $('#btnPlan').onclick = () => window.open('floorplan.svg', '_blank');
 
-  // ───────────────────────────────────────────────────────────── keep camera + target inside the room
-  const _clampV = new THREE.Vector3(), _off = new THREE.Vector3();
-  // Rigid clamp: the target is kept inside the room and the camera follows by the SAME correction (so the view never
-  // swings when you hit a wall); if the camera itself would end up outside, it slides toward the target along the
-  // current view direction instead of being pushed sideways.
-  function clampToRoom() {
-    if (!S.data) return; const { width: W, depth: D, height: H } = S.data.room; const m = 0.25;
-    // the point you look at stays inside the room; the camera may hover up to 3 m outside the walls (dollhouse view) but never below the floor
-    const lo = { x: -W - 3, y: 0.3, z: -3 }, hi = { x: 3, y: 16, z: D + 3 };
-    _off.copy(camera.position).sub(controls.target);
-    _clampV.copy(controls.target);
-    _clampV.x = Math.min(-m, Math.max(-W + m, _clampV.x)); _clampV.z = Math.min(D - m, Math.max(m, _clampV.z)); _clampV.y = Math.min(H, Math.max(0.0, _clampV.y));
-    if (!_clampV.equals(controls.target)) controls.target.copy(_clampV);
-    // largest s in (0,1] with target + s*off inside the box
-    let s = 1;
-    for (const k of ['x', 'y', 'z']) { const o = _off[k]; if (Math.abs(o) < 1e-9) continue; const lim = o > 0 ? hi[k] : lo[k]; const t = (lim - controls.target[k]) / o; if (t < s) s = Math.max(0, t); }
-    const minS = Math.min(1, controls.minDistance / Math.max(1e-6, _off.length()));
-    s = Math.max(s, minS);
-    _clampV.copy(controls.target).addScaledVector(_off, s);
-    for (const k of ['x', 'y', 'z']) _clampV[k] = Math.min(hi[k], Math.max(lo[k], _clampV[k])); // last resort (target pressed against a wall)
-    if (!_clampV.equals(camera.position)) camera.position.copy(_clampV);
+  // Keep the focus near the lab by translating camera and target together.
+  // The old camera box shortened the viewing radius every frame and caused jumps.
+  const previousCamera = new THREE.Vector3(), previousTarget = new THREE.Vector3();
+  const collisionRay = new THREE.Raycaster();
+  function constrainNavigation(collisions = true) {
+    if (!S.data) return;
+    const { width: W, depth: D, height: H } = S.data.room;
+    const bounded = controls.target.clone().clamp(new THREE.Vector3(-W - 0.5, 0, -0.5), new THREE.Vector3(0.5, H, D + 0.5));
+    camera.position.add(bounded.clone().sub(controls.target)); controls.target.copy(bounded);
+    if (camera.position.y < 0.3) { const rise = 0.3 - camera.position.y; camera.position.y += rise; controls.target.y += rise; }
+    if (collisions) {
+      const delta = camera.position.clone().sub(previousCamera), distance = delta.length();
+      if (distance > 1e-6) {
+        const solids = S.pickables.filter(m => m.visible && ['item', 'setup', 'shelf', 'storage'].includes(S.recs.get(m.userData.id)?.cat));
+        collisionRay.set(previousCamera, delta.normalize()); collisionRay.far = distance + 0.18;
+        const hit = collisionRay.intersectObjects(solids, false)[0];
+        if (hit && hit.distance < distance + 0.18) {
+          const fraction = Math.max(0, Math.min(1, (hit.distance - 0.18) / distance));
+          camera.position.lerpVectors(previousCamera, camera.position.clone(), fraction);
+          controls.target.lerpVectors(previousTarget, controls.target.clone(), fraction);
+        }
+      }
+    }
+    camera.lookAt(controls.target);
+    previousCamera.copy(camera.position); previousTarget.copy(controls.target);
   }
   // pan the whole view (camera + target together) along the floor, relative to where you look
   function panBy(dx, dz) {
@@ -1102,12 +1096,25 @@
   }
 
   // ───────────────────────────────────────────────────────────── camera views
-  function roomCenter() { const { width: W, depth: D } = S.data.room; return new THREE.Vector3(W / 2, 0.9, D / 2); }
-  function tweenCamera(pos, target, ms = 700) { S.tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() }; }
+  function roomCenter() { const { width: W, depth: D, height: H } = S.data.room; return new THREE.Vector3(WX(W / 2), H * 0.35, D / 2); }
+  function tweenCamera(pos, target, ms = 700) {
+    controls.cancel();
+    S.tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() };
+  }
+  function fitLab(top = false) {
+    scene.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(world);
+    const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+    const vertical = THREE.MathUtils.degToRad(camera.fov), horizontal = 2 * Math.atan(Math.tan(vertical / 2) * camera.aspect);
+    const distance = Math.min(controls.maxDistance * 0.9, sphere.radius / Math.sin(Math.min(vertical, horizontal) / 2) * 1.12);
+    const target = roomCenter();
+    const direction = (top ? new THREE.Vector3(0, 1, -0.04) : new THREE.Vector3(0.45, 0.95, -1)).normalize();
+    tweenCamera(target.clone().addScaledVector(direction, distance), target);
+  }
   const VIEWS = {
-    orbit() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(-1.0), 5.4, -1.6), new THREE.Vector3(WX(W / 2), 0.5, D * 0.5)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
-    top() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 11.5, D / 2 - 0.001), new THREE.Vector3(WX(W / 2), 0, D / 2)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
-    eye() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 1.65, 0.35), new THREE.Vector3(WX(W / 2), 1.35, D * 0.7)); controls.maxPolarAngle = Math.PI / 2 + 0.35; },
+    orbit() { fitLab(); },
+    top() { fitLab(true); },
+    eye() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 1.65, 0.35), new THREE.Vector3(WX(W / 2), 1.35, D * 0.7)); },
   };
   function setView(name) { VIEWS[name](); $$('.tb').forEach(b => b.classList.remove('active')); $('#v' + name[0].toUpperCase() + name.slice(1)).classList.add('active'); }
   function flyTo(rec, force) {
@@ -1120,7 +1127,9 @@
     tweenCamera(c.clone().add(dir.multiplyScalar(dist)), c, force ? 500 : 800);
   }
   $('#vOrbit').onclick = () => setView('orbit'); $('#vTop').onclick = () => setView('top'); $('#vEye').onclick = () => setView('eye');
-  $('#vReset').onclick = () => { setView('orbit'); closeDetail(); };
+  $('#vReset').onclick = () => { cancelMove(); closeDetail(); setView('orbit'); };
+  $('#vFit').onclick = () => fitLab();
+  $('#vFocus').onclick = () => { const rec = S.recs.get(S.selected); if (rec) flyTo(rec, true); };
   $('#btnHome').onclick = () => setView('orbit');
   $('#tWalls').onclick = () => { S.wallsVisible = !S.wallsVisible; wallsGroup.visible = S.wallsVisible; $('#tWalls').classList.toggle('active', !S.wallsVisible); $('#tWalls').textContent = S.wallsVisible ? 'Walls' : 'Walls hidden'; };
   $('#tZones').onclick = () => { S.zonesVisible = !S.zonesVisible; zonesGroup.visible = S.zonesVisible; $('#tZones').classList.toggle('active', S.zonesVisible); };
@@ -1128,7 +1137,7 @@
   function setLabelMode(mode, silent) { S.labelMode = mode; $('#tLabels').textContent = 'Labels: ' + { setups: 'setups', all: 'all', none: 'off' }[mode]; if (!silent) LS.set('labelMode', mode); }
   $('#tLabels').onclick = () => setLabelMode({ setups: 'all', all: 'none', none: 'setups' }[S.labelMode]);
   window.addEventListener('keydown', e => {
-    if (e.target.matches('input,textarea,select')) return;
+    if (e.target !== canvas && e.target !== document.body) return;
     const k = e.key.toLowerCase();
     if (k === 'r') setView('orbit'); if (k === 't') setView('top'); if (k === 'e') setView('eye'); if (k === 'w') $('#tWalls').click(); if (k === 'l') $('#tLabels').click(); if (k === 'z') $('#tZones').click();
     if (k === 'k') toggleKiosk(); if (e.key === 'F2') toggleEdit();
@@ -1137,48 +1146,27 @@
 
   // ───────────────────────────────────────────────────────────── picking
   let downPos = null;
-  // ── drag & drop (Edit mode): press a device and drag it onto another shelf / rack / storage
-  let drag = null;
-  function draggable(rec) { return rec && rec.cat === 'item' && rec.meshes.length && (S.data.items.some(x => x.id === rec.id) || movesViaDcim(rec.item)); }
-  function dragUpdate(e, id) {
-    const hit = pickAt(e); const t = hit ? resolveMoveTarget(hit) : null; const name = S.recs.get(id)?.def.name || id;
-    if ((t ? t.id : null) !== S.hover) setHover(t ? t.id : null);
-    $('#moveText').textContent = t ? `Drop ${name} on ${t.id}${t.cat === 'shelf' ? ' · L' + t.level : ''}` : `Drag ${name} onto a shelf, rack or storage`;
-    return t;
-  }
-  function dragEnd(e, drop) {
-    const d = drag; drag = null; if (!d || !d.active) return false;
-    controls.enabled = true; canvas.classList.remove('dragging');
-    const t = drop ? dragUpdate(e, d.id) : null;
-    if (t) finishMove(t); else { cancelMove(); if (drop) toast('Dropped outside a shelf — nothing moved', 'err'); }
-    return true;
-  }
   canvas.addEventListener('pointerdown', e => {
-    downPos = [e.clientX, e.clientY]; S.lastInput = performance.now(); S.tween = null; // a touch always wins over a running camera animation
-    if (S.editMode && !S.moveItem && e.button === 0) { const hit = pickAt(e); const rec = hit && S.recs.get(hit.object.userData.id); drag = draggable(rec) ? { id: rec.id, x: e.clientX, y: e.clientY, active: false, pid: e.pointerId } : null; }
+    downPos = e.button === 0 ? { x: e.clientX, y: e.clientY, id: e.pointerId, moved: false } : null;
   });
-  window.addEventListener('pointermove', e => {
-    if (!drag) return;
-    if (!drag.active) { if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 8) return; drag.active = true; controls.enabled = false; canvas.classList.add('dragging'); startMove(drag.id); }
-    dragUpdate(e, drag.id);
-  });
-  window.addEventListener('pointerup', e => { if (drag && drag.active) { dragEnd(e, true); downPos = null; } else if (drag) drag = null; });
-  window.addEventListener('pointercancel', e => { dragEnd(e, false); });
-  ['pointermove', 'wheel', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, () => { S.lastInput = performance.now(); }, { passive: true }));
+  canvas.addEventListener('pointermove', e => {
+    if (downPos && e.pointerId === downPos.id && Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 5) downPos.moved = true;
+    if (e.pointerType === 'mouse' && e.buttons === 0 && activePointers.size) cancelNavigation();
+  }, true);
   canvas.addEventListener('pointerup', e => {
-    if (drag && drag.active) return; // handled by the window-level drop handler
-    if (!downPos) return; const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]); downPos = null; if (moved > (e.pointerType === 'touch' ? 14 : 6)) return;
+    const down = downPos; downPos = null;
+    const rect = canvas.getBoundingClientRect();
+    if (!down || down.id !== e.pointerId || down.moved || e.button !== 0 || activePointers.size > 1 ||
+        e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
     const hit = pickAt(e);
-    if (S.moveItem) {
-      // while moving: anything you tap resolves to the shelf / rack / storage at that spot — never changes the selection
+    if (S.moveItem && S.editMode && window.DCIM_CAN_OPERATE) {
       const target = hit ? resolveMoveTarget(hit) : null;
-      if (target) finishMove(target); else toast('Tap a shelf, a rack or a storage unit (or Cancel)', 'err');
+      if (target) finishMove(target); else toast('Choose a shelf, rack or storage destination, or Cancel', 'err');
       return;
     }
-    if (!hit) return;
-    const rec = S.recs.get(hit.object.userData.id);
-    select(hit.object.userData.id, rec && rec.cat === 'setup' && !S.editMode ? { fly: true } : { keepCamera: true });
+    if (hit) select(hit.object.userData.id, { keepCamera: true });
   });
+  ['pointerdown', 'wheel', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, () => { S.lastInput = performance.now(); }, { passive: true }));
   let hoverT = 0;
   canvas.addEventListener('pointermove', e => {
     const now = performance.now(); if (now - hoverT < 40) return; hoverT = now; const hit = pickAt(e);
@@ -1258,21 +1246,22 @@
   // ───────────────────────────────────────────────────────────── render loop
   function animate() {
     requestAnimationFrame(animate);
-    if (S.kiosk) { const idle = performance.now() - S.lastInput; controls.autoRotate = idle > 45000 && !S.selected; controls.autoRotateSpeed = 0.6; } else controls.autoRotate = false;
+    controls.autoRotate = false;
+    const animating = !!S.tween;
     if (S.tween) { const k = Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms); const e = 1 - Math.pow(1 - k, 3); camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); if (k >= 1) S.tween = null; }
     const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
-    controls.update(); clampToRoom(); renderer.render(scene, camera); updateLabels();
+    controls.update(); constrainNavigation(!animating); renderer.render(scene, camera); updateLabels();
   }
 
 
   // ───────────────────────────────────────────────────────────── EDIT MODE (touch-friendly editor for the lab screen)
   const STATUS_ICON = { active: '●', building: '◐', inactive: '○', dismantled: '✕', unknown: '?' };
-  function toggleEdit(force) { S.editMode = force !== undefined ? force : !S.editMode; LS.set('editMode', S.editMode); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit'; if (!S.editMode) cancelMove(); if (S.selected) select(S.selected, { keepCamera: true }); toast(S.editMode ? 'Edit mode — tap any rack, shelf or item' : 'Edit mode off', 'ok'); }
+  function toggleEdit(force) { if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; } S.editMode = force !== undefined ? force : !S.editMode; LS.set('editMode', S.editMode); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit'; if (!S.editMode) cancelMove(); if (S.selected) select(S.selected, { keepCamera: true }); toast(S.editMode ? 'Edit mode — tap any rack, shelf or item' : 'Edit mode off', 'ok'); }
   function toggleKiosk(force) { S.kiosk = force !== undefined ? force : !S.kiosk; LS.set('kiosk', S.kiosk); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); if (S.kiosk && S.labelMode === 'none') setLabelMode('setups'); resize(); }
   $('#btnEdit').onclick = () => toggleEdit(); $('#btnKiosk').onclick = () => toggleKiosk();
 
-  function startMove(itemId) { S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden'); $('#moveText').textContent = `Tap the shelf (or rack / storage) where ${S.recs.get(itemId)?.def.name || itemId} goes now`; highlightTargets(true); }
-  function cancelMove() { if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); highlightTargets(false); }
+  function startMove(itemId) { if (!S.editMode || !window.DCIM_CAN_OPERATE) return; controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden'); $('#moveText').textContent = `Tap the shelf (or rack / storage) where ${S.recs.get(itemId)?.def.name || itemId} goes now`; highlightTargets(true); }
+  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); highlightTargets(false); }
   $('#moveCancel').onclick = cancelMove;
   function highlightTargets(on) {
     for (const r of S.recs.values()) if (r.cat === 'shelf') {
@@ -1327,6 +1316,7 @@
     return `${rack} · U${u}`;
   }
   async function finishMove(target) {
+    if (!S.editMode || !window.DCIM_CAN_OPERATE) { cancelMove(); return; }
     const id = S.moveItem; cancelMove(); if (!id) return;
     const rec = S.recs.get(id); const mit = rec?.item; const def = S.data.items.find(x => x.id === id);
     if (!def && !mit) return;
@@ -1372,7 +1362,7 @@
         <div class="row-lg"><button class="btn-lg btn-cyan" id="eMove">⇄ Move… (tap a shelf)</button><button class="btn-lg" id="eUnplace">Unplace</button></div>
         ${it.setup ? `<div class="row-lg"><button class="btn-lg sm" data-side="left">⇤ Hang on left side</button><button class="btn-lg sm" data-side="right">Hang on right side ⇥</button><button class="btn-lg sm" data-side="bay">Bottom bay</button></div>` : ''}
         <label class="lbl-lg">Type</label><select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
-        <label class="lbl-lg">Owner</label><input class="in-lg" id="eOwner" value="${esc(it.owner || '')}" placeholder="engineer" />
+        <label class="lbl-lg">Owner</label>${ownerPicker(it.owner)}
         <label class="lbl-lg">PDU · outlet</label>
         <div class="row-lg"><select class="in-lg" id="ePdu" style="flex:2"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${x.id}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
           <div class="stepper"><button data-step="-1">−</button><input id="eOutlet" type="number" min="1" max="48" value="${it.dcim?.outlet ?? ''}" placeholder="#" /><button data-step="1">＋</button></div></div>
@@ -1502,7 +1492,7 @@
   function rotateBy(a) { const dir = camera.position.clone().sub(controls.target); dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), a); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 300); }
   $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4); $('#zL').onclick = () => rotateBy(Math.PI / 8); $('#zR').onclick = () => rotateBy(-Math.PI / 8);
   $('#pL').onclick = () => panBy(-1, 0); $('#pR').onclick = () => panBy(1, 0); $('#pF').onclick = () => panBy(0, 1); $('#pB').onclick = () => panBy(0, -1);
-  window.addEventListener('keydown', e => { if (e.target.matches('input,textarea,select')) return; const k = e.key; if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1); else return; e.preventDefault(); });
+  window.addEventListener('keydown', e => { if (e.target !== canvas && e.target !== document.body) return; const k = e.key; if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1); else return; e.preventDefault(); });
 
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }
@@ -1510,6 +1500,7 @@
 
   // ───────────────────────────────────────────────────────────── boot
   function init(data) {
+    if (!window.DCIM_CAN_OPERATE) S.editMode = false;
     // a browser draft is only restored if it was made on top of THIS exact dataset (otherwise a newer lab-data.json would be hidden by stale edits)
     S.dataBase = dataFingerprint(data);
     const draft = LS.get('draft', null);
@@ -1520,7 +1511,10 @@
     setupFilterUI(); buildStatic(); computeModel(); buildItems();
     setLabelMode(LS.get('labelMode', 'setups'), true); updateSaveBar();
     $('#tHeat').classList.toggle('active', S.heat); document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit';
-    resize(); VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; $('#vOrbit').classList.add('active');
+    resize(); controls.maxDistance = Math.max(25, Math.hypot(S.data.room.width, S.data.room.depth, S.data.room.height) * 5);
+    camera.far = controls.maxDistance + 50; camera.updateProjectionMatrix();
+    VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
+    previousCamera.copy(camera.position); previousTarget.copy(controls.target); $('#vOrbit').classList.add('active');
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
     if (S.settings.url) connect(); else if (auto) { api('/api/version').then(() => connect()).catch(() => {}); }
@@ -1528,7 +1522,7 @@
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
   window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-  boot.then(init).catch(err => {
+  Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
     $('#loadFallback').classList.remove('hidden');
     $('#fileJson').onchange = e => { const f = e.target.files[0]; if (!f) return; f.text().then(t => { $('#loadFallback').classList.add('hidden'); init(JSON.parse(t)); }).catch(er => toast('Invalid JSON: ' + er.message, 'err')); };

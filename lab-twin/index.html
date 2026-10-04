@@ -82,7 +82,7 @@
 
     <!-- 3D viewport -->
     <section class="viewport" id="viewport">
-      <canvas id="c"></canvas>
+      <canvas id="c" tabindex="0" aria-label="תצוגת המעבדה בתלת ממד"></canvas>
       <div id="labels" class="labels"></div>
 
       <div class="toolbar">
@@ -98,7 +98,9 @@
           <button class="tb" id="tHeat" title="Temperature heat-map under the racks (live PDU sensors)">Heat</button>
         </div>
         <div class="tb-group">
-          <button class="tb tb-accent" id="vReset" title="Reset view (Home)">Reset View</button>
+          <button class="tb tb-accent" id="vReset" title="איפוס מבט (Home)">איפוס מבט</button>
+          <button class="tb" id="vFit" title="הצגת כל המעבדה">כל המעבדה</button>
+          <button class="tb" id="vFocus" title="מיקוד באובייקט שנבחר" disabled>מיקוד בבחירה</button>
         </div>
       </div>
 
@@ -107,7 +109,7 @@
       <div class="envpanel hidden" id="envPanel"></div>
       <div class="rackbar" id="rackBar"></div>
       <div class="zoombar"><button class="zb" id="zIn" title="Zoom in">＋</button><button class="zb" id="zOut" title="Zoom out">−</button><button class="zb" id="zL" title="Rotate left">⟲</button><button class="zb" id="zR" title="Rotate right">⟳</button><span class="zb-sep"></span><button class="zb" id="pL" title="Move left (←)">◀</button><button class="zb" id="pR" title="Move right (→)">▶</button><button class="zb" id="pF" title="Move forward (↑)">▲</button><button class="zb" id="pB" title="Move back (↓)">▼</button></div>
-      <div class="hint" id="hint">Drag to rotate around what you touch · two fingers / right-drag to slide the floor · pinch / wheel to zoom there · tap a rack to go there · tap a rack to go there · Edit: drag a device onto a shelf</div>
+      <div class="hint" id="hint" dir="rtl" lang="he">שמאל + גרירה: סיבוב · ימין + גרירה: הזזת מבט · גלגלת: זום · הזזת ציוד: עריכה ← Move ← בחירת יעד</div>
       <div class="compass" id="compass">ENTRANCE ↓</div>
     </section>
 
@@ -165,6 +167,7 @@
 
   <script src="vendor/three.min.js"></script>
   <script src="vendor/OrbitControls.js"></script>
+  <script src="account-access.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -29,12 +29,20 @@ class OutletState(BaseModel):
     current: float = 0.0
     voltage: float = 0.0
 
+class InletReading(BaseModel):
+    number: int
+    voltage: float | None = None
+    current: float | None = None
+    watts: float | None = None
+
+
 class PduStatus(BaseModel):
     device_id: str
     reachable: bool
     inlet_voltage: float = 0.0
     total_watts: float = 0.0
     outlets: list[OutletState] = []
+    inlet_readings: list[InletReading] = []
     error: Optional[str] = None
     temperature: Optional[float] = None
     humidity: Optional[float] = None

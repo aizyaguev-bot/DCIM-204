@@ -47,6 +47,7 @@ async def _fetch_status(device_id: str, dev: Device) -> PduStatus:
             device_id=device_id,
             reachable=True,
             inlet_voltage=inlet.get("voltage", 0.0),
+            inlet_readings=inlet.get("readings", []),
             total_watts=total_watts,
             outlets=outlets,
             temperature=env.get("temperature"),
