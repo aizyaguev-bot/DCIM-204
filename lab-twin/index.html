@@ -32,7 +32,7 @@
         <span class="dot"></span><span id="liveText">Offline · static data</span>
       </div>
       <button class="btn btn-edit" id="btnEdit" title="Edit mode (F2) — tap objects to edit, move, replace">Edit</button>
-      <button class="btn btn-ghost" id="btnKiosk" title="Lab screen mode (K) — big touch UI, auto-rotate when idle">Screen</button>
+      <button class="btn btn-ghost" id="btnKiosk" title="Lab screen mode (K) — large touch UI, no sidebar; the camera never rotates on its own">Screen</button>
       <button class="btn btn-ghost" id="btnPlan" title="Open the 2D floor plan (floorplan.svg)">2D plan</button>
       <button class="btn btn-ghost" id="btnExport" title="Download the current lab-data.json (with your edits)">Export JSON</button>
       <button class="btn btn-primary" id="btnSettings">
@@ -70,11 +70,13 @@
 
       <section class="card grow">
         <div class="card-h tabs">
-          <button class="tab active" data-tab="tree">Tree</button>
+          <button class="tab active" data-tab="attn" title="מה דורש טיפול היום">Attention <span class="badge" id="attnCount">0</span></button>
+          <button class="tab" data-tab="tree">Tree</button>
           <button class="tab" data-tab="inv">Inventory</button>
           <button class="tab" data-tab="unplaced">Unplaced <span class="badge" id="unplacedCount">0</span></button>
         </div>
-        <div class="card-b list" id="tree"></div>
+        <div class="card-b list" id="attn"></div>
+        <div class="card-b list hidden" id="tree"></div>
         <div class="card-b list hidden" id="inv"></div>
         <div class="card-b list hidden" id="unplaced"></div>
       </section>
@@ -87,28 +89,29 @@
 
       <div class="toolbar">
         <div class="tb-group">
-          <button class="tb" id="vOrbit" title="Overview from the entrance (R)">Overview</button>
-          <button class="tb" id="vTop" title="Top view (T)">Top</button>
-          <button class="tb" id="vEye" title="Eye-level walk (E)">Eye level</button>
+          <button class="tb" id="vOrbit" title="מבט כללי מהכניסה (R)">Overview</button>
+          <button class="tb" id="vTop" title="מבט מלמעלה (T)">Top</button>
+          <button class="tb" id="vEye" title="מבט בגובה העיניים (E)">Eye level</button>
         </div>
         <div class="tb-group">
-          <button class="tb" id="tWalls" title="Hide / show walls (W)">Walls</button>
-          <button class="tb" id="tLabels" title="Label density (L)">Labels: setups</button>
-          <button class="tb" id="tZones" title="Zone overlays (Z)">Zones</button>
-          <button class="tb" id="tHeat" title="Temperature heat-map under the racks (live PDU sensors)">Heat</button>
+          <button class="tb" id="tWalls" title="הצגה / הסתרה של הקירות (W)">Walls</button>
+          <button class="tb" id="tLabels" title="צפיפות תוויות: ארונות / הכול / כבוי (L)">Labels: setups</button>
+          <button class="tb" id="tZones" title="הצגה / הסתרה של האזורים (Z)">Zones</button>
+          <button class="tb" id="tHeat" title="מפת חום מתחת לארונות וכרטיסי טלמטריה מלאים (חיישני PDU חיים)">Heat</button>
         </div>
         <div class="tb-group">
-          <button class="tb tb-accent" id="vReset" title="איפוס מבט (Home)">איפוס מבט</button>
-          <button class="tb" id="vFit" title="הצגת כל המעבדה">כל המעבדה</button>
-          <button class="tb" id="vFocus" title="מיקוד באובייקט שנבחר" disabled>מיקוד בבחירה</button>
+          <button class="tb tb-accent" id="vReset" title="איפוס: סגירת הבחירה וחזרה למבט הכללי (Home)">Reset</button>
+          <button class="tb" id="vFit" title="הצגת כל המעבדה בלי לסגור את הבחירה">Fit lab</button>
+          <button class="tb" id="vFocus" title="מיקוד המצלמה באובייקט שנבחר" disabled>Focus</button>
         </div>
       </div>
+      <div class="attn-dock" id="attnDock" aria-label="Attention" aria-live="polite"></div>
 
       <div class="movebanner hidden" id="moveBanner"><span class="mv-ic">⇄</span><span id="moveText">Tap a shelf</span><button class="btn btn-xs" id="moveCancel">Cancel</button></div>
       <div class="savebar hidden" id="saveBar"><span class="sb-dot"></span><span>Unsaved edits</span><button class="btn btn-primary btn-xs" id="sbSave">Save to server</button><button class="btn btn-xs" id="sbDownload">Download JSON</button><button class="btn btn-xs" id="sbDiscard">Discard</button></div>
       <div class="envpanel hidden" id="envPanel"></div>
       <div class="rackbar" id="rackBar"></div>
-      <div class="zoombar"><button class="zb" id="zIn" title="Zoom in">＋</button><button class="zb" id="zOut" title="Zoom out">−</button><button class="zb" id="zL" title="Rotate left">⟲</button><button class="zb" id="zR" title="Rotate right">⟳</button><span class="zb-sep"></span><button class="zb" id="pL" title="Move left (←)">◀</button><button class="zb" id="pR" title="Move right (→)">▶</button><button class="zb" id="pF" title="Move forward (↑)">▲</button><button class="zb" id="pB" title="Move back (↓)">▼</button></div>
+      <div class="zoombar"><button class="zb" id="zIn" title="התקרבות">＋</button><button class="zb" id="zOut" title="התרחקות">−</button><button class="zb" id="zL" title="סיבוב שמאלה">⟲</button><button class="zb" id="zR" title="סיבוב ימינה">⟳</button><span class="zb-sep"></span><button class="zb" id="pL" title="הזזה שמאלה (←)">◀</button><button class="zb" id="pR" title="הזזה ימינה (→)">▶</button><button class="zb" id="pF" title="הזזה קדימה (↑)">▲</button><button class="zb" id="pB" title="הזזה אחורה (↓)">▼</button></div>
       <div class="hint" id="hint" dir="rtl" lang="he">שמאל + גרירה: סיבוב · ימין + גרירה: הזזת מבט · גלגלת: זום · הזזת ציוד: עריכה ← Move ← בחירת יעד</div>
       <div class="compass" id="compass">ENTRANCE ↓</div>
     </section>

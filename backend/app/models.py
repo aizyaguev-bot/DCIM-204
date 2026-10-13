@@ -72,6 +72,29 @@ class Device(Base):
             return {}
 
 
+class PduMaintenance(Base):
+    """A PDU whose outlets were switched off for maintenance; outlets_off is the restore list."""
+    __tablename__ = "pdu_maintenance"
+    device_id: Mapped[str] = mapped_column(String, primary_key=True)
+    started_at: Mapped[float] = mapped_column(Float)
+    started_by: Mapped[str] = mapped_column(String)
+    reason: Mapped[str] = mapped_column(String, default="")
+    outlets_off_json: Mapped[str] = mapped_column(String, default="[]")
+    failed_json: Mapped[str] = mapped_column(String, default="[]")
+
+
+class PduMaintenanceLog(Base):
+    __tablename__ = "pdu_maintenance_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    at: Mapped[float] = mapped_column(Float, index=True)
+    device_id: Mapped[str] = mapped_column(String, index=True)
+    action: Mapped[str] = mapped_column(String)   # "shutdown" | "restore" | "denied"
+    by: Mapped[str] = mapped_column(String)
+    reason: Mapped[str] = mapped_column(String, default="")
+    ok: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class PingTarget(Base):
     __tablename__ = "ping_targets"
 

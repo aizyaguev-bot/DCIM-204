@@ -11,7 +11,7 @@ import pathlib
 
 from .database import init_db, AsyncSessionLocal, get_db
 from .models import Device
-from .routers import devices, pdus, kvms, kvm_proxy, inventory, monitoring
+from .routers import devices, pdus, pdu_maintenance, kvms, kvm_proxy, inventory, monitoring
 from .ping_monitor import monitor_loop
 from .alerts import alert_loop
 from .accounts import AccountAccess, bootstrap_admin, router as accounts_router
@@ -103,6 +103,7 @@ app.add_middleware(AccountAccess)
 
 app.include_router(devices.router)
 app.include_router(pdus.router)
+app.include_router(pdu_maintenance.router)
 app.include_router(kvms.router)
 app.include_router(kvm_proxy.router)
 app.include_router(inventory.router)

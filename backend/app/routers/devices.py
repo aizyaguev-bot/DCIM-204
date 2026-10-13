@@ -1,10 +1,12 @@
+from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import uuid, json, pathlib
 
 from ..database import get_db
-from ..models import Device
+from ..models import Device, PduMaintenance
+from ..pdu_locks import maintenance_lock
 from ..schemas import DeviceCreate, DeviceOut
 from ..crypto import encrypt, decrypt
 
@@ -108,21 +110,40 @@ async def create_device(body: DeviceCreate, db: AsyncSession = Depends(get_db)):
     return dev
 
 
+async def _reject_if_in_maintenance(device_id: str, db: AsyncSession):
+    # The maintenance restore list is only meaningful for the PDU at the address it was taken from.
+    if await db.get(PduMaintenance, device_id, populate_existing=True):
+        raise HTTPException(409, "PDU is in maintenance mode; restore it first")
+
+
+@asynccontextmanager
+async def _locked_device(device_id: str, db: AsyncSession):
+    """Holds the PDU maintenance lock so the maintenance check and the commit cannot interleave with a shutdown."""
+    await _get_or_404(device_id, db)  # unknown ids never get a lock entry
+    async with maintenance_lock(device_id):
+        dev = await db.scalar(select(Device).where(Device.id == device_id).execution_options(populate_existing=True))
+        if not dev:
+            raise HTTPException(status_code=404, detail="Device not found")
+        yield dev
+
+
 @router.put("/{device_id}", response_model=DeviceOut)
 async def update_device(device_id: str, body: DeviceCreate, db: AsyncSession = Depends(get_db)):
-    dev = await _get_or_404(device_id, db)
-    dev.name = body.name
-    dev.kind = body.kind
-    dev.model = body.model
-    dev.ip = body.ip
-    dev.rack = body.rack
-    dev.port_count = body.port_count
-    dev.notes = body.notes
-    if body.username:
-        dev.username_enc = encrypt(body.username)
-    if body.password:
-        dev.password_enc = encrypt(body.password)
-    await db.commit()
+    async with _locked_device(device_id, db) as dev:
+        if body.ip != dev.ip or body.kind != dev.kind:
+            await _reject_if_in_maintenance(device_id, db)
+        dev.name = body.name
+        dev.kind = body.kind
+        dev.model = body.model
+        dev.ip = body.ip
+        dev.rack = body.rack
+        dev.port_count = body.port_count
+        dev.notes = body.notes
+        if body.username:
+            dev.username_enc = encrypt(body.username)
+        if body.password:
+            dev.password_enc = encrypt(body.password)
+        await db.commit()
     await db.refresh(dev)
     return dev
 
@@ -242,9 +263,10 @@ async def rename_opt(body: dict, db: AsyncSession = Depends(get_db)):
 
 @router.delete("/{device_id}", status_code=204)
 async def delete_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    dev = await _get_or_404(device_id, db)
-    await db.delete(dev)
-    await db.commit()
+    async with _locked_device(device_id, db) as dev:
+        await _reject_if_in_maintenance(device_id, db)
+        await db.delete(dev)
+        await db.commit()
 
 
 async def _get_or_404(device_id: str, db: AsyncSession) -> Device:

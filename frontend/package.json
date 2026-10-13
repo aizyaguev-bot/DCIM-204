@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test:inventory": "node --test src/__tests__/inventory.test.js",
+    "test:changelog": "node --test src/__tests__/changelog.test.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

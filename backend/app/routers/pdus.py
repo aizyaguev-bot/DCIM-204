@@ -1,10 +1,12 @@
 import asyncio, json, time
+from contextlib import asynccontextmanager
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from ..database import get_db
-from ..models import Device
+from ..models import Device, PduMaintenance
+from ..pdu_locks import maintenance_lock
 from ..schemas import PduStatus, OutletState, PowerAction
 from ..routers.devices import get_creds
 from drivers.raritan_pdu import RaritanPduDriver, safe_error
@@ -25,6 +27,19 @@ async def _get_pdu_or_404(device_id: str, db: AsyncSession) -> Device:
     if not dev:
         raise HTTPException(status_code=404, detail="PDU not found")
     return dev
+
+
+@asynccontextmanager
+async def locked_pdu(device_id: str, db: AsyncSession):
+    """Holds the per-PDU maintenance lock and yields the PDU re-read inside it,
+    so a concurrent address change cannot redirect the action."""
+    await _get_pdu_or_404(device_id, db)  # unknown ids never get a lock entry
+    async with maintenance_lock(device_id):
+        dev = await db.scalar(select(Device).where(Device.id == device_id, Device.kind == "pdu")
+                              .execution_options(populate_existing=True))
+        if not dev:
+            raise HTTPException(status_code=404, detail="PDU not found")
+        yield dev
 
 
 async def _fetch_status(device_id: str, dev: Device) -> PduStatus:
@@ -114,20 +129,23 @@ async def outlet_power(
     body: PowerAction,
     db: AsyncSession = Depends(get_db),
 ):
-    dev = await _get_pdu_or_404(device_id, db)
-    username, password = get_creds(dev)
-    driver = RaritanPduDriver(dev.ip, username, password)
-    try:
-        success = await driver.set_outlet_state(outlet_number, body.action)
-        # Invalidate cache so next poll gets fresh state
-        _cache.pop(device_id, None)
-        return {"ok": success, "outlet": outlet_number, "action": body.action}
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Unknown action; use on, off or cycle")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=safe_error(e))
-    finally:
-        await driver.close()
+    # The maintenance check and the switch share the shutdown lock, so an "on" cannot slip in after a shutdown.
+    async with locked_pdu(device_id, db) as dev:
+        if body.action in ("on", "cycle") and await db.get(PduMaintenance, device_id, populate_existing=True):
+            raise HTTPException(status_code=409, detail="PDU is in maintenance mode; restore it from the Maintenance column first")
+        username, password = get_creds(dev)
+        driver = RaritanPduDriver(dev.ip, username, password)
+        try:
+            success = await driver.set_outlet_state(outlet_number, body.action)
+            # Invalidate cache so next poll gets fresh state
+            _cache.pop(device_id, None)
+            return {"ok": success, "outlet": outlet_number, "action": body.action}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Unknown action; use on, off or cycle")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=safe_error(e))
+        finally:
+            await driver.close()
 
 
 @router.get("/{device_id}/sensors-debug")

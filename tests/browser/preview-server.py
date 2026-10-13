@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -60,6 +61,7 @@ async def fake_power(self, number, action):
 class FakePdu:
     def __init__(self, ip, *args): self.ip = ip
     set_outlet_state = fake_power
+    async def close(self): pass
 
 async def forbidden_rpc(*args, **kwargs):
     raise RuntimeError('Real hardware access forbidden in isolated preview')
@@ -73,6 +75,9 @@ async def no_session(*args, **kwargs):
     pass
 kvms.ensure_session = no_session
 
+# Maintenance switches outlets only through FakePdu / pdu_status above.
+PDU_MAINTENANCE = re.compile(r'/api/pdus/maintenance|/api/pdus/[^/]+/maintenance/(shutdown|restore)')
+
 @main.app.middleware('http')
 async def preview_hardware_boundary(request, call_next):
     path = request.url.path
@@ -80,7 +85,7 @@ async def preview_hardware_boundary(request, call_next):
         return HTMLResponse('<html><body style="background:#111;color:#ddd;font-family:Arial;padding:32px"><h2>Console preview</h2><p>This is a test device. No live KVM connection is opened.</p></body></html>')
     if path.startswith('/api/kvms/') and not path.endswith(('/status', '/mark-in-use', '/mark-free')):
         return JSONResponse({'detail':'Hardware access is disabled in the isolated preview.'}, status_code=409)
-    if path.startswith('/api/pdus/') and not path.endswith(('/status', '/power')):
+    if path.startswith('/api/pdus/') and not path.endswith(('/status', '/power')) and not PDU_MAINTENANCE.fullmatch(path):
         return JSONResponse({'detail':'Hardware access is disabled in the isolated preview.'}, status_code=409)
     return await call_next(request)
 

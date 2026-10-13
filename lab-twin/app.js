@@ -20,6 +20,12 @@
   const CABLE_COLORS = ['#d92b2b', '#d92b2b', '#1a1a1a', '#d92b2b', '#22c1a6', '#d92b2b', '#f4f4f5'];
   const EQUIP_LABEL = { switch: 'Switch', computer: 'Computer', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
   const POLL_MS = 15000;
+  // attention list: severity:kind priority (computeAttention sorts by this, then by setup)
+  const SEVERITIES = ['crit', 'warn', 'info'];
+  const SEV_LABEL = { crit: 'Critical', warn: 'Warning', info: 'Info' };
+  const SEV_COLOR = { crit: '#f43f5e', warn: '#fbbf24', info: '#38bdf8' };
+  const ATTN_ORDER = ['crit:leak', 'crit:pdu-down', 'crit:load', 'crit:temp', 'warn:opt-off', 'warn:opt-unknown', 'warn:kvm-down', 'warn:load', 'warn:temp', 'warn:unplaced', 'warn:unmapped-rack', 'warn:not-in-dcim', 'info:offline', 'info:stale', 'info:auto-u', 'info:mapping'];
+  const STALE_DAYS = 30, ATTN_TEMP_CRIT = 30, ATTN_TEMP_WARN = 27, ATTN_LOAD_CRIT = 0.95, ATTN_LOAD_WARN = 0.8;
 
   const LS = {
     get(k, d) { try { const v = JSON.parse(localStorage.getItem('twin.' + k)); return v == null ? d : v; } catch { return d; } },
@@ -37,7 +43,8 @@
     settings: LS.get('settings', { url: '', pass: '', poll: true }),
     live: { connected: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
-    heat: LS.get('heat', true), embed: /[?&]embed=1/.test(location.search), editMode: false, kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
+    attention: [], attnFilter: LS.get('attnFilter', 'all'), attnDockCollapsed: LS.get('attnDockCollapsed', false), attnDockAll: false, detailStale: false, labelHover: null,
+    heat: LS.get('heat', false), embed: /[?&]embed=1/.test(location.search), editMode: false, kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
   };
@@ -118,6 +125,7 @@
   function resize() {
     const vp = $('#viewport'); const w = Math.max(1, vp.clientWidth), h = Math.max(1, vp.clientHeight);
     renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+    placeAttnDock();
   }
   window.addEventListener('resize', () => { cancelNavigation(); resize(); });
   const viewportObserver = new ResizeObserver(resize); viewportObserver.observe($('#viewport'));
@@ -258,11 +266,18 @@
     const e = setEdgeOp(edges(env, col), .5); g.add(e); eds.push(e);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: su.id, cat: 'setup', def: su, group: g, meshes, edges: eds, status, conf: su.confidence, zone: su.zone, setup: su.id, anchor: localToWorld(g, 0, h + 0.12, 0), tpl });
-    makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span>${su.id}<small>${dcimRackOf(su) || 'no DCIM rack'} · ${su.name.split('—')[0].trim()}</small>`);
-    // floating telemetry card (power / voltage / current / capacity / temp / humidity / leak) — filled by updateTelemetry()
+    makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span>${esc(su.id)}<small>${esc(dcimRackOf(su) || 'no DCIM rack')} · ${esc(su.name.split('—')[0].trim())}</small><span class="lt"></span>`);
+    rec.labelTel = rec.label.querySelector('.lt');
+    rec.label.addEventListener('mouseenter', () => { S.labelHover = su.id; });
+    rec.label.addEventListener('mouseleave', () => { if (S.labelHover === su.id) S.labelHover = null; });
+    // full telemetry card (power / voltage / current / capacity / temp / humidity / leak) — filled by updateTelemetry();
+    // shown only for the selected / hovered rack or with Heat on (the compact kW · A line lives in the setup label)
     const tel = document.createElement('div'); tel.className = 'telem'; tel.dataset.id = su.id; tel.innerHTML = '<span class="t-muted">no live data</span>';
     tel.addEventListener('click', e => { e.stopPropagation(); select(su.id, { fly: true }); }); labelsLayer.appendChild(tel);
     rec.telem = tel; rec.telemAnchor = localToWorld(g, 0, h + 0.55, 0);
+    // attention badge on the rack front (DOM only, never pickable) — filled by renderAttention(), placed by updateLabels()
+    const attnEl = document.createElement('div'); attnEl.className = 'attn-badge'; attnEl.dataset.id = su.id; attnEl.setAttribute('aria-hidden', 'true'); attnEl.style.display = 'none'; labelsLayer.appendChild(attnEl);
+    rec.attnEl = attnEl; rec.attnN = 0; rec.attnAnchor = localToWorld(g, dd / 2 + 0.02, h - 0.18, 0);
     // heat-map patch under the rack + leak ring (hidden until live data / toggle)
     const patch = box(dd + 0.3, 0.012, w + 0.3, mat('#22c55e', { opacity: .45, unique: true, rough: 1, emissive: '#22c55e', emissiveIntensity: .35 }), 0, 0.012, 0); patch.visible = false; g.add(patch); rec.heatPatch = patch;
     const ring = new THREE.Mesh(new THREE.RingGeometry(Math.max(dd, w) * 0.55, Math.max(dd, w) * 0.62, 48), new THREE.MeshBasicMaterial({ color: 0xf43f5e, transparent: true, opacity: .8, side: THREE.DoubleSide })); ring.rotation.x = -Math.PI / 2; ring.position.y = 0.02; ring.visible = false; g.add(ring); rec.leakRing = ring;
@@ -300,7 +315,7 @@
     const e = setEdgeOp(edges(env, col), .55); g.add(e);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: sd.id, cat: 'storage', def: sd, group: g, meshes, edges: [e], status, conf: sd.confidence, zone: sd.zone, anchor: localToWorld(g, 0, h + 0.12, 0), trayY, tpl });
-    makeLabel(rec, 'storage', `<span class="lp" style="background:${col}"></span>${sd.id}<small>${sd.name}</small>`);
+    makeLabel(rec, 'storage', `<span class="lp" style="background:${col}"></span>${esc(sd.id)}<small>${esc(sd.name)}</small>`);
     return rec;
   }
 
@@ -312,12 +327,12 @@
     const seam = box(0.005, h - 0.1, 0.01, mat('#3f3f46'), 0, h / 2, dd / 2 + 0.005); g.add(seam);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: sd.id, cat: 'storage', def: sd, group: g, meshes: [m], edges: [e], status, conf: sd.confidence, zone: sd.zone, anchor: localToWorld(g, 0, h + 0.12, 0) });
-    makeLabel(rec, 'storage', `<span class="lp" style="background:${col}"></span>${sd.id}<small>${sd.name}</small>`);
+    makeLabel(rec, 'storage', `<span class="lp" style="background:${col}"></span>${esc(sd.id)}<small>${esc(sd.name)}</small>`);
     return rec;
   }
 
   // ───────────────────────────────────────────────────────────── items
-  function buildItems() {
+  function buildItems(opts = {}) {
     // remove previous item recs
     for (const [id, r] of [...S.recs]) if (r.cat === 'item') { if (r.label) r.label.remove(); S.recs.delete(id); }
     S.pickables = S.pickables.filter(m => { const r = S.recs.get(m.userData.id); return !!r; });
@@ -466,11 +481,12 @@
       const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor });
       const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + 'W')}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : it.type === 'equip-switch' ? `switch under test${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
       const named = it.type === 'opt' || it.type.startsWith('equip-');
-      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${named ? it.name : it.id}<small>${it.type === 'opt' ? it.id + ' · ' + sub : sub}</small>`);
+      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${esc(named ? it.name : it.id)}<small>${esc(it.type === 'opt' ? it.id + ' · ' + sub : sub)}</small>`);
     });
-    applyFilters(); updateTelemetry();
+    S.attention = computeAttention(S.model, S.live, S.recs);
+    applyFilters(); updateTelemetry(); renderAttention();
     if (S.selected && !S.recs.has(S.selected)) closeDetail();
-    else if (S.selected) select(S.selected, { keepCamera: true });
+    else if (S.selected) select(S.selected, { keepCamera: true, refresh: !!opts.refresh });
   }
 
   // ───────────────────────────────────────────────────────────── effective model (static JSON + overrides + live)
@@ -547,7 +563,8 @@
       // 3) rack_items (custom equipment: switches, patch panels …)
       Object.entries(live.rackItems || {}).forEach(([rack, list]) => (list || []).forEach(ci => {
         const sid = setupByRack[rack] || null; const id = 'LIVE-' + ci.id;
-        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
+        const history = Array.isArray(ci.tracking_history) ? ci.tracking_history : [];
+        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', last_seen_at: ci.last_seen_at || null, tracking: { count: history.length, last: history[history.length - 1] || null }, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
       }));
       // 4) chillers from DCIM
       if (live.chillers?.units?.length) {
@@ -582,6 +599,65 @@
     S.model = { setups, setupByRack, items, unmappedRacks, liveRacks };
   }
   function pickOv() { return {}; }
+
+  // ───────────────────────────────────────────────────────────── attention: what needs a person today
+  // Pure (no DOM, no S): model + live + recs (+ now) → [{ key, id|null, setup|null, severity, kind, text, hint }].
+  function computeAttention(model, live, recs, now = Date.now()) {
+    const out = []; if (!model) return out;
+    const add = (severity, kind, key, text, hint, id = null, setup = null) => out.push({ key: `${kind}:${key}`, id: id || null, setup: setup || null, severity, kind, text, hint: hint || '' });
+    const items = model.items || []; const connected = !!live?.connected;
+    const names = list => list.slice(0, 4).map(i => i.name || i.id).join(', ') + (list.length > 4 ? ` +${list.length - 4}` : '');
+    const bySetup = list => { const m = new Map(); list.forEach(i => { const k = i.setup || ''; if (!m.has(k)) m.set(k, []); m.get(k).push(i); }); return m; };
+    const opts = items.filter(i => i.type === 'opt');
+    if (connected) {
+      items.filter(i => i.type === 'pdu' && i.live?.device).forEach(p => {
+        const dev = p.dcim?.deviceId || p.id; const st = p.live.status; const name = p.name || dev;
+        if (st?.leak_detected) add('crit', 'leak', dev, `Leak detected · ${name}`, 'חיישן הנזילה מתריע — בדקו מיד את הצ׳ילר והצנרת', p.id, p.setup);
+        if (p.live.reachable === false) {
+          const stuck = opts.filter(o => o.live?.inDcim && o.dcim?.pdu === dev && o.live.state !== 'on' && o.live.state !== 'off');
+          add('crit', 'pdu-down', dev, `${name} unreachable`, `${stuck.length ? stuck.length + ' מחשבי OPT במצב לא ידוע · ' : ''}בדקו רשת וחשמל של ה-PDU`, p.id, p.setup);
+        }
+        if (st?.reachable && st.temperature != null) {
+          if (st.temperature > ATTN_TEMP_CRIT) add('crit', 'temp', dev, `${name} ${st.temperature.toFixed(1)} °C`, `טמפרטורה מעל ${ATTN_TEMP_CRIT}°C — בדקו קירור`, p.id, p.setup);
+          else if (st.temperature > ATTN_TEMP_WARN) add('warn', 'temp', dev, `${name} ${st.temperature.toFixed(1)} °C`, `טמפרטורה מעל ${ATTN_TEMP_WARN}°C — מעקב אחר הקירור`, p.id, p.setup);
+        }
+      });
+      (model.setups || []).forEach(su => {
+        const t = rackTelemetry(su, live); if (!t || t.loading || t.cap == null) return;
+        const pct = Math.round(t.cap * 100), hint = `${t.amps.toFixed(1)} A מתוך ${RATED_AMPS * t.pduCount} A (הערכה) — שקלו להוריד עומס`;
+        if (t.cap >= ATTN_LOAD_CRIT) add('crit', 'load', su.id, `${su.id} power load ${pct}%`, hint, su.id, su.id);
+        else if (t.cap >= ATTN_LOAD_WARN) add('warn', 'load', su.id, `${su.id} power load ${pct}%`, hint, su.id, su.id);
+      });
+      opts.filter(o => o.live?.inDcim).forEach(o => {
+        const where = `שקע #${o.dcim?.outlet ?? '?'} · ${o.dcim?.pduName || o.dcim?.pdu || 'PDU'}`;
+        if (o.live.state === 'off') add('warn', 'opt-off', o.id, `${o.name} is off`, `${where} כבוי`, o.id, o.setup);
+        else if (o.live.state !== 'on' && live.pdu?.[o.dcim?.pdu]?.reachable === true) add('warn', 'opt-unknown', o.id, `${o.name} state unknown`, `${where} לא מדווח מצב`, o.id, o.setup);
+      });
+      items.filter(k => k.type === 'kvm' && k.live?.reachable === false).forEach(k => add('warn', 'kvm-down', k.dcim?.deviceId || k.id, `${k.name} unreachable`, 'קונסולת ה-KVM לא זמינה — בדקו רשת וחשמל', k.id, k.setup));
+      bySetup(opts.filter(o => o.live && o.live.inDcim === false)).forEach((list, sid) => add('warn', 'not-in-dcim', sid || 'none', list.length === 1 ? `${list[0].name} not in DCIM labels` : `${list.length} OPTs not in DCIM labels`, `לא מופיעים בתוויות ה-PDU החיות: ${names(list)}`, list.length === 1 || !sid ? list[0].id : sid, sid));
+      items.filter(i => i.id.startsWith('LIVE-') && i.type.startsWith('equip-') && i.last_seen_at).forEach(i => {
+        const t = Date.parse(i.last_seen_at); if (!Number.isFinite(t)) return; const days = Math.floor((now - t) / 864e5);
+        if (days > STALE_DAYS) add('info', 'stale', i.id, `${i.name} not seen for ${days} days`, `סריקה אחרונה ${String(i.last_seen_at).slice(0, 10)} — סרקו את הברקוד כדי לאשר מיקום`, i.id, i.setup);
+      });
+      bySetup(opts.filter(o => o.live?.inDcim && o.setup && o.placementConfidence === 'low')).forEach((list, sid) => add('info', 'auto-u', sid, list.length === 1 ? `${list[0].name} auto-placed (no explicit U)` : `${list.length} OPTs auto-placed (no explicit U)`, `המדף נקבע לפי סדר ולא לפי rack_slots — אשרו מיקום עם Move: ${names(list)}`, list.length === 1 ? list[0].id : sid, sid));
+    } else {
+      add('info', 'offline', 'live', 'Live data off — connect the backend', 'מוצגים רק נתונים סטטיים מ-lab-data.json (מצב, הספק וסריקות דורשים חיבור)');
+    }
+    // static checks (also offline)
+    [...(recs ? recs.values() : [])].filter(r => r.unplaced).forEach(r => add('warn', 'unplaced', r.id, `${r.def?.name || r.id} has no position`, 'אין מיקום בתלת ממד — מקמו במצב עריכה (Move) או ב-Lab Manager', r.id, r.setup));
+    (model.unmappedRacks || []).forEach(rack => add('warn', 'unmapped-rack', rack, `DCIM rack ${rack} has no physical setup`, 'שייכו אותו לארון בפאנל הארון (DCIM rack mapping) — ראו לשונית Unplaced'));
+    const lowMap = (model.setups || []).filter(s => s.dcimMappingConfidence === 'low');
+    if (lowMap.length) add('info', 'mapping', 'setups', lowMap.length === 1 ? `${lowMap[0].id} rack mapping unverified` : `${lowMap.length} rack mappings unverified`, `שיוך ארון פיזי ↔ Rack-0X לא אומת: ${lowMap.map(s => s.id).join(', ')}`, lowMap[0].id);
+    const rank = e => { const i = ATTN_ORDER.indexOf(e.severity + ':' + e.kind); return i < 0 ? ATTN_ORDER.length : i; };
+    return out.sort((a, b) => rank(a) - rank(b) || (a.setup ? 0 : 1) - (b.setup ? 0 : 1) || String(a.setup || '').localeCompare(String(b.setup || '')) || a.key.localeCompare(b.key));
+  }
+  function attnCounts(list) { const c = { crit: 0, warn: 0, info: 0 }; (list || []).forEach(e => { c[e.severity]++; }); return c; }
+  function worstSeverity(list) { return SEVERITIES.find(s => list.some(e => e.severity === s)) || null; }
+  function ago(ts, now = Date.now()) {
+    const t = Date.parse(ts); if (!Number.isFinite(t)) return '—'; const s = Math.max(0, (now - t) / 1000);
+    return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' days ago';
+  }
+  function fmtTs(ts) { const d = new Date(ts); if (isNaN(d)) return String(ts); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
 
   // ───────────────────────────────────────────────────────────── filters / search
   function matchesQuery(rec, query) {
@@ -632,7 +708,7 @@
       const q = inp.value.trim(); S.filters.q = q; applyFilters();
       if (!q) { res.classList.add('hidden'); return; }
       const hits = [...S.recs.values()].filter(r => matchesQuery(r, q)).slice(0, 14);
-      res.innerHTML = hits.map(r => `<div class="sr" data-id="${r.id}"><span class="id">${r.id}</span><span class="nm">${esc(r.def.name || '')}</span><span class="cat">${r.cat}</span></div>`).join('') || '<div class="sr"><span class="nm muted">No matches</span></div>';
+      res.innerHTML = hits.map(r => `<div class="sr" data-id="${esc(r.id)}"><span class="id">${esc(r.id)}</span><span class="nm">${esc(r.def.name || '')}</span><span class="cat">${r.cat}</span></div>`).join('') || '<div class="sr"><span class="nm muted">No matches</span></div>';
       res.classList.remove('hidden');
       $$('.sr', res).forEach(el => el.onclick = () => { if (el.dataset.id) { select(el.dataset.id); res.classList.add('hidden'); } });
     });
@@ -682,7 +758,7 @@
   }
   function renderInventory() {
     const el = $('#inv'); const rows = [...S.recs.values()].filter(r => r.cat !== 'zone').sort((a, b) => a.id.localeCompare(b.id));
-    el.innerHTML = `<div class="inv-row inv-h"><span>ID</span><span>Name</span><span style="text-align:right">Where</span></div>` + rows.map(r => `<div class="inv-row ${r.filtered ? 'dim' : ''}" data-id="${r.id}"><span class="id">${dot(r)} ${r.id}</span><span class="nm" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.def.name || '')}</span><span class="loc">${r.shelf || r.setup || r.item?.storage || r.zone || (r.unplaced ? '—' : 'room')}</span></div>`).join('');
+    el.innerHTML = `<div class="inv-row inv-h"><span>ID</span><span>Name</span><span style="text-align:right">Where</span></div>` + rows.map(r => `<div class="inv-row ${r.filtered ? 'dim' : ''}" data-id="${esc(r.id)}"><span class="id">${dot(r)} ${esc(r.id)}</span><span class="nm" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.def.name || '')}</span><span class="loc">${r.shelf || r.setup || r.item?.storage || r.zone || (r.unplaced ? '—' : 'room')}</span></div>`).join('');
     $$('.inv-row[data-id]', el).forEach(n => n.onclick = () => select(n.dataset.id));
   }
   function renderUnplaced() {
@@ -699,8 +775,9 @@
     const opts = items.filter(i => i.type === 'opt'); const on = opts.filter(i => i.live?.state === 'on').length; const off = opts.filter(i => i.live?.state === 'off').length;
     const low = recs.filter(r => r.conf === 'low' || r.pconf === 'low').length;
     let kw = 0, known = 0, partial = false, temps = []; S.live.devices.filter(d => d.kind === 'pdu').forEach(p => { const st = S.live.pdu[p.id]; if (st?.reachable && st.total_watts != null) { kw += st.total_watts; known++; } if (!st?.reachable || st.watts_complete !== true) partial = true; if (st?.temperature != null) temps.push(st.temperature); });
-    const live = S.live.connected;
+    const live = S.live.connected; const ac = attnCounts(S.attention);
     $('#stats').innerHTML = [
+      `<button type="button" class="st st-attn${ac.crit ? ' crit' : ac.warn ? ' warn' : ''}" id="stAttn" title="פתיחת רשימת הפריטים שדורשים טיפול">Attention ${ac.crit + ac.warn ? `${ac.crit ? `<b class="bad">${ac.crit}</b> crit` : ''}${ac.crit && ac.warn ? ' · ' : ''}${ac.warn ? `<b class="warn">${ac.warn}</b> warn` : ''}` : '<b class="nv">✓</b>'}${ac.info ? ` · <b>${ac.info}</b> info` : ''}</button>`,
       `<span class="st">Setups <b>${S.data.setups.length}</b></span>`,
       `<span class="st">Shelves <b>${S.data.shelves.length}</b></span>`,
       `<span class="st">OPTs <b class="nv">${opts.length}</b>${live ? ` <span>on <b class="nv">${on}</b> · off <b>${off}</b></span>` : ''}</span>`,
@@ -710,12 +787,95 @@
       temps.length ? `<span class="st">Temp <b class="${Math.max(...temps) > 24 ? 'warn' : ''}">${Math.min(...temps).toFixed(0)}–${Math.max(...temps).toFixed(0)}°C</b></span>` : '',
       S.model.unmappedRacks.length ? `<span class="st">Unmapped DCIM racks <b class="warn">${S.model.unmappedRacks.join(', ')}</b></span>` : '',
     ].join('');
+    $('#stAttn').onclick = () => { showTab('attn'); if (S.kiosk || S.attnDockCollapsed) { S.attnDockCollapsed = false; LS.set('attnDockCollapsed', false); renderAttention(); } };
+  }
+
+  // ───────────────────────────────────────────────────────────── attention: sidebar tab + floating dock + rack badges
+  function attnRow(e, i, compact) {
+    return `<div class="attn-row sev-${e.severity}${compact ? ' compact' : ''}" data-attn="${i}" role="button" tabindex="0"${compact && e.hint ? ` title="${esc(e.hint)}"` : ''}><span class="attn-dot"></span><span class="attn-txt">${esc(e.text)}${e.hint && !compact ? `<small dir="auto">${esc(e.hint)}</small>` : ''}</span>${e.setup ? `<span class="tag">${esc(e.setup)}</span>` : ''}</div>`;
+  }
+  function bindAttnRows(root) {
+    $$('[data-attn]', root).forEach(r => {
+      r.onclick = () => focusAttention(S.attention[+r.dataset.attn]);
+      r.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); focusAttention(S.attention[+r.dataset.attn]); } };
+    });
+  }
+  function placeAttnDock() {
+    const dock = $('#attnDock'), tb = $('.toolbar'); if (!dock || !tb) return;
+    dock.style.top = (tb.offsetTop + tb.offsetHeight + 8) + 'px';
+  }
+  function renderAttention() {
+    const list = S.attention || []; const c = attnCounts(list); const worst = worstSeverity(list);
+    const indexed = list.map((e, i) => [e, i]);
+    const el = $('#attn');
+    if (el) {
+      const f = ['all', ...SEVERITIES].includes(S.attnFilter) ? S.attnFilter : 'all';
+      let html = `<div class="attn-chips">${['all', ...SEVERITIES].map(s => `<button type="button" class="chip ${f === s ? 'on' : 'off'} ${s === 'all' ? '' : 'sev-' + s}" data-sev="${s}">${s === 'all' ? '' : '<span class="sw"></span>'}${s === 'all' ? 'All' : SEV_LABEL[s]} <b>${s === 'all' ? list.length : c[s]}</b></button>`).join('')}</div>`;
+      let rows = '';
+      SEVERITIES.filter(s => f === 'all' || f === s).forEach(s => {
+        const group = indexed.filter(([e]) => e.severity === s); if (!group.length) return;
+        rows += `<div class="zone-h sev-${s}"><span class="sw"></span>${SEV_LABEL[s]} · ${group.length}</div>` + group.map(([e, i]) => attnRow(e, i)).join('');
+      });
+      html += rows || `<div class="muted small" style="padding:8px">${list.length ? 'Nothing at this level.' : '✓ Nothing needs attention right now.'}</div>`;
+      el.innerHTML = html;
+      $$('[data-sev]', el).forEach(b => b.onclick = () => { S.attnFilter = b.dataset.sev; LS.set('attnFilter', S.attnFilter); renderAttention(); });
+      bindAttnRows(el);
+    }
+    const badge = $('#attnCount'); if (badge) { badge.textContent = list.length; badge.className = 'badge' + (worst ? ' sev-' + worst : ''); }
+    const dock = $('#attnDock');
+    if (dock) {
+      const collapsed = !!S.attnDockCollapsed; const shown = S.attnDockAll ? indexed : indexed.slice(0, 5);
+      dock.className = 'attn-dock' + (collapsed ? ' collapsed' : '') + (worst ? ' sev-' + worst : '');
+      dock.innerHTML = `<button type="button" class="attn-dock-h" id="attnDockToggle" aria-expanded="${!collapsed}" title="${collapsed ? 'הצגת הרשימה' : 'קיפול הרשימה'}"><span class="caret">${collapsed ? '▸' : '▾'}</span>Attention<span class="attn-sum">${c.crit ? `<b class="bad">${c.crit}</b>` : ''}${c.warn ? `<b class="warn">${c.warn}</b>` : ''}${c.info ? `<b class="info">${c.info}</b>` : ''}${list.length ? '' : '<b class="ok">✓</b>'}</span></button>` +
+        (collapsed ? '' : `<div class="attn-dock-b">${shown.map(([e, i]) => attnRow(e, i, true)).join('') || '<div class="muted small attn-empty">✓ Nothing needs attention right now.</div>'}${list.length > 5 ? `<button type="button" class="attn-more" id="attnMore">${S.attnDockAll ? 'Show top 5' : `+${list.length - 5} more…`}</button>` : ''}</div>`);
+      $('#attnDockToggle').onclick = () => { S.attnDockCollapsed = !S.attnDockCollapsed; LS.set('attnDockCollapsed', S.attnDockCollapsed); renderAttention(); };
+      const more = $('#attnMore'); if (more) more.onclick = () => { if (!S.kiosk && !S.attnDockAll) { showTab('attn'); return; } S.attnDockAll = !S.attnDockAll; renderAttention(); };
+      bindAttnRows(dock); placeAttnDock();
+    }
+    // per-rack 3D badges
+    const bySetup = new Map(); list.forEach(e => { if (e.setup) { if (!bySetup.has(e.setup)) bySetup.set(e.setup, []); bySetup.get(e.setup).push(e); } });
+    for (const rec of S.recs.values()) {
+      if (!rec.attnEl) continue;
+      const mine = bySetup.get(rec.id) || []; rec.attnN = mine.length;
+      if (!mine.length) { rec.attnEl.style.display = 'none'; continue; }
+      const w = worstSeverity(mine); rec.attnEl.className = 'attn-badge sev-' + w;
+      rec.attnEl.textContent = `${w === 'info' ? 'ⓘ' : '⚠'} ${mine.length}`;
+    }
+  }
+  function focusAttention(e) {
+    if (!e) return;
+    if (e.kind === 'offline') { $('#btnSettings').click(); return; }
+    if (e.id && S.recs.has(e.id)) { select(e.id, { fly: true }); return; }
+    showTab('unplaced');
+    if (S.kiosk) toast('The Unplaced list is in the sidebar — leave Screen mode (K) to see it');
+  }
+  function showTab(name) {
+    const tabs = $$('.tab').map(b => b.dataset.tab); if (!tabs.includes(name)) name = tabs[0];
+    $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+    tabs.forEach(id => { const el = $('#' + id); if (el) el.classList.toggle('hidden', id !== name); });
+    LS.set('sideTab', name);
   }
 
   // ───────────────────────────────────────────────────────────── selection & detail panel
   function anchorOf(rec) { if (!rec.anchor) return null; return typeof rec.anchor === 'function' ? rec.anchor() : rec.anchor; }
+  // A live refresh must not throw away what the user is doing in the panel (typing, an open select, scroll position).
+  function detailBusy() {
+    const a = document.activeElement; const d = $('#detail');
+    return !!a && a !== document.body && d.contains(a) && (S.editMode || a.matches('input, select, textarea'));
+  }
+  function renderPanel(rec, keepScroll) {
+    const body = $('#dBody'); const top = body.scrollTop;
+    S.detailStale = false;
+    if (S.editMode) renderEditor(rec); else renderDetail(rec);
+    if (keepScroll) body.scrollTop = top;
+  }
+  $('#detail').addEventListener('focusout', () => setTimeout(() => {
+    if (!S.detailStale || detailBusy()) return;
+    const rec = S.recs.get(S.selected); if (rec) renderPanel(rec, true); else S.detailStale = false;
+  }, 250));
   function select(id, opts = {}) {
     const rec = S.recs.get(id); if (!rec) return;
+    const refresh = !!opts.refresh && S.selected === id;
     S.selected = id; $('#vFocus').disabled = !id;
     if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
     if (rec.group) {
@@ -724,7 +884,8 @@
       if (!opts.keepCamera && opts.fly !== false) flyTo(rec);
     }
     $$('.lbl.sel').forEach(l => l.classList.remove('sel')); if (rec.label) rec.label.classList.add('sel');
-    if (S.editMode) renderEditor(rec); else renderDetail(rec); renderTree(); renderRackBar();
+    if (refresh && detailBusy()) S.detailStale = true; else renderPanel(rec, refresh);
+    renderTree(); renderRackBar();
     $('#detail').classList.remove('hidden'); resize();
   }
   function closeDetail() { S.selected = null; $('#vFocus').disabled = true; if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; } $('#detail').classList.add('hidden'); $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); resize(); }
@@ -761,6 +922,8 @@
       ${it?.serial_number ? `<span class="k">SN</span><span class="v mono">${esc(it.serial_number)}</span>` : ''}
       ${it?.barcode ? `<span class="k">Barcode</span><span class="v mono">${esc(it.barcode)}</span>` : ''}
       ${it?.shelf_position ? `<span class="k">Shelf position</span><span class="v">${esc(it.shelf_position)}</span>` : ''}
+      ${it?.last_seen_at ? `<span class="k">Last seen</span><span class="v">${esc(ago(it.last_seen_at))} <span class="muted small mono">${esc(fmtTs(it.last_seen_at))}</span></span>` : it?.tracking ? `<span class="k">Last seen</span><span class="v muted">never scanned</span>` : ''}
+      ${it?.tracking?.count ? `<span class="k">Tracking</span><span class="v">${it.tracking.count} event${it.tracking.count === 1 ? '' : 's'}${it.tracking.last ? ` · last: ${esc(it.tracking.last.action || '?')}${it.tracking.last.at ? ' ' + esc(ago(it.tracking.last.at)) : ''}` : ''}</span>` : ''}
       <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${it.live.state}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + ' W')}</span>` : ''}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(ov(rec.id).dcimRack !== undefined ? 'medium' : def.dcimMappingConfidence)}` : ''}</span>
       <span class="k">Owner</span><span class="v">${esc(it?.owner || def.owner || '—')}${it?.live?.owner ? ' <span class="muted small">(DCIM)</span>' : ''}</span>
@@ -834,7 +997,10 @@
     }
     // ── Edit (mutates lab-data.json in memory → Save to server / Download)
     const isLive = rec.id.startsWith('LIVE-');
-    if (rec.cat === 'item' && isLive) {
+    if (!S.editMode) {
+      const notes = (it?.notes || def.notes || '').trim();
+      if (notes) html += `<div class="sec"><div class="sec-h">Notes</div><div class="note">${esc(notes)}</div></div>`;
+    } else if (rec.cat === 'item' && isLive) {
       html += `<div class="sec"><div class="sec-h">Edit</div><div class="note muted">This object comes live from the DCIM backend (labels / rack items). Rename or move it in Lab Manager. To keep a physical record of it in the twin (photos, notes, exact shelf), add it to lab-data.json:</div>
         <div class="ctl-row" style="margin-top:8px"><button class="btn btn-xs" id="eMaterialize">+ Add a copy to lab-data.json</button></div></div>`;
     } else if (rec.cat === 'item') {
@@ -926,7 +1092,8 @@
 
   function rebuildAll() {
     // setups/shelves colors follow overrides → rebuild static + items
-    for (const [id, r] of [...S.recs]) { if (r.label) r.label.remove(); if (r.telem) r.telem.remove(); S.recs.delete(id); }
+    for (const [id, r] of [...S.recs]) { if (r.label) r.label.remove(); if (r.telem) r.telem.remove(); if (r.attnEl) r.attnEl.remove(); S.recs.delete(id); }
+    S.labelHover = null;
     S.pickables = []; disposeGroup(staticGroup); disposeGroup(wallsGroup); disposeGroup(zonesGroup); disposeGroup(itemsGroup);
     buildStatic(); computeModel(); buildItems(); refreshLabelsStatic();
   }
@@ -1003,13 +1170,14 @@
       Object.assign(S.live, inventory);
       const pdus = S.live.devices.filter(d => d.kind === 'pdu'), kvms = S.live.devices.filter(d => d.kind === 'kvm');
       // Update inventory immediately; a slow PDU must not delay shelf/SN changes.
-      computeModel(); buildItems();
+      // refresh: keep the detail panel's scroll / an editor that has focus, never move the camera.
+      computeModel(); buildItems({ refresh: true });
       await Promise.all([
         ...pdus.map(p => api(`/api/pdus/${p.id}/status`).then(s => { if (session === liveSession) S.live.pdu[p.id] = s; }).catch(() => {})),
         ...kvms.map(k => api(`/api/kvms/${k.id}/status`).then(s => { if (session === liveSession) S.live.kvm[k.id] = s; }).catch(() => {})),
       ]);
       if (!S.live.connected || session !== liveSession) return;
-      computeModel(); buildItems();
+      computeModel(); buildItems({ refresh: true });
     } finally {
       if (refreshInFlight === session) refreshInFlight = null;
     }
@@ -1022,7 +1190,7 @@
     try {
       await api(`/api/pdus/${pduId}/outlets/${outlet}/power`, { method: 'POST', body: JSON.stringify({ action }) });
       toast(`Outlet #${outlet} → ${action}`, 'ok');
-      setTimeout(async () => { try { S.live.pdu[pduId] = await api(`/api/pdus/${pduId}/status`); computeModel(); buildItems(); } catch { /* ignore */ } }, 1500);
+      setTimeout(async () => { try { S.live.pdu[pduId] = await api(`/api/pdus/${pduId}/status`); computeModel(); buildItems({ refresh: true }); } catch { /* ignore */ } }, 1500);
     } catch (e) { toast('Power action failed: ' + e.message, 'err'); }
     finally { if (btn) { btn.disabled = false; btn.innerHTML = old; } }
   }
@@ -1088,6 +1256,7 @@
   }
   // pan the whole view (camera + target together) along the floor, relative to where you look
   function panBy(dx, dz) {
+    markView(null);
     const fwd = controls.target.clone().sub(camera.position); fwd.y = 0; if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
     const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
     const step = Math.max(0.35, camera.position.distanceTo(controls.target) * 0.25);
@@ -1116,9 +1285,14 @@
     top() { fitLab(true); },
     eye() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 1.65, 0.35), new THREE.Vector3(WX(W / 2), 1.35, D * 0.7)); },
   };
-  function setView(name) { VIEWS[name](); $$('.tb').forEach(b => b.classList.remove('active')); $('#v' + name[0].toUpperCase() + name.slice(1)).classList.add('active'); }
+  // Only the preset the camera is actually in is highlighted; focus / orbit / zoom / pan leave every preset.
+  const VIEW_BTN = { orbit: '#vOrbit', top: '#vTop', eye: '#vEye' };
+  function markView(name) { S.view = VIEW_BTN[name] ? name : null; Object.entries(VIEW_BTN).forEach(([k, q]) => $(q).classList.toggle('active', k === S.view)); }
+  function setView(name) { VIEWS[name](); markView(name); }
+  controls.addEventListener('start', () => markView(null));
   function flyTo(rec, force) {
-    if (!rec.group) return; const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (b.isEmpty()) return;
+    if (!rec.group) return;
+    markView(null); const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (b.isEmpty()) return;
     const c = b.getCenter(new THREE.Vector3()), s = b.getSize(new THREE.Vector3()); let dist = Math.max(s.x, s.y, s.z) * 1.7 + 1.1;
     if (rec.cat === 'setup') { dist = 3.4; c.y = 1.25; } else if (rec.cat === 'shelf') { dist = 2.2; } else if (rec.cat === 'item' && rec.setup) { dist = Math.max(1.2, dist * 0.8); }
     let dir = camera.position.clone().sub(controls.target); if (dir.length() < 0.01) dir.set(-1, 1, -1); dir.normalize(); if (dir.y < 0.25) dir.y = 0.25; dir.normalize();
@@ -1128,13 +1302,15 @@
   }
   $('#vOrbit').onclick = () => setView('orbit'); $('#vTop').onclick = () => setView('top'); $('#vEye').onclick = () => setView('eye');
   $('#vReset').onclick = () => { cancelMove(); closeDetail(); setView('orbit'); };
-  $('#vFit').onclick = () => fitLab();
+  $('#vFit').onclick = () => setView('orbit');
   $('#vFocus').onclick = () => { const rec = S.recs.get(S.selected); if (rec) flyTo(rec, true); };
   $('#btnHome').onclick = () => setView('orbit');
-  $('#tWalls').onclick = () => { S.wallsVisible = !S.wallsVisible; wallsGroup.visible = S.wallsVisible; $('#tWalls').classList.toggle('active', !S.wallsVisible); $('#tWalls').textContent = S.wallsVisible ? 'Walls' : 'Walls hidden'; };
+  // toggles: highlighted = layer shown / feature on
+  $('#tWalls').onclick = () => { S.wallsVisible = !S.wallsVisible; wallsGroup.visible = S.wallsVisible; $('#tWalls').classList.toggle('active', S.wallsVisible); };
+  $('#tWalls').classList.toggle('active', S.wallsVisible);
   $('#tZones').onclick = () => { S.zonesVisible = !S.zonesVisible; zonesGroup.visible = S.zonesVisible; $('#tZones').classList.toggle('active', S.zonesVisible); };
   $('#tZones').classList.add('active');
-  function setLabelMode(mode, silent) { S.labelMode = mode; $('#tLabels').textContent = 'Labels: ' + { setups: 'setups', all: 'all', none: 'off' }[mode]; if (!silent) LS.set('labelMode', mode); }
+  function setLabelMode(mode, silent) { S.labelMode = mode; $('#tLabels').textContent = 'Labels: ' + { setups: 'setups', all: 'all', none: 'off' }[mode]; $('#tLabels').classList.toggle('active', mode !== 'none'); if (!silent) LS.set('labelMode', mode); }
   $('#tLabels').onclick = () => setLabelMode({ setups: 'all', all: 'none', none: 'setups' }[S.labelMode]);
   window.addEventListener('keydown', e => {
     if (e.target !== canvas && e.target !== document.body) return;
@@ -1215,9 +1391,18 @@
   const tmpV = new THREE.Vector3();
   function updateLabels() {
     const r = canvas.getBoundingClientRect(); const camPos = camera.position;
+    const hoverSetup = S.labelHover || (S.hover ? (S.recs.get(S.hover)?.cat === 'setup' ? S.hover : S.recs.get(S.hover)?.setup) : null);
     for (const rec of S.recs.values()) {
+      const ab = rec.attnEl;
+      if (ab) {
+        let vis = rec.attnN > 0 && !rec.filtered;
+        if (vis) { tmpV.copy(rec.attnAnchor).project(camera); vis = tmpV.z <= 1 && Math.abs(tmpV.x) <= 1.05 && Math.abs(tmpV.y) <= 1.05; }
+        if (!vis) ab.style.display = 'none';
+        else { ab.style.display = ''; ab.style.left = ((tmpV.x + 1) / 2 * r.width) + 'px'; ab.style.top = ((1 - tmpV.y) / 2 * r.height) + 'px'; }
+      }
       const el = rec.telem; if (!el) continue;
-      const show = !rec.filtered && S.labelMode !== 'none' && (S.live.connected || S.selected === rec.id);
+      const full = S.heat || S.selected === rec.id || hoverSetup === rec.id;
+      const show = full && !rec.filtered && S.labelMode !== 'none' && (S.live.connected || S.selected === rec.id);
       if (!show) { el.style.display = 'none'; continue; }
       tmpV.copy(rec.telemAnchor); const dist = tmpV.distanceTo(camPos); tmpV.project(camera);
       if (tmpV.z > 1 || Math.abs(tmpV.x) > 1.1 || Math.abs(tmpV.y) > 1.1) { el.style.display = 'none'; continue; }
@@ -1439,13 +1624,13 @@
   function heatColor(t) { // 18°C blue → 22 green → 26 amber → 32+ red
     if (t == null) return '#52525b'; if (t <= 18) return '#3b82f6'; if (t <= 22) return '#22c55e'; if (t <= 26) return '#84cc16'; if (t <= 30) return '#f59e0b'; return '#ef4444';
   }
-  function rackTelemetry(su) {
-    const rack = su.dcimRack; if (!S.live.connected || !rack) return null;
-    const pdus = S.live.devices.filter(d => d.kind === 'pdu' && (d.rack === rack || (d.notes || '').split(',').map(x => x.trim()).includes('shared:' + rack)));
+  function rackTelemetry(su, live = S.live) {
+    const rack = su.dcimRack; if (!live.connected || !rack) return null;
+    const pdus = (live.devices || []).filter(d => d.kind === 'pdu' && (d.rack === rack || (d.notes || '').split(',').map(x => x.trim()).includes('shared:' + rack)));
     if (!pdus.length) return null;
     let watts = 0, amps = 0, volts = 0, n = 0, on = 0, total = 0, temp = null, hum = null, leak = false, reach = 0, any = false, known = 0, partial = false, ampsPartial = false, estimated = false;
     pdus.forEach(p => {
-      const st = S.live.pdu[p.id];
+      const st = (live.pdu || {})[p.id];
       if (!st) { partial = ampsPartial = true; return; }
       any = true;
       if (!st.reachable) { partial = ampsPartial = true; return; }
@@ -1472,9 +1657,11 @@
     for (const rec of S.recs.values()) {
       if (rec.cat !== 'setup' || !rec.telem) continue;
       const t = rackTelemetry(rec.def);
+      const lt = rec.labelTel;
       if (!t || t.loading || !t.reachable) {
         if (t) kwPartial = true;
         rec.telem.className = 'telem dim'; rec.telem.innerHTML = `<span class="t-muted">${!t ? (S.live.connected ? (rec.def.dcimRack ? 'no PDU' : 'unmapped') : '—') : t.loading ? '…' : 'PDU offline'}</span>`;
+        if (lt) { lt.className = 'lt' + (t && !t.loading ? ' off' : ' muted'); lt.textContent = !S.live.connected ? '' : !t ? (rec.def.dcimRack ? 'no PDU' : 'unmapped') : t.loading ? '…' : 'PDU offline'; }
         rec.heatPatch.visible = false; rec.leakRing.visible = false; continue;
       }
       if (t.watts != null) { kwTot += t.watts; kwKnown++; }
@@ -1485,6 +1672,11 @@
       const capPct = Math.round(t.cap * 100); const capCls = t.cap > .95 ? 'bad' : t.cap > .8 ? 'warn' : 'ok';
       rec.telem.className = 'telem' + (t.leak ? ' leak' : capCls === 'bad' ? ' bad' : capCls === 'warn' ? ' warn' : '');
       rec.telem.innerHTML = `<div class="t-row"><b class="t-kw">${t.watts == null ? '\u2014' : (t.watts / 1000).toFixed(2)}${t.partial ? ' (partial)' : ''}</b><span class="t-u">kW</span><span class="t-sep"></span><span class="t-v">${t.volts == null ? '\u2014' : t.volts.toFixed(0) + ' V'}</span><span class="t-sep"></span><span class="t-v">${t.amps == null ? '\u2014' : (t.estimated ? '~' : '') + t.amps.toFixed(1) + ' A' + (t.estimated ? ' (estimate)' : '')}</span>${t.leak ? '<span class="t-leak">LEAK</span>' : ''}</div><div class="t-cap ${capCls}" title="${t.cap == null ? 'unknown / partial' : capPct + '% (estimate)'} of ${RATED_AMPS * t.pduCount} A · ${t.on}/${t.total} outlets on"><i style="width:${Math.min(100, capPct)}%"></i></div>`;
+      if (lt) {
+        lt.className = 'lt' + (t.leak || capCls === 'bad' ? ' bad' : capCls === 'warn' ? ' warn' : '');
+        lt.title = `${t.partial ? 'partial reading — not every outlet reports watts · ' : ''}${t.cap == null ? 'load unknown' : capPct + '% of ' + RATED_AMPS * t.pduCount + ' A (estimate)'}`;
+        lt.innerHTML = `<b>${t.watts == null ? '\u2014' : (t.partial ? '≥' : '') + (t.watts / 1000).toFixed(2)}</b> kW · ${t.amps == null ? '\u2014' : (t.estimated ? '~' : '') + t.amps.toFixed(1)} A<i class="lt-bar"><i style="width:${t.cap == null ? 0 : Math.min(100, capPct)}%"></i></i>${t.leak ? '<span class="lt-leak">LEAK</span>' : ''}`;
+      }
       rec.heatPatch.visible = S.heat; rec.heatPatch.material.color.set(heatColor(t.temp)); rec.heatPatch.material.emissive.set(heatColor(t.temp));
       rec.leakRing.visible = !!t.leak;
     }
@@ -1500,24 +1692,31 @@
       <div class="e-row"><span class="e-ic">${leaks.length ? '⚠' : '●'}</span><b class="${leaks.length ? 'e-bad' : 'e-ok'}">${leaks.length ? 'LEAK · ' + leaks.join(', ') : 'no leaks'}</b></div>
       <div class="e-row e-foot"><small>${kwKnown ? (kwTot / 1000).toFixed(2) + ' kW total' + (kwPartial ? ' (partial)' : '') : '\u2014'}</small></div>`;
   }
-  $('#tHeat').onclick = () => { S.heat = !S.heat; $('#tHeat').classList.toggle('active', S.heat); updateTelemetry(); };
+  $('#tHeat').onclick = () => { S.heat = !S.heat; LS.set('heat', S.heat); $('#tHeat').classList.toggle('active', S.heat); updateTelemetry(); };
 
   // ───────────────────────────────────────────────────────────── quick-jump rack bar + zoom buttons
   function renderRackBar() {
     const bar = $('#rackBar'); if (!bar || !S.data) return;
-    bar.innerHTML = S.data.setups.map(su => `<button data-jump="${su.id}" class="${S.selected === su.id ? 'on' : ''}"><span><span class="rb-dot" style="background:${STATUS_COLOR[su.status || 'unknown']}"></span>${esc(su.dcimRack || su.id)}</span><small>${esc(su.name.split('—')[0].replace('Rack', '').trim())}</small></button>`).join('') +
+    // dot = worst attention severity of the rack; without issues: live PDU reachability, else the static status
+    const rackDot = su => {
+      const mine = (S.attention || []).filter(e => e.setup === su.id); const w = worstSeverity(mine);
+      if (w) return { color: SEV_COLOR[w], n: mine.length, w };
+      const t = S.live.connected ? rackTelemetry(su) : null;
+      return { color: t && !t.loading ? STATUS_COLOR[t.reachable ? 'active' : 'inactive'] : STATUS_COLOR[su.status || 'unknown'], n: 0, w: null };
+    };
+    bar.innerHTML = S.data.setups.map(su => { const d = rackDot(su); return `<button data-jump="${su.id}" class="${S.selected === su.id ? 'on' : ''}" title="${d.n ? `${d.n} item${d.n === 1 ? '' : 's'} need attention` : esc(su.id)}"><span><span class="rb-dot" style="background:${d.color}"></span>${esc(su.dcimRack || su.id)}${d.n ? `<span class="rb-n sev-${d.w}">${d.n}</span>` : ''}</span><small>${esc(su.name.split('—')[0].replace('Rack', '').trim())}</small></button>`; }).join('') +
       S.data.storage.map(st => `<button data-jump="${st.id}" class="${S.selected === st.id ? 'on' : ''}"><span><span class="rb-dot" style="background:${STATUS_COLOR[st.status || 'unknown']}"></span>${st.id.replace('STORAGE-', 'ST-')}</span><small>${esc(st.name.split(' ').slice(0, 2).join(' '))}</small></button>`).join('');
     $$('[data-jump]', bar).forEach(b => b.onclick = () => select(b.dataset.jump, { fly: true }));
   }
-  function zoomBy(f) { const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
-  function rotateBy(a) { const dir = camera.position.clone().sub(controls.target); dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), a); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 300); }
+  function zoomBy(f) { markView(null); const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
+  function rotateBy(a) { markView(null); const dir = camera.position.clone().sub(controls.target); dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), a); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 300); }
   $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4); $('#zL').onclick = () => rotateBy(Math.PI / 8); $('#zR').onclick = () => rotateBy(-Math.PI / 8);
   $('#pL').onclick = () => panBy(-1, 0); $('#pR').onclick = () => panBy(1, 0); $('#pF').onclick = () => panBy(0, 1); $('#pB').onclick = () => panBy(0, -1);
   window.addEventListener('keydown', e => { if (e.target !== canvas && e.target !== document.body) return; const k = e.key; if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1); else return; e.preventDefault(); });
 
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }
-  $$('.tab').forEach(b => b.onclick = () => { $$('.tab').forEach(x => x.classList.remove('active')); b.classList.add('active'); ['tree', 'inv', 'unplaced'].forEach(id => $('#' + id).classList.toggle('hidden', id !== b.dataset.tab)); });
+  $$('.tab').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
   // ───────────────────────────────────────────────────────────── boot
   function init(data) {
@@ -1535,13 +1734,14 @@
     resize(); controls.maxDistance = Math.max(25, Math.hypot(S.data.room.width, S.data.room.depth, S.data.room.height) * 5);
     camera.far = controls.maxDistance + 50; camera.updateProjectionMatrix();
     VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
-    previousCamera.copy(camera.position); previousTarget.copy(controls.target); $('#vOrbit').classList.add('active');
+    previousCamera.copy(camera.position); previousTarget.copy(controls.target); markView('orbit');
+    showTab(LS.get('sideTab', 'attn')); placeAttnDock();
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
     if (S.settings.url) connect(); else if (auto) { api('/api/version').then(() => connect()).catch(() => {}); }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk };
+  window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);

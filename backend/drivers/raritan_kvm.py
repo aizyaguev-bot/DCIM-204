@@ -15,9 +15,25 @@ from typing import Optional
 
 TIMEOUT = httpx.Timeout(6.0, connect=6.0, read=6.0)
 
+AUTH_FAILED = "Device API authentication failed"
+
 
 class RaritanKvmError(Exception):
     pass
+
+
+class RaritanKvmAuthError(RaritanKvmError):
+    pass
+
+
+def _rejected(resp: httpx.Response) -> bool:
+    """The device answered but refused the saved credentials."""
+    return resp.status_code in (401, 403) or (resp.status_code == 200 and _is_login_page(resp.text))
+
+
+def _is_login_page(text: str) -> bool:
+    lowered = text.lower()
+    return "action_login" in lowered or bool(re.search(r"<input[^>]+type\s*=\s*[\"']?password", lowered))
 
 
 class RaritanKvmDriver:
@@ -28,6 +44,8 @@ class RaritanKvmDriver:
         self.password = password
         self.model = model
         self._client: httpx.AsyncClient | None = None
+        # Set by get_ports() when the device answered but rejected the credentials.
+        self.auth_error: Optional[str] = None
 
     async def _client_ctx(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -70,26 +88,43 @@ class RaritanKvmDriver:
         Returns list of { number, label, status } for all KVM ports.
         KX III: REST API first. LX II / fallback: scrape sidebar.asp so that
         ports without a configured target are marked 'empty' automatically.
+
+        When every sign-in method is refused, sets self.auth_error. KX III then
+        returns no ports; LX II keeps its designed static list.
         """
-        if "LX" not in self.model:
+        self.auth_error = None
+        lx = "LX" in self.model
+        basic_rejected = False
+        if not lx:
             try:
                 return await self._get_ports_rest()
+            except RaritanKvmAuthError:
+                basic_rejected = True
             except RaritanKvmError:
                 pass
         # LX II (and KX III older firmware): scrape sidebar.asp
         try:
-            return await self._get_ports_sidebar(port_count)
+            return await self._get_ports_sidebar(port_count, basic_rejected=basic_rejected)
+        except RaritanKvmAuthError:
+            self.auth_error = AUTH_FAILED
+            if not lx:
+                return []
         except Exception:
             pass
         # Final fallback: static list (can't distinguish empty from idle)
         return [{"number": i + 1, "label": f"Port {i + 1}", "status": "idle", "status_source": "unknown"}
                 for i in range(port_count)]
 
-    async def _get_ports_sidebar(self, port_count: int) -> list[dict]:
+    def _session_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(verify=False, follow_redirects=True, timeout=TIMEOUT)
+
+    async def _get_ports_sidebar(self, port_count: int, basic_rejected: bool = False) -> list[dict]:
         """
         Scrape sidebar.asp to find which port numbers have targets configured.
         Tries HTTP Basic auth first; falls back to form-POST session auth.
         Configured ports → 'idle', unconfigured ports → 'empty'.
+        Raises RaritanKvmAuthError as soon as the form sign-in is refused too,
+        so a wrong password costs no further requests.
         """
         def _extract_configured(text: str) -> set[int]:
             nums: set[int] = set()
@@ -106,17 +141,19 @@ class RaritanKvmDriver:
                 for i in range(port_count)
             ]
 
-        # Attempt 1: Basic auth (works on most KX III / LX II firmware)
-        client = await self._client_ctx()
-        resp = await client.get(f"{self.base_url}/sidebar.asp")
-        if resp.status_code == 200:
-            nums = _extract_configured(resp.text)
-            if nums:
-                return _build(nums)
+        # Attempt 1: Basic auth (works on most KX III / LX II firmware).
+        # Skipped when the REST API already refused the same Basic credentials.
+        if not basic_rejected:
+            client = await self._client_ctx()
+            resp = await client.get(f"{self.base_url}/sidebar.asp")
+            if resp.status_code == 200 and not _is_login_page(resp.text):
+                nums = _extract_configured(resp.text)
+                if nums:
+                    return _build(nums)
 
         # Attempt 2: form-POST session auth (needed on some LX II firmware)
-        async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=TIMEOUT) as sc:
-            await sc.post(
+        async with self._session_client() as sc:
+            login = await sc.post(
                 f"{self.base_url}/auth.asp",
                 params={"client": "javascript"},
                 data={
@@ -128,7 +165,13 @@ class RaritanKvmDriver:
                     "action_login": "Login",
                 },
             )
+            # A login page with a session cookie may still be a working session;
+            # sidebar.asp below decides that case.
+            if login.status_code in (401, 403) or (_rejected(login) and not sc.cookies):
+                raise RaritanKvmAuthError("sign-in refused")
             resp2 = await sc.get(f"{self.base_url}/sidebar.asp")
+            if _rejected(resp2):
+                raise RaritanKvmAuthError("sign-in refused")
             if resp2.status_code == 200:
                 nums = _extract_configured(resp2.text)
                 if nums:
@@ -140,6 +183,8 @@ class RaritanKvmDriver:
         """KX III newer firmware: REST API at /api/v1/targets."""
         client = await self._client_ctx()
         resp = await client.get(f"{self.base_url}/api/v1/targets")
+        if resp.status_code in (401, 403):
+            raise RaritanKvmAuthError(f"HTTP {resp.status_code}")
         if resp.status_code != 200:
             raise RaritanKvmError(f"HTTP {resp.status_code}")
         data = resp.json()

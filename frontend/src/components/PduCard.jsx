@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import StatusDot from "./StatusDot";
 import {useAccounts} from "../accounts";
 
-export default function PduCard({ device, status, onOpen, onOutletAction }) {
+export default function PduCard({ device, status, inMaintenance = false, onOpen, onOutletAction }) {
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;
   const totalW = status?.reachable ? status.total_watts : null;
@@ -24,6 +24,9 @@ export default function PduCard({ device, status, onOpen, onOutletAction }) {
         </button>
         <button onClick={onOpen} className="device-details">Details →</button>
       </div>
+      {inMaintenance && (
+        <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs">In maintenance · restore power from the Maintenance column</div>
+      )}
       {status?.error && (
         <div className="px-4 py-2 bg-rose-500/10 border-b border-rose-500/30 text-rose-300 text-xs">⚠ {status.error}</div>
       )}
@@ -31,7 +34,7 @@ export default function PduCard({ device, status, onOpen, onOutletAction }) {
         {outlets.length > 0 ? (
           <div className="grid grid-cols-6 gap-1.5">
             {outlets.map((o, i) => (
-              <OutletCell key={o.number} outlet={o} index={i} totalCount={outlets.length}
+              <OutletCell key={o.number} outlet={o} index={i} totalCount={outlets.length} locked={inMaintenance}
                 onAction={a => onOutletAction(o.number, a)} />
             ))}
           </div>
@@ -52,7 +55,7 @@ export default function PduCard({ device, status, onOpen, onOutletAction }) {
   );
 }
 
-function OutletCell({ outlet, index, totalCount, onAction }) {
+function OutletCell({ outlet, index, totalCount, locked, onAction }) {
   const {canOperate} = useAccounts();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ top: 0, left: 0, openUp: false });
@@ -117,7 +120,12 @@ function OutletCell({ outlet, index, totalCount, onAction }) {
                 Outlet {outlet.number} · {isOn ? `${outlet.watts == null ? "\u2014" : outlet.watts + "W"} / ${outlet.current == null ? "\u2014" : outlet.current + "A"}` : outlet.state}
               </div>
             </div>
-            {!canOperate ? <p className="text-xs text-zinc-500 px-2 py-1">Viewer · read only</p> : isOn ? (
+            {!canOperate ? <p className="text-xs text-zinc-500 px-2 py-1">Viewer · read only</p> : locked ? (
+              <>
+                <p className="text-xs text-amber-300 px-2 py-1">PDU is in maintenance mode; restore it from the Maintenance column first</p>
+                {isOn && <MI onClick={() => { onAction("off"); setOpen(false); }} icon="⏻" label="Turn off" danger />}
+              </>
+            ) : isOn ? (
               <>
                 <MI onClick={() => { onAction("cycle"); setOpen(false); }} icon="↻" label="Power cycle" />
                 <MI

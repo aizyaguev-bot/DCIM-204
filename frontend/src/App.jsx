@@ -16,6 +16,9 @@ import AddDeviceModal from "./components/AddDeviceModal";
 import { useAccounts, AccountSettings, UsersView } from "./accounts";
 import { EngineersView } from "./engineers";
 import InlineKvmConsole from "./components/InlineKvmConsole";
+import MaintenanceColumn, { maintenanceStateFor } from "./components/MaintenanceColumn";
+import MaintenanceDialog from "./components/MaintenanceDialog";
+import WhatsNew from "./components/WhatsNew";
 
 export default function App() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
@@ -38,6 +41,10 @@ export default function App() {
   const kvmTimers = useRef(new Set());
   const [rackItems, setRackItems] = useState(null);
   const [rackItemsError, setRackItemsError] = useState("");
+  const [maintenance, setMaintenance] = useState(null);
+  const [maintenanceError, setMaintenanceError] = useState("");
+  const [maintenanceDialog, setMaintenanceDialog] = useState(null);   // { mode: "shutdown" | "restore", pduId }
+  const maintenanceSeq = useRef(0);
   const [adminSection, setAdminSection] = useState(new URLSearchParams(location.search).get("tab") === "sync" ? "mapping" : "devices");
   function navigate(tab, rack) {
     const url = new URL(window.location.href);
@@ -138,6 +145,7 @@ export default function App() {
     const refresh = () => {
       pdus.forEach(p => loadPduStatus(p.id));
       kvms.forEach(k => loadKvmStatus(k.id));
+      if (pdus.length) loadMaintenance();
     };
     refresh();
     const t = setInterval(refresh, preferences.refresh_seconds * 1000);
@@ -162,6 +170,18 @@ export default function App() {
       setPduStatuses(s => ({ ...s, [id]: status }));
       setLastUpdated(new Date());
     } catch (e) { setPduStatuses(s => ({...s, [id]: {device_id:id, reachable:false, outlets:[], error:e.message}})); }
+  }
+
+  async function loadMaintenance() {
+    const seq = ++maintenanceSeq.current;
+    try {
+      const data = await api.maintenanceList();
+      if (seq !== maintenanceSeq.current) return;
+      setMaintenance({ password_mode: data?.password_mode || "unavailable", pdus: data?.pdus || {}, log: data?.log || [] });
+      setMaintenanceError("");
+    } catch (e) {
+      if (seq === maintenanceSeq.current) setMaintenanceError(e.detail || (e.status ? `HTTP ${e.status}` : e.message));
+    }
   }
 
   async function loadKvmStatus(id) {
@@ -342,9 +362,11 @@ export default function App() {
           {mainTab === "dashboard" && <Toolbar filter={filter} setFilter={setFilter} rackFilter={rackFilter} setRackFilter={setRackFilter} racks={racks}
             count={(filter === "all" || filter === "pdus" ? visiblePdus.length : 0) + (filter === "all" || filter === "kvms" ? visibleKvms.length : 0)}
             rackCount={filter === "all" || filter === "racks" ? visibleInventoryRacks.length : 0} onAdd={canAdmin ? () => setAddOpen(true) : null} />}
-          <div className="device-grid">
+          <div className={mainTab === "power" ? "flex flex-col xl:flex-row xl:items-start gap-x-4" : undefined}>
+          <div className={mainTab === "power" ? "device-grid flex-1 min-w-0" : "device-grid"}>
             {(mainTab === "power" || (mainTab === "dashboard" && (filter === "all" || filter === "pdus"))) && visiblePdus.map(p =>
               <PduCard key={p.id} device={p} status={pduStatuses[p.id]}
+                inMaintenance={!!maintenanceStateFor(maintenance, p.id)}
                 onOpen={() => openDetail({ kind: "pdu", id: p.id })}
                 onOutletAction={(n, a) => handleOutletAction(p, n, a)}
               />
@@ -369,6 +391,12 @@ export default function App() {
               </div>
             )}
           </div>
+          {mainTab === "power" && pdus.length > 0 && (
+            <MaintenanceColumn pdus={pdus} pduStatuses={pduStatuses} maintenance={maintenance} error={maintenanceError}
+              onShutdown={p => setMaintenanceDialog({ mode: "shutdown", pduId: p.id })}
+              onRestore={p => setMaintenanceDialog({ mode: "restore", pduId: p.id })} />
+          )}
+          </div>
         </main>
       )}
 
@@ -388,6 +416,9 @@ export default function App() {
         <PduDetail
           device={pdus.find(p => p.id === view.id)}
           status={pduStatuses[view.id]}
+          maintenance={maintenanceStateFor(maintenance, view.id)}
+          maintenanceMode={maintenance?.password_mode}
+          onMaintenance={mode => setMaintenanceDialog({ mode, pduId: view.id })}
           onBack={() => history.back()}
           onOutletAction={(n, a, confirmed) => handleOutletAction(pdus.find(p => p.id === view.id), n, a, confirmed)}
           onDelete={() => { handleDeleteDevice(view.id); history.back(); }}
@@ -417,7 +448,18 @@ export default function App() {
 
       {addOpen && <AddDeviceModal racks={racks} onClose={() => setAddOpen(false)} onAdd={handleAddDevice} />}
       {inlineConsole && <InlineKvmConsole console={inlineConsole} onClose={closeInlineConsole} />}
+      {maintenanceDialog && (
+        <MaintenanceDialog key={`${maintenanceDialog.mode}-${maintenanceDialog.pduId}`}
+          mode={maintenanceDialog.mode}
+          device={pdus.find(p => p.id === maintenanceDialog.pduId)}
+          status={pduStatuses[maintenanceDialog.pduId]}
+          state={maintenanceStateFor(maintenance, maintenanceDialog.pduId)}
+          passwordMode={maintenance?.password_mode}
+          onClose={() => setMaintenanceDialog(null)}
+          onChanged={() => { loadMaintenance(); loadPduStatus(maintenanceDialog.pduId); }} />
+      )}
 
+      <WhatsNew version={version} onOpenChangelog={() => navigate("changelog")} />
       <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>
     </div>
   );

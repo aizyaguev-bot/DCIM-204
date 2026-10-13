@@ -4,15 +4,14 @@ import {useAccounts} from "../accounts";
 
 export default function KvmDetail({ device, status, onBack, onPortClick, onDelete, onLabelsSave, onMarkFree }) {
   const {canOperate,canAdmin} = useAccounts();
+  const [editMode, setEditMode] = useState(false);
+  const [draftLabels, setDraftLabels] = useState({});
+  const [saving, setSaving] = useState(false);
   if (!device) return null;
   const ports = status?.ports || [];
   const active = ports.filter(p => p.status === "active").length;
   const inUsePorts = ports.filter(p => p.in_use);
   const isLx = device.model?.includes("LX");
-
-  const [editMode, setEditMode] = useState(false);
-  const [draftLabels, setDraftLabels] = useState({});
-  const [saving, setSaving] = useState(false);
 
   function startEdit() {
     const current = {};

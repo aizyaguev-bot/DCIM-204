@@ -2,6 +2,52 @@
 
 ---
 
+## v2.37.0 — 2026-10-13 — PDU maintenance mode, KVM fixes and twin daily-tracking view
+
+### Added
+- **What's new** window: after an update, each browser shows once the changelog
+  sections added since the version it last saw, with a link to the full
+  Changelog tab.
+- Power tab **Maintenance** column. "Turn off all outlets" puts a PDU in
+  maintenance mode. It asks for a reason and the user's password, or the shared
+  Lab Manager password in legacy mode, and records which outlets were on.
+  "Restore power" switches exactly those outlets back on. Every shutdown,
+  restore and wrong-password attempt is kept in a maintenance log, and the last
+  15 entries are shown in the column. API: `GET /api/pdus/maintenance`,
+  `POST /api/pdus/{id}/maintenance/shutdown`, `POST /api/pdus/{id}/maintenance/restore`.
+- While a PDU is in maintenance, outlet on/cycle requests return 409 and are
+  disabled in the PDU card and the detail page. Changing its IP or kind, or
+  deleting it, also returns 409.
+- Wrong maintenance passwords are throttled separately from login
+  (10 failures per 5 minutes; 429 with `Retry-After`).
+- 3D twin: an **Attention** tab and a kiosk dock list leaks, unreachable PDUs
+  and KVMs, high temperature, high rack load, OPTs that are off, in an unknown
+  state or missing from the DCIM labels, auto-placed or unplaced items,
+  unmapped racks and equipment not scanned for over 30 days, sorted by
+  severity. Clicking an entry focuses its rack or item. Identity shows when the
+  device was last seen and how many trackers it has. Heat is off by default and
+  remembered per browser. Refreshes keep the panel scroll position and any
+  open edit.
+
+### Fixed
+- Restoring a PDU from maintenance only counts outlets that the PDU reports as
+  on. Outlets missing from the status reading stay on the restore list instead
+  of ending maintenance mode while still off.
+- KVM ports marked in use on LX II and other units without live port status
+  no longer lose the mark after two minutes. The mark stays until Mark free
+  or expiry.
+- A KVM that rejects the saved credentials now reports "Device API
+  authentication failed" instead of appearing online with generic ports, and
+  stops after the first refused sign-in.
+- 3D twin labels, search results and inventory rows escape device names.
+
+### Notes
+- Maintenance mode is not a physical lockout. Disconnect power physically
+  before hands-on work. Without accounts and without `LAB_MANAGER_PASSWORD`,
+  maintenance actions are disabled.
+
+---
+
 ## Unreleased — Unknown power readings and VM operations tools
 
 ### Added
