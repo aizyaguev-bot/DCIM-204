@@ -28,3 +28,10 @@ backend/.rack-items-*.tmp
 .barcode-backups/
 .barcode-install.lock
 .monitor-backups/
+# Local test scratch directories
+.pytest_cache/
+.pytest-tmp-*/
+frontend/src/.t1-test-temp/
+
+# Local development-team activity and Codex reports
+.team/

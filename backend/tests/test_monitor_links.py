@@ -263,6 +263,12 @@ async def test_additive_upgrade_preserves_existing_monitor_and_device_data(tmp_p
     ("Device API request timeout (ConnectTimeout) secret-password", "could not establish"),
     ("Device API request timeout (ReadTimeout) secret-password", "receiving data"),
     ("Device API request timeout (PoolTimeout) secret-password", "local connection slot"),
+    ("Connection error: [Errno -2] Name or service not known secret-password", "DNS failure"),
+    ("Connection error: [Errno 111] Connection refused secret-password", "Connection refused"),
+    ("Connection error: [Errno 113] No route to host secret-password", "Network unreachable"),
+    ("Connection error: SSL handshake failed secret-password", "TLS error"),
+    ("ProxyError secret-password", "Proxy error"),
+    ("Device API responded with HTTP 503 secret-password", "responded with HTTP 5xx"),
     ("invalid response secret-password", "no usable status"),
 ])
 async def test_failed_checks_explain_safe_reason_and_clear_on_recovery(lab, monkeypatch, message, expected):
@@ -317,6 +323,63 @@ async def test_pdu_connect_timeout_explains_missing_connection_without_raw_error
     assert "could not connect" in str(error.value)
     assert "ConnectTimeout" in str(error.value) and "secret-password" not in str(error.value)
     assert "could not establish" in monitor_links.failure_reason(str(error.value))
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("Name or service not known", "DNS failure"),
+    ("nodename nor servname provided, or not known", "DNS failure"),
+    ("getaddrinfo failed", "DNS failure"),
+    ("Temporary failure in name resolution", "DNS failure"),
+    ("Connection refused", "Connection refused"),
+    ("[Errno 111]", "Connection refused"),
+    ("No route to host", "Network unreachable"),
+    ("Network is unreachable", "Network unreachable"),
+    ("[Errno 113]", "Network unreachable"),
+    ("[Errno 101]", "Network unreachable"),
+    ("SSL error", "TLS error"),
+    ("CERTIFICATE_VERIFY_FAILED", "TLS error"),
+    ("handshake failed", "TLS error"),
+    ("ProxyError", "Proxy error"),
+    ("HTTP 407 Proxy Authentication Required", "Proxy error"),
+    ("HTTP 500", "responded with HTTP 5xx"),
+    ("HTTP 503", "responded with HTTP 5xx"),
+    ("HTTP 5xx", "responded with HTTP 5xx"),
+])
+def test_failure_classes_describe_vm_api_path_without_secrets(message, expected):
+    reason = monitor_links.failure_reason(message + " https://private-user:secret-password@example.invalid response-body")
+    assert expected in reason
+    assert "management API path from the VM, not server power" in reason
+    assert all(token not in reason for token in ("private-user", "secret-password", "https://", "response-body"))
+
+
+def test_proxy_exception_without_message_is_classified():
+    import httpx
+    assert "Proxy error" in monitor_links.failure_reason(httpx.ProxyError(""))
+
+
+def test_connect_timeout_mentions_tls_phase_and_keeps_prefix():
+    reason = monitor_links.failure_reason("ConnectTimeout")
+    assert reason.startswith("Connection timeout")
+    assert "connect phase includes the TLS handshake" in reason
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("HTTP 401", "Device authentication failed. Check the saved username, password and permissions."),
+    ("ReadTimeout", "Device API request timeout: receiving data from the device took too long. Check device load and network stability."),
+    ("PoolTimeout", "Device API request timeout: a local connection slot was not available in time. This does not establish a device outage."),
+])
+def test_existing_auth_read_and_pool_messages_remain_compatible(message, expected):
+    assert monitor_links.failure_reason(message) == expected
+
+
+@pytest.mark.parametrize("message", [
+    "HTTP 401", "ConnectTimeout", "ReadTimeout", "PoolTimeout", "timed out", "ProxyError",
+    "Name or service not known", "Connection refused", "No route to host", "SSL error",
+    "HTTP 503", "connect failed", "invalid response",
+])
+def test_failure_reason_is_stable_when_applied_to_its_own_output(message):
+    reason = monitor_links.failure_reason(message)
+    assert monitor_links.failure_reason(reason) == reason
 
 
 @pytest.mark.parametrize("kind", ["pdu", "kvm"])

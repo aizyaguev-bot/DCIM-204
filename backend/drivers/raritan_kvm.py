@@ -13,7 +13,7 @@ import re
 import httpx
 from typing import Optional
 
-TIMEOUT = 6.0
+TIMEOUT = httpx.Timeout(6.0, connect=6.0, read=6.0)
 
 
 class RaritanKvmError(Exception):
@@ -44,13 +44,26 @@ class RaritanKvmDriver:
             await self._client.aclose()
 
     async def ping(self) -> bool:
-        """Returns True if the KVM is reachable (any HTTP response)."""
+        """Keep the legacy boolean check; probe() preserves failure details."""
+        return await self.probe() is None
+
+    async def probe(self) -> Optional[str]:
+        """Return a safe failure class, or None for a usable HTTP response.
+
+        Never return exception text: it may contain credentials, request URLs,
+        or response bodies. Authentication at the root is firmware dependent,
+        so ordinary 4xx responses still establish reachability as before.
+        """
         try:
             client = await self._client_ctx()
             resp = await client.get(f"{self.base_url}/")
-            return resp.status_code < 500
-        except Exception:
-            return False
+            if resp.status_code >= 500:
+                return f"Device API responded with HTTP {resp.status_code}"
+            if resp.status_code == 407:
+                return "Device API proxy error (HTTP 407)"
+            return None
+        except Exception as exc:
+            return classify_error(exc)
 
     async def get_ports(self, port_count: int = 0) -> list[dict]:
         """
@@ -175,6 +188,31 @@ class RaritanKvmDriver:
         except Exception:
             pass
         return None
+
+
+def classify_error(exc: Exception) -> str:
+    """Map a request failure to a fixed failure class without its message text."""
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "Device API connection timeout (ConnectTimeout)"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"Device API request timeout ({type(exc).__name__})"
+    if isinstance(exc, httpx.ProxyError):
+        return "Device API proxy error (ProxyError)"
+    if isinstance(exc, httpx.RequestError):
+        text = str(exc).lower()
+        if any(token in text for token in (
+            "name or service not known", "nodename nor servname", "getaddrinfo",
+            "temporary failure in name resolution",
+        )):
+            return "Device API DNS failure (getaddrinfo)"
+        if "connection refused" in text or re.search(r"\berrno\s+111\b", text):
+            return "Device API connection refused"
+        if any(token in text for token in ("no route to host", "network is unreachable")) or re.search(r"\berrno\s+(?:113|101)\b", text):
+            return "Device API network unreachable"
+        if any(token in text for token in ("ssl", "certificate", "handshake")):
+            return "Device API TLS handshake error"
+        return "Device API connection error"
+    return "Device API probe failed"
 
 
 def _parse_kvm_status(raw) -> str:

@@ -1,6 +1,7 @@
 """Read-only PDU/KVM observations and server-to-port associations."""
 import asyncio
 import json
+import re
 import time
 
 from sqlalchemy import select
@@ -147,17 +148,33 @@ async def connection_index(db, tz, now):
 
 def failure_reason(message):
     """Explain the failure without storing device response bodies or credentials."""
-    lowered = str(message or "").lower()
+    lowered = f"{type(message).__name__} {message or ''}".lower()
+    api_path = " This describes the management API path from the VM, not server power."
+    if "proxyerror" in lowered or "proxy error" in lowered or re.search(r"\b407\b", lowered):
+        return "Proxy error: the VM could not access the device management API through its proxy. Check proxy access and authentication." + api_path
     if "401" in lowered or "403" in lowered or "auth" in lowered:
         return "Device authentication failed. Check the saved username, password and permissions."
     if "connecttimeout" in lowered or "connection timeout" in lowered:
-        return "Connection timeout: the VM could not establish a connection to the device API. Check the address, HTTPS access and network."
-    if "readtimeout" in lowered:
+        return "Connection timeout: the VM could not establish a connection to the device API. The connect phase includes the TLS handshake, so a slow handshake can also cause this. Check the address, HTTPS access and network." + api_path
+    if "readtimeout" in lowered or "receiving data from the device took too long" in lowered:
         return "Device API request timeout: receiving data from the device took too long. Check device load and network stability."
-    if "pooltimeout" in lowered:
+    if "pooltimeout" in lowered or "local connection slot was not available" in lowered:
         return "Device API request timeout: a local connection slot was not available in time. This does not establish a device outage."
     if "timeout" in lowered or "timed out" in lowered:
         return "The device API did not respond before its request timeout."
+    if any(token in lowered for token in (
+        "dns failure", "name or service not known", "nodename nor servname",
+        "getaddrinfo", "temporary failure in name resolution",
+    )):
+        return "DNS failure: the VM could not resolve the device management API address. Check the hostname and VM DNS configuration." + api_path
+    if "connection refused" in lowered or re.search(r"\berrno\s+111\b", lowered):
+        return "Connection refused: the device management API connection from the VM was refused. Check the HTTPS service, port and firewall rules." + api_path
+    if any(token in lowered for token in ("no route to host", "network is unreachable", "network unreachable")) or re.search(r"\berrno\s+(?:113|101)\b", lowered):
+        return "Network unreachable: the VM has no usable network path to the device management API. Check routing and network access." + api_path
+    if any(token in lowered for token in ("ssl", "certificate", "handshake")):
+        return "TLS error: the VM could not complete a secure connection to the device management API. Check TLS configuration and certificates." + api_path
+    if re.search(r"\bhttp\s+5(?:\d{2}|xx)\b", lowered):
+        return "Device management API responded with HTTP 5xx to the VM. Check the device service and load." + api_path
     if "connection" in lowered or "connect" in lowered or "unreachable" in lowered:
         return "Could not connect to the device API from the VM. Check the address and network."
     return "The device API returned no usable status. Check the device service and configuration."

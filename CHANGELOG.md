@@ -2,6 +2,35 @@
 
 ---
 
+## Unreleased — Unknown power readings and VM operations tools
+
+### Added
+- `scripts/diagnose-device-api.py`: a read-only VM check per PDU/KVM (DNS,
+  route, TCP 443, TLS, HTTPS, proxy environment of the running backend) that
+  separates connection failures from slow responses. It sends no credentials
+  and makes no device changes. See `docs/device-api-diagnostics.md`.
+- `scripts/lab-service.py`: `status` (backend PIDs, version, monitoring and
+  alert state, inventory counts), idempotent `start`, safe `restart`, and an
+  optional `@reboot` start (`install-boot` / `remove-boot`) that refuses to add
+  a second boot mechanism and cannot start a second backend.
+- `scripts/alerts-setup.py`: check, configure SMTP from approved values, send
+  one test mail and show the relay's reply, enable alerts only after a matching
+  successful test, verify the running worker, and an isolated alert simulation.
+- `docs/vm-runbook.md`: ordered VM steps for install, diagnosis, SMTP, alerts,
+  boot start and before/after inventory comparison.
+
+### Fixed
+- Missing or invalid PDU readings are shown as unknown instead of 0 W/V/A.
+  Totals that include unknown outlets are marked partial; measured inlet
+  current is kept when only outlet watts are incomplete.
+- PDU and KVM API failures report fixed failure classes (authentication, HTTP
+  status, connection/read/pool timeout, DNS, refused, unreachable, TLS, proxy).
+  Device response bodies, RPC messages and raw connection errors are no longer
+  returned by the API or included in monitor details and alert emails. The PDU
+  sensor debug view returns status codes and numeric samples only.
+
+---
+
 ## Unreleased — KVM console launch recovery
 
 ### Fixed

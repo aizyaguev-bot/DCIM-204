@@ -8,7 +8,7 @@ from ..models import Device
 from ..schemas import KvmStatus, KvmPort
 from ..routers.devices import get_creds
 from ..routers.kvm_proxy import ensure_session
-from drivers.raritan_kvm import RaritanKvmDriver, RaritanKvmError
+from drivers.raritan_kvm import RaritanKvmDriver, RaritanKvmError, classify_error
 
 router = APIRouter(prefix="/api/kvms", tags=["kvms"])
 
@@ -36,9 +36,9 @@ async def _fetch_status(device_id: str, dev: Device) -> KvmStatus:
     username, password = get_creds(dev)
     driver = RaritanKvmDriver(dev.ip, username, password, model=dev.model)
     try:
-        reachable = await driver.ping()
-        if not reachable:
-            return KvmStatus(device_id=device_id, reachable=False, error="Cannot reach device")
+        error = await driver.probe()
+        if error is not None:
+            return KvmStatus(device_id=device_id, reachable=False, error=error)
         ports_raw = await driver.get_ports(port_count=dev.port_count)
         labels = json.loads(dev.labels_json or "{}")
         for p in ports_raw:
@@ -48,7 +48,7 @@ async def _fetch_status(device_id: str, dev: Device) -> KvmStatus:
         ports = [KvmPort(**p) for p in ports_raw]
         return KvmStatus(device_id=device_id, reachable=True, ports=ports)
     except Exception as e:
-        return KvmStatus(device_id=device_id, reachable=False, error=str(e))
+        return KvmStatus(device_id=device_id, reachable=False, error=classify_error(e))
     finally:
         await driver.close()
 

@@ -464,7 +464,7 @@
       }
       if (g && it.placement !== 'rack-strips') S.itemGroups.push(g);
       const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor });
-      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${it.live.watts ? ' · ' + Math.round(it.live.watts) + 'W' : ''}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : it.type === 'equip-switch' ? `switch under test${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
+      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + 'W')}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : it.type === 'equip-switch' ? `switch under test${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
       const named = it.type === 'opt' || it.type.startsWith('equip-');
       makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${named ? it.name : it.id}<small>${it.type === 'opt' ? it.id + ' · ' + sub : sub}</small>`);
     });
@@ -495,16 +495,16 @@
       // 1) OPT servers exactly like DcimView.servers
       const servers = new Map();
       pdus.forEach(pdu => {
-        const stored = pdu.labels || {}; const liveOut = live.pdu[pdu.id]?.outlets || []; const liveByN = Object.fromEntries(liveOut.map(o => [String(o.number), o]));
+        const stored = pdu.labels || {}; const liveOut = live.pdu[pdu.id]?.reachable ? live.pdu[pdu.id].outlets || [] : []; const liveByN = Object.fromEntries(liveOut.map(o => [String(o.number), o]));
         Object.entries(stored).forEach(([num, label]) => {
           if (isDefaultOutletLabel(label)) return; const key = optKey(label); if (servers.has(key)) return;
           const lo = liveByN[num];
-          servers.set(key, { key, name: label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: lo?.state ?? 'unknown', watts: lo?.watts ?? 0 });
+          servers.set(key, { key, name: label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: lo?.state ?? 'unknown', watts: lo?.watts ?? null });
         });
         liveOut.forEach(o => {
           if (isDefaultOutletLabel(o.label)) return; const key = optKey(o.label);
-          if (servers.has(key)) { const e = servers.get(key); e.state = o.state; e.watts = o.watts || 0; return; }
-          servers.set(key, { key, name: o.label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts || 0 });
+          if (servers.has(key)) { const e = servers.get(key); e.state = o.state; e.watts = o.watts ?? null; return; }
+          servers.set(key, { key, name: o.label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts ?? null });
         });
       });
       // KVM cross-reference
@@ -698,7 +698,7 @@
     const recs = [...S.recs.values()]; const items = S.model.items;
     const opts = items.filter(i => i.type === 'opt'); const on = opts.filter(i => i.live?.state === 'on').length; const off = opts.filter(i => i.live?.state === 'off').length;
     const low = recs.filter(r => r.conf === 'low' || r.pconf === 'low').length;
-    let kw = 0, temps = []; Object.values(S.live.pdu).forEach(st => { kw += st?.total_watts || 0; if (st?.temperature != null) temps.push(st.temperature); });
+    let kw = 0, known = 0, partial = false, temps = []; S.live.devices.filter(d => d.kind === 'pdu').forEach(p => { const st = S.live.pdu[p.id]; if (st?.reachable && st.total_watts != null) { kw += st.total_watts; known++; } if (!st?.reachable || st.watts_complete !== true) partial = true; if (st?.temperature != null) temps.push(st.temperature); });
     const live = S.live.connected;
     $('#stats').innerHTML = [
       `<span class="st">Setups <b>${S.data.setups.length}</b></span>`,
@@ -706,7 +706,7 @@
       `<span class="st">OPTs <b class="nv">${opts.length}</b>${live ? ` <span>on <b class="nv">${on}</b> · off <b>${off}</b></span>` : ''}</span>`,
       `<span class="st">Items <b>${items.length}</b></span>`,
       `<span class="st">Low-confidence objects <b class="${low ? 'warn' : ''}">${low}</b></span>`,
-      live ? `<span class="st">Floor draw <b class="nv">${(kw / 1000).toFixed(2)} kW</b></span>` : `<span class="st muted">connect the backend for live power / state</span>`,
+      live ? `<span class="st">Floor draw <b class="nv">${known ? (kw / 1000).toFixed(2) + ' kW' + (partial ? ' (partial)' : '') : '\u2014'}</b></span>` : `<span class="st muted">connect the backend for live power / state</span>`,
       temps.length ? `<span class="st">Temp <b class="${Math.max(...temps) > 24 ? 'warn' : ''}">${Math.min(...temps).toFixed(0)}–${Math.max(...temps).toFixed(0)}°C</b></span>` : '',
       S.model.unmappedRacks.length ? `<span class="st">Unmapped DCIM racks <b class="warn">${S.model.unmappedRacks.join(', ')}</b></span>` : '',
     ].join('');
@@ -761,7 +761,7 @@
       ${it?.serial_number ? `<span class="k">SN</span><span class="v mono">${esc(it.serial_number)}</span>` : ''}
       ${it?.barcode ? `<span class="k">Barcode</span><span class="v mono">${esc(it.barcode)}</span>` : ''}
       ${it?.shelf_position ? `<span class="k">Shelf position</span><span class="v">${esc(it.shelf_position)}</span>` : ''}
-      <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${it.live.state}${it.live.watts ? ' · ' + Math.round(it.live.watts) + ' W' : ''}</span>` : ''}</span>
+      <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${it.live.state}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + ' W')}</span>` : ''}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(ov(rec.id).dcimRack !== undefined ? 'medium' : def.dcimMappingConfidence)}` : ''}</span>
       <span class="k">Owner</span><span class="v">${esc(it?.owner || def.owner || '—')}${it?.live?.owner ? ' <span class="muted small">(DCIM)</span>' : ''}</span>
       <span class="k">Location</span><span class="v">${locationOf(rec)}</span>
@@ -792,9 +792,9 @@
     // ── PDU
     if (it?.type === 'pdu') {
       const st = it.live?.status; const live = S.live.connected; const labels = it.dcim?.labels || it.live?.device?.labels || {};
-      const outlets = st?.outlets?.length ? st.outlets : Array.from({ length: it.dcim?.outlets || 24 }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Outlet ${i + 1}`, state: 'unknown', watts: 0 }));
-      html += `<div class="sec"><div class="sec-h">Outlets <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? `<span style="color:#fda4af">unreachable</span>` : st ? `${outlets.filter(x => x.state === 'on').length}/${outlets.length} on · ${((st.total_watts || 0) / 1000).toFixed(2)} kW` : 'loading…') : 'static labels · click needs backend'}</span></div>
-        <div class="ogrid">${outlets.map(x => { const named = !isDefaultOutletLabel(x.label); const cls = x.state === 'unknown' ? 'unknown' : `${x.state} ${named ? 'named' : 'free'}`; return `<div class="ocell ${cls}" data-outlet="${x.number}" title="${esc(x.label)}"><span class="n">#${x.number}</span><span class="l">${named ? esc(x.label) : '—'}</span>${x.watts ? `<span class="w">${Math.round(x.watts)} W</span>` : ''}</div>`; }).join('')}</div>
+      const outlets = st?.reachable && st.outlets?.length ? st.outlets : Array.from({ length: it.dcim?.outlets || 24 }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Outlet ${i + 1}`, state: 'unknown', watts: null }));
+      html += `<div class="sec"><div class="sec-h">Outlets <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? `<span style="color:#fda4af">unreachable</span>` : st ? `${outlets.filter(x => x.state === 'on').length}/${outlets.length} on · ${st.total_watts == null ? '\u2014' : (st.total_watts / 1000).toFixed(2) + ' kW' + (st.watts_complete === false ? ' (partial)' : '')}` : 'loading…') : 'static labels · click needs backend'}</span></div>
+        <div class="ogrid">${outlets.map(x => { const named = !isDefaultOutletLabel(x.label); const cls = x.state === 'unknown' ? 'unknown' : `${x.state} ${named ? 'named' : 'free'}`; return `<div class="ocell ${cls}" data-outlet="${x.number}" title="${esc(x.label)}"><span class="n">#${x.number}</span><span class="l">${named ? esc(x.label) : '—'}</span><span class="w">${x.watts == null ? '\u2014' : Math.round(x.watts) + ' W'}</span></div>`; }).join('')}</div>
         ${st?.temperature != null || st?.humidity != null ? `<div class="kv" style="margin-top:8px"><span class="k">Environment</span><span class="v">${st.temperature != null ? `🌡 ${st.temperature.toFixed(1)} °C` : ''} ${st.humidity != null ? `· 💧 ${st.humidity.toFixed(0)} %` : ''} ${st.leak_detected ? '<span style="color:#fda4af">· ⚠ leak</span>' : ''}</span></div>` : ''}
         ${st?.error ? `<div class="err-box" style="margin-top:8px">⚠ ${esc(st.error)}</div>` : ''}
       </div>`;
@@ -1443,27 +1443,48 @@
     const rack = su.dcimRack; if (!S.live.connected || !rack) return null;
     const pdus = S.live.devices.filter(d => d.kind === 'pdu' && (d.rack === rack || (d.notes || '').split(',').map(x => x.trim()).includes('shared:' + rack)));
     if (!pdus.length) return null;
-    let watts = 0, amps = 0, volts = 0, n = 0, on = 0, total = 0, temp = null, hum = null, leak = false, reach = 0, any = false;
-    pdus.forEach(p => { const st = S.live.pdu[p.id]; if (!st) return; any = true; if (st.reachable === false) return; reach++; const v = st.inlet_voltage > 0 ? st.inlet_voltage : 208; volts += v; n++; watts += st.total_watts || 0; amps += (st.total_watts || 0) / v; (st.outlets || []).forEach(o => { total++; if (o.state === 'on') on++; }); if (st.temperature != null) temp = temp == null ? st.temperature : Math.max(temp, st.temperature); if (st.humidity != null) hum = hum == null ? st.humidity : Math.max(hum, st.humidity); if (st.leak_detected) leak = true; });
+    let watts = 0, amps = 0, volts = 0, n = 0, on = 0, total = 0, temp = null, hum = null, leak = false, reach = 0, any = false, known = 0, partial = false, ampsPartial = false, estimated = false;
+    pdus.forEach(p => {
+      const st = S.live.pdu[p.id];
+      if (!st) { partial = ampsPartial = true; return; }
+      any = true;
+      if (!st.reachable) { partial = ampsPartial = true; return; }
+      reach++;
+      if (st.inlet_voltage != null) { volts += st.inlet_voltage; n++; }
+      if (st.total_watts != null) { watts += st.total_watts; known++; }
+      if (st.watts_complete !== true) partial = true;
+      const readings = st.inlet_readings || [];
+      if (readings.length && readings.every(i => i.current != null)) {
+        amps += readings.reduce((sum, i) => sum + i.current, 0);
+      } else if (st.total_watts != null && st.watts_complete === true) {
+        amps += st.total_watts / (st.inlet_voltage > 0 ? st.inlet_voltage : 208); estimated = true;
+      } else { ampsPartial = true; }
+      (st.outlets || []).forEach(o => { total++; if (o.state === 'on') on++; });
+      if (st.temperature != null) temp = temp == null ? st.temperature : Math.max(temp, st.temperature);
+      if (st.humidity != null) hum = hum == null ? st.humidity : Math.max(hum, st.humidity);
+      if (st.leak_detected) leak = true;
+    });
     if (!any) return { loading: true };
-    return { watts, amps, volts: n ? volts / n : 0, cap: amps / (RATED_AMPS * pdus.length), on, total, temp, hum, leak, reachable: reach > 0, pduCount: pdus.length };
+    return { watts: known ? watts : null, amps: ampsPartial ? null : amps, partial, estimated, volts: n ? volts / n : null, cap: ampsPartial ? null : amps / (RATED_AMPS * pdus.length), on, total, temp, hum, leak, reachable: reach > 0, pduCount: pdus.length };
   }
   function updateTelemetry() {
-    let tSum = 0, tN = 0, hSum = 0, hN = 0, tMin = null, tMax = null, leaks = [], kwTot = 0;
+    let tSum = 0, tN = 0, hSum = 0, hN = 0, tMin = null, tMax = null, leaks = [], kwTot = 0, kwKnown = 0, kwPartial = false;
     for (const rec of S.recs.values()) {
       if (rec.cat !== 'setup' || !rec.telem) continue;
       const t = rackTelemetry(rec.def);
       if (!t || t.loading || !t.reachable) {
+        if (t) kwPartial = true;
         rec.telem.className = 'telem dim'; rec.telem.innerHTML = `<span class="t-muted">${!t ? (S.live.connected ? (rec.def.dcimRack ? 'no PDU' : 'unmapped') : '—') : t.loading ? '…' : 'PDU offline'}</span>`;
         rec.heatPatch.visible = false; rec.leakRing.visible = false; continue;
       }
-      kwTot += t.watts;
+      if (t.watts != null) { kwTot += t.watts; kwKnown++; }
+      if (t.partial) kwPartial = true;
       if (t.temp != null) { tSum += t.temp; tN++; tMin = tMin == null ? t.temp : Math.min(tMin, t.temp); tMax = tMax == null ? t.temp : Math.max(tMax, t.temp); }
       if (t.hum != null) { hSum += t.hum; hN++; }
       if (t.leak) leaks.push(rec.def.dcimRack || rec.id);
       const capPct = Math.round(t.cap * 100); const capCls = t.cap > .95 ? 'bad' : t.cap > .8 ? 'warn' : 'ok';
       rec.telem.className = 'telem' + (t.leak ? ' leak' : capCls === 'bad' ? ' bad' : capCls === 'warn' ? ' warn' : '');
-      rec.telem.innerHTML = `<div class="t-row"><b class="t-kw">${(t.watts / 1000).toFixed(2)}</b><span class="t-u">kW</span><span class="t-sep"></span><span class="t-v">${t.volts.toFixed(0)} V</span><span class="t-sep"></span><span class="t-v">${t.amps.toFixed(1)} A</span>${t.leak ? '<span class="t-leak">LEAK</span>' : ''}</div><div class="t-cap ${capCls}" title="${capPct}% of ${RATED_AMPS * t.pduCount} A · ${t.on}/${t.total} outlets on"><i style="width:${Math.min(100, capPct)}%"></i></div>`;
+      rec.telem.innerHTML = `<div class="t-row"><b class="t-kw">${t.watts == null ? '\u2014' : (t.watts / 1000).toFixed(2)}${t.partial ? ' (partial)' : ''}</b><span class="t-u">kW</span><span class="t-sep"></span><span class="t-v">${t.volts == null ? '\u2014' : t.volts.toFixed(0) + ' V'}</span><span class="t-sep"></span><span class="t-v">${t.amps == null ? '\u2014' : (t.estimated ? '~' : '') + t.amps.toFixed(1) + ' A' + (t.estimated ? ' (estimate)' : '')}</span>${t.leak ? '<span class="t-leak">LEAK</span>' : ''}</div><div class="t-cap ${capCls}" title="${t.cap == null ? 'unknown / partial' : capPct + '% (estimate)'} of ${RATED_AMPS * t.pduCount} A · ${t.on}/${t.total} outlets on"><i style="width:${Math.min(100, capPct)}%"></i></div>`;
       rec.heatPatch.visible = S.heat; rec.heatPatch.material.color.set(heatColor(t.temp)); rec.heatPatch.material.emissive.set(heatColor(t.temp));
       rec.leakRing.visible = !!t.leak;
     }
@@ -1477,7 +1498,7 @@
       <div class="e-row"><span class="e-ic">🌡</span><b class="e-${tCls}">${tAvg == null ? '—' : tAvg.toFixed(1) + '°C'}</b>${tN > 1 ? `<small>${tMin.toFixed(1)}–${tMax.toFixed(1)}</small>` : ''}</div>
       <div class="e-row"><span class="e-ic">💧</span><b>${hAvg == null ? '—' : hAvg.toFixed(0) + '%'}</b><small>humidity</small></div>
       <div class="e-row"><span class="e-ic">${leaks.length ? '⚠' : '●'}</span><b class="${leaks.length ? 'e-bad' : 'e-ok'}">${leaks.length ? 'LEAK · ' + leaks.join(', ') : 'no leaks'}</b></div>
-      <div class="e-row e-foot"><small>${(kwTot / 1000).toFixed(2)} kW total</small></div>`;
+      <div class="e-row e-foot"><small>${kwKnown ? (kwTot / 1000).toFixed(2) + ' kW total' + (kwPartial ? ' (partial)' : '') : '\u2014'}</small></div>`;
   }
   $('#tHeat').onclick = () => { S.heat = !S.heat; $('#tHeat').classList.toggle('active', S.heat); updateTelemetry(); };
 

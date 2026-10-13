@@ -106,3 +106,14 @@ previously queued mail; check observation timestamps on delayed messages.
 unknown readings, all-inlet evaluation, pause/edit races, worker leases, SMTP retry,
 TLS and configuration validation, using test databases and mocked mail/hardware.
 A real relay/inbox delivery check is still needed after VM configuration.
+
+## VM commands
+
+On the Linux VM, use `backend/.venv/bin/python` and do not guess a relay:
+
+- `scripts/alerts-setup.py check` prints the recipient, sender, relay host, whether a username and password are present, and any configuration problems. It does not print secrets.
+- `scripts/alerts-setup.py configure ...` writes only the SMTP keys you pass into the existing `.env`, after a backup. It refuses a symlink and does not enable alerts.
+- `scripts/alerts-setup.py test-mail` sends one message through `alerts.send_email` and prints the relay's DATA reply. Acceptance is not inbox delivery.
+- `scripts/alerts-setup.py enable` turns on `EMAIL_ALERTS_ENABLED` and minute probes only after `check` is clean and that test matches the current mail settings. It does not set electrical thresholds.
+- `scripts/alerts-setup.py simulate` runs the five-minute confirmation rules on a temporary database.
+- `scripts/lab-service.py` starts one backend, registers a single `@reboot` line, and can print inventory counts. See `docs/vm-runbook.md`.

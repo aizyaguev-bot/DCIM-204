@@ -7,7 +7,7 @@ from ..database import get_db
 from ..models import Device
 from ..schemas import PduStatus, OutletState, PowerAction
 from ..routers.devices import get_creds
-from drivers.raritan_pdu import RaritanPduDriver, RaritanPduError
+from drivers.raritan_pdu import RaritanPduDriver, safe_error
 
 router = APIRouter(prefix="/api/pdus", tags=["pdus"])
 
@@ -42,23 +42,24 @@ async def _fetch_status(device_id: str, dev: Device) -> PduStatus:
             if key in labels:
                 o["label"] = labels[key]
         outlets = [OutletState(**o) for o in outlets_raw]
-        total_watts = sum(o.watts for o in outlets)
+        known_watts = [o.watts for o in outlets if o.watts is not None]
+        total_watts = sum(known_watts) if known_watts else None
         return PduStatus(
             device_id=device_id,
             reachable=True,
-            inlet_voltage=inlet.get("voltage", 0.0),
+            inlet_voltage=inlet.get("voltage"),
             inlet_readings=inlet.get("readings", []),
             total_watts=total_watts,
+            watts_complete=bool(outlets) and len(known_watts) == len(outlets),
             outlets=outlets,
             temperature=env.get("temperature"),
             humidity=env.get("humidity"),
             leak_detected=env.get("leak_detected"),
         )
     except Exception as e:
-        return PduStatus(device_id=device_id, reachable=False, error=str(e))
+        return PduStatus(device_id=device_id, reachable=False, error=safe_error(e))
     finally:
         await driver.close()
-
 
 async def _refresh_background(device_id: str, dev: Device):
     if device_id in _refreshing:
@@ -121,8 +122,12 @@ async def outlet_power(
         # Invalidate cache so next poll gets fresh state
         _cache.pop(device_id, None)
         return {"ok": success, "outlet": outlet_number, "action": body.action}
-    except (RaritanPduError, ValueError) as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Unknown action; use on, off or cycle")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=safe_error(e))
+    finally:
+        await driver.close()
 
 
 @router.get("/{device_id}/sensors-debug")
@@ -134,6 +139,6 @@ async def sensors_debug(device_id: str, db: AsyncSession = Depends(get_db)):
     try:
         return await driver.list_sensors()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        raise HTTPException(status_code=502, detail=safe_error(e))
     finally:
         await driver.close()

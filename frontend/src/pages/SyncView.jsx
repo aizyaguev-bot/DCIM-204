@@ -20,7 +20,7 @@ function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, on
       <td className="px-3 py-2">
         <div className={`w-1.5 h-1.5 rounded-full inline-block ${row.outlet_state === "on" ? "bg-emerald-400" : "bg-zinc-600"}`} />
       </td>
-      <td className="px-3 py-2 text-zinc-500 text-xs">{row.outlet_watts > 0 ? `${row.outlet_watts.toFixed(0)}W` : ""}</td>
+      <td className="px-3 py-2 text-zinc-500 text-xs">{row.outlet_watts != null ? `${row.outlet_watts.toFixed(0)}W` : "\u2014"}</td>
       <td className="px-3 py-2">
         <input
           value={label}
@@ -99,7 +99,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
           pdu_name:      pdu.name,
           outlet_number: null,
           outlet_state:  null,
-          outlet_watts:  0,
+          outlet_watts:  null,
           label:         "",
           kvm:           null,
           noStatus:      true,
@@ -113,7 +113,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
           pdu_name:      pdu.name,
           outlet_number: outlet.number,
           outlet_state:  outlet.state,
-          outlet_watts:  outlet.watts || 0,
+          outlet_watts:  outlet.watts ?? null,
           label,
           kvm: label ? (kvmByLabel[label.toLowerCase()] || null) : null,
           noStatus:      false,
@@ -249,12 +249,12 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
                   lastPdu = row.pdu_name;
                   const pduStatus = pduStatuses[row.pdu_id];
                   const onCount  = pduStatus?.outlets?.filter(o => o.state === "on").length ?? "?";
-                  const totalW   = pduStatus?.total_watts ?? 0;
+                  const totalW   = pduStatus?.reachable ? pduStatus.total_watts : null;
                   elements.push(
                     <tr key={`g-${row.pdu_name}`} className="bg-zinc-900/80">
                       <td colSpan={7} className="px-4 py-1.5">
                         <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-widest">{row.pdu_name}</span>
-                        <span className="ml-3 text-[10px] text-zinc-500">{onCount} on · {totalW > 0 ? `${totalW.toFixed(0)}W` : ""}</span>
+                        <span className="ml-3 text-[10px] text-zinc-500">{onCount} on · {totalW != null ? `${totalW.toFixed(0)}W${pduStatus.watts_complete === false ? " (partial)" : ""}` : "\u2014"}</span>
                       </td>
                     </tr>
                   );
@@ -288,7 +288,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
                       <div className={`w-1.5 h-1.5 rounded-full ${row.outlet_state === "on" ? "bg-emerald-400" : "bg-zinc-700"}`} />
                     </td>
                     <td className="px-3 py-2.5 text-zinc-500 text-xs">
-                      {row.outlet_watts > 0 ? `${row.outlet_watts.toFixed(0)}W` : ""}
+                      {row.outlet_watts != null ? `${row.outlet_watts.toFixed(0)}W` : "\u2014"}
                     </td>
                     <td className="px-3 py-2.5 font-mono text-sm text-zinc-100">
                       {row.label || <span className="text-zinc-700 text-xs">—</span>}

@@ -5,6 +5,8 @@ All tests mock the Raritan hardware driver so no live KVM is required.
 Integration tests against real KVMs live in test_kvm_regression.py.
 """
 import time
+import httpx
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import app.routers.kvms as kvms_module
@@ -239,7 +241,7 @@ async def test_auto_clear_keeps_still_active_port():
 
 # ── _parse_kvm_status — driver-level status normalisation ────────────────────
 
-from drivers.raritan_kvm import _parse_kvm_status
+from drivers.raritan_kvm import RaritanKvmDriver, _parse_kvm_status
 
 @pytest.mark.parametrize("raw,expected", [
     # Active / in-use
@@ -267,3 +269,92 @@ from drivers.raritan_kvm import _parse_kvm_status
 ])
 def test_parse_kvm_status(raw, expected):
     assert _parse_kvm_status(raw) == expected
+
+
+@pytest.mark.parametrize("exception,expected", [
+    (httpx.ConnectTimeout(""), "ConnectTimeout"),
+    (httpx.ReadTimeout(""), "ReadTimeout"),
+    (httpx.WriteTimeout(""), "WriteTimeout"),
+    (httpx.PoolTimeout(""), "PoolTimeout"),
+    (httpx.ConnectError("[Errno 111] Connection refused"), "connection refused"),
+    (httpx.ConnectError("[Errno -2] Name or service not known"), "DNS failure"),
+    (httpx.ConnectError("nodename nor servname provided, or not known"), "DNS failure"),
+    (httpx.ConnectError("getaddrinfo failed"), "DNS failure"),
+    (httpx.ConnectError("Temporary failure in name resolution"), "DNS failure"),
+    (httpx.ConnectError("[Errno 111]"), "connection refused"),
+    (httpx.ConnectError("[Errno 113] No route to host"), "network unreachable"),
+    (httpx.ConnectError("[Errno 101] Network is unreachable"), "network unreachable"),
+    (httpx.ConnectError("[Errno 113]"), "network unreachable"),
+    (httpx.ConnectError("[Errno 101]"), "network unreachable"),
+    (httpx.ConnectError("SSL CERTIFICATE_VERIFY_FAILED"), "TLS handshake"),
+    (httpx.ProxyError(""), "ProxyError"),
+    (httpx.ConnectError("unknown failure"), "connection error"),
+    (RuntimeError("unknown failure"), "probe failed"),
+])
+async def test_kvm_probe_and_status_preserve_safe_failure_class(monkeypatch, exception, expected):
+    unsafe = " https://secret-user:secret-password@example.invalid/private response-body"
+    exception.args = (str(exception) + unsafe,)
+    def transport(request):
+        raise exception
+    driver = RaritanKvmDriver("example.invalid", "secret-user", "secret-password")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    try:
+        reason = await driver.probe()
+        assert expected in reason
+        assert await driver.ping() is False
+        monkeypatch.setattr(kvms_module, "RaritanKvmDriver", lambda *args, **kwargs: driver)
+        monkeypatch.setattr(kvms_module, "get_creds", lambda dev: ("secret-user", "secret-password"))
+        driver.get_ports = AsyncMock()
+        status = await kvms_module._fetch_status("probe-kvm", SimpleNamespace(ip="example.invalid", model="KX III"))
+        assert not status.reachable and status.error == reason
+        driver.get_ports.assert_not_awaited()
+        assert driver._client.is_closed
+        assert all(token not in status.error for token in ("secret-user", "secret-password", "https://", "response-body"))
+    finally:
+        await driver.close()
+
+
+@pytest.mark.parametrize("code,expected", [(200, None), (401, None), (404, None), (407, "HTTP 407"), (503, "HTTP 503")])
+async def test_kvm_probe_http_status_and_boolean_compatibility(monkeypatch, code, expected):
+    driver = RaritanKvmDriver("example.invalid", "", "")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(code, text="secret-password response-body")))
+    try:
+        reason = await driver.probe()
+        assert reason is None if expected is None else expected in reason
+        assert await driver.ping() is (expected is None)
+        if expected:
+            monkeypatch.setattr(kvms_module, "RaritanKvmDriver", lambda *args, **kwargs: driver)
+            monkeypatch.setattr(kvms_module, "get_creds", lambda dev: ("", ""))
+            status = await kvms_module._fetch_status("probe-kvm", SimpleNamespace(ip="example.invalid", model="KX III"))
+            assert not status.reachable and status.error == reason
+            assert "response-body" not in status.error and "secret-password" not in status.error
+    finally:
+        await driver.close()
+
+
+async def test_kvm_port_read_failure_after_probe_keeps_failure_class(monkeypatch):
+    from app import monitor_links
+    def transport(request):
+        if request.url.path == "/":
+            return httpx.Response(200)
+        raise httpx.ReadTimeout("https://secret-user:secret-password@example.invalid response-body")
+    driver = RaritanKvmDriver("example.invalid", "secret-user", "secret-password")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    monkeypatch.setattr(kvms_module, "RaritanKvmDriver", lambda *args, **kwargs: driver)
+    monkeypatch.setattr(kvms_module, "get_creds", lambda dev: ("secret-user", "secret-password"))
+    status = await kvms_module._fetch_status("probe-kvm", SimpleNamespace(
+        ip="example.invalid", model="KX III", port_count=2, labels_json="{}"))
+    assert not status.reachable
+    assert status.error == "Device API request timeout (ReadTimeout)"
+    assert "receiving data" in monitor_links.failure_reason(status.error)
+
+
+async def test_kvm_client_keeps_six_second_connect_and_read_timeouts():
+    driver = RaritanKvmDriver("example.invalid", "", "")
+    try:
+        client = await driver._client_ctx()
+        assert client.timeout.connect == client.timeout.read == 6.0
+        assert client.timeout.write == client.timeout.pool == 6.0
+    finally:
+        await driver.close()

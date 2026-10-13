@@ -73,7 +73,7 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
                 {outlets.map(o => {
                   const hasName = !/^Outlet \d+$/.test(o.label);
                   const isOn = o.state === "on";
-                  const hasWatts = o.watts > 0;
+                  const hasWatts = o.watts != null;
                   const borderCls = hasName
                     ? "border-nv-400/30 bg-nv-400/5"
                     : "border-rose-500/25 bg-rose-500/5";
@@ -101,7 +101,7 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
                           {!isOn
                             ? <span className="text-zinc-600">{o.state}</span>
                             : hasWatts
-                            ? <span className="text-zinc-400">{o.watts}W · {o.current}A</span>
+                            ? <span className="text-zinc-400">{o.watts == null ? "\u2014" : `${o.watts}W`} · {o.current == null ? "\u2014" : `${o.current}A`}</span>
                             : <span className="text-zinc-700">—</span>
                           }
                         </div>
@@ -124,12 +124,12 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
             </Row>
             <Row label="Rack" v={device.rack} />
             <Row label="IP" v={device.ip} />
-            <Row label="Inlet voltage" v={status ? `${status.inlet_voltage} V` : "—"} />
+            <Row label="Inlet voltage" v={status?.reachable && status.inlet_voltage != null ? `${status.inlet_voltage} V` : "—"} />
             <Row label="Active outlets" v={outlets.length ? `${on} / ${outlets.length}` : "—"} />
-            <Row label="Total draw" v={status ? `${(status.total_watts/1000).toFixed(2)} kW` : "—"} />
-            {status?.inlet_voltage > 0 && status?.total_watts > 0 && (
+            <Row label="Total draw" v={status?.reachable && status.total_watts != null ? `${(status.total_watts/1000).toFixed(2)} kW${status.watts_complete === false ? " (partial)" : ""}` : "—"} />
+            {status?.inlet_voltage > 0 && status?.total_watts != null && (
               <Row label="Current">
-                <span className="tabular-nums">{(status.total_watts / status.inlet_voltage).toFixed(1)} A</span>
+                <span className="tabular-nums">{(status.total_watts / status.inlet_voltage).toFixed(1)} A (estimate){status.watts_complete === false ? " (partial)" : ""}</span>
                 <span className="text-zinc-600 text-xs ml-1">/ 16 A</span>
               </Row>
             )}

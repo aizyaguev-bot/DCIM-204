@@ -235,7 +235,7 @@ export default function App() {
   };
 
   const stats = useMemo(() => {
-    let outletsOn = 0, outletsTotal = 0, watts = 0, portsMapped = 0, portsTotal = 0, alerts = 0;
+    let outletsOn = 0, outletsTotal = 0, watts = 0, wattsKnown = 0, wattsComplete = true, portsMapped = 0, portsTotal = 0, alerts = 0;
     const temps = [], humids = [];
     let leakDetected = false;
     pdus.forEach(p => {
@@ -243,8 +243,9 @@ export default function App() {
       if (s?.outlets) {
         outletsOn    += s.outlets.filter(o => o.state === "on").length;
         outletsTotal += s.outlets.length;
-        watts        += s.total_watts || 0;
+        if (s.reachable && s.total_watts != null) { watts += s.total_watts; wattsKnown++; }
       }
+      if (!s?.reachable || s.total_watts == null || s.watts_complete !== true) wattsComplete = false;
       if (!s?.reachable && s) alerts++;
       if (s?.temperature != null) temps.push(s.temperature);
       if (s?.humidity    != null) humids.push(s.humidity);
@@ -261,7 +262,7 @@ export default function App() {
     const tempMax = temps.length ? Math.max(...temps) : null;
     const humMin  = humids.length ? Math.min(...humids) : null;
     const humMax  = humids.length ? Math.max(...humids) : null;
-    return { deviceCount: pdus.length + kvms.length, outletsOn, outletsTotal, watts, portsMapped, portsTotal, alerts,
+    return { deviceCount: pdus.length + kvms.length, outletsOn, outletsTotal, watts: wattsKnown ? watts : null, wattsComplete, portsMapped, portsTotal, alerts,
              tempMin, tempMax, humMin, humMax, leakDetected, hasSensors: temps.length > 0 || humids.length > 0 };
   }, [devices, pduStatuses, kvmStatuses]);
 

@@ -18,6 +18,8 @@ import math
 import httpx
 from typing import Any
 
+from .raritan_kvm import classify_error
+
 TIMEOUT = 6.0
 PDU_PATH = "/model/pdu/1"
 MAX_CONCURRENT = 6  # max simultaneous connections to one PDU
@@ -25,6 +27,15 @@ MAX_CONCURRENT = 6  # max simultaneous connections to one PDU
 
 class RaritanPduError(Exception):
     pass
+
+
+def safe_error(exc: Exception) -> str:
+    """Driver errors are fixed failure classes; other exception text is never returned."""
+    if isinstance(exc, RaritanPduError):
+        return str(exc)
+    if isinstance(exc, httpx.HTTPError):
+        return classify_error(exc)
+    return f"Device API returned no usable status ({type(exc).__name__})"
 
 
 class RaritanPduDriver:
@@ -59,25 +70,33 @@ class RaritanPduDriver:
             "params": params if params is not None else [],
             "id": 1,
         }
+        # Error texts are fixed failure classes: device response bodies, RPC
+        # messages and httpx exception text may carry URLs or credentials.
         try:
             async with self._sem:
                 resp = await client.post(f"{self.base_url}{rid_path}", json=payload)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise RaritanPduError(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
+            raise RaritanPduError(f"Device API responded with HTTP {e.response.status_code}") from None
         except httpx.ConnectTimeout as e:
             raise RaritanPduError("Device API connection timeout (ConnectTimeout): the VM could not connect to the PDU HTTPS API") from e
         except httpx.TimeoutException as e:
             raise RaritanPduError(f"Device API request timeout ({type(e).__name__})") from e
         except httpx.RequestError as e:
-            raise RaritanPduError(f"Connection error: {e}")
+            raise RaritanPduError(classify_error(e)) from None
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RaritanPduError("Device API returned an invalid response") from None
+        if not isinstance(data, dict):
+            raise RaritanPduError("Device API returned an invalid response")
         if "error" in data:
-            code = data["error"].get("code", "?")
-            msg = data["error"].get("message", "")
-            raise RaritanPduError(f"RPC error {code}: {msg}")
-        return data.get("result", {}).get("_ret_")
+            error = data["error"] if isinstance(data["error"], dict) else {}
+            code = error.get("code")
+            raise RaritanPduError(f"RPC error {code if isinstance(code, int) else '?'}")
+        result = data.get("result")
+        return result.get("_ret_") if isinstance(result, dict) else None
 
     # ------------------------------------------------------------------
     # Internal: discover and cache RIDs
@@ -120,9 +139,9 @@ class RaritanPduDriver:
                 self._rpc(rid, "getSettings"),
                 self._rpc(rid, "getSensors"),
             )
-            power_state = (state_data or {}).get("powerState", 0)
+            power_state = (state_data or {}).get("powerState")
             cycle_in_progress = (state_data or {}).get("cycleInProgress", False)
-            state = "on" if power_state == 1 else ("cycling" if cycle_in_progress else "off")
+            state = "on" if power_state == 1 else ("cycling" if cycle_in_progress else "off" if power_state == 0 else "unknown")
             name = (settings_data or {}).get("name", "") or f"Outlet {outlet_num}"
 
             async def _read(sname: str):
@@ -130,7 +149,12 @@ class RaritanPduDriver:
                 if sinfo and sinfo.get("rid"):
                     try:
                         r = await self._rpc(sinfo["rid"], "getReading")
-                        return (r or {}).get("value")
+                        if not isinstance(r, dict):
+                            return None
+                        if any(key in r for key in ("valid", "available")) and not (r.get("valid") is True and r.get("available") is True):
+                            return None
+                        value = float(r["value"])
+                        return value if math.isfinite(value) else None
                     except Exception:
                         pass
                 return None
@@ -144,18 +168,18 @@ class RaritanPduDriver:
                 "number": outlet_num,
                 "label": name,
                 "state": state,
-                "watts":   round(float(p), 1) if p is not None else 0.0,
-                "current": round(float(c), 2) if c is not None else 0.0,
-                "voltage": round(float(v), 1) if v is not None else 0.0,
+                "watts":   round(float(p), 1) if p is not None else None,
+                "current": round(float(c), 2) if c is not None else None,
+                "voltage": round(float(v), 1) if v is not None else None,
             }
         except Exception:
             return {
                 "number": outlet_num,
                 "label": f"Outlet {outlet_num}",
                 "state": "unknown",
-                "watts": 0.0,
-                "current": 0.0,
-                "voltage": 0.0,
+                "watts": None,
+                "current": None,
+                "voltage": None,
             }
 
     async def set_outlet_state(self, outlet_number: int, action: str) -> bool:
@@ -258,33 +282,55 @@ class RaritanPduDriver:
                 continue
         return result
 
+    @staticmethod
+    def _sensor_samples(events) -> list[dict]:
+        """Keep numeric samples only. Event text and response bodies stay on the device."""
+        samples = []
+        if not isinstance(events, list):
+            return samples
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            reading = event.get("reading") if isinstance(event.get("reading"), dict) else event
+            if not isinstance(reading, dict):
+                continue
+            try:
+                value = float(reading.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value):
+                continue
+            name = str(event.get("rid") or "").rsplit("/", 1)[-1][:80]
+            samples.append({"name": name, "value": value})
+        return samples
+
     async def list_sensors(self) -> dict:
-        """Debug: try GET on port + channel pollEvents to find sensor data."""
+        """Debug: status code and numeric sensor samples. No response bodies or exception text."""
         out: dict = {}
         client = await self._client_ctx()
         PORT_PATH = "/tfwopaque/portsmodel.Port:2.0.4/portsensor0"
 
         try:
             resp = await client.get(f"{self.base_url}{PORT_PATH}")
-            out["GET_port"] = {"status": resp.status_code, "body": resp.text[:500]}
-        except Exception as e:
-            out["GET_port"] = str(e)
+            out["GET_port"] = {"status": resp.status_code}
+        except Exception as exc:
+            out["GET_port"] = {"error": safe_error(exc)}
 
         try:
             ch = await self._rpc("/eventservice", "createChannel")
             ch_rid = (ch or {}).get("rid") if isinstance(ch, dict) else None
-            out["channel"] = ch_rid
-            if ch_rid:
+            out["channel"] = ch_rid if isinstance(ch_rid, str) else None
+            if isinstance(ch_rid, str):
                 for params in (None, [], {}):
+                    label = "none" if params is None else "list" if params == [] else "object"
                     try:
                         await self._rpc(ch_rid, "subscribe", params)
-                        out[f"subscribe_{params}"] = "ok"
-                    except Exception as e:
-                        out[f"subscribe_{params}"] = str(e)
-                events = await self._rpc(ch_rid, "pollEvents")
-                out["pollEvents"] = events
-        except Exception as e:
-            out["channel_error"] = str(e)
+                        out[f"subscribe_{label}"] = "ok"
+                    except Exception as exc:
+                        out[f"subscribe_{label}"] = safe_error(exc)
+                out["sensors"] = self._sensor_samples(await self._rpc(ch_rid, "pollEvents"))
+        except Exception as exc:
+            out["channel_error"] = safe_error(exc)
 
         return out
 
@@ -314,5 +360,5 @@ class RaritanPduDriver:
 
         readings = await asyncio.gather(*(read_inlet(n, rid) for n, rid in enumerate(inlet_rids, 1)))
         first = readings[0] if readings else {}
-        # Preserve the existing display fields; alerts use the nullable readings.
-        return {**{key: first.get(key) or 0.0 for key in ("voltage", "current", "watts")}, "readings": readings}
+        # Display fields and alert readings both preserve unknown values.
+        return {**{key: first.get(key) for key in ("voltage", "current", "watts")}, "readings": readings}

@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ["./index.html", "./src/**/*.{js,jsx}"],
+  content: ["./index.html", "./src/**/*.{js,jsx}", "!./src/.t1-test-temp/**"],
   theme: {
     extend: {
       borderRadius: {sm:"2px",DEFAULT:"2px",md:"2px",lg:"2px",xl:"2px","2xl":"2px","3xl":"2px"},

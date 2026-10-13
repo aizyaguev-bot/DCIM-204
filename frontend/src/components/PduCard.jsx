@@ -5,7 +5,7 @@ import {useAccounts} from "../accounts";
 export default function PduCard({ device, status, onOpen, onOutletAction }) {
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;
-  const totalW = status?.total_watts || 0;
+  const totalW = status?.reachable ? status.total_watts : null;
   const reachable = status ? status.reachable : null;
   const devStatus = reachable === false ? "offline" : reachable === true ? "online" : "unknown";
 
@@ -45,7 +45,7 @@ export default function PduCard({ device, status, onOpen, onOutletAction }) {
         <span>{outlets.length > 0 ? `${on} of ${outlets.length} outlets active` : "—"}</span>
         <div className="flex items-center gap-1.5">
           <EnvBadges status={status} />
-          <span className="font-mono font-bold text-white">{outlets.length > 0 ? `${(totalW / 1000).toFixed(2)} kW` : "—"}</span>
+          <span className="font-mono font-bold text-white">{totalW != null ? `${(totalW / 1000).toFixed(2)} kW${status.watts_complete === false ? " (partial)" : ""}` : "—"}</span>
         </div>
       </div>
     </section>
@@ -92,7 +92,7 @@ function OutletCell({ outlet, index, totalCount, onAction }) {
       <button
         ref={btnRef}
         onClick={handleClick}
-        title={`${outlet.label}\n${isOn ? `${outlet.watts}W` : outlet.state}`}
+        title={`${outlet.label}\n${isOn ? `${outlet.watts == null ? "\u2014" : outlet.watts + "W"}` : outlet.state}`}
         data-state={outlet.state} data-labelled={hasName}
         className={`pdu-outlet-cell ${cls} hover:brightness-125 transition`}
       >
@@ -114,7 +114,7 @@ function OutletCell({ outlet, index, totalCount, onAction }) {
             <div className="px-2 py-1.5 border-b border-zinc-800 mb-1">
               <div className="font-medium truncate">{outlet.label}</div>
               <div className="text-xs text-zinc-500">
-                Outlet {outlet.number} · {isOn ? `${outlet.watts}W / ${outlet.current}A` : outlet.state}
+                Outlet {outlet.number} · {isOn ? `${outlet.watts == null ? "\u2014" : outlet.watts + "W"} / ${outlet.current == null ? "\u2014" : outlet.current + "A"}` : outlet.state}
               </div>
             </div>
             {!canOperate ? <p className="text-xs text-zinc-500 px-2 py-1">Viewer · read only</p> : isOn ? (
