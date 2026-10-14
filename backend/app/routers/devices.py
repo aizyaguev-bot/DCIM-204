@@ -1,16 +1,50 @@
+from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import uuid, json, pathlib
 
 from ..database import get_db
-from ..models import Device
+from ..models import Device, PduMaintenance
+from ..pdu_locks import maintenance_lock
 from ..schemas import DeviceCreate, DeviceOut
 from ..crypto import encrypt, decrypt
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 _BACKEND_DIR = pathlib.Path(__file__).parent.parent.parent
+
+
+async def _rename_monitor_and_owner(db, old_name, new_name):
+    """Keep stable monitor IDs/history and owner assignments across inventory renames."""
+    from ..models import AssetOwner, PingTarget
+    from ..ping_monitor import server_identity
+    from ..engineers import owner_map
+    old, new = server_identity(old_name), server_identity(new_name)
+    if not old or not new:
+        return
+    target = await db.scalar(select(PingTarget).where(PingTarget.source_key == "server:" + old[0]))
+    if old[0] != new[0]:
+        collision = await db.scalar(select(PingTarget).where(PingTarget.source_key == "server:" + new[0]))
+        if collision:
+            raise HTTPException(409, "This server name already has a monitor. Choose a different name.")
+        owners = await owner_map(db)
+        if new[0] in owners:
+            raise HTTPException(409, "This server name already has an owner. Choose a different name.")
+        assignment = await db.get(AssetOwner, old[0])
+        if assignment or old[0] in owners:
+            destination = await db.get(AssetOwner, new[0])
+            if destination is None:
+                destination = AssetOwner(asset_key=new[0]); db.add(destination)
+            destination.engineer_id = assignment.engineer_id if assignment else None
+            destination.legacy_name = assignment.legacy_name if assignment else owners[old[0]]
+            if assignment is None:
+                assignment = AssetOwner(asset_key=old[0]); db.add(assignment)
+            # Tombstone prevents the old JSON fallback from resurrecting an owner.
+            assignment.engineer_id, assignment.legacy_name = None, ""
+    if target:
+        target.source_key, target.name = "server:" + new[0], new[1]
+        target.revision += 1  # Ignore a probe still in flight for the old identity.
 
 
 def _rename_server_ids_in_file(path: pathlib.Path, id_renames: dict[str, str]) -> None:
@@ -76,21 +110,40 @@ async def create_device(body: DeviceCreate, db: AsyncSession = Depends(get_db)):
     return dev
 
 
+async def _reject_if_in_maintenance(device_id: str, db: AsyncSession):
+    # The maintenance restore list is only meaningful for the PDU at the address it was taken from.
+    if await db.get(PduMaintenance, device_id, populate_existing=True):
+        raise HTTPException(409, "PDU is in maintenance mode; restore it first")
+
+
+@asynccontextmanager
+async def _locked_device(device_id: str, db: AsyncSession):
+    """Holds the PDU maintenance lock so the maintenance check and the commit cannot interleave with a shutdown."""
+    await _get_or_404(device_id, db)  # unknown ids never get a lock entry
+    async with maintenance_lock(device_id):
+        dev = await db.scalar(select(Device).where(Device.id == device_id).execution_options(populate_existing=True))
+        if not dev:
+            raise HTTPException(status_code=404, detail="Device not found")
+        yield dev
+
+
 @router.put("/{device_id}", response_model=DeviceOut)
 async def update_device(device_id: str, body: DeviceCreate, db: AsyncSession = Depends(get_db)):
-    dev = await _get_or_404(device_id, db)
-    dev.name = body.name
-    dev.kind = body.kind
-    dev.model = body.model
-    dev.ip = body.ip
-    dev.rack = body.rack
-    dev.port_count = body.port_count
-    dev.notes = body.notes
-    if body.username:
-        dev.username_enc = encrypt(body.username)
-    if body.password:
-        dev.password_enc = encrypt(body.password)
-    await db.commit()
+    async with _locked_device(device_id, db) as dev:
+        if body.ip != dev.ip or body.kind != dev.kind:
+            await _reject_if_in_maintenance(device_id, db)
+        dev.name = body.name
+        dev.kind = body.kind
+        dev.model = body.model
+        dev.ip = body.ip
+        dev.rack = body.rack
+        dev.port_count = body.port_count
+        dev.notes = body.notes
+        if body.username:
+            dev.username_enc = encrypt(body.username)
+        if body.password:
+            dev.password_enc = encrypt(body.password)
+        await db.commit()
     await db.refresh(dev)
     return dev
 
@@ -114,6 +167,8 @@ async def update_labels(
         and old_labels[port]
     }
 
+    for old_name, new_name in renames.items():
+        await _rename_monitor_and_owner(db, old_name, new_name)
     dev.labels_json = json.dumps(new_labels)
 
     if renames:
@@ -187,6 +242,8 @@ async def rename_opt(body: dict, db: AsyncSession = Depends(get_db)):
     if old_name.lower() == new_name.lower():
         raise HTTPException(status_code=400, detail="Names are identical")
 
+    await _rename_monitor_and_owner(db, old_name, new_name)
+
     result = await db.execute(select(Device))
     updated = []
     for dev in result.scalars().all():
@@ -206,9 +263,10 @@ async def rename_opt(body: dict, db: AsyncSession = Depends(get_db)):
 
 @router.delete("/{device_id}", status_code=204)
 async def delete_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    dev = await _get_or_404(device_id, db)
-    await db.delete(dev)
-    await db.commit()
+    async with _locked_device(device_id, db) as dev:
+        await _reject_if_in_maintenance(device_id, db)
+        await db.delete(dev)
+        await db.commit()
 
 
 async def _get_or_404(device_id: str, db: AsyncSession) -> Device:

@@ -8,7 +8,7 @@ from ..models import Device
 from ..schemas import KvmStatus, KvmPort
 from ..routers.devices import get_creds
 from ..routers.kvm_proxy import ensure_session
-from drivers.raritan_kvm import RaritanKvmDriver, RaritanKvmError
+from drivers.raritan_kvm import RaritanKvmDriver, RaritanKvmError, classify_error
 
 router = APIRouter(prefix="/api/kvms", tags=["kvms"])
 
@@ -36,9 +36,9 @@ async def _fetch_status(device_id: str, dev: Device) -> KvmStatus:
     username, password = get_creds(dev)
     driver = RaritanKvmDriver(dev.ip, username, password, model=dev.model)
     try:
-        reachable = await driver.ping()
-        if not reachable:
-            return KvmStatus(device_id=device_id, reachable=False, error="Cannot reach device")
+        error = await driver.probe()
+        if error is not None:
+            return KvmStatus(device_id=device_id, reachable=False, error=error)
         ports_raw = await driver.get_ports(port_count=dev.port_count)
         labels = json.loads(dev.labels_json or "{}")
         for p in ports_raw:
@@ -46,9 +46,10 @@ async def _fetch_status(device_id: str, dev: Device) -> KvmStatus:
             if key in labels:
                 p["label"] = labels[key]
         ports = [KvmPort(**p) for p in ports_raw]
-        return KvmStatus(device_id=device_id, reachable=True, ports=ports)
+        # Reachable, but a rejected sign-in is reported instead of a healthy port list.
+        return KvmStatus(device_id=device_id, reachable=True, ports=ports, error=driver.auth_error)
     except Exception as e:
-        return KvmStatus(device_id=device_id, reachable=False, error=str(e))
+        return KvmStatus(device_id=device_id, reachable=False, error=classify_error(e))
     finally:
         await driver.close()
 
@@ -60,14 +61,19 @@ async def _refresh_background(device_id: str, dev: Device):
     try:
         result = await _fetch_status(device_id, dev)
         _cache[device_id] = (time.monotonic(), result)
-        # Auto-clear in-use markers when KVM reports the port as no longer active.
+        # Auto-clear in-use markers only when the device's live status positively
+        # reports the port as not active. Sidebar/static ports never report
+        # "active", so their manual mark stays until mark-free or expiry.
         # Wait 2 min before clearing so the initial connection has time to establish.
         if result.reachable and device_id in _in_use:
             now = time.monotonic()
-            active_ports = {p.number for p in result.ports if p.status == "active"}
+            live_inactive = {
+                p.number for p in result.ports
+                if p.status_source == "live" and p.status != "active"
+            }
             to_clear = [
                 pnum for pnum, exp in list(_in_use[device_id].items())
-                if pnum not in active_ports and now - (exp - _IN_USE_TTL) > 120
+                if pnum in live_inactive and now - (exp - _IN_USE_TTL) > 120
             ]
             for pnum in to_clear:
                 _in_use[device_id].pop(pnum, None)

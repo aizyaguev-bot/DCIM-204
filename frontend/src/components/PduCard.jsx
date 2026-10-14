@@ -1,36 +1,40 @@
 import { useState, useRef, useEffect } from "react";
 import StatusDot from "./StatusDot";
+import {useAccounts} from "../accounts";
 
-export default function PduCard({ device, status, onOpen, onOutletAction }) {
+export default function PduCard({ device, status, inMaintenance = false, onOpen, onOutletAction }) {
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;
-  const totalW = status?.total_watts || 0;
+  const totalW = status?.reachable ? status.total_watts : null;
   const reachable = status ? status.reachable : null;
   const devStatus = reachable === false ? "offline" : reachable === true ? "online" : "unknown";
 
   return (
-    <div className="bg-zinc-900/70 border border-zinc-800 hover:border-zinc-700 rounded-xl transition">
-      <div className="px-4 py-3 flex items-center gap-3 border-b border-zinc-800/80">
-        <div className="w-9 h-9 rounded-md bg-zinc-800/70 border border-zinc-700 flex items-center justify-center text-zinc-300">
+    <section className="device-card" aria-label={device.name}>
+      <div className="device-card-header">
+        <div className="device-icon">
           <PduIcon />
         </div>
-        <button onClick={onOpen} className="flex-1 text-left group">
+        <button onClick={onOpen} className="flex-1 min-w-0 text-left group">
           <div className="flex items-center gap-2">
-            <span className="font-medium group-hover:text-nv-400 transition">{device.name}</span>
-            <StatusDot status={devStatus} />
+            <span className="device-name group-hover:text-nv-400 transition truncate">{device.name}</span>
+            <StatusDot status={devStatus} label />
           </div>
-          <div className="text-xs text-zinc-500 mt-0.5">{device.model} · {device.ip} · {device.rack}</div>
+          <div className="device-subtitle" title={`${device.model} · ${device.ip} · ${device.rack}`}>{device.model} · {device.ip} · {device.rack}</div>
         </button>
-        <button onClick={onOpen} className="text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded">Details →</button>
+        <button onClick={onOpen} className="device-details">Details →</button>
       </div>
+      {inMaintenance && (
+        <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs">In maintenance · restore power from the Maintenance column</div>
+      )}
       {status?.error && (
         <div className="px-4 py-2 bg-rose-500/10 border-b border-rose-500/30 text-rose-300 text-xs">⚠ {status.error}</div>
       )}
-      <div className="p-4">
+      <div className="px-4 py-3">
         {outlets.length > 0 ? (
           <div className="grid grid-cols-6 gap-1.5">
             {outlets.map((o, i) => (
-              <OutletCell key={o.number} outlet={o} index={i} totalCount={outlets.length}
+              <OutletCell key={o.number} outlet={o} index={i} totalCount={outlets.length} locked={inMaintenance}
                 onAction={a => onOutletAction(o.number, a)} />
             ))}
           </div>
@@ -40,18 +44,19 @@ export default function PduCard({ device, status, onOpen, onOutletAction }) {
           </div>
         )}
       </div>
-      <div className="px-4 py-2.5 border-t border-zinc-800/80 bg-zinc-950/40 text-xs text-zinc-400 flex items-center justify-between gap-2">
+      <div className="device-card-footer">
         <span>{outlets.length > 0 ? `${on} of ${outlets.length} outlets active` : "—"}</span>
         <div className="flex items-center gap-1.5">
           <EnvBadges status={status} />
-          <span className="tabular-nums text-zinc-200">{outlets.length > 0 ? `${(totalW / 1000).toFixed(2)} kW` : "—"}</span>
+          <span className="font-mono font-bold text-white">{totalW != null ? `${(totalW / 1000).toFixed(2)} kW${status.watts_complete === false ? " (partial)" : ""}` : "—"}</span>
         </div>
       </div>
-    </div>
+    </section>
   );
 }
 
-function OutletCell({ outlet, index, totalCount, onAction }) {
+function OutletCell({ outlet, index, totalCount, locked, onAction }) {
+  const {canOperate} = useAccounts();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ top: 0, left: 0, openUp: false });
   const btnRef = useRef(null);
@@ -90,8 +95,9 @@ function OutletCell({ outlet, index, totalCount, onAction }) {
       <button
         ref={btnRef}
         onClick={handleClick}
-        title={`${outlet.label}\n${isOn ? `${outlet.watts}W` : outlet.state}`}
-        className={`h-9 w-full rounded border ${cls} hover:brightness-125 transition text-[10px] font-mono flex items-center justify-center overflow-hidden px-1`}
+        title={`${outlet.label}\n${isOn ? `${outlet.watts == null ? "\u2014" : outlet.watts + "W"}` : outlet.state}`}
+        data-state={outlet.state} data-labelled={hasName}
+        className={`pdu-outlet-cell ${cls} hover:brightness-125 transition`}
       >
         <span className="truncate">{outlet.label || outlet.number}</span>
       </button>
@@ -111,14 +117,19 @@ function OutletCell({ outlet, index, totalCount, onAction }) {
             <div className="px-2 py-1.5 border-b border-zinc-800 mb-1">
               <div className="font-medium truncate">{outlet.label}</div>
               <div className="text-xs text-zinc-500">
-                Outlet {outlet.number} · {isOn ? `${outlet.watts}W / ${outlet.current}A` : outlet.state}
+                Outlet {outlet.number} · {isOn ? `${outlet.watts == null ? "\u2014" : outlet.watts + "W"} / ${outlet.current == null ? "\u2014" : outlet.current + "A"}` : outlet.state}
               </div>
             </div>
-            {isOn ? (
+            {!canOperate ? <p className="text-xs text-zinc-500 px-2 py-1">Viewer · read only</p> : locked ? (
+              <>
+                <p className="text-xs text-amber-300 px-2 py-1">PDU is in maintenance mode; restore it from the Maintenance column first</p>
+                {isOn && <MI onClick={() => { onAction("off"); setOpen(false); }} icon="⏻" label="Turn off" danger />}
+              </>
+            ) : isOn ? (
               <>
                 <MI onClick={() => { onAction("cycle"); setOpen(false); }} icon="↻" label="Power cycle" />
                 <MI
-                  onClick={() => { if (confirm(`Turn OFF ${outlet.label}?`)) { onAction("off"); setOpen(false); } }}
+                  onClick={() => { onAction("off"); setOpen(false); }}
                   icon="⏻" label="Turn off" danger />
               </>
             ) : (

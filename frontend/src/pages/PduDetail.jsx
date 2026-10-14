@@ -1,14 +1,22 @@
 import { Fragment, useState } from "react";
 import StatusDot from "../components/StatusDot";
+import {useAccounts} from "../accounts";
+import { formatMaintenanceTime } from "../components/MaintenanceColumn";
 
-export default function PduDetail({ device, status, onBack, onOutletAction, onDelete, onLabelsSave }) {
-  if (!device) return null;
-  const outlets = status?.outlets || [];
-  const on = outlets.filter(o => o.state === "on").length;
+const MAINTENANCE_BLOCKED = "PDU is in maintenance mode; restore it from the Maintenance column first";
 
+export default function PduDetail({ device, status, maintenance, maintenanceMode, onMaintenance, onBack, onOutletAction, onDelete, onLabelsSave }) {
+  const {canOperate,canAdmin} = useAccounts();
   const [editMode, setEditMode] = useState(false);
   const [draftLabels, setDraftLabels] = useState({});
   const [saving, setSaving] = useState(false);
+  if (!device) return null;
+  const outlets = status?.outlets || [];
+  const on = outlets.filter(o => o.state === "on").length;
+  const inMaintenance = !!maintenance;
+  const maintenanceReady = canOperate && maintenanceMode != null && maintenanceMode !== "unavailable";
+  const maintenanceHint = maintenanceMode === "unavailable" ? "Maintenance actions require a configured password"
+    : maintenanceMode == null ? "Maintenance state is not loaded yet" : undefined;
 
   function startEdit() {
     const current = {};
@@ -30,6 +38,26 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
   return (
     <main className="flex-1 px-6 py-5 max-w-[1600px] w-full mx-auto">
       <BackBar onBack={onBack} crumbs={["Dashboard", device.name]} />
+      {inMaintenance && (
+        <div role="status" className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 flex flex-wrap items-center gap-3">
+          <div className="flex-1 min-w-0 text-sm">
+            <div className="font-semibold text-amber-300">
+              In maintenance since {formatMaintenanceTime(maintenance.started_at)}{maintenance.started_by ? ` by ${maintenance.started_by}` : ""}
+            </div>
+            {maintenance.reason && <div className="text-zinc-300 break-words">{maintenance.reason}</div>}
+            <div className="text-xs text-zinc-400 mt-0.5">
+              {(maintenance.outlets_off || []).length} outlet{(maintenance.outlets_off || []).length === 1 ? "" : "s"} will be restored: {(maintenance.outlets_off || []).join(", ") || "none"}
+              {maintenance.failed?.length > 0 && <span className="text-rose-300"> · Failed outlets: {maintenance.failed.join(", ")}</span>}
+            </div>
+          </div>
+          {canOperate && (
+            <button type="button" disabled={!maintenanceReady} title={maintenanceHint} onClick={() => onMaintenance("restore")}
+              className="text-sm px-3.5 py-1.5 rounded bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium disabled:opacity-50">
+              Restore power
+            </button>
+          )}
+        </div>
+      )}
       <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-5">
         <section className="lg:col-span-2 bg-zinc-900/70 border border-zinc-800 rounded-xl">
           <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
@@ -45,7 +73,7 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-zinc-500">Outlets</div>
               {!editMode ? (
-                <button onClick={startEdit}
+                <button disabled={!canOperate} onClick={startEdit}
                   className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition">
                   <PencilIcon /> Edit Labels
                 </button>
@@ -71,7 +99,7 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
                 {outlets.map(o => {
                   const hasName = !/^Outlet \d+$/.test(o.label);
                   const isOn = o.state === "on";
-                  const hasWatts = o.watts > 0;
+                  const hasWatts = o.watts != null;
                   const borderCls = hasName
                     ? "border-nv-400/30 bg-nv-400/5"
                     : "border-rose-500/25 bg-rose-500/5";
@@ -99,12 +127,12 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
                           {!isOn
                             ? <span className="text-zinc-600">{o.state}</span>
                             : hasWatts
-                            ? <span className="text-zinc-400">{o.watts}W · {o.current}A</span>
+                            ? <span className="text-zinc-400">{o.watts == null ? "\u2014" : `${o.watts}W`} · {o.current == null ? "\u2014" : `${o.current}A`}</span>
                             : <span className="text-zinc-700">—</span>
                           }
                         </div>
                       </div>
-                      <PowerButtons outlet={o} onAction={a => onOutletAction(o.number, a)} />
+                      <PowerButtons outlet={o} locked={inMaintenance} onAction={a => onOutletAction(o.number, a)} />
                     </div>
                   );
                 })}
@@ -122,12 +150,12 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
             </Row>
             <Row label="Rack" v={device.rack} />
             <Row label="IP" v={device.ip} />
-            <Row label="Inlet voltage" v={status ? `${status.inlet_voltage} V` : "—"} />
+            <Row label="Inlet voltage" v={status?.reachable && status.inlet_voltage != null ? `${status.inlet_voltage} V` : "—"} />
             <Row label="Active outlets" v={outlets.length ? `${on} / ${outlets.length}` : "—"} />
-            <Row label="Total draw" v={status ? `${(status.total_watts/1000).toFixed(2)} kW` : "—"} />
-            {status?.inlet_voltage > 0 && status?.total_watts > 0 && (
+            <Row label="Total draw" v={status?.reachable && status.total_watts != null ? `${(status.total_watts/1000).toFixed(2)} kW${status.watts_complete === false ? " (partial)" : ""}` : "—"} />
+            {status?.inlet_voltage > 0 && status?.total_watts != null && (
               <Row label="Current">
-                <span className="tabular-nums">{(status.total_watts / status.inlet_voltage).toFixed(1)} A</span>
+                <span className="tabular-nums">{(status.total_watts / status.inlet_voltage).toFixed(1)} A (estimate){status.watts_complete === false ? " (partial)" : ""}</span>
                 <span className="text-zinc-600 text-xs ml-1">/ 16 A</span>
               </Row>
             )}
@@ -135,16 +163,29 @@ export default function PduDetail({ device, status, onBack, onOutletAction, onDe
           <EnvSensorsPanel status={status} />
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4 space-y-1">
             <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Quick actions</div>
-            <button className="w-full text-left text-sm px-3 py-2 rounded hover:bg-zinc-800 text-zinc-200"
+            <button disabled={!canOperate || inMaintenance} title={inMaintenance ? MAINTENANCE_BLOCKED : undefined}
+              className="w-full text-left text-sm px-3 py-2 rounded hover:bg-zinc-800 text-zinc-200 disabled:opacity-50 disabled:hover:bg-transparent"
               onClick={() => { if (confirm("Turn ON all outlets?")) outlets.forEach(o => o.state !== "on" && onOutletAction(o.number, "on")); }}>
               ⏻ Turn on all outlets
             </button>
-            <button className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/15 text-rose-300"
-              onClick={() => { if (confirm("Turn OFF all outlets on this PDU? This affects connected devices.")) outlets.forEach(o => o.state === "on" && onOutletAction(o.number, "off")); }}>
-              ⏻ Turn off all outlets
-            </button>
+            {inMaintenance ? (
+              <button type="button" disabled={!maintenanceReady} title={maintenanceHint}
+                className="w-full text-left text-sm px-3 py-2 rounded hover:bg-nv-400/15 text-nv-300 disabled:opacity-50 disabled:hover:bg-transparent"
+                onClick={() => onMaintenance("restore")}>
+                ⏻ Restore power
+              </button>
+            ) : (
+              <button type="button" disabled={!maintenanceReady} title={maintenanceHint}
+                className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/15 text-rose-300 disabled:opacity-50 disabled:hover:bg-transparent"
+                onClick={() => onMaintenance("shutdown")}>
+                ⏻ Turn off all outlets
+              </button>
+            )}
+            {canOperate && maintenanceMode === "unavailable" && (
+              <p className="text-[11px] text-amber-300 px-3">Turning off all outlets requires a configured maintenance password.</p>
+            )}
             <div className="border-t border-zinc-800 my-2" />
-            <button onClick={onDelete} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400">
+            <button disabled={!canAdmin} onClick={onDelete} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400">
               Remove device
             </button>
           </div>
@@ -200,17 +241,19 @@ function PencilIcon() {
   );
 }
 
-function PowerButtons({ outlet, onAction }) {
+function PowerButtons({ outlet, locked, onAction }) {
+  const {canOperate} = useAccounts();
+  if (!canOperate) return <span className="text-xs text-zinc-600">Read only</span>;
   const on = outlet.state === "on";
   return (
     <div className="flex gap-1">
       {on ? (
         <>
-          <button onClick={() => onAction("cycle")} title="Cycle" className="w-7 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-sm">↻</button>
-          <button onClick={() => { if (confirm(`Turn OFF outlet ${outlet.number}?`)) onAction("off"); }} title="Off" className="w-7 h-7 rounded border border-zinc-700 hover:border-rose-500/60 hover:bg-rose-500/10 text-zinc-300 text-sm">⏻</button>
+          <button disabled={locked} onClick={() => onAction("cycle")} title={locked ? MAINTENANCE_BLOCKED : "Cycle"} className="w-7 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-sm disabled:opacity-40 disabled:cursor-not-allowed">↻</button>
+          <button onClick={() => onAction("off")} title="Off" className="w-7 h-7 rounded border border-zinc-700 hover:border-rose-500/60 hover:bg-rose-500/10 text-zinc-300 text-sm">⏻</button>
         </>
       ) : (
-        <button onClick={() => onAction("on")} className="px-2 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-xs">on</button>
+        <button disabled={locked} onClick={() => onAction("on")} title={locked ? MAINTENANCE_BLOCKED : undefined} className="px-2 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-xs disabled:opacity-40 disabled:cursor-not-allowed">on</button>
       )}
     </div>
   );

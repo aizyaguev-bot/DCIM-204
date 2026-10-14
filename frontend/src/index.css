@@ -5,9 +5,149 @@
 html, body, #root { height: 100%; }
 
 body {
-  background: radial-gradient(circle at 15% 0%, #1a2a14 0%, #0a0a0c 35%, #0a0a0c 100%);
-  color: #e7e7ea;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: #0c0c0c;
+  color: #d4d4d4;
+  font-family: "NVIDIA Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+button:disabled { opacity: .5; cursor: not-allowed; }
+.auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.auth-panel { width: 400px; max-width: 100%; display: flex; flex-direction: column; gap: 18px; padding: 28px 24px; background: #161616; border: 1px solid #333333; border-radius: 2px; box-shadow: none; }
+.auth-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: #161616; border: 1px solid #333333; border-radius: 2px; }
+.auth-tabs button { height: 30px; border-radius: 2px; border: 1px solid transparent; color: #a7a7a7; font-size: 13px; font-weight: 700; }
+.auth-tabs button[aria-selected="true"] { color: #9fe040; border-color: #3f6a14; background: #1a2a0c; }
+.account-fields { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.account-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #a7a7a7; }
+.account-fields input:not([type="checkbox"]), .account-fields select { height: 40px; width: 100%; min-width: 0; padding: 0 12px; background: #0c0c0c; border: 1px solid #333333; border-radius: 2px; font-size: 14px; color: #fff; }
+.account-fields input[readonly] { color: #a7a7a7; }
+.account-fields .account-check { flex-direction: row; align-items: center; gap: 8px; color: #ccc; }
+.account-primary { min-height: 36px; padding: 8px 14px; border-radius: 2px; background: #76b900; color: #000; font-size: 13px; font-weight: 700; }
+.account-primary:hover { background: #88ce0c; }
+.account-secondary { padding: 6px 10px; border: 1px solid #333333; border-radius: 2px; color: #eee; font-size: 12px; white-space: nowrap; }
+.account-error { font-size: 12px; color: #ff8181; }
+.account-menu-anchor { position: relative; flex-shrink: 0; }
+.account-menu-toggle { height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid #333333; background: #161616; color: #fff; border-radius: 2px; font-size: 12px; }
+.account-menu-toggle span { color: #a7a7a7; }
+.account-menu { position: absolute; left: 0; top: 44px; width: 230px; display: flex; flex-direction: column; padding: 6px; background: #222222; border: 1px solid #333333; border-radius: 2px; box-shadow: none; z-index: 40; }
+.account-menu > button { height: 36px; padding: 0 10px; font-size: 13px; text-align: left; border-radius: 2px; }
+.account-menu > button:hover { background: #222; }
+.account-page { padding: 24px 16px; width: 100%; max-width: 1000px; }
+.account-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,380px),1fr)); gap: 16px; align-items: start; }
+.account-card { border: 1px solid #333333; border-radius: 2px; background: #161616; min-width: 0; }
+.account-card header { padding: 12px 16px; border-bottom: 1px solid #333333; }
+.account-card header h2 { color: #fff; font-weight: 700; }
+.account-card header p { color: #a7a7a7; font-size: 12px; margin-top: 2px; }
+.account-card > .account-fields { padding: 16px; }
+.account-modal { position: fixed; inset: 0; z-index: 80; background: #000a; display: flex; align-items: center; justify-content: center; padding: 16px; overflow-y: auto; }
+.account-modal .auth-panel { max-height: calc(100vh - 32px); overflow-y: auto; }
+.user-kpis { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 12px; margin-bottom: 20px; }
+.user-kpis > div { padding: 14px 16px; border: 1px solid #333333; border-radius: 2px; background: #161616; }
+.user-kpis span { display: block; color: #a7a7a7; font-size: 12px; }
+.user-kpis strong { display: block; color: #fff; font: 700 22px Consolas, monospace; margin-top: 4px; }
+.user-table-wrap { width: 100%; overflow-x: auto; border: 1px solid #333333; border-radius: 2px; background: #161616; }
+.user-table { width: 100%; min-width: 900px; border-collapse: collapse; text-align: left; font-size: 12px; }
+.user-table th { color: #a7a7a7; padding: 10px 12px; white-space: nowrap; }
+.user-table td { padding: 9px 12px; border-top: 1px solid #2a2a2a; }
+.user-table select { height: 30px; background: #0c0c0c; border: 1px solid #333333; border-radius: 2px; padding: 0 8px; color: #fff; }
+:focus-visible { outline: 2px solid #9fe040; outline-offset: 3px; }
+.app-header { display: flex; align-items: center; gap: 12px; padding: 15px 16px; min-width: 0; }
+.app-brand { text-align: left; flex: 1 0 215px; }
+.app-brand strong { display: block; color: #fff; font-size: 16px; font-weight: 700; }
+.app-brand span { display: block; color: #a7a7a7; font-size: 12px; margin-top: 2px; }
+.app-tabs { display: flex; gap: 4px; padding: 4px; min-width: 0; overflow-x: auto; border: 1px solid #333333; background: #161616; border-radius: 2px; }
+.app-tabs button { display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; white-space: nowrap; flex-shrink: 0; border: 1px solid transparent; border-radius: 2px; color: #a7a7a7; font-size: 13px; }
+.app-tabs button:hover { color: #fff; background: #191919; }
+.app-tabs button[aria-current="page"], .edit-toggle.active { color: #9fe040; border-color: #3f6a14; background: #1a2a0c; font-weight: 600; }
+.edit-toggle { flex-shrink: 0; border: 1px solid #333333; background: #161616; padding: 8px 13px; border-radius: 2px; color: #a7a7a7; font-size: 13px; }
+.app-subnav { display: flex; gap: 18px; padding: 0 16px; border-bottom: 1px solid #333333; overflow-x: auto; }
+.app-subnav button { padding: 12px 2px; color: #a7a7a7; font-size: 13px; white-space: nowrap; border-bottom: 2px solid transparent; }
+.app-subnav button[aria-current="page"] { border-color: #76b900; color: #9fe040; }
+.app-footer { padding: 18px 16px; margin-top: auto; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; color: #757575; font: 11px Consolas, monospace; }
+.device-page { flex: 1; width: 100%; padding: 20px 16px; }
+.device-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.device-filter { height: 32px; padding: 0 14px; border: 1px solid #333333; border-radius: 2px; font-size: 13px; color: #ccc; }
+.device-filter.active { background: #fff; color: #000; font-weight: 700; }
+.device-rack-filter { height: 32px; padding: 0 8px; max-width: 180px; background: #161616; border: 1px solid #333333; border-radius: 2px; color: #fff; font-size: 13px; }
+.device-count { margin-left: auto; color: #777; font-size: 12px; }
+.device-add { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; background: #76b900; color: #000; font-size: 13px; font-weight: 700; border-radius: 2px; white-space: nowrap; }
+.device-add:hover { background: #88ce0c; }
+.device-add span { font-size: 16px; line-height: 1; }
+.device-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); align-items: start; gap: 16px; margin-top: 16px; }
+.device-card { min-width: 0; background: #161616; border: 1px solid #333333; border-radius: 2px; box-shadow: none; }
+.device-card[data-in-use="true"] { border-color: #756122; }
+.device-card-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #2a2a2a; }
+.device-icon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 34px; height: 34px; border-radius: 2px; background: #161616; border: 1px solid #333333; color: #a7a7a7; }
+.device-name { font-size: 15px; font-weight: 700; color: #fff; }
+.device-subtitle { color: #a7a7a7; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-details { padding: 0; color: #a7a7a7; font-size: 12px; white-space: nowrap; }
+.device-details:hover { color: #9fe040; }
+.device-card-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 10px 16px; border-top: 1px solid #2a2a2a; font-size: 12px; color: #a7a7a7; }
+.device-note { padding: 6px 16px; background: #2a1c08; color: #f0c060; font-size: 12px; border-bottom: 1px solid #2a2a2a; }
+.pdu-outlet-cell { display: flex; align-items: center; justify-content: center; height: 30px; width: 100%; min-width: 0; padding: 0 6px; border-width: 1px; border-radius: 2px; overflow: hidden; font: 700 11px "JetBrains Mono", Consolas, monospace; }
+.pdu-outlet-cell[data-state="on"][data-labelled="true"] { background: #14200a; border-color: #3f6a14; color: #9fe040; }
+.pdu-outlet-cell[data-state="on"][data-labelled="false"] { background: #2a0c0c; border-color: #7a1e1e; color: #ff8181; }
+.kvm-port-tile { position: relative; display: flex; align-items: center; justify-content: center; height: 72px; padding: 14px 8px; min-width: 0; overflow: hidden; border: 1px solid #333333; border-radius: 2px; background: #0c0c0c; }
+.kvm-port-tile[data-mapped="true"] { background: #0f1808; border-color: #3f6a14; }
+.kvm-port-tile[data-active="true"] { box-shadow: none; }
+.kvm-port-tile:hover { filter: brightness(1.3); }
+.kvm-port-dot { position: absolute; top: 6px; right: 6px; height: 6px; width: 6px; border-radius: 50%; background: #76b900; }
+.kvm-port-dot[data-in-use="true"] { background: #ef9100; }
+.rack-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: #161616; border: 1px solid #333333; border-radius: 2px; padding: 16px 20px; margin-bottom: 16px; }
+.rack-kpi { padding: 0 20px; border-left: 1px solid #333333; }
+.rack-kpi:first-child { border: 0; }
+.rack-kpi strong { display: block; font: 700 22px "JetBrains Mono", Consolas, monospace; color: #fff; }
+.rack-kpi span { display: block; font-size: 12px; color: #a7a7a7; margin-top: 2px; }
+.rack-kpi small { font-size: 11px; color: #757575; }
+.rack-card { padding: 12px 16px 16px; border: 1px solid #333333; background: #161616; border-radius: 2px; box-shadow: none; font-family: "JetBrains Mono", Consolas, monospace; }
+.rack-card[data-status="offline"] { border-color: #5a1a1a; }
+.rack-card-header { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.rack-card-name { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 16px; font-weight: 700; color: #fff; text-align: left; }
+.rack-card-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rack-card-name small { font-size: 10px; color: #757575; }
+.rack-status { display: inline-flex; align-items: center; gap: 5px; padding: 3px 6px; border-radius: 2px; font-size: 10px; font-weight: 700; letter-spacing: .06em; color: #a7a7a7; background: #191919; }
+.rack-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: none; }
+.rack-status.online { color: #76b900; background: #172a08; }
+.rack-status.offline { color: #fe3f3f; background: #2a0c0c; }
+.rack-status.storage { color: #7dd3fc; background: #0c1a20; }
+.rack-meta { display: flex; gap: 7px; font-size: 10px; color: #a7a7a7; margin: 5px 0 10px; white-space: nowrap; overflow-x: auto; }
+.rack-shelves { background: #0c0c0c; border: 1px solid #2a2a2a; border-radius: 2px; padding: 8px; }
+.shelf-row { display: flex; align-items: stretch; gap: 8px; min-height: 44px; margin-bottom: 6px; }
+.shelf-index { display: flex; align-items: center; flex: 0 0 16px; font-size: 10px; color: #757575; }
+.shelf-grip { width: 12px; display: flex; align-items: center; color: #757575; cursor: grab; touch-action: none; }
+.shelf-content { display: flex; gap: 6px; flex: 1; min-width: 0; flex-wrap: wrap; }
+.shelf-empty { height: 18px; display: flex; gap: 8px; margin: 6px 0; align-items: center; }
+.shelf-empty .shelf-index { color: #333; }
+.shelf-empty-line { flex: 1; height: 1px; background: #1a1a1a; }
+.server-cell { display: flex; flex: 1 1 90px; align-items: center; gap: 7px; padding: 6px 10px; min-height: 42px; min-width: 0; border-radius: 2px; background: #141414; border: 1px solid #333; cursor: pointer; }
+.server-cell.on { background: linear-gradient(180deg, #1b2c10, #0f1808); border-color: #3f6a14; }
+.server-cell .server-led { height: 7px; width: 7px; background: #555; border-radius: 50%; flex-shrink: 0; }
+.server-cell.on .server-led { background: #76b900; box-shadow: none; }
+.server-name { font-size: 13px; font-weight: 700; color: #fff; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-meta { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 10px; color: #a7a7a7; min-width: 0; }
+.owner-pill { color: #c9b8ff; background: #241b45; border: 1px solid #4a3a8a; border-radius: 2px; padding: 0 3px; max-width: 85px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-state { font-size: 10px; font-weight: 700; color: #a7a7a7; }
+.server-cell.on .server-state { color: #76b900; }
+.equipment-cell { flex: 1 1 70px; min-width: 0; min-height: 42px; padding: 5px 8px; border-radius: 2px; border: 1px solid #3a3a3a; background: #161616; color: #e5e5e5; cursor: pointer; }
+.equipment-cell[data-type="switch"] { color: #7dd3fc; background: #0c1a20; border-color: #1f4050; }
+.equipment-cell[data-type="ups"] { color: #86efac; background: #0f1c10; border-color: #26502a; }
+.equipment-type { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; opacity: .65; }
+.equipment-name { display: block; font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.equipment-serial { display: block; font-size: 9px; color: #7a8a8f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shelf-chiller { width: 48px; flex-shrink: 0; font-size: 9px; color: #7dd3fc; display: flex; align-items: center; justify-content: center; }
+.rack-power { margin-top: 12px; font-size: 11px; color: #757575; }
+.rack-power-label { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.rack-power-track { height: 6px; border-radius: 2px; background: #1a1a1a; overflow: hidden; }
+.rack-power-track div { height: 100%; border-radius: inherit; transition: width .4s; }
+@media (max-width: 1100px) {
+  .app-header { flex-wrap: wrap; }
+  .app-tabs { flex-basis: 100%; }
+}
+@media (max-width: 580px) {
+  .rack-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 14px 4px; row-gap: 18px; }
+  .rack-kpi { padding: 0 12px; }
+  .rack-kpi:nth-child(3) { border: 0; }
+  .rack-kpi strong { font-size: 19px; }
+  .rack-card { padding: 12px; }
 }
 
 .screen { font-family: "JetBrains Mono", Consolas, ui-monospace, monospace; overflow: hidden; position: relative; }
@@ -16,10 +156,71 @@ body {
   background: repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 3px);
   pointer-events: none;
 }
-.screen.linux-term  { background: #0a0a0a; color: #c8f779; }
-.screen.blank       { background: #0a0a0a; color: #333; }
+.screen.linux-term  { background: #0c0c0c; color: #c8f779; }
+.screen.blank       { background: #0c0c0c; color: #333; }
 
 *::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-track { background: transparent; }
-*::-webkit-scrollbar-thumb { background: #2a2a2e; border-radius: 4px; }
+*::-webkit-scrollbar-thumb { background: #2a2a2e; border-radius: 2px; }
 *::-webkit-scrollbar-thumb:hover { background: #3a3a3e; }
+
+/* v3 Kaizen handoff: flat surfaces, neutral equipment, underline navigation. */
+.app-header { min-height: 56px; gap: 24px; padding: 0 20px; background: #000; border-bottom: 1px solid #333; }
+.app-brand { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+.app-brand img { flex-shrink: 0; }
+.app-brand > i { width: 1px; height: 20px; background: #333; }
+.app-brand > span { margin: 0; line-height: 1.15; }
+.app-brand strong { font-size: 14px; }
+.app-brand small { display: block; color: #a7a7a7; font-size: 11px; margin-top: 2px; }
+.app-tabs { gap: 2px; padding: 0; height: 56px; align-items: stretch; border: 0; border-radius: 0; background: transparent; scrollbar-width: none; flex: 1; }
+.app-tabs button { height: auto; padding: 0 12px; border: 0; border-top: 2px solid transparent; border-bottom: 2px solid transparent; border-radius: 0; font-size: 14px; }
+.app-tabs button[aria-current="page"] { background: transparent; color: #fff; border-bottom-color: #76b900; font-weight: 700; }
+.app-tabs button:hover { background: #111; }
+.app-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
+.edit-toggle, .account-menu-toggle { height: 32px; padding: 0 12px; background: transparent; color: #fff; }
+.edit-toggle.active { background: #76b900; color: #000; border-color: #76b900; }
+.app-subnav { height: 40px; padding: 0 20px; background: #000; gap: 4px; }
+.app-subnav button { padding: 0 12px; }
+.app-subnav button[aria-current="page"] { color: #fff; }
+.account-menu { left: auto; right: 0; top: 40px; width: 240px; box-shadow: 0 4px 12px #0008; }
+.device-page { padding: 24px; }
+.device-card, .rack-card, .account-card { background: #161616; }
+.device-icon { background: #161616; border-color: #333; }
+.device-card-footer { border-color: #2a2a2a; }
+.device-card [role="img"], .rack-status::before, .server-led { box-shadow: none !important; }
+.pdu-outlet-cell { background: #0c0c0c; border-color: #313131; color: #757575; }
+.pdu-outlet-cell[data-labelled="true"][data-state="on"] { background: #1c2a0a; border-color: #3c5c10; color: #fff; }
+.pdu-outlet-cell[data-labelled="true"][data-state="off"] { background: #1f1f1f; border-color: #4b4b4b; color: #a7a7a7; }
+.pdu-outlet-cell[data-labelled="false"][data-state="on"] { background: #0c0c0c; border-color: #313131; color: #757575; }
+.kvm-port-tile[data-mapped="true"] { background: #1c2a0a; border-color: #3c5c10; }
+.kvm-port-tile[data-active="true"] { box-shadow: none; }
+.kvm-port-tile span.text-nv-300 { color: #fff; }
+.rack-card { font-family: "NVIDIA Sans", ui-sans-serif, system-ui, sans-serif; }
+.rack-meta, .rack-power, .shelf-index, .equipment-serial { font-family: "JetBrains Mono", Consolas, monospace; }
+.rack-status { background: transparent !important; border: 1px solid currentColor; text-transform: none; }
+.rack-status.storage { color: #a7a7a7; }
+.rack-shelves { background: #0c0c0c; border-color: #2a2a2a; }
+.server-cell, .equipment-cell, .equipment-cell[data-type="switch"], .equipment-cell[data-type="ups"] { background: #1f1f1f; border-color: #4b4b4b; color: #fff; }
+.server-cell.on { background: #1c2a0a; border-color: #3c5c10; }
+.owner-pill { color: #ccc; background: #222; border-color: #4b4b4b; }
+.equipment-serial, .shelf-chiller { color: #a7a7a7; }
+.rack-power-track div { box-shadow: none !important; }
+.rack-power-label > span:last-child { color: #fff; }
+.page-intro { padding: 24px 24px 0; }
+.page-intro h1 { font-size: 24px; line-height: 1.2; font-weight: 700; color: #fff; }
+.page-intro p { color: #a7a7a7; font-size: 14px; margin-top: 6px; }
+.edit-mode-notice { border: 1px solid #76b900; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; background: #161616; }
+@media (max-width: 1200px) {
+  .app-header { flex-wrap: wrap; gap: 0 12px; padding-top: 12px; }
+  .app-tabs { order: 3; flex-basis: 100%; height: 44px; margin-top: 10px; }
+}
+@media (max-width: 580px) {
+  .app-header { padding-left: 12px; padding-right: 12px; }
+  .app-brand { gap: 8px; }
+  .app-brand img { width: 78px; height: 15px; }
+  .app-brand strong { font-size: 13px; }
+  .account-menu-toggle { max-width: 140px; font-size: 11px; gap: 4px; padding: 0 6px; }
+  .account-menu-toggle span { display: none; }
+  .device-page { padding: 20px 12px; }
+  .page-intro { padding: 20px 12px 0; }
+}

@@ -2,6 +2,7 @@ import { cloneElement, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import JsBarcode from "jsbarcode";
 import { loadInventory, updateInventory, locationCode, parseLocationCode, rackCode, mainStorageCode, MAIN_STORAGE } from "../api/inventory";
+import {useAccounts} from "../accounts";
 
 const input = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-nv-400 disabled:opacity-50";
 const primary = "rounded-lg px-4 py-2.5 text-sm font-semibold bg-nv-400 text-zinc-950 hover:bg-nv-300 disabled:opacity-40";
@@ -78,12 +79,13 @@ function ShelfLabels({ racks, onClose }) {
 }
 
 export default function ScanView() {
+  const {canOperate} = useAccounts();
   const [snapshot, setSnapshot] = useState(null);
   const [selected, setSelected] = useState(null);
   const [editRevision, setEditRevision] = useState(null);
   const [destination, setDestination] = useState(emptyLocation);
   const [destinationChosen, setDestinationChosen] = useState(false);
-  const [autoRegister, setAutoRegister] = useState(true);
+  const [autoRegister, setAutoRegister] = useState(canOperate);
   const [scan, setScan] = useState("");
   const [unknown, setUnknown] = useState("");
   const [matches, setMatches] = useState([]);
@@ -166,7 +168,7 @@ export default function ScanView() {
     } else if (result.data.matches.length > 1) {
       setMatches(result.data.matches);
       setError("This code matches multiple items. Select the correct item by ID and location; nothing has been changed.");
-    } else if (autoRegister && validLocation(target, result.data.racks)) {
+    } else if (canOperate && autoRegister && validLocation(target, result.data.racks)) {
       try {
         const saved = await updateInventory("", { code, name: Array.from(code).slice(0, 160).join(""), type: "other", ...target }, result.revision);
         if (!mounted.current) return;
@@ -228,7 +230,7 @@ export default function ScanView() {
         <button type="submit" className={primary} disabled={busy || !scan.trim()}>{busy ? "Please wait…" : "Find barcode"}</button>
         <button type="button" className={secondary} onClick={() => inputRef.current?.focus()} disabled={busy}>Focus scanner</button>
       </form>
-      <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="accent-nv-400" checked={autoRegister} disabled={busy} onChange={e => { setAutoRegister(e.target.checked); inputRef.current?.focus(); }}/>Automatically register new equipment</label>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="accent-nv-400" checked={autoRegister} disabled={busy || !canOperate} onChange={e => { setAutoRegister(e.target.checked); inputRef.current?.focus(); }}/>Automatically register new equipment</label>
       <p className="text-xs text-zinc-400">{autoRegister ? "New barcodes are saved immediately at your selected destination, using the barcode as the name and type Other. Edit these details later in DCIM. Existing equipment moves still require Save." : "Unknown barcodes can be linked to existing equipment or registered manually. Moves require Save."}</p>
       <p className="text-xs text-zinc-400">USB / Bluetooth keyboard scanner: use English keyboard mode and an Enter or Tab suffix. Shelf 01 is the top shelf.</p>
     </section>
@@ -243,7 +245,7 @@ export default function ScanView() {
         <form onSubmit={saveLocation} className="space-y-4"><h3 className="font-medium">Confirm or move equipment</h3><LocationFields value={destination} onChange={selectDestination} racks={racks} disabled={busy}/>
           {!!neighbors.length && <p className="text-xs text-amber-300">Also on this shelf: {neighbors.map(i => `${i.name}${i.shelf_position ? ` (${i.shelf_position})` : ""}`).join(", ")}. Check that the destination has space.</p>}
           <p className="text-sm text-zinc-400">Save to confirm <strong className="text-zinc-200">{selected.name}</strong> is at <strong className="text-zinc-200">{where(destination)}</strong>.</p>
-          <button className={primary} type="submit" disabled={busy || !locationValid}>Save and confirm location</button>
+          <button className={primary} type="submit" disabled={busy || !canOperate || !locationValid}>Save and confirm location</button>
         </form>
       </section>
       <section className="rounded-2xl border border-zinc-800 p-5"><h2 className="font-medium mb-1">Tracking history</h2><p className="text-xs text-zinc-500 mb-4">Latest {snapshot?.data.history_limit || 100} recorded actions. Scan confirmations and moves from DCIM or 3D Twin.</p>
@@ -259,13 +261,13 @@ export default function ScanView() {
         <form className="space-y-3" onSubmit={e => { e.preventDefault(); run(async () => { const result = await updateInventory(`/${encodeURIComponent(linkId)}/barcode`, { code: unknown }, editRevision); if (mounted.current) { acceptSaved(result); setMessage(destinationChosen ? "Barcode linked. Review the selected destination, then save to confirm the move. The saved location has not changed yet." : "Barcode linked to existing equipment. Its serial number and location were kept."); } }); }}>
           <h3 className="font-medium">Link to existing equipment</h3><p className="text-xs text-zinc-400">Choose the existing rack item to keep one equipment record.</p>
           <select aria-label="Existing equipment" className={input} disabled={busy} value={linkId} onChange={e => setLinkId(e.target.value)}><option value="">Choose equipment…</option>{items.filter(i => !i.barcode).map(i => <option key={i.id} value={i.id}>{i.name} · {i.rack} / {i.u || "?"} · {i.id}</option>)}</select>
-          <button className={secondary} disabled={busy || !linkId}>Link barcode</button>
+          <button className={secondary} disabled={busy || !canOperate || !linkId}>Link barcode</button>
         </form>
         <form className="space-y-3" onSubmit={e => { e.preventDefault(); run(async () => { const result = await updateInventory("", { code: unknown, name: name.trim(), type, ...destination }, editRevision); if (mounted.current) { acceptSaved(result); setMessage("Equipment registered and its location saved in DCIM."); } }); }}>
           <h3 className="font-medium">Register new equipment</h3><div className="grid grid-cols-2 gap-3"><Field label="Equipment name"><input required maxLength={160} className={input} disabled={busy} value={name} onChange={e => setName(e.target.value)}/></Field><Field label="Type"><select className={input} value={type} disabled={busy} onChange={e => setType(e.target.value)}>{types.map(t => <option key={t}>{t}</option>)}</select></Field></div>
           <LocationFields value={destination} onChange={selectDestination} racks={racks} disabled={busy}/>
           {!racks.length && <p className="text-xs text-amber-300">Add a rack in DCIM before registering equipment.</p>}
-          <button className={primary} disabled={busy || !name.trim() || !locationValid}>Register equipment</button>
+          <button className={primary} disabled={busy || !canOperate || !name.trim() || !locationValid}>Register equipment</button>
         </form>
       </div>
     </section>}

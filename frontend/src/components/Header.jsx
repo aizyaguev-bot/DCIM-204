@@ -1,47 +1,35 @@
-import { useState, useEffect } from "react";
-
-export default function Header({ search, setSearch, onAdd, onHome }) {
-  const [version, setVersion] = useState("");
-
-  useEffect(() => {
-    fetch("/api/version")
-      .then(r => r.json())
-      .then(d => setVersion(d.version))
-      .catch(() => {});
-  }, []);
-
-  return (
-    <header className="border-b border-zinc-800/80 bg-zinc-950/70 backdrop-blur sticky top-0 z-30">
-      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap sm:flex-nowrap items-center gap-4">
-        <button onClick={onHome} className="flex items-center gap-2 group shrink-0">
-          <div className="w-8 h-8 rounded-md bg-nv-400/20 border border-nv-400/40 flex items-center justify-center">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#76b900" strokeWidth="2.5">
-              <path d="M3 12h3l2-7 4 14 2-7h7" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </div>
-          <div className="leading-tight text-left">
-            <div className="font-semibold tracking-tight group-hover:text-nv-400 transition">Lab Manager</div>
-            <div className="text-[11px] text-zinc-500 -mt-0.5">Raritan PDU + KVM control</div>
-          </div>
-        </button>
-        <div className="order-last sm:order-none basis-full sm:basis-auto sm:flex-1 min-w-0 max-w-xl mx-auto relative">
-          <svg className="absolute left-3 top-2.5 text-zinc-500" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="11" cy="11" r="7"/><path d="m21 21-3.5-3.5"/>
-          </svg>
-          <input value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search devices, outlets, ports, IPs…"
-            className="w-full bg-zinc-900/70 border border-zinc-800 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-nv-400/60 placeholder:text-zinc-500" />
-        </div>
-        <button onClick={onAdd} className="bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium text-sm px-3.5 py-2 rounded-lg flex items-center gap-1.5 shrink-0 ml-auto sm:ml-0">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 5v14M5 12h14"/></svg>
-          Add Device
-        </button>
-        {version && (
-          <span className="hidden md:inline text-[11px] text-zinc-600 whitespace-nowrap font-mono" title="deployed commit">
-            {version}
-          </span>
-        )}
-      </div>
-    </header>
-  );
+import { useAccounts, UserMenu } from "../accounts";
+import nvidiaLogo from "../assets/nvidia-logo.svg";
+const tabs = [
+  ["dashboard", "Dashboard", "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"],
+  ["racks", "Racks", "M4 3h16v7H4zM4 14h16v7H4zM7 6h.01M7 17h.01"],
+  ["inventory", "Inventory", "M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01"],
+  ["power", "Power", "m13 2-9 12h8l-1 8 9-12h-8z"],
+  ["consoles", "Consoles", "M3 4h18v13H3zM8 21h8M12 17v4"],
+  ["scan", "Scan & Track", "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5M8 8v8M12 8v8M16 8v8"],
+  ["monitoring", "Ping Monitor", "M2 12h4l3-8 6 16 3-8h4"],
+  ["twin", "3D Twin", "m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5M12 12v10"],
+  ["admin", "Admin", "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"],
+  ["changelog", "Changelog", "M12 20h9M16 3l5 5-12 12-6 1 1-6z"],
+];
+export default function Header({ activeTab, onNavigate, summary, editMode, onEditChange, onHome, onAccount, onUsers }) {
+  const {canOperate} = useAccounts();
+  return <header className="app-header">
+    <button className="app-brand" onClick={onHome} title={summary || "Open Dashboard"}>
+      <img src={nvidiaLogo} alt="NVIDIA" width="104" height="20"/><i aria-hidden="true"/>
+      <span><strong>Lab Manager</strong><small>Lab 204 · Yokneam</small></span>
+    </button>
+    <nav className="app-tabs" aria-label="Main navigation">
+      {tabs.map(([id, label]) => <button key={id} onClick={() => onNavigate(id)} aria-current={activeTab === id ? "page" : undefined}>
+        {label}
+      </button>)}
+    </nav>
+    <div className="app-header-actions">
+      {canOperate && ["racks", "inventory"].includes(activeTab) && <button className={`edit-toggle ${editMode ? "active" : ""}`}
+        aria-pressed={editMode} title="Edit rack layout and inventory" onClick={() => onEditChange(!editMode)}>
+        {editMode ? "✓ Done" : "✎ Edit"}
+      </button>}
+      <UserMenu onAccount={onAccount} onUsers={onUsers}/>
+    </div>
+  </header>;
 }

@@ -2,6 +2,178 @@
 
 ---
 
+## v2.37.2 — 2026-10-14 — KVM console in browsers that opened it before
+
+### Fixed
+- The KVM console could stay white after updating, because the browser kept
+  the broken copy of the KVM's scripts from the earlier version. The KVM sends
+  them without cache headers, so browsers reuse them for months. Console pages
+  and scripts now load from a new address, are never cached, and the browser's
+  "has it changed?" and partial-download requests are no longer passed on to
+  the KVM, so the browser always receives a complete, matching script.
+- While the KVM reports no picture, the console says that the server's screen
+  is probably asleep or off, and that moving the mouse or pressing a key wakes
+  it.
+
+---
+
+## v2.37.1 — 2026-10-14 — KVM console fix
+
+### Fixed
+- The KVM console opened as a white page. The proxy changed single quotes to
+  double quotes inside the KVM's own scripts, which broke jQuery. Rewritten
+  links now keep their original quotes.
+- With user accounts enabled, the console's live connection (WebSocket) was
+  always refused because `ws://` was compared with the browser's `http://`
+  origin. Same-site connections are accepted again; other sites are still
+  refused.
+- With user accounts enabled, the KVM web client's own requests were refused
+  for a missing CSRF header that it cannot send. Requests through the KVM
+  proxy now need an Operator session and a same-site `Origin` header instead.
+
+---
+
+## v2.37.0 — 2026-10-13 — PDU maintenance mode, KVM fixes and twin daily-tracking view
+
+### Added
+- **What's new** window: after an update, each browser shows once the changelog
+  sections added since the version it last saw, with a link to the full
+  Changelog tab.
+- Power tab **Maintenance** column. "Turn off all outlets" puts a PDU in
+  maintenance mode. It asks for a reason and the user's password, or the shared
+  Lab Manager password in legacy mode, and records which outlets were on.
+  "Restore power" switches exactly those outlets back on. Every shutdown,
+  restore and wrong-password attempt is kept in a maintenance log, and the last
+  15 entries are shown in the column. API: `GET /api/pdus/maintenance`,
+  `POST /api/pdus/{id}/maintenance/shutdown`, `POST /api/pdus/{id}/maintenance/restore`.
+- While a PDU is in maintenance, outlet on/cycle requests return 409 and are
+  disabled in the PDU card and the detail page. Changing its IP or kind, or
+  deleting it, also returns 409.
+- Wrong maintenance passwords are throttled separately from login
+  (10 failures per 5 minutes; 429 with `Retry-After`).
+- 3D twin: an **Attention** tab and a kiosk dock list leaks, unreachable PDUs
+  and KVMs, high temperature, high rack load, OPTs that are off, in an unknown
+  state or missing from the DCIM labels, auto-placed or unplaced items,
+  unmapped racks and equipment not scanned for over 30 days, sorted by
+  severity. Clicking an entry focuses its rack or item. Identity shows when the
+  device was last seen and how many trackers it has. Heat is off by default and
+  remembered per browser. Refreshes keep the panel scroll position and any
+  open edit.
+
+### Fixed
+- Restoring a PDU from maintenance only counts outlets that the PDU reports as
+  on. Outlets missing from the status reading stay on the restore list instead
+  of ending maintenance mode while still off.
+- KVM ports marked in use on LX II and other units without live port status
+  no longer lose the mark after two minutes. The mark stays until Mark free
+  or expiry.
+- A KVM that rejects the saved credentials now reports "Device API
+  authentication failed" instead of appearing online with generic ports, and
+  stops after the first refused sign-in.
+- 3D twin labels, search results and inventory rows escape device names.
+
+### Notes
+- Maintenance mode is not a physical lockout. Disconnect power physically
+  before hands-on work. Without accounts and without `LAB_MANAGER_PASSWORD`,
+  maintenance actions are disabled.
+
+---
+
+## Unreleased — Unknown power readings and VM operations tools
+
+### Added
+- `scripts/diagnose-device-api.py`: a read-only VM check per PDU/KVM (DNS,
+  route, TCP 443, TLS, HTTPS, proxy environment of the running backend) that
+  separates connection failures from slow responses. It sends no credentials
+  and makes no device changes. See `docs/device-api-diagnostics.md`.
+- `scripts/lab-service.py`: `status` (backend PIDs, version, monitoring and
+  alert state, inventory counts), idempotent `start`, safe `restart`, and an
+  optional `@reboot` start (`install-boot` / `remove-boot`) that refuses to add
+  a second boot mechanism and cannot start a second backend.
+- `scripts/alerts-setup.py`: check, configure SMTP from approved values, send
+  one test mail and show the relay's reply, enable alerts only after a matching
+  successful test, verify the running worker, and an isolated alert simulation.
+- `docs/vm-runbook.md`: ordered VM steps for install, diagnosis, SMTP, alerts,
+  boot start and before/after inventory comparison.
+
+### Fixed
+- Missing or invalid PDU readings are shown as unknown instead of 0 W/V/A.
+  Totals that include unknown outlets are marked partial; measured inlet
+  current is kept when only outlet watts are incomplete.
+- PDU and KVM API failures report fixed failure classes (authentication, HTTP
+  status, connection/read/pool timeout, DNS, refused, unreachable, TLS, proxy).
+  Device response bodies, RPC messages and raw connection errors are no longer
+  returned by the API or included in monitor details and alert emails. The PDU
+  sensor debug view returns status codes and numeric samples only.
+
+---
+
+## Unreleased — KVM console launch recovery
+
+### Fixed
+- When a browser refuses a new KVM tab, a port click opens the console inside
+  the application instead of silently doing nothing. Closing it releases that
+  port's in-use marker and keeps the existing application view intact.
+- KVM cards and detail pages explain why Viewer accounts cannot open consoles.
+  Operator/Admin permissions and saved device connections are unchanged.
+
+---
+
+## v3.1.1 — 2026-10-01
+
+### Added
+- Optional email alerts for persistent PDU/KVM API-check failures, with one
+  notification per episode and a recovery message. Existing device-check schedules
+  remain in use; SMTP configuration is still required to enable delivery.
+
+### Fixed
+- Monitor diagnostics distinguish connection, read and connection-pool timeouts.
+  Connection failures no longer imply that the device replied too slowly.
+
+---
+
+## v3.1.0 — 2026-10-01
+
+### Added
+- An engineer directory seeded with the requested ten names, and Owner selection
+  in Inventory, rack editors and the Twin. Admins can add, rename or disable
+  engineers; Operators can assign owners. Existing ownership remains preserved.
+- Reset View, Fit Lab and Focus Selection controls, with Hebrew navigation hints.
+
+### Fixed
+- Twin mouse input now uses the bundled official OrbitControls. Rotation, screen
+  pan and bounded zoom share one controller; releasing or cancelling a drag stops
+  navigation. Equipment only moves through explicit Edit → Move → destination.
+- Monitor names follow inventory changes and can use a saved display alias.
+  Server renames preserve monitoring history, port associations and ownership.
+- PDU checks have sufficient time for multiple outlet requests and expose safe
+  failure details instead of hiding the reason behind Check failed.
+- KVM sign-in redirects to the same-origin viewer proxy; its HTTP/WebSocket
+  traffic no longer requires opening the device's certificate warning page.
+
+---
+
+## v3.0.0 — 2026-09-30
+
+### Added
+- Real accounts with Admin, Operator and Viewer permissions, account settings,
+  temporary passwords and user management. Activation reuses the existing site
+  password for the first administrator and preserves the existing inventory.
+- Optional email alerts for observed network outages and configured PDU inlet
+  limits. Delivery remains disabled until SMTP and thresholds are configured.
+- The Linux installer can activate accounts, test sign-in before changing the
+  running site, and restore the previous login configuration on failure.
+
+### Changed
+- Integrated the v3 design into the existing application. Dashboard remains the
+  default page; Racks, Inventory, monitoring, console controls and 3D Twin remain
+  connected to the real APIs.
+- Storage racks appear on Dashboard with their saved equipment. Compute rack
+  placeholders do not create additional Dashboard cards for Rack 6 or Rack 7.
+- Rack editing is explicit; opening a rack no longer adds cooling assignments.
+
+---
+
 ## v2.36.0 — 2026-07-30
 
 ### Fixed
@@ -21,7 +193,7 @@
 - **Sensor name matching** — flexible keyword matching (handles `temperature1`, `relativeHumidity`, `leakDetector` etc. across Raritan firmware versions)
 
 ### Added
-- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:FTSW2026 http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
+- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:YOUR_SITE_PASSWORD http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
 
 ---
 

@@ -20,6 +20,12 @@
   const CABLE_COLORS = ['#d92b2b', '#d92b2b', '#1a1a1a', '#d92b2b', '#22c1a6', '#d92b2b', '#f4f4f5'];
   const EQUIP_LABEL = { switch: 'Switch', computer: 'Computer', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
   const POLL_MS = 15000;
+  // attention list: severity:kind priority (computeAttention sorts by this, then by setup)
+  const SEVERITIES = ['crit', 'warn', 'info'];
+  const SEV_LABEL = { crit: 'Critical', warn: 'Warning', info: 'Info' };
+  const SEV_COLOR = { crit: '#f43f5e', warn: '#fbbf24', info: '#38bdf8' };
+  const ATTN_ORDER = ['crit:leak', 'crit:pdu-down', 'crit:load', 'crit:temp', 'warn:opt-off', 'warn:opt-unknown', 'warn:kvm-down', 'warn:load', 'warn:temp', 'warn:unplaced', 'warn:unmapped-rack', 'warn:not-in-dcim', 'info:offline', 'info:stale', 'info:auto-u', 'info:mapping'];
+  const STALE_DAYS = 30, ATTN_TEMP_CRIT = 30, ATTN_TEMP_WARN = 27, ATTN_LOAD_CRIT = 0.95, ATTN_LOAD_WARN = 0.8;
 
   const LS = {
     get(k, d) { try { const v = JSON.parse(localStorage.getItem('twin.' + k)); return v == null ? d : v; } catch { return d; } },
@@ -35,9 +41,10 @@
     filters: { zone: '', setup: '', statuses: new Set(STATUSES), onlyLow: false, q: '' },
     dirty: false,                        // unsaved edits to S.data (draft mirrored in localStorage)
     settings: LS.get('settings', { url: '', pass: '', poll: true }),
-    live: { connected: false, devices: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
+    live: { connected: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
-    heat: LS.get('heat', true), embed: /[?&]embed=1/.test(location.search), editMode: LS.get('editMode', false), kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
+    attention: [], attnFilter: LS.get('attnFilter', 'all'), attnDockCollapsed: LS.get('attnDockCollapsed', false), attnDockAll: false, detailStale: false, labelHover: null,
+    heat: LS.get('heat', false), embed: /[?&]embed=1/.test(location.search), editMode: false, kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
   };
@@ -50,70 +57,50 @@
   const scene = new THREE.Scene();
   scene.fog = null;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
-  // ── MapControls: navigation like facility-management / digital-twin viewers (dollhouse style)
-  //   one finger / left-drag   → orbit around the point you touched (object or floor) — the room turns under your finger
-  //   two fingers / right-drag → grab the floor and slide it (the touched point stays under the finger)
-  //   pinch / wheel            → zoom towards the point under the fingers / cursor
-  //   two-finger twist         → rotate around the pinch point · tap a rack → fly to it
-  //   Keeps OrbitControls' `.target` API (camera looks at target) so tweens / fly-to / buttons work unchanged.
-  class MapControls {
-    constructor(camera, dom, pickFn) {
-      this.camera = camera; this.dom = dom; this.pick = pickFn; this.target = new THREE.Vector3(0, 1, -3); this.enabled = true;
-      this.autoRotate = false; this.autoRotateSpeed = 0.6; this.minDistance = 0.4; this.maxDistance = 30; this.maxPolarAngle = Math.PI;
-      this.rotateSpeed = 0.0055; this.minPitch = -Math.PI / 2 + 0.02; this.maxPitch = 0.35;   // pitch of the view direction: straight down … slightly up
-      this._p = new Map(); this._pivot = null; this._plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); this._ray = new THREE.Raycaster();
-      this._v = new THREE.Vector3(); this._v2 = new THREE.Vector3(); this._q = new THREE.Quaternion(); this._pinch = null;
-      dom.style.touchAction = 'none';
-      dom.addEventListener('pointerdown', e => { if (!this.enabled) return; this._p.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button }); try { dom.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
-        if (this._p.size === 1) { this._pivot = this.pointUnder(e.clientX, e.clientY); this._plane.constant = -this._pivot.y; }
-        if (this._p.size === 2) { const a = [...this._p.values()]; this._pinch = { d: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), ang: Math.atan2(a[1].y - a[0].y, a[1].x - a[0].x), cx: (a[0].x + a[1].x) / 2, cy: (a[0].y + a[1].y) / 2 }; this._pivot = this.pointUnder(this._pinch.cx, this._pinch.cy); this._plane.constant = -this._pivot.y; } });
-      dom.addEventListener('pointermove', e => { if (!this.enabled || !this._p.has(e.pointerId)) return; const p = this._p.get(e.pointerId); const x0 = p.x, y0 = p.y; p.x = e.clientX; p.y = e.clientY;
-        if (this._p.size === 1) { if (p.b === 2 || p.b === 1 || e.shiftKey) this.grab(x0, y0, p.x, p.y); else this.orbit((p.x - x0), (p.y - y0)); }
-        else if (this._p.size === 2 && this._pinch) { const a = [...this._p.values()]; const d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), ang = Math.atan2(a[1].y - a[0].y, a[1].x - a[0].x), cx = (a[0].x + a[1].x) / 2, cy = (a[0].y + a[1].y) / 2;
-          this.grab(this._pinch.cx, this._pinch.cy, cx, cy); if (this._pinch.d > 0) this.zoomAt(cx, cy, this._pinch.d / d); let da = ang - this._pinch.ang; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI; this.rotateAround(this._pivot, da);
-          this._pinch = { d, ang, cx, cy }; } });
-      const end = e => { this._p.delete(e.pointerId); if (this._p.size < 2) this._pinch = null; if (this._p.size === 1) { const a = [...this._p.values()][0]; this._pivot = this.pointUnder(a.x, a.y); this._plane.constant = -this._pivot.y; } };
-      dom.addEventListener('pointerup', end); dom.addEventListener('pointercancel', end); dom.addEventListener('lostpointercapture', end);
-      dom.addEventListener('wheel', e => { if (!this.enabled) return; e.preventDefault(); const k = Math.exp((e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY) * 0.0012); this.zoomAt(e.clientX, e.clientY, k); }, { passive: false });
-      dom.addEventListener('contextmenu', e => e.preventDefault());
-    }
-    _ndc(x, y) { const r = this.dom.getBoundingClientRect(); return new THREE.Vector2(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1); }
-    pointUnder(x, y) { // 3D point under the screen position: nearest object, else the floor, else the current target
-      const hit = this.pick ? this.pick({ clientX: x, clientY: y }) : null; if (hit && hit.point) return hit.point.clone();
-      this._ray.setFromCamera(this._ndc(x, y), this.camera); const fl = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); const out = new THREE.Vector3();
-      return this._ray.ray.intersectPlane(fl, out) ? out : this.target.clone();
-    }
-    onPlane(x, y, out) { this._ray.setFromCamera(this._ndc(x, y), this.camera); return this._ray.ray.intersectPlane(this._plane, out); }
-    dist() { return this.camera.position.distanceTo(this.target); }
-    pitch() { this._v.copy(this.target).sub(this.camera.position); return Math.atan2(this._v.y, Math.hypot(this._v.x, this._v.z)); }
-    rotateAround(P, yaw, pitch = 0) { // rigid rotation of camera + target around the pivot P (yaw about vertical, pitch about the camera's right axis)
-      if (!P) P = this.target;
-      if (yaw) { this._q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw); this.camera.position.sub(P).applyQuaternion(this._q).add(P); this.target.sub(P).applyQuaternion(this._q).add(P); }
-      if (pitch) {
-        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion); right.y = 0; if (right.lengthSq() < 1e-6) return; right.normalize();
-        const pos0 = this.camera.position.clone(), tgt0 = this.target.clone();
-        this._q.setFromAxisAngle(right, pitch); this.camera.position.sub(P).applyQuaternion(this._q).add(P); this.target.sub(P).applyQuaternion(this._q).add(P);
-        const pt = this.pitch(); if (pt < this.minPitch || pt > this.maxPitch || this.camera.position.y < 0.3) { this.camera.position.copy(pos0); this.target.copy(tgt0); }
-      }
-    }
-    orbit(dx, dy) { this.rotateAround(this._pivot, -dx * this.rotateSpeed, -dy * this.rotateSpeed); }
-    grab(x0, y0, x1, y1) { // slide so that the floor point under the finger follows the finger
-      const a = new THREE.Vector3(), b = new THREE.Vector3();
-      if (this.onPlane(x0, y0, a) && this.onPlane(x1, y1, b) && a.distanceTo(b) < 30) { a.sub(b); this.camera.position.add(a); this.target.add(a); return; }
-      // fallback (looking at the horizon): screen-space slide
-      const k = this.dist() * 0.0015; const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion); const up = new THREE.Vector3(0, 1, 0);
-      const d = right.multiplyScalar(-(x1 - x0) * k).add(up.multiplyScalar((y1 - y0) * k)); this.camera.position.add(d); this.target.add(d);
-    }
-    zoomAt(x, y, k) { // scale the view about the point under the cursor: k < 1 zooms in
-      const Q = this.pointUnder(x, y); const dQ = this.camera.position.distanceTo(Q);
-      if (k < 1 && dQ * k < this.minDistance) k = Math.max(k, this.minDistance / Math.max(dQ, 1e-6));
-      if (k > 1 && this.dist() * k > this.maxDistance) k = Math.min(k, this.maxDistance / Math.max(this.dist(), 1e-6));
-      this.camera.position.sub(Q).multiplyScalar(k).add(Q); this.target.sub(Q).multiplyScalar(k).add(Q);
-    }
-    update() { if (this.autoRotate) this.rotateAround(this.target, this.autoRotateSpeed * 0.0015, 0); this.camera.lookAt(this.target); return true; }
-    dispose() {}
+  // Official OrbitControls matches the bundled Three.js r128 build.
+  // One navigation controller owns input; equipment moves use the explicit Move tool.
+  camera.up.set(0, 1, 0);
+  const controls = new THREE.OrbitControls(camera, canvas);
+  controls.rotateSpeed = 0.45;
+  controls.panSpeed = 0.65;
+  controls.zoomSpeed = 0.65;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.18;
+  controls.screenSpacePanning = true;
+  controls.minDistance = 0.8;
+  controls.maxDistance = 35;
+  controls.minPolarAngle = 0.035;
+  controls.maxPolarAngle = Math.PI / 2 - 0.025;
+  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+  controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+  canvas.style.touchAction = 'none';
+  const activePointers = new Set();
+  function cancelNavigation() {
+    controls.cancel();
+    S.tween = null;
+    downPos = null;
+    activePointers.forEach(id => { try { canvas.releasePointerCapture(id); } catch {} });
+    activePointers.clear();
   }
-  const controls = new MapControls(camera, canvas, e => (typeof pickAt === 'function' ? pickAt(e) : null));
+  canvas.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch' && ![0, 1, 2].includes(e.button)) return;
+    controls.cancel(); S.tween = null; S.lastInput = performance.now();
+    activePointers.add(e.pointerId);
+    if (e.pointerType !== 'touch') { try { canvas.setPointerCapture(e.pointerId); } catch {} }
+    canvas.focus({ preventScroll: true });
+  }, true);
+  window.addEventListener('pointerup', e => {
+    activePointers.delete(e.pointerId);
+    if (!activePointers.size) controls.cancel();
+    try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    downPos = null;
+  });
+  canvas.addEventListener('wheel', () => { S.tween = null; S.lastInput = performance.now(); }, { capture: true, passive: true });
+  window.addEventListener('pointercancel', cancelNavigation);
+  canvas.addEventListener('lostpointercapture', () => { if (activePointers.size) cancelNavigation(); });
+  window.addEventListener('blur', () => { cancelNavigation(); cancelMove(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { cancelNavigation(); cancelMove(); } });
+  window.addEventListener('pointerdown', e => { if (e.target !== canvas && activePointers.size) cancelNavigation(); }, true);
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x50555c, 1.0));
   const sun = new THREE.DirectionalLight(0xffffff, 0.55); sun.position.set(-6, 9, 4); scene.add(sun);
@@ -136,10 +123,13 @@
   const ndc = new THREE.Vector2();
 
   function resize() {
-    const vp = $('#viewport'); const w = vp.clientWidth, h = vp.clientHeight;
+    const vp = $('#viewport'); const w = Math.max(1, vp.clientWidth), h = Math.max(1, vp.clientHeight);
     renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+    placeAttnDock();
   }
-  window.addEventListener('resize', resize);
+  window.addEventListener('resize', () => { cancelNavigation(); resize(); });
+  const viewportObserver = new ResizeObserver(resize); viewportObserver.observe($('#viewport'));
+  window.addEventListener('pagehide', () => { cancelNavigation(); controls.dispose(); viewportObserver.disconnect(); });
 
   // ───────────────────────────────────────────────────────────── geometry helpers
   const matCache = new Map();
@@ -276,11 +266,18 @@
     const e = setEdgeOp(edges(env, col), .5); g.add(e); eds.push(e);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: su.id, cat: 'setup', def: su, group: g, meshes, edges: eds, status, conf: su.confidence, zone: su.zone, setup: su.id, anchor: localToWorld(g, 0, h + 0.12, 0), tpl });
-    makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span>${su.id}<small>${dcimRackOf(su) || 'no DCIM rack'} · ${su.name.split('—')[0].trim()}</small>`);
-    // floating telemetry card (power / voltage / current / capacity / temp / humidity / leak) — filled by updateTelemetry()
+    makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span>${esc(su.id)}<small>${esc(dcimRackOf(su) || 'no DCIM rack')} · ${esc(su.name.split('—')[0].trim())}</small><span class="lt"></span>`);
+    rec.labelTel = rec.label.querySelector('.lt');
+    rec.label.addEventListener('mouseenter', () => { S.labelHover = su.id; });
+    rec.label.addEventListener('mouseleave', () => { if (S.labelHover === su.id) S.labelHover = null; });
+    // full telemetry card (power / voltage / current / capacity / temp / humidity / leak) — filled by updateTelemetry();
+    // shown only for the selected / hovered rack or with Heat on (the compact kW · A line lives in the setup label)
     const tel = document.createElement('div'); tel.className = 'telem'; tel.dataset.id = su.id; tel.innerHTML = '<span class="t-muted">no live data</span>';
     tel.addEventListener('click', e => { e.stopPropagation(); select(su.id, { fly: true }); }); labelsLayer.appendChild(tel);
     rec.telem = tel; rec.telemAnchor = localToWorld(g, 0, h + 0.55, 0);
+    // attention badge on the rack front (DOM only, never pickable) — filled by renderAttention(), placed by updateLabels()
+    const attnEl = document.createElement('div'); attnEl.className = 'attn-badge'; attnEl.dataset.id = su.id; attnEl.setAttribute('aria-hidden', 'true'); attnEl.style.display = 'none'; labelsLayer.appendChild(attnEl);
+    rec.attnEl = attnEl; rec.attnN = 0; rec.attnAnchor = localToWorld(g, dd / 2 + 0.02, h - 0.18, 0);
     // heat-map patch under the rack + leak ring (hidden until live data / toggle)
     const patch = box(dd + 0.3, 0.012, w + 0.3, mat('#22c55e', { opacity: .45, unique: true, rough: 1, emissive: '#22c55e', emissiveIntensity: .35 }), 0, 0.012, 0); patch.visible = false; g.add(patch); rec.heatPatch = patch;
     const ring = new THREE.Mesh(new THREE.RingGeometry(Math.max(dd, w) * 0.55, Math.max(dd, w) * 0.62, 48), new THREE.MeshBasicMaterial({ color: 0xf43f5e, transparent: true, opacity: .8, side: THREE.DoubleSide })); ring.rotation.x = -Math.PI / 2; ring.position.y = 0.02; ring.visible = false; g.add(ring); rec.leakRing = ring;
@@ -318,7 +315,7 @@
     const e = setEdgeOp(edges(env, col), .55); g.add(e);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: sd.id, cat: 'storage', def: sd, group: g, meshes, edges: [e], status, conf: sd.confidence, zone: sd.zone, anchor: localToWorld(g, 0, h + 0.12, 0), trayY, tpl });
-    makeLabel(rec, 'storage', `<span class="lp" style="background:${col}"></span>${sd.id}<small>${sd.name}</small>`);
+    makeLabel(rec, 'storage', `<span class="lp" style="background:${col}"></span>${esc(sd.id)}<small>${esc(sd.name)}</small>`);
     return rec;
   }
 
@@ -330,12 +327,12 @@
     const seam = box(0.005, h - 0.1, 0.01, mat('#3f3f46'), 0, h / 2, dd / 2 + 0.005); g.add(seam);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: sd.id, cat: 'storage', def: sd, group: g, meshes: [m], edges: [e], status, conf: sd.confidence, zone: sd.zone, anchor: localToWorld(g, 0, h + 0.12, 0) });
-    makeLabel(rec, 'storage', `<span class="lp" style="background:${col}"></span>${sd.id}<small>${sd.name}</small>`);
+    makeLabel(rec, 'storage', `<span class="lp" style="background:${col}"></span>${esc(sd.id)}<small>${esc(sd.name)}</small>`);
     return rec;
   }
 
   // ───────────────────────────────────────────────────────────── items
-  function buildItems() {
+  function buildItems(opts = {}) {
     // remove previous item recs
     for (const [id, r] of [...S.recs]) if (r.cat === 'item') { if (r.label) r.label.remove(); S.recs.delete(id); }
     S.pickables = S.pickables.filter(m => { const r = S.recs.get(m.userData.id); return !!r; });
@@ -482,13 +479,14 @@
       }
       if (g && it.placement !== 'rack-strips') S.itemGroups.push(g);
       const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor });
-      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${it.live.watts ? ' · ' + Math.round(it.live.watts) + 'W' : ''}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : it.type === 'equip-switch' ? `switch under test${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
+      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + 'W')}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : it.type === 'equip-switch' ? `switch under test${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
       const named = it.type === 'opt' || it.type.startsWith('equip-');
-      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${named ? it.name : it.id}<small>${it.type === 'opt' ? it.id + ' · ' + sub : sub}</small>`);
+      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${esc(named ? it.name : it.id)}<small>${esc(it.type === 'opt' ? it.id + ' · ' + sub : sub)}</small>`);
     });
-    applyFilters(); updateTelemetry();
+    S.attention = computeAttention(S.model, S.live, S.recs);
+    applyFilters(); updateTelemetry(); renderAttention();
     if (S.selected && !S.recs.has(S.selected)) closeDetail();
-    else if (S.selected) select(S.selected, { keepCamera: true });
+    else if (S.selected) select(S.selected, { keepCamera: true, refresh: !!opts.refresh });
   }
 
   // ───────────────────────────────────────────────────────────── effective model (static JSON + overrides + live)
@@ -513,16 +511,16 @@
       // 1) OPT servers exactly like DcimView.servers
       const servers = new Map();
       pdus.forEach(pdu => {
-        const stored = pdu.labels || {}; const liveOut = live.pdu[pdu.id]?.outlets || []; const liveByN = Object.fromEntries(liveOut.map(o => [String(o.number), o]));
+        const stored = pdu.labels || {}; const liveOut = live.pdu[pdu.id]?.reachable ? live.pdu[pdu.id].outlets || [] : []; const liveByN = Object.fromEntries(liveOut.map(o => [String(o.number), o]));
         Object.entries(stored).forEach(([num, label]) => {
           if (isDefaultOutletLabel(label)) return; const key = optKey(label); if (servers.has(key)) return;
           const lo = liveByN[num];
-          servers.set(key, { key, name: label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: lo?.state ?? 'unknown', watts: lo?.watts ?? 0 });
+          servers.set(key, { key, name: label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: lo?.state ?? 'unknown', watts: lo?.watts ?? null });
         });
         liveOut.forEach(o => {
           if (isDefaultOutletLabel(o.label)) return; const key = optKey(o.label);
-          if (servers.has(key)) { const e = servers.get(key); e.state = o.state; e.watts = o.watts || 0; return; }
-          servers.set(key, { key, name: o.label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts || 0 });
+          if (servers.has(key)) { const e = servers.get(key); e.state = o.state; e.watts = o.watts ?? null; return; }
+          servers.set(key, { key, name: o.label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts ?? null });
         });
       });
       // KVM cross-reference
@@ -565,7 +563,8 @@
       // 3) rack_items (custom equipment: switches, patch panels …)
       Object.entries(live.rackItems || {}).forEach(([rack, list]) => (list || []).forEach(ci => {
         const sid = setupByRack[rack] || null; const id = 'LIVE-' + ci.id;
-        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
+        const history = Array.isArray(ci.tracking_history) ? ci.tracking_history : [];
+        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', last_seen_at: ci.last_seen_at || null, tracking: { count: history.length, last: history[history.length - 1] || null }, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
       }));
       // 4) chillers from DCIM
       if (live.chillers?.units?.length) {
@@ -600,6 +599,65 @@
     S.model = { setups, setupByRack, items, unmappedRacks, liveRacks };
   }
   function pickOv() { return {}; }
+
+  // ───────────────────────────────────────────────────────────── attention: what needs a person today
+  // Pure (no DOM, no S): model + live + recs (+ now) → [{ key, id|null, setup|null, severity, kind, text, hint }].
+  function computeAttention(model, live, recs, now = Date.now()) {
+    const out = []; if (!model) return out;
+    const add = (severity, kind, key, text, hint, id = null, setup = null) => out.push({ key: `${kind}:${key}`, id: id || null, setup: setup || null, severity, kind, text, hint: hint || '' });
+    const items = model.items || []; const connected = !!live?.connected;
+    const names = list => list.slice(0, 4).map(i => i.name || i.id).join(', ') + (list.length > 4 ? ` +${list.length - 4}` : '');
+    const bySetup = list => { const m = new Map(); list.forEach(i => { const k = i.setup || ''; if (!m.has(k)) m.set(k, []); m.get(k).push(i); }); return m; };
+    const opts = items.filter(i => i.type === 'opt');
+    if (connected) {
+      items.filter(i => i.type === 'pdu' && i.live?.device).forEach(p => {
+        const dev = p.dcim?.deviceId || p.id; const st = p.live.status; const name = p.name || dev;
+        if (st?.leak_detected) add('crit', 'leak', dev, `Leak detected · ${name}`, 'חיישן הנזילה מתריע — בדקו מיד את הצ׳ילר והצנרת', p.id, p.setup);
+        if (p.live.reachable === false) {
+          const stuck = opts.filter(o => o.live?.inDcim && o.dcim?.pdu === dev && o.live.state !== 'on' && o.live.state !== 'off');
+          add('crit', 'pdu-down', dev, `${name} unreachable`, `${stuck.length ? stuck.length + ' מחשבי OPT במצב לא ידוע · ' : ''}בדקו רשת וחשמל של ה-PDU`, p.id, p.setup);
+        }
+        if (st?.reachable && st.temperature != null) {
+          if (st.temperature > ATTN_TEMP_CRIT) add('crit', 'temp', dev, `${name} ${st.temperature.toFixed(1)} °C`, `טמפרטורה מעל ${ATTN_TEMP_CRIT}°C — בדקו קירור`, p.id, p.setup);
+          else if (st.temperature > ATTN_TEMP_WARN) add('warn', 'temp', dev, `${name} ${st.temperature.toFixed(1)} °C`, `טמפרטורה מעל ${ATTN_TEMP_WARN}°C — מעקב אחר הקירור`, p.id, p.setup);
+        }
+      });
+      (model.setups || []).forEach(su => {
+        const t = rackTelemetry(su, live); if (!t || t.loading || t.cap == null) return;
+        const pct = Math.round(t.cap * 100), hint = `${t.amps.toFixed(1)} A מתוך ${RATED_AMPS * t.pduCount} A (הערכה) — שקלו להוריד עומס`;
+        if (t.cap >= ATTN_LOAD_CRIT) add('crit', 'load', su.id, `${su.id} power load ${pct}%`, hint, su.id, su.id);
+        else if (t.cap >= ATTN_LOAD_WARN) add('warn', 'load', su.id, `${su.id} power load ${pct}%`, hint, su.id, su.id);
+      });
+      opts.filter(o => o.live?.inDcim).forEach(o => {
+        const where = `שקע #${o.dcim?.outlet ?? '?'} · ${o.dcim?.pduName || o.dcim?.pdu || 'PDU'}`;
+        if (o.live.state === 'off') add('warn', 'opt-off', o.id, `${o.name} is off`, `${where} כבוי`, o.id, o.setup);
+        else if (o.live.state !== 'on' && live.pdu?.[o.dcim?.pdu]?.reachable === true) add('warn', 'opt-unknown', o.id, `${o.name} state unknown`, `${where} לא מדווח מצב`, o.id, o.setup);
+      });
+      items.filter(k => k.type === 'kvm' && k.live?.reachable === false).forEach(k => add('warn', 'kvm-down', k.dcim?.deviceId || k.id, `${k.name} unreachable`, 'קונסולת ה-KVM לא זמינה — בדקו רשת וחשמל', k.id, k.setup));
+      bySetup(opts.filter(o => o.live && o.live.inDcim === false)).forEach((list, sid) => add('warn', 'not-in-dcim', sid || 'none', list.length === 1 ? `${list[0].name} not in DCIM labels` : `${list.length} OPTs not in DCIM labels`, `לא מופיעים בתוויות ה-PDU החיות: ${names(list)}`, list.length === 1 || !sid ? list[0].id : sid, sid));
+      items.filter(i => i.id.startsWith('LIVE-') && i.type.startsWith('equip-') && i.last_seen_at).forEach(i => {
+        const t = Date.parse(i.last_seen_at); if (!Number.isFinite(t)) return; const days = Math.floor((now - t) / 864e5);
+        if (days > STALE_DAYS) add('info', 'stale', i.id, `${i.name} not seen for ${days} days`, `סריקה אחרונה ${String(i.last_seen_at).slice(0, 10)} — סרקו את הברקוד כדי לאשר מיקום`, i.id, i.setup);
+      });
+      bySetup(opts.filter(o => o.live?.inDcim && o.setup && o.placementConfidence === 'low')).forEach((list, sid) => add('info', 'auto-u', sid, list.length === 1 ? `${list[0].name} auto-placed (no explicit U)` : `${list.length} OPTs auto-placed (no explicit U)`, `המדף נקבע לפי סדר ולא לפי rack_slots — אשרו מיקום עם Move: ${names(list)}`, list.length === 1 ? list[0].id : sid, sid));
+    } else {
+      add('info', 'offline', 'live', 'Live data off — connect the backend', 'מוצגים רק נתונים סטטיים מ-lab-data.json (מצב, הספק וסריקות דורשים חיבור)');
+    }
+    // static checks (also offline)
+    [...(recs ? recs.values() : [])].filter(r => r.unplaced).forEach(r => add('warn', 'unplaced', r.id, `${r.def?.name || r.id} has no position`, 'אין מיקום בתלת ממד — מקמו במצב עריכה (Move) או ב-Lab Manager', r.id, r.setup));
+    (model.unmappedRacks || []).forEach(rack => add('warn', 'unmapped-rack', rack, `DCIM rack ${rack} has no physical setup`, 'שייכו אותו לארון בפאנל הארון (DCIM rack mapping) — ראו לשונית Unplaced'));
+    const lowMap = (model.setups || []).filter(s => s.dcimMappingConfidence === 'low');
+    if (lowMap.length) add('info', 'mapping', 'setups', lowMap.length === 1 ? `${lowMap[0].id} rack mapping unverified` : `${lowMap.length} rack mappings unverified`, `שיוך ארון פיזי ↔ Rack-0X לא אומת: ${lowMap.map(s => s.id).join(', ')}`, lowMap[0].id);
+    const rank = e => { const i = ATTN_ORDER.indexOf(e.severity + ':' + e.kind); return i < 0 ? ATTN_ORDER.length : i; };
+    return out.sort((a, b) => rank(a) - rank(b) || (a.setup ? 0 : 1) - (b.setup ? 0 : 1) || String(a.setup || '').localeCompare(String(b.setup || '')) || a.key.localeCompare(b.key));
+  }
+  function attnCounts(list) { const c = { crit: 0, warn: 0, info: 0 }; (list || []).forEach(e => { c[e.severity]++; }); return c; }
+  function worstSeverity(list) { return SEVERITIES.find(s => list.some(e => e.severity === s)) || null; }
+  function ago(ts, now = Date.now()) {
+    const t = Date.parse(ts); if (!Number.isFinite(t)) return '—'; const s = Math.max(0, (now - t) / 1000);
+    return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' days ago';
+  }
+  function fmtTs(ts) { const d = new Date(ts); if (isNaN(d)) return String(ts); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
 
   // ───────────────────────────────────────────────────────────── filters / search
   function matchesQuery(rec, query) {
@@ -650,7 +708,7 @@
       const q = inp.value.trim(); S.filters.q = q; applyFilters();
       if (!q) { res.classList.add('hidden'); return; }
       const hits = [...S.recs.values()].filter(r => matchesQuery(r, q)).slice(0, 14);
-      res.innerHTML = hits.map(r => `<div class="sr" data-id="${r.id}"><span class="id">${r.id}</span><span class="nm">${esc(r.def.name || '')}</span><span class="cat">${r.cat}</span></div>`).join('') || '<div class="sr"><span class="nm muted">No matches</span></div>';
+      res.innerHTML = hits.map(r => `<div class="sr" data-id="${esc(r.id)}"><span class="id">${esc(r.id)}</span><span class="nm">${esc(r.def.name || '')}</span><span class="cat">${r.cat}</span></div>`).join('') || '<div class="sr"><span class="nm muted">No matches</span></div>';
       res.classList.remove('hidden');
       $$('.sr', res).forEach(el => el.onclick = () => { if (el.dataset.id) { select(el.dataset.id); res.classList.add('hidden'); } });
     });
@@ -700,7 +758,7 @@
   }
   function renderInventory() {
     const el = $('#inv'); const rows = [...S.recs.values()].filter(r => r.cat !== 'zone').sort((a, b) => a.id.localeCompare(b.id));
-    el.innerHTML = `<div class="inv-row inv-h"><span>ID</span><span>Name</span><span style="text-align:right">Where</span></div>` + rows.map(r => `<div class="inv-row ${r.filtered ? 'dim' : ''}" data-id="${r.id}"><span class="id">${dot(r)} ${r.id}</span><span class="nm" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.def.name || '')}</span><span class="loc">${r.shelf || r.setup || r.item?.storage || r.zone || (r.unplaced ? '—' : 'room')}</span></div>`).join('');
+    el.innerHTML = `<div class="inv-row inv-h"><span>ID</span><span>Name</span><span style="text-align:right">Where</span></div>` + rows.map(r => `<div class="inv-row ${r.filtered ? 'dim' : ''}" data-id="${esc(r.id)}"><span class="id">${dot(r)} ${esc(r.id)}</span><span class="nm" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.def.name || '')}</span><span class="loc">${r.shelf || r.setup || r.item?.storage || r.zone || (r.unplaced ? '—' : 'room')}</span></div>`).join('');
     $$('.inv-row[data-id]', el).forEach(n => n.onclick = () => select(n.dataset.id));
   }
   function renderUnplaced() {
@@ -716,25 +774,109 @@
     const recs = [...S.recs.values()]; const items = S.model.items;
     const opts = items.filter(i => i.type === 'opt'); const on = opts.filter(i => i.live?.state === 'on').length; const off = opts.filter(i => i.live?.state === 'off').length;
     const low = recs.filter(r => r.conf === 'low' || r.pconf === 'low').length;
-    let kw = 0, temps = []; Object.values(S.live.pdu).forEach(st => { kw += st?.total_watts || 0; if (st?.temperature != null) temps.push(st.temperature); });
-    const live = S.live.connected;
+    let kw = 0, known = 0, partial = false, temps = []; S.live.devices.filter(d => d.kind === 'pdu').forEach(p => { const st = S.live.pdu[p.id]; if (st?.reachable && st.total_watts != null) { kw += st.total_watts; known++; } if (!st?.reachable || st.watts_complete !== true) partial = true; if (st?.temperature != null) temps.push(st.temperature); });
+    const live = S.live.connected; const ac = attnCounts(S.attention);
     $('#stats').innerHTML = [
+      `<button type="button" class="st st-attn${ac.crit ? ' crit' : ac.warn ? ' warn' : ''}" id="stAttn" title="פתיחת רשימת הפריטים שדורשים טיפול">Attention ${ac.crit + ac.warn ? `${ac.crit ? `<b class="bad">${ac.crit}</b> crit` : ''}${ac.crit && ac.warn ? ' · ' : ''}${ac.warn ? `<b class="warn">${ac.warn}</b> warn` : ''}` : '<b class="nv">✓</b>'}${ac.info ? ` · <b>${ac.info}</b> info` : ''}</button>`,
       `<span class="st">Setups <b>${S.data.setups.length}</b></span>`,
       `<span class="st">Shelves <b>${S.data.shelves.length}</b></span>`,
       `<span class="st">OPTs <b class="nv">${opts.length}</b>${live ? ` <span>on <b class="nv">${on}</b> · off <b>${off}</b></span>` : ''}</span>`,
       `<span class="st">Items <b>${items.length}</b></span>`,
       `<span class="st">Low-confidence objects <b class="${low ? 'warn' : ''}">${low}</b></span>`,
-      live ? `<span class="st">Floor draw <b class="nv">${(kw / 1000).toFixed(2)} kW</b></span>` : `<span class="st muted">connect the backend for live power / state</span>`,
+      live ? `<span class="st">Floor draw <b class="nv">${known ? (kw / 1000).toFixed(2) + ' kW' + (partial ? ' (partial)' : '') : '\u2014'}</b></span>` : `<span class="st muted">connect the backend for live power / state</span>`,
       temps.length ? `<span class="st">Temp <b class="${Math.max(...temps) > 24 ? 'warn' : ''}">${Math.min(...temps).toFixed(0)}–${Math.max(...temps).toFixed(0)}°C</b></span>` : '',
       S.model.unmappedRacks.length ? `<span class="st">Unmapped DCIM racks <b class="warn">${S.model.unmappedRacks.join(', ')}</b></span>` : '',
     ].join('');
+    $('#stAttn').onclick = () => { showTab('attn'); if (S.kiosk || S.attnDockCollapsed) { S.attnDockCollapsed = false; LS.set('attnDockCollapsed', false); renderAttention(); } };
+  }
+
+  // ───────────────────────────────────────────────────────────── attention: sidebar tab + floating dock + rack badges
+  function attnRow(e, i, compact) {
+    return `<div class="attn-row sev-${e.severity}${compact ? ' compact' : ''}" data-attn="${i}" role="button" tabindex="0"${compact && e.hint ? ` title="${esc(e.hint)}"` : ''}><span class="attn-dot"></span><span class="attn-txt">${esc(e.text)}${e.hint && !compact ? `<small dir="auto">${esc(e.hint)}</small>` : ''}</span>${e.setup ? `<span class="tag">${esc(e.setup)}</span>` : ''}</div>`;
+  }
+  function bindAttnRows(root) {
+    $$('[data-attn]', root).forEach(r => {
+      r.onclick = () => focusAttention(S.attention[+r.dataset.attn]);
+      r.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); focusAttention(S.attention[+r.dataset.attn]); } };
+    });
+  }
+  function placeAttnDock() {
+    const dock = $('#attnDock'), tb = $('.toolbar'); if (!dock || !tb) return;
+    dock.style.top = (tb.offsetTop + tb.offsetHeight + 8) + 'px';
+  }
+  function renderAttention() {
+    const list = S.attention || []; const c = attnCounts(list); const worst = worstSeverity(list);
+    const indexed = list.map((e, i) => [e, i]);
+    const el = $('#attn');
+    if (el) {
+      const f = ['all', ...SEVERITIES].includes(S.attnFilter) ? S.attnFilter : 'all';
+      let html = `<div class="attn-chips">${['all', ...SEVERITIES].map(s => `<button type="button" class="chip ${f === s ? 'on' : 'off'} ${s === 'all' ? '' : 'sev-' + s}" data-sev="${s}">${s === 'all' ? '' : '<span class="sw"></span>'}${s === 'all' ? 'All' : SEV_LABEL[s]} <b>${s === 'all' ? list.length : c[s]}</b></button>`).join('')}</div>`;
+      let rows = '';
+      SEVERITIES.filter(s => f === 'all' || f === s).forEach(s => {
+        const group = indexed.filter(([e]) => e.severity === s); if (!group.length) return;
+        rows += `<div class="zone-h sev-${s}"><span class="sw"></span>${SEV_LABEL[s]} · ${group.length}</div>` + group.map(([e, i]) => attnRow(e, i)).join('');
+      });
+      html += rows || `<div class="muted small" style="padding:8px">${list.length ? 'Nothing at this level.' : '✓ Nothing needs attention right now.'}</div>`;
+      el.innerHTML = html;
+      $$('[data-sev]', el).forEach(b => b.onclick = () => { S.attnFilter = b.dataset.sev; LS.set('attnFilter', S.attnFilter); renderAttention(); });
+      bindAttnRows(el);
+    }
+    const badge = $('#attnCount'); if (badge) { badge.textContent = list.length; badge.className = 'badge' + (worst ? ' sev-' + worst : ''); }
+    const dock = $('#attnDock');
+    if (dock) {
+      const collapsed = !!S.attnDockCollapsed; const shown = S.attnDockAll ? indexed : indexed.slice(0, 5);
+      dock.className = 'attn-dock' + (collapsed ? ' collapsed' : '') + (worst ? ' sev-' + worst : '');
+      dock.innerHTML = `<button type="button" class="attn-dock-h" id="attnDockToggle" aria-expanded="${!collapsed}" title="${collapsed ? 'הצגת הרשימה' : 'קיפול הרשימה'}"><span class="caret">${collapsed ? '▸' : '▾'}</span>Attention<span class="attn-sum">${c.crit ? `<b class="bad">${c.crit}</b>` : ''}${c.warn ? `<b class="warn">${c.warn}</b>` : ''}${c.info ? `<b class="info">${c.info}</b>` : ''}${list.length ? '' : '<b class="ok">✓</b>'}</span></button>` +
+        (collapsed ? '' : `<div class="attn-dock-b">${shown.map(([e, i]) => attnRow(e, i, true)).join('') || '<div class="muted small attn-empty">✓ Nothing needs attention right now.</div>'}${list.length > 5 ? `<button type="button" class="attn-more" id="attnMore">${S.attnDockAll ? 'Show top 5' : `+${list.length - 5} more…`}</button>` : ''}</div>`);
+      $('#attnDockToggle').onclick = () => { S.attnDockCollapsed = !S.attnDockCollapsed; LS.set('attnDockCollapsed', S.attnDockCollapsed); renderAttention(); };
+      const more = $('#attnMore'); if (more) more.onclick = () => { if (!S.kiosk && !S.attnDockAll) { showTab('attn'); return; } S.attnDockAll = !S.attnDockAll; renderAttention(); };
+      bindAttnRows(dock); placeAttnDock();
+    }
+    // per-rack 3D badges
+    const bySetup = new Map(); list.forEach(e => { if (e.setup) { if (!bySetup.has(e.setup)) bySetup.set(e.setup, []); bySetup.get(e.setup).push(e); } });
+    for (const rec of S.recs.values()) {
+      if (!rec.attnEl) continue;
+      const mine = bySetup.get(rec.id) || []; rec.attnN = mine.length;
+      if (!mine.length) { rec.attnEl.style.display = 'none'; continue; }
+      const w = worstSeverity(mine); rec.attnEl.className = 'attn-badge sev-' + w;
+      rec.attnEl.textContent = `${w === 'info' ? 'ⓘ' : '⚠'} ${mine.length}`;
+    }
+  }
+  function focusAttention(e) {
+    if (!e) return;
+    if (e.kind === 'offline') { $('#btnSettings').click(); return; }
+    if (e.id && S.recs.has(e.id)) { select(e.id, { fly: true }); return; }
+    showTab('unplaced');
+    if (S.kiosk) toast('The Unplaced list is in the sidebar — leave Screen mode (K) to see it');
+  }
+  function showTab(name) {
+    const tabs = $$('.tab').map(b => b.dataset.tab); if (!tabs.includes(name)) name = tabs[0];
+    $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+    tabs.forEach(id => { const el = $('#' + id); if (el) el.classList.toggle('hidden', id !== name); });
+    LS.set('sideTab', name);
   }
 
   // ───────────────────────────────────────────────────────────── selection & detail panel
   function anchorOf(rec) { if (!rec.anchor) return null; return typeof rec.anchor === 'function' ? rec.anchor() : rec.anchor; }
+  // A live refresh must not throw away what the user is doing in the panel (typing, an open select, scroll position).
+  function detailBusy() {
+    const a = document.activeElement; const d = $('#detail');
+    return !!a && a !== document.body && d.contains(a) && (S.editMode || a.matches('input, select, textarea'));
+  }
+  function renderPanel(rec, keepScroll) {
+    const body = $('#dBody'); const top = body.scrollTop;
+    S.detailStale = false;
+    if (S.editMode) renderEditor(rec); else renderDetail(rec);
+    if (keepScroll) body.scrollTop = top;
+  }
+  $('#detail').addEventListener('focusout', () => setTimeout(() => {
+    if (!S.detailStale || detailBusy()) return;
+    const rec = S.recs.get(S.selected); if (rec) renderPanel(rec, true); else S.detailStale = false;
+  }, 250));
   function select(id, opts = {}) {
     const rec = S.recs.get(id); if (!rec) return;
-    S.selected = id;
+    const refresh = !!opts.refresh && S.selected === id;
+    S.selected = id; $('#vFocus').disabled = !id;
     if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
     if (rec.group) {
       const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (rec.cat === 'setup' || rec.cat === 'storage') b.setFromObject(rec.group);
@@ -742,10 +884,11 @@
       if (!opts.keepCamera && opts.fly !== false) flyTo(rec);
     }
     $$('.lbl.sel').forEach(l => l.classList.remove('sel')); if (rec.label) rec.label.classList.add('sel');
-    if (S.editMode) renderEditor(rec); else renderDetail(rec); renderTree(); renderRackBar();
+    if (refresh && detailBusy()) S.detailStale = true; else renderPanel(rec, refresh);
+    renderTree(); renderRackBar();
     $('#detail').classList.remove('hidden'); resize();
   }
-  function closeDetail() { S.selected = null; if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; } $('#detail').classList.add('hidden'); $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); resize(); }
+  function closeDetail() { S.selected = null; $('#vFocus').disabled = true; if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; } $('#detail').classList.add('hidden'); $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); resize(); }
   $('#dClose').onclick = closeDetail;
   $('#dFocus').onclick = () => { const r = S.recs.get(S.selected); if (r) flyTo(r, true); };
 
@@ -779,7 +922,9 @@
       ${it?.serial_number ? `<span class="k">SN</span><span class="v mono">${esc(it.serial_number)}</span>` : ''}
       ${it?.barcode ? `<span class="k">Barcode</span><span class="v mono">${esc(it.barcode)}</span>` : ''}
       ${it?.shelf_position ? `<span class="k">Shelf position</span><span class="v">${esc(it.shelf_position)}</span>` : ''}
-      <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${it.live.state}${it.live.watts ? ' · ' + Math.round(it.live.watts) + ' W' : ''}</span>` : ''}</span>
+      ${it?.last_seen_at ? `<span class="k">Last seen</span><span class="v">${esc(ago(it.last_seen_at))} <span class="muted small mono">${esc(fmtTs(it.last_seen_at))}</span></span>` : it?.tracking ? `<span class="k">Last seen</span><span class="v muted">never scanned</span>` : ''}
+      ${it?.tracking?.count ? `<span class="k">Tracking</span><span class="v">${it.tracking.count} event${it.tracking.count === 1 ? '' : 's'}${it.tracking.last ? ` · last: ${esc(it.tracking.last.action || '?')}${it.tracking.last.at ? ' ' + esc(ago(it.tracking.last.at)) : ''}` : ''}</span>` : ''}
+      <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${it.live.state}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + ' W')}</span>` : ''}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(ov(rec.id).dcimRack !== undefined ? 'medium' : def.dcimMappingConfidence)}` : ''}</span>
       <span class="k">Owner</span><span class="v">${esc(it?.owner || def.owner || '—')}${it?.live?.owner ? ' <span class="muted small">(DCIM)</span>' : ''}</span>
       <span class="k">Location</span><span class="v">${locationOf(rec)}</span>
@@ -810,9 +955,9 @@
     // ── PDU
     if (it?.type === 'pdu') {
       const st = it.live?.status; const live = S.live.connected; const labels = it.dcim?.labels || it.live?.device?.labels || {};
-      const outlets = st?.outlets?.length ? st.outlets : Array.from({ length: it.dcim?.outlets || 24 }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Outlet ${i + 1}`, state: 'unknown', watts: 0 }));
-      html += `<div class="sec"><div class="sec-h">Outlets <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? `<span style="color:#fda4af">unreachable</span>` : st ? `${outlets.filter(x => x.state === 'on').length}/${outlets.length} on · ${((st.total_watts || 0) / 1000).toFixed(2)} kW` : 'loading…') : 'static labels · click needs backend'}</span></div>
-        <div class="ogrid">${outlets.map(x => { const named = !isDefaultOutletLabel(x.label); const cls = x.state === 'unknown' ? 'unknown' : `${x.state} ${named ? 'named' : 'free'}`; return `<div class="ocell ${cls}" data-outlet="${x.number}" title="${esc(x.label)}"><span class="n">#${x.number}</span><span class="l">${named ? esc(x.label) : '—'}</span>${x.watts ? `<span class="w">${Math.round(x.watts)} W</span>` : ''}</div>`; }).join('')}</div>
+      const outlets = st?.reachable && st.outlets?.length ? st.outlets : Array.from({ length: it.dcim?.outlets || 24 }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Outlet ${i + 1}`, state: 'unknown', watts: null }));
+      html += `<div class="sec"><div class="sec-h">Outlets <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? `<span style="color:#fda4af">unreachable</span>` : st ? `${outlets.filter(x => x.state === 'on').length}/${outlets.length} on · ${st.total_watts == null ? '\u2014' : (st.total_watts / 1000).toFixed(2) + ' kW' + (st.watts_complete === false ? ' (partial)' : '')}` : 'loading…') : 'static labels · click needs backend'}</span></div>
+        <div class="ogrid">${outlets.map(x => { const named = !isDefaultOutletLabel(x.label); const cls = x.state === 'unknown' ? 'unknown' : `${x.state} ${named ? 'named' : 'free'}`; return `<div class="ocell ${cls}" data-outlet="${x.number}" title="${esc(x.label)}"><span class="n">#${x.number}</span><span class="l">${named ? esc(x.label) : '—'}</span><span class="w">${x.watts == null ? '\u2014' : Math.round(x.watts) + ' W'}</span></div>`; }).join('')}</div>
         ${st?.temperature != null || st?.humidity != null ? `<div class="kv" style="margin-top:8px"><span class="k">Environment</span><span class="v">${st.temperature != null ? `🌡 ${st.temperature.toFixed(1)} °C` : ''} ${st.humidity != null ? `· 💧 ${st.humidity.toFixed(0)} %` : ''} ${st.leak_detected ? '<span style="color:#fda4af">· ⚠ leak</span>' : ''}</span></div>` : ''}
         ${st?.error ? `<div class="err-box" style="margin-top:8px">⚠ ${esc(st.error)}</div>` : ''}
       </div>`;
@@ -852,7 +997,10 @@
     }
     // ── Edit (mutates lab-data.json in memory → Save to server / Download)
     const isLive = rec.id.startsWith('LIVE-');
-    if (rec.cat === 'item' && isLive) {
+    if (!S.editMode) {
+      const notes = (it?.notes || def.notes || '').trim();
+      if (notes) html += `<div class="sec"><div class="sec-h">Notes</div><div class="note">${esc(notes)}</div></div>`;
+    } else if (rec.cat === 'item' && isLive) {
       html += `<div class="sec"><div class="sec-h">Edit</div><div class="note muted">This object comes live from the DCIM backend (labels / rack items). Rename or move it in Lab Manager. To keep a physical record of it in the twin (photos, notes, exact shelf), add it to lab-data.json:</div>
         <div class="ctl-row" style="margin-top:8px"><button class="btn btn-xs" id="eMaterialize">+ Add a copy to lab-data.json</button></div></div>`;
     } else if (rec.cat === 'item') {
@@ -866,7 +1014,7 @@
         <span>Type</span><select id="eType">${TYPES.map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         <span>Type label</span><input id="eTypeLabel" value="${esc(it.typeLabel || '')}" placeholder="e.g. Spectrum-4 SN5600 under test" />
         <span>Status</span><select id="eStatus">${STATUSES.map(x => `<option value="${x}" ${(it.status || 'unknown') === x ? 'selected' : ''}>${STATUS_LABEL[x]}</option>`).join('')}</select>
-        <span>Owner</span><input id="eOwner" value="${esc(it.owner || '')}" placeholder="engineer" />
+        <span>Owner</span>${ownerPicker(it.owner)}
         <span>Confidence</span><select id="eConf">${['high', 'medium', 'low'].map(x => `<option value="${x}" ${(it.confidence || 'medium') === x ? 'selected' : ''}>${x}</option>`).join('')}</select>
         <span>Location</span><select id="eLoc"><option value="">— free position —</option>${S.data.setups.map(x => `<option value="setup:${x.id}" ${locVal === 'setup:' + x.id ? 'selected' : ''}>${x.id} · ${esc(x.name.split('—')[0].replace('Rack', '').trim())}</option>`).join('')}${S.data.storage.map(x => `<option value="storage:${x.id}" ${locVal === 'storage:' + x.id ? 'selected' : ''}>${x.id} · ${esc(x.name)}</option>`).join('')}</select>
         <span>Shelf</span><select id="eShelf" ${it.setup ? '' : 'disabled'}>${it.setup ? shelfOpts(it.setup) : '<option value="">—</option>'}</select>
@@ -880,7 +1028,7 @@
       html += `<div class="sec"><div class="sec-h">Edit</div><div class="edit-grid">
         <span>Name</span><input id="eName" value="${esc(def.name || '')}" />
         <span>Status</span><select id="eStatus">${STATUSES.map(x => `<option value="${x}" ${(def.status || 'unknown') === x ? 'selected' : ''}>${STATUS_LABEL[x]}</option>`).join('')}</select>
-        <span>Owner</span><input id="eOwner" value="${esc(def.owner || '')}" placeholder="engineer" />
+        <span>Owner</span>${ownerPicker(def.owner)}
       </div><textarea id="eNotes" placeholder="notes…" style="margin-top:6px">${esc(def.notes || '')}</textarea>
       <div class="ctl-row" style="margin-top:8px"><button class="btn btn-primary" id="eSave">Save</button>${rec.cat === 'shelf' ? `<button class="btn btn-xs" id="eAddHere">+ Add item on this shelf</button>` : rec.cat === 'setup' ? `<button class="btn btn-xs" id="eAddBay">+ Add rack-level item</button>` : ''}</div></div>`;
     } else if (def.notes) html += `<div class="sec"><div class="sec-h">Notes</div><div class="note">${esc(def.notes)}</div></div>`;
@@ -919,6 +1067,11 @@
     const eMat = $('#eMaterialize'); if (eMat) eMat.onclick = () => { const c = { id: nextItemId(), name: it.name, category: 'item', type: it.type, typeLabel: it.typeLabel, setup: it.setup || null, shelf: it.shelf || null, placement: it.placement, zone: it.zone || null, status: it.status || 'active', owner: it.owner || null, confidence: 'high', placementConfidence: 'medium', photos: [], notes: 'Added from live DCIM data.', dcim: it.dcim ? { optKey: it.dcim.optKey, pdu: it.dcim.pdu, pduName: it.dcim.pduName, outlet: it.dcim.outlet, deviceId: it.dcim.deviceId } : undefined }; S.data.items.push(c); markDirty(); rebuildAll(); select(c.id, { keepCamera: true }); };
   }
   // ── data editing helpers
+  function ownerPicker(current = '') {
+    const people = S.live.engineers.filter(p => p.active || p.name === current);
+    const known = people.some(p => p.name === current);
+    return `<select id="eOwner" aria-label="Owner"><option value="">— ללא בעלים —</option>${current && !known ? `<option value="${esc(current)}" selected>${esc(current)} (קיים)</option>` : ''}${people.map(p => `<option value="${esc(p.name)}" ${p.name === current ? 'selected' : ''} ${!p.active ? 'disabled' : ''}>${esc(p.name)}${p.active ? '' : ' (לא פעיל)'}</option>`).join('')}</select>`;
+  }
   function findDef(id) { const d = S.data; return d.setups.find(x => x.id === id) || d.shelves.find(x => x.id === id) || d.storage.find(x => x.id === id) || d.items.find(x => x.id === id) || null; }
   function patchDef(id, patch) { const def = findDef(id); if (!def) return false; Object.entries(patch).forEach(([k, v]) => { if (v === undefined) delete def[k]; else def[k] = v; }); markDirty(); return true; }
   function nextItemId() { let n = 0; S.data.items.forEach(i => { const m = /^ITEM-(\d+)$/.exec(i.id); if (m) n = Math.max(n, +m[1]); }); return 'ITEM-' + String(n + 1).padStart(4, '0'); }
@@ -939,7 +1092,8 @@
 
   function rebuildAll() {
     // setups/shelves colors follow overrides → rebuild static + items
-    for (const [id, r] of [...S.recs]) { if (r.label) r.label.remove(); if (r.telem) r.telem.remove(); S.recs.delete(id); }
+    for (const [id, r] of [...S.recs]) { if (r.label) r.label.remove(); if (r.telem) r.telem.remove(); if (r.attnEl) r.attnEl.remove(); S.recs.delete(id); }
+    S.labelHover = null;
     S.pickables = []; disposeGroup(staticGroup); disposeGroup(wallsGroup); disposeGroup(zonesGroup); disposeGroup(itemsGroup);
     buildStatic(); computeModel(); buildItems(); refreshLabelsStatic();
   }
@@ -966,7 +1120,7 @@
   const INVENTORY_PATHS = {
     devices: '/api/devices/', rackSlots: '/api/rack-slots', rackOrder: '/api/rack-positions',
     sw: '/api/switch-assignments', owners: '/api/opt-owners', rackItems: '/api/rack-items',
-    chillers: '/api/chillers', rackOverrides: '/api/rack-overrides',
+    chillers: '/api/chillers', rackOverrides: '/api/rack-overrides', engineers: '/api/engineers',
   };
   async function readLiveInventory() {
     // Share the same inventory source on connection and every live refresh.
@@ -995,7 +1149,7 @@
       computeModel(); buildItems(); await refreshStatuses();
       if (session !== liveSession) return;
       if (S.live.timer) clearInterval(S.live.timer);
-      if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, POLL_MS);
+      if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, (window.DCIM_ACCOUNT_PREFS.refresh_seconds || 15) * 1000);
       toast('Backend connected', 'ok');
     } catch (e) {
       if (session !== liveSession) return;
@@ -1016,28 +1170,32 @@
       Object.assign(S.live, inventory);
       const pdus = S.live.devices.filter(d => d.kind === 'pdu'), kvms = S.live.devices.filter(d => d.kind === 'kvm');
       // Update inventory immediately; a slow PDU must not delay shelf/SN changes.
-      computeModel(); buildItems();
+      // refresh: keep the detail panel's scroll / an editor that has focus, never move the camera.
+      computeModel(); buildItems({ refresh: true });
       await Promise.all([
         ...pdus.map(p => api(`/api/pdus/${p.id}/status`).then(s => { if (session === liveSession) S.live.pdu[p.id] = s; }).catch(() => {})),
         ...kvms.map(k => api(`/api/kvms/${k.id}/status`).then(s => { if (session === liveSession) S.live.kvm[k.id] = s; }).catch(() => {})),
       ]);
       if (!S.live.connected || session !== liveSession) return;
-      computeModel(); buildItems();
+      computeModel(); buildItems({ refresh: true });
     } finally {
       if (refreshInFlight === session) refreshInFlight = null;
     }
   }
   async function outletAction(pduId, outlet, action, btn) {
+    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
+    if (window.DCIM_ACCOUNT_PREFS.confirm_power && ['off', 'cycle'].includes(action) && !confirm(`Power ${action} outlet ${outlet}?`)) return;
     if (!S.live.connected) { toast('Connect the backend first', 'err'); return; }
     const old = btn ? btn.innerHTML : null; if (btn) { btn.disabled = true; btn.innerHTML = `<span class="busy"></span> ${action}…`; }
     try {
       await api(`/api/pdus/${pduId}/outlets/${outlet}/power`, { method: 'POST', body: JSON.stringify({ action }) });
       toast(`Outlet #${outlet} → ${action}`, 'ok');
-      setTimeout(async () => { try { S.live.pdu[pduId] = await api(`/api/pdus/${pduId}/status`); computeModel(); buildItems(); } catch { /* ignore */ } }, 1500);
+      setTimeout(async () => { try { S.live.pdu[pduId] = await api(`/api/pdus/${pduId}/status`); computeModel(); buildItems({ refresh: true }); } catch { /* ignore */ } }, 1500);
     } catch (e) { toast('Power action failed: ' + e.message, 'err'); }
     finally { if (btn) { btn.disabled = false; btn.innerHTML = old; } }
   }
   function openKvm(kvmId, port) {
+    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
     const base = (S.settings.url || '').replace(/\/$/, '');
     api(`/api/kvms/${kvmId}/ports/${port}/mark-in-use`, { method: 'POST' }).catch(() => {});
     const popup = window.open(`${base}/api/kvms/${kvmId}/autologin?port=${port}`, '_blank');
@@ -1070,30 +1228,35 @@
   $('#sbDiscard').onclick = () => { if (confirm('Discard all unsaved edits and reload the saved lab-data.json?')) { LS.set('draft', null); location.reload(); } };
   $('#btnPlan').onclick = () => window.open('floorplan.svg', '_blank');
 
-  // ───────────────────────────────────────────────────────────── keep camera + target inside the room
-  const _clampV = new THREE.Vector3(), _off = new THREE.Vector3();
-  // Rigid clamp: the target is kept inside the room and the camera follows by the SAME correction (so the view never
-  // swings when you hit a wall); if the camera itself would end up outside, it slides toward the target along the
-  // current view direction instead of being pushed sideways.
-  function clampToRoom() {
-    if (!S.data) return; const { width: W, depth: D, height: H } = S.data.room; const m = 0.25;
-    // the point you look at stays inside the room; the camera may hover up to 3 m outside the walls (dollhouse view) but never below the floor
-    const lo = { x: -W - 3, y: 0.3, z: -3 }, hi = { x: 3, y: 16, z: D + 3 };
-    _off.copy(camera.position).sub(controls.target);
-    _clampV.copy(controls.target);
-    _clampV.x = Math.min(-m, Math.max(-W + m, _clampV.x)); _clampV.z = Math.min(D - m, Math.max(m, _clampV.z)); _clampV.y = Math.min(H, Math.max(0.0, _clampV.y));
-    if (!_clampV.equals(controls.target)) controls.target.copy(_clampV);
-    // largest s in (0,1] with target + s*off inside the box
-    let s = 1;
-    for (const k of ['x', 'y', 'z']) { const o = _off[k]; if (Math.abs(o) < 1e-9) continue; const lim = o > 0 ? hi[k] : lo[k]; const t = (lim - controls.target[k]) / o; if (t < s) s = Math.max(0, t); }
-    const minS = Math.min(1, controls.minDistance / Math.max(1e-6, _off.length()));
-    s = Math.max(s, minS);
-    _clampV.copy(controls.target).addScaledVector(_off, s);
-    for (const k of ['x', 'y', 'z']) _clampV[k] = Math.min(hi[k], Math.max(lo[k], _clampV[k])); // last resort (target pressed against a wall)
-    if (!_clampV.equals(camera.position)) camera.position.copy(_clampV);
+  // Keep the focus near the lab by translating camera and target together.
+  // The old camera box shortened the viewing radius every frame and caused jumps.
+  const previousCamera = new THREE.Vector3(), previousTarget = new THREE.Vector3();
+  const collisionRay = new THREE.Raycaster();
+  function constrainNavigation(collisions = true) {
+    if (!S.data) return;
+    const { width: W, depth: D, height: H } = S.data.room;
+    const bounded = controls.target.clone().clamp(new THREE.Vector3(-W - 0.5, 0, -0.5), new THREE.Vector3(0.5, H, D + 0.5));
+    camera.position.add(bounded.clone().sub(controls.target)); controls.target.copy(bounded);
+    if (camera.position.y < 0.3) { const rise = 0.3 - camera.position.y; camera.position.y += rise; controls.target.y += rise; }
+    if (collisions) {
+      const delta = camera.position.clone().sub(previousCamera), distance = delta.length();
+      if (distance > 1e-6) {
+        const solids = S.pickables.filter(m => m.visible && ['item', 'setup', 'shelf', 'storage'].includes(S.recs.get(m.userData.id)?.cat));
+        collisionRay.set(previousCamera, delta.normalize()); collisionRay.far = distance + 0.18;
+        const hit = collisionRay.intersectObjects(solids, false)[0];
+        if (hit && hit.distance < distance + 0.18) {
+          const fraction = Math.max(0, Math.min(1, (hit.distance - 0.18) / distance));
+          camera.position.lerpVectors(previousCamera, camera.position.clone(), fraction);
+          controls.target.lerpVectors(previousTarget, controls.target.clone(), fraction);
+        }
+      }
+    }
+    camera.lookAt(controls.target);
+    previousCamera.copy(camera.position); previousTarget.copy(controls.target);
   }
   // pan the whole view (camera + target together) along the floor, relative to where you look
   function panBy(dx, dz) {
+    markView(null);
     const fwd = controls.target.clone().sub(camera.position); fwd.y = 0; if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
     const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
     const step = Math.max(0.35, camera.position.distanceTo(controls.target) * 0.25);
@@ -1102,16 +1265,34 @@
   }
 
   // ───────────────────────────────────────────────────────────── camera views
-  function roomCenter() { const { width: W, depth: D } = S.data.room; return new THREE.Vector3(W / 2, 0.9, D / 2); }
-  function tweenCamera(pos, target, ms = 700) { S.tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() }; }
+  function roomCenter() { const { width: W, depth: D, height: H } = S.data.room; return new THREE.Vector3(WX(W / 2), H * 0.35, D / 2); }
+  function tweenCamera(pos, target, ms = 700) {
+    controls.cancel();
+    S.tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() };
+  }
+  function fitLab(top = false) {
+    scene.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(world);
+    const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+    const vertical = THREE.MathUtils.degToRad(camera.fov), horizontal = 2 * Math.atan(Math.tan(vertical / 2) * camera.aspect);
+    const distance = Math.min(controls.maxDistance * 0.9, sphere.radius / Math.sin(Math.min(vertical, horizontal) / 2) * 1.12);
+    const target = roomCenter();
+    const direction = (top ? new THREE.Vector3(0, 1, -0.04) : new THREE.Vector3(0.45, 0.95, -1)).normalize();
+    tweenCamera(target.clone().addScaledVector(direction, distance), target);
+  }
   const VIEWS = {
-    orbit() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(-1.0), 5.4, -1.6), new THREE.Vector3(WX(W / 2), 0.5, D * 0.5)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
-    top() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 11.5, D / 2 - 0.001), new THREE.Vector3(WX(W / 2), 0, D / 2)); controls.maxPolarAngle = Math.PI / 2 - 0.01; },
-    eye() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 1.65, 0.35), new THREE.Vector3(WX(W / 2), 1.35, D * 0.7)); controls.maxPolarAngle = Math.PI / 2 + 0.35; },
+    orbit() { fitLab(); },
+    top() { fitLab(true); },
+    eye() { const { width: W, depth: D } = S.data.room; tweenCamera(new THREE.Vector3(WX(W / 2), 1.65, 0.35), new THREE.Vector3(WX(W / 2), 1.35, D * 0.7)); },
   };
-  function setView(name) { VIEWS[name](); $$('.tb').forEach(b => b.classList.remove('active')); $('#v' + name[0].toUpperCase() + name.slice(1)).classList.add('active'); }
+  // Only the preset the camera is actually in is highlighted; focus / orbit / zoom / pan leave every preset.
+  const VIEW_BTN = { orbit: '#vOrbit', top: '#vTop', eye: '#vEye' };
+  function markView(name) { S.view = VIEW_BTN[name] ? name : null; Object.entries(VIEW_BTN).forEach(([k, q]) => $(q).classList.toggle('active', k === S.view)); }
+  function setView(name) { VIEWS[name](); markView(name); }
+  controls.addEventListener('start', () => markView(null));
   function flyTo(rec, force) {
-    if (!rec.group) return; const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (b.isEmpty()) return;
+    if (!rec.group) return;
+    markView(null); const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (b.isEmpty()) return;
     const c = b.getCenter(new THREE.Vector3()), s = b.getSize(new THREE.Vector3()); let dist = Math.max(s.x, s.y, s.z) * 1.7 + 1.1;
     if (rec.cat === 'setup') { dist = 3.4; c.y = 1.25; } else if (rec.cat === 'shelf') { dist = 2.2; } else if (rec.cat === 'item' && rec.setup) { dist = Math.max(1.2, dist * 0.8); }
     let dir = camera.position.clone().sub(controls.target); if (dir.length() < 0.01) dir.set(-1, 1, -1); dir.normalize(); if (dir.y < 0.25) dir.y = 0.25; dir.normalize();
@@ -1120,15 +1301,19 @@
     tweenCamera(c.clone().add(dir.multiplyScalar(dist)), c, force ? 500 : 800);
   }
   $('#vOrbit').onclick = () => setView('orbit'); $('#vTop').onclick = () => setView('top'); $('#vEye').onclick = () => setView('eye');
-  $('#vReset').onclick = () => { setView('orbit'); closeDetail(); };
+  $('#vReset').onclick = () => { cancelMove(); closeDetail(); setView('orbit'); };
+  $('#vFit').onclick = () => setView('orbit');
+  $('#vFocus').onclick = () => { const rec = S.recs.get(S.selected); if (rec) flyTo(rec, true); };
   $('#btnHome').onclick = () => setView('orbit');
-  $('#tWalls').onclick = () => { S.wallsVisible = !S.wallsVisible; wallsGroup.visible = S.wallsVisible; $('#tWalls').classList.toggle('active', !S.wallsVisible); $('#tWalls').textContent = S.wallsVisible ? 'Walls' : 'Walls hidden'; };
+  // toggles: highlighted = layer shown / feature on
+  $('#tWalls').onclick = () => { S.wallsVisible = !S.wallsVisible; wallsGroup.visible = S.wallsVisible; $('#tWalls').classList.toggle('active', S.wallsVisible); };
+  $('#tWalls').classList.toggle('active', S.wallsVisible);
   $('#tZones').onclick = () => { S.zonesVisible = !S.zonesVisible; zonesGroup.visible = S.zonesVisible; $('#tZones').classList.toggle('active', S.zonesVisible); };
   $('#tZones').classList.add('active');
-  function setLabelMode(mode, silent) { S.labelMode = mode; $('#tLabels').textContent = 'Labels: ' + { setups: 'setups', all: 'all', none: 'off' }[mode]; if (!silent) LS.set('labelMode', mode); }
+  function setLabelMode(mode, silent) { S.labelMode = mode; $('#tLabels').textContent = 'Labels: ' + { setups: 'setups', all: 'all', none: 'off' }[mode]; $('#tLabels').classList.toggle('active', mode !== 'none'); if (!silent) LS.set('labelMode', mode); }
   $('#tLabels').onclick = () => setLabelMode({ setups: 'all', all: 'none', none: 'setups' }[S.labelMode]);
   window.addEventListener('keydown', e => {
-    if (e.target.matches('input,textarea,select')) return;
+    if (e.target !== canvas && e.target !== document.body) return;
     const k = e.key.toLowerCase();
     if (k === 'r') setView('orbit'); if (k === 't') setView('top'); if (k === 'e') setView('eye'); if (k === 'w') $('#tWalls').click(); if (k === 'l') $('#tLabels').click(); if (k === 'z') $('#tZones').click();
     if (k === 'k') toggleKiosk(); if (e.key === 'F2') toggleEdit();
@@ -1137,48 +1322,27 @@
 
   // ───────────────────────────────────────────────────────────── picking
   let downPos = null;
-  // ── drag & drop (Edit mode): press a device and drag it onto another shelf / rack / storage
-  let drag = null;
-  function draggable(rec) { return rec && rec.cat === 'item' && rec.meshes.length && (S.data.items.some(x => x.id === rec.id) || movesViaDcim(rec.item)); }
-  function dragUpdate(e, id) {
-    const hit = pickAt(e); const t = hit ? resolveMoveTarget(hit) : null; const name = S.recs.get(id)?.def.name || id;
-    if ((t ? t.id : null) !== S.hover) setHover(t ? t.id : null);
-    $('#moveText').textContent = t ? `Drop ${name} on ${t.id}${t.cat === 'shelf' ? ' · L' + t.level : ''}` : `Drag ${name} onto a shelf, rack or storage`;
-    return t;
-  }
-  function dragEnd(e, drop) {
-    const d = drag; drag = null; if (!d || !d.active) return false;
-    controls.enabled = true; canvas.classList.remove('dragging');
-    const t = drop ? dragUpdate(e, d.id) : null;
-    if (t) finishMove(t); else { cancelMove(); if (drop) toast('Dropped outside a shelf — nothing moved', 'err'); }
-    return true;
-  }
   canvas.addEventListener('pointerdown', e => {
-    downPos = [e.clientX, e.clientY]; S.lastInput = performance.now(); S.tween = null; // a touch always wins over a running camera animation
-    if (S.editMode && !S.moveItem && e.button === 0) { const hit = pickAt(e); const rec = hit && S.recs.get(hit.object.userData.id); drag = draggable(rec) ? { id: rec.id, x: e.clientX, y: e.clientY, active: false, pid: e.pointerId } : null; }
+    downPos = e.button === 0 ? { x: e.clientX, y: e.clientY, id: e.pointerId, moved: false } : null;
   });
-  window.addEventListener('pointermove', e => {
-    if (!drag) return;
-    if (!drag.active) { if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 8) return; drag.active = true; controls.enabled = false; canvas.classList.add('dragging'); startMove(drag.id); }
-    dragUpdate(e, drag.id);
-  });
-  window.addEventListener('pointerup', e => { if (drag && drag.active) { dragEnd(e, true); downPos = null; } else if (drag) drag = null; });
-  window.addEventListener('pointercancel', e => { dragEnd(e, false); });
-  ['pointermove', 'wheel', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, () => { S.lastInput = performance.now(); }, { passive: true }));
+  canvas.addEventListener('pointermove', e => {
+    if (downPos && e.pointerId === downPos.id && Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 5) downPos.moved = true;
+    if (e.pointerType === 'mouse' && e.buttons === 0 && activePointers.size) cancelNavigation();
+  }, true);
   canvas.addEventListener('pointerup', e => {
-    if (drag && drag.active) return; // handled by the window-level drop handler
-    if (!downPos) return; const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]); downPos = null; if (moved > (e.pointerType === 'touch' ? 14 : 6)) return;
+    const down = downPos; downPos = null;
+    const rect = canvas.getBoundingClientRect();
+    if (!down || down.id !== e.pointerId || down.moved || e.button !== 0 || activePointers.size > 1 ||
+        e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
     const hit = pickAt(e);
-    if (S.moveItem) {
-      // while moving: anything you tap resolves to the shelf / rack / storage at that spot — never changes the selection
+    if (S.moveItem && S.editMode && window.DCIM_CAN_OPERATE) {
       const target = hit ? resolveMoveTarget(hit) : null;
-      if (target) finishMove(target); else toast('Tap a shelf, a rack or a storage unit (or Cancel)', 'err');
+      if (target) finishMove(target); else toast('Choose a shelf, rack or storage destination, or Cancel', 'err');
       return;
     }
-    if (!hit) return;
-    const rec = S.recs.get(hit.object.userData.id);
-    select(hit.object.userData.id, rec && rec.cat === 'setup' && !S.editMode ? { fly: true } : { keepCamera: true });
+    if (hit) select(hit.object.userData.id, { keepCamera: true });
   });
+  ['pointerdown', 'wheel', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, () => { S.lastInput = performance.now(); }, { passive: true }));
   let hoverT = 0;
   canvas.addEventListener('pointermove', e => {
     const now = performance.now(); if (now - hoverT < 40) return; hoverT = now; const hit = pickAt(e);
@@ -1227,9 +1391,18 @@
   const tmpV = new THREE.Vector3();
   function updateLabels() {
     const r = canvas.getBoundingClientRect(); const camPos = camera.position;
+    const hoverSetup = S.labelHover || (S.hover ? (S.recs.get(S.hover)?.cat === 'setup' ? S.hover : S.recs.get(S.hover)?.setup) : null);
     for (const rec of S.recs.values()) {
+      const ab = rec.attnEl;
+      if (ab) {
+        let vis = rec.attnN > 0 && !rec.filtered;
+        if (vis) { tmpV.copy(rec.attnAnchor).project(camera); vis = tmpV.z <= 1 && Math.abs(tmpV.x) <= 1.05 && Math.abs(tmpV.y) <= 1.05; }
+        if (!vis) ab.style.display = 'none';
+        else { ab.style.display = ''; ab.style.left = ((tmpV.x + 1) / 2 * r.width) + 'px'; ab.style.top = ((1 - tmpV.y) / 2 * r.height) + 'px'; }
+      }
       const el = rec.telem; if (!el) continue;
-      const show = !rec.filtered && S.labelMode !== 'none' && (S.live.connected || S.selected === rec.id);
+      const full = S.heat || S.selected === rec.id || hoverSetup === rec.id;
+      const show = full && !rec.filtered && S.labelMode !== 'none' && (S.live.connected || S.selected === rec.id);
       if (!show) { el.style.display = 'none'; continue; }
       tmpV.copy(rec.telemAnchor); const dist = tmpV.distanceTo(camPos); tmpV.project(camera);
       if (tmpV.z > 1 || Math.abs(tmpV.x) > 1.1 || Math.abs(tmpV.y) > 1.1) { el.style.display = 'none'; continue; }
@@ -1258,21 +1431,22 @@
   // ───────────────────────────────────────────────────────────── render loop
   function animate() {
     requestAnimationFrame(animate);
-    if (S.kiosk) { const idle = performance.now() - S.lastInput; controls.autoRotate = idle > 45000 && !S.selected; controls.autoRotateSpeed = 0.6; } else controls.autoRotate = false;
+    controls.autoRotate = false;
+    const animating = !!S.tween;
     if (S.tween) { const k = Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms); const e = 1 - Math.pow(1 - k, 3); camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); if (k >= 1) S.tween = null; }
     const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
-    controls.update(); clampToRoom(); renderer.render(scene, camera); updateLabels();
+    controls.update(); constrainNavigation(!animating); renderer.render(scene, camera); updateLabels();
   }
 
 
   // ───────────────────────────────────────────────────────────── EDIT MODE (touch-friendly editor for the lab screen)
   const STATUS_ICON = { active: '●', building: '◐', inactive: '○', dismantled: '✕', unknown: '?' };
-  function toggleEdit(force) { S.editMode = force !== undefined ? force : !S.editMode; LS.set('editMode', S.editMode); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit'; if (!S.editMode) cancelMove(); if (S.selected) select(S.selected, { keepCamera: true }); toast(S.editMode ? 'Edit mode — tap any rack, shelf or item' : 'Edit mode off', 'ok'); }
+  function toggleEdit(force) { if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; } S.editMode = force !== undefined ? force : !S.editMode; LS.set('editMode', S.editMode); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit'; if (!S.editMode) cancelMove(); if (S.selected) select(S.selected, { keepCamera: true }); toast(S.editMode ? 'Edit mode — tap any rack, shelf or item' : 'Edit mode off', 'ok'); }
   function toggleKiosk(force) { S.kiosk = force !== undefined ? force : !S.kiosk; LS.set('kiosk', S.kiosk); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); if (S.kiosk && S.labelMode === 'none') setLabelMode('setups'); resize(); }
   $('#btnEdit').onclick = () => toggleEdit(); $('#btnKiosk').onclick = () => toggleKiosk();
 
-  function startMove(itemId) { S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden'); $('#moveText').textContent = `Tap the shelf (or rack / storage) where ${S.recs.get(itemId)?.def.name || itemId} goes now`; highlightTargets(true); }
-  function cancelMove() { if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); highlightTargets(false); }
+  function startMove(itemId) { if (!S.editMode || !window.DCIM_CAN_OPERATE) return; controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden'); $('#moveText').textContent = `Tap the shelf (or rack / storage) where ${S.recs.get(itemId)?.def.name || itemId} goes now`; highlightTargets(true); }
+  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); highlightTargets(false); }
   $('#moveCancel').onclick = cancelMove;
   function highlightTargets(on) {
     for (const r of S.recs.values()) if (r.cat === 'shelf') {
@@ -1327,6 +1501,7 @@
     return `${rack} · U${u}`;
   }
   async function finishMove(target) {
+    if (!S.editMode || !window.DCIM_CAN_OPERATE) { cancelMove(); return; }
     const id = S.moveItem; cancelMove(); if (!id) return;
     const rec = S.recs.get(id); const mit = rec?.item; const def = S.data.items.find(x => x.id === id);
     if (!def && !mit) return;
@@ -1372,7 +1547,7 @@
         <div class="row-lg"><button class="btn-lg btn-cyan" id="eMove">⇄ Move… (tap a shelf)</button><button class="btn-lg" id="eUnplace">Unplace</button></div>
         ${it.setup ? `<div class="row-lg"><button class="btn-lg sm" data-side="left">⇤ Hang on left side</button><button class="btn-lg sm" data-side="right">Hang on right side ⇥</button><button class="btn-lg sm" data-side="bay">Bottom bay</button></div>` : ''}
         <label class="lbl-lg">Type</label><select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
-        <label class="lbl-lg">Owner</label><input class="in-lg" id="eOwner" value="${esc(it.owner || '')}" placeholder="engineer" />
+        <label class="lbl-lg">Owner</label>${ownerPicker(it.owner)}
         <label class="lbl-lg">PDU · outlet</label>
         <div class="row-lg"><select class="in-lg" id="ePdu" style="flex:2"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${x.id}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
           <div class="stepper"><button data-step="-1">−</button><input id="eOutlet" type="number" min="1" max="48" value="${it.dcim?.outlet ?? ''}" placeholder="#" /><button data-step="1">＋</button></div></div>
@@ -1449,31 +1624,59 @@
   function heatColor(t) { // 18°C blue → 22 green → 26 amber → 32+ red
     if (t == null) return '#52525b'; if (t <= 18) return '#3b82f6'; if (t <= 22) return '#22c55e'; if (t <= 26) return '#84cc16'; if (t <= 30) return '#f59e0b'; return '#ef4444';
   }
-  function rackTelemetry(su) {
-    const rack = su.dcimRack; if (!S.live.connected || !rack) return null;
-    const pdus = S.live.devices.filter(d => d.kind === 'pdu' && (d.rack === rack || (d.notes || '').split(',').map(x => x.trim()).includes('shared:' + rack)));
+  function rackTelemetry(su, live = S.live) {
+    const rack = su.dcimRack; if (!live.connected || !rack) return null;
+    const pdus = (live.devices || []).filter(d => d.kind === 'pdu' && (d.rack === rack || (d.notes || '').split(',').map(x => x.trim()).includes('shared:' + rack)));
     if (!pdus.length) return null;
-    let watts = 0, amps = 0, volts = 0, n = 0, on = 0, total = 0, temp = null, hum = null, leak = false, reach = 0, any = false;
-    pdus.forEach(p => { const st = S.live.pdu[p.id]; if (!st) return; any = true; if (st.reachable === false) return; reach++; const v = st.inlet_voltage > 0 ? st.inlet_voltage : 208; volts += v; n++; watts += st.total_watts || 0; amps += (st.total_watts || 0) / v; (st.outlets || []).forEach(o => { total++; if (o.state === 'on') on++; }); if (st.temperature != null) temp = temp == null ? st.temperature : Math.max(temp, st.temperature); if (st.humidity != null) hum = hum == null ? st.humidity : Math.max(hum, st.humidity); if (st.leak_detected) leak = true; });
+    let watts = 0, amps = 0, volts = 0, n = 0, on = 0, total = 0, temp = null, hum = null, leak = false, reach = 0, any = false, known = 0, partial = false, ampsPartial = false, estimated = false;
+    pdus.forEach(p => {
+      const st = (live.pdu || {})[p.id];
+      if (!st) { partial = ampsPartial = true; return; }
+      any = true;
+      if (!st.reachable) { partial = ampsPartial = true; return; }
+      reach++;
+      if (st.inlet_voltage != null) { volts += st.inlet_voltage; n++; }
+      if (st.total_watts != null) { watts += st.total_watts; known++; }
+      if (st.watts_complete !== true) partial = true;
+      const readings = st.inlet_readings || [];
+      if (readings.length && readings.every(i => i.current != null)) {
+        amps += readings.reduce((sum, i) => sum + i.current, 0);
+      } else if (st.total_watts != null && st.watts_complete === true) {
+        amps += st.total_watts / (st.inlet_voltage > 0 ? st.inlet_voltage : 208); estimated = true;
+      } else { ampsPartial = true; }
+      (st.outlets || []).forEach(o => { total++; if (o.state === 'on') on++; });
+      if (st.temperature != null) temp = temp == null ? st.temperature : Math.max(temp, st.temperature);
+      if (st.humidity != null) hum = hum == null ? st.humidity : Math.max(hum, st.humidity);
+      if (st.leak_detected) leak = true;
+    });
     if (!any) return { loading: true };
-    return { watts, amps, volts: n ? volts / n : 0, cap: amps / (RATED_AMPS * pdus.length), on, total, temp, hum, leak, reachable: reach > 0, pduCount: pdus.length };
+    return { watts: known ? watts : null, amps: ampsPartial ? null : amps, partial, estimated, volts: n ? volts / n : null, cap: ampsPartial ? null : amps / (RATED_AMPS * pdus.length), on, total, temp, hum, leak, reachable: reach > 0, pduCount: pdus.length };
   }
   function updateTelemetry() {
-    let tSum = 0, tN = 0, hSum = 0, hN = 0, tMin = null, tMax = null, leaks = [], kwTot = 0;
+    let tSum = 0, tN = 0, hSum = 0, hN = 0, tMin = null, tMax = null, leaks = [], kwTot = 0, kwKnown = 0, kwPartial = false;
     for (const rec of S.recs.values()) {
       if (rec.cat !== 'setup' || !rec.telem) continue;
       const t = rackTelemetry(rec.def);
+      const lt = rec.labelTel;
       if (!t || t.loading || !t.reachable) {
+        if (t) kwPartial = true;
         rec.telem.className = 'telem dim'; rec.telem.innerHTML = `<span class="t-muted">${!t ? (S.live.connected ? (rec.def.dcimRack ? 'no PDU' : 'unmapped') : '—') : t.loading ? '…' : 'PDU offline'}</span>`;
+        if (lt) { lt.className = 'lt' + (t && !t.loading ? ' off' : ' muted'); lt.textContent = !S.live.connected ? '' : !t ? (rec.def.dcimRack ? 'no PDU' : 'unmapped') : t.loading ? '…' : 'PDU offline'; }
         rec.heatPatch.visible = false; rec.leakRing.visible = false; continue;
       }
-      kwTot += t.watts;
+      if (t.watts != null) { kwTot += t.watts; kwKnown++; }
+      if (t.partial) kwPartial = true;
       if (t.temp != null) { tSum += t.temp; tN++; tMin = tMin == null ? t.temp : Math.min(tMin, t.temp); tMax = tMax == null ? t.temp : Math.max(tMax, t.temp); }
       if (t.hum != null) { hSum += t.hum; hN++; }
       if (t.leak) leaks.push(rec.def.dcimRack || rec.id);
       const capPct = Math.round(t.cap * 100); const capCls = t.cap > .95 ? 'bad' : t.cap > .8 ? 'warn' : 'ok';
       rec.telem.className = 'telem' + (t.leak ? ' leak' : capCls === 'bad' ? ' bad' : capCls === 'warn' ? ' warn' : '');
-      rec.telem.innerHTML = `<div class="t-row"><b class="t-kw">${(t.watts / 1000).toFixed(2)}</b><span class="t-u">kW</span><span class="t-sep"></span><span class="t-v">${t.volts.toFixed(0)} V</span><span class="t-sep"></span><span class="t-v">${t.amps.toFixed(1)} A</span>${t.leak ? '<span class="t-leak">LEAK</span>' : ''}</div><div class="t-cap ${capCls}" title="${capPct}% of ${RATED_AMPS * t.pduCount} A · ${t.on}/${t.total} outlets on"><i style="width:${Math.min(100, capPct)}%"></i></div>`;
+      rec.telem.innerHTML = `<div class="t-row"><b class="t-kw">${t.watts == null ? '\u2014' : (t.watts / 1000).toFixed(2)}${t.partial ? ' (partial)' : ''}</b><span class="t-u">kW</span><span class="t-sep"></span><span class="t-v">${t.volts == null ? '\u2014' : t.volts.toFixed(0) + ' V'}</span><span class="t-sep"></span><span class="t-v">${t.amps == null ? '\u2014' : (t.estimated ? '~' : '') + t.amps.toFixed(1) + ' A' + (t.estimated ? ' (estimate)' : '')}</span>${t.leak ? '<span class="t-leak">LEAK</span>' : ''}</div><div class="t-cap ${capCls}" title="${t.cap == null ? 'unknown / partial' : capPct + '% (estimate)'} of ${RATED_AMPS * t.pduCount} A · ${t.on}/${t.total} outlets on"><i style="width:${Math.min(100, capPct)}%"></i></div>`;
+      if (lt) {
+        lt.className = 'lt' + (t.leak || capCls === 'bad' ? ' bad' : capCls === 'warn' ? ' warn' : '');
+        lt.title = `${t.partial ? 'partial reading — not every outlet reports watts · ' : ''}${t.cap == null ? 'load unknown' : capPct + '% of ' + RATED_AMPS * t.pduCount + ' A (estimate)'}`;
+        lt.innerHTML = `<b>${t.watts == null ? '\u2014' : (t.partial ? '≥' : '') + (t.watts / 1000).toFixed(2)}</b> kW · ${t.amps == null ? '\u2014' : (t.estimated ? '~' : '') + t.amps.toFixed(1)} A<i class="lt-bar"><i style="width:${t.cap == null ? 0 : Math.min(100, capPct)}%"></i></i>${t.leak ? '<span class="lt-leak">LEAK</span>' : ''}`;
+      }
       rec.heatPatch.visible = S.heat; rec.heatPatch.material.color.set(heatColor(t.temp)); rec.heatPatch.material.emissive.set(heatColor(t.temp));
       rec.leakRing.visible = !!t.leak;
     }
@@ -1487,29 +1690,37 @@
       <div class="e-row"><span class="e-ic">🌡</span><b class="e-${tCls}">${tAvg == null ? '—' : tAvg.toFixed(1) + '°C'}</b>${tN > 1 ? `<small>${tMin.toFixed(1)}–${tMax.toFixed(1)}</small>` : ''}</div>
       <div class="e-row"><span class="e-ic">💧</span><b>${hAvg == null ? '—' : hAvg.toFixed(0) + '%'}</b><small>humidity</small></div>
       <div class="e-row"><span class="e-ic">${leaks.length ? '⚠' : '●'}</span><b class="${leaks.length ? 'e-bad' : 'e-ok'}">${leaks.length ? 'LEAK · ' + leaks.join(', ') : 'no leaks'}</b></div>
-      <div class="e-row e-foot"><small>${(kwTot / 1000).toFixed(2)} kW total</small></div>`;
+      <div class="e-row e-foot"><small>${kwKnown ? (kwTot / 1000).toFixed(2) + ' kW total' + (kwPartial ? ' (partial)' : '') : '\u2014'}</small></div>`;
   }
-  $('#tHeat').onclick = () => { S.heat = !S.heat; $('#tHeat').classList.toggle('active', S.heat); updateTelemetry(); };
+  $('#tHeat').onclick = () => { S.heat = !S.heat; LS.set('heat', S.heat); $('#tHeat').classList.toggle('active', S.heat); updateTelemetry(); };
 
   // ───────────────────────────────────────────────────────────── quick-jump rack bar + zoom buttons
   function renderRackBar() {
     const bar = $('#rackBar'); if (!bar || !S.data) return;
-    bar.innerHTML = S.data.setups.map(su => `<button data-jump="${su.id}" class="${S.selected === su.id ? 'on' : ''}"><span><span class="rb-dot" style="background:${STATUS_COLOR[su.status || 'unknown']}"></span>${esc(su.dcimRack || su.id)}</span><small>${esc(su.name.split('—')[0].replace('Rack', '').trim())}</small></button>`).join('') +
+    // dot = worst attention severity of the rack; without issues: live PDU reachability, else the static status
+    const rackDot = su => {
+      const mine = (S.attention || []).filter(e => e.setup === su.id); const w = worstSeverity(mine);
+      if (w) return { color: SEV_COLOR[w], n: mine.length, w };
+      const t = S.live.connected ? rackTelemetry(su) : null;
+      return { color: t && !t.loading ? STATUS_COLOR[t.reachable ? 'active' : 'inactive'] : STATUS_COLOR[su.status || 'unknown'], n: 0, w: null };
+    };
+    bar.innerHTML = S.data.setups.map(su => { const d = rackDot(su); return `<button data-jump="${su.id}" class="${S.selected === su.id ? 'on' : ''}" title="${d.n ? `${d.n} item${d.n === 1 ? '' : 's'} need attention` : esc(su.id)}"><span><span class="rb-dot" style="background:${d.color}"></span>${esc(su.dcimRack || su.id)}${d.n ? `<span class="rb-n sev-${d.w}">${d.n}</span>` : ''}</span><small>${esc(su.name.split('—')[0].replace('Rack', '').trim())}</small></button>`; }).join('') +
       S.data.storage.map(st => `<button data-jump="${st.id}" class="${S.selected === st.id ? 'on' : ''}"><span><span class="rb-dot" style="background:${STATUS_COLOR[st.status || 'unknown']}"></span>${st.id.replace('STORAGE-', 'ST-')}</span><small>${esc(st.name.split(' ').slice(0, 2).join(' '))}</small></button>`).join('');
     $$('[data-jump]', bar).forEach(b => b.onclick = () => select(b.dataset.jump, { fly: true }));
   }
-  function zoomBy(f) { const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
-  function rotateBy(a) { const dir = camera.position.clone().sub(controls.target); dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), a); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 300); }
+  function zoomBy(f) { markView(null); const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
+  function rotateBy(a) { markView(null); const dir = camera.position.clone().sub(controls.target); dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), a); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 300); }
   $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4); $('#zL').onclick = () => rotateBy(Math.PI / 8); $('#zR').onclick = () => rotateBy(-Math.PI / 8);
   $('#pL').onclick = () => panBy(-1, 0); $('#pR').onclick = () => panBy(1, 0); $('#pF').onclick = () => panBy(0, 1); $('#pB').onclick = () => panBy(0, -1);
-  window.addEventListener('keydown', e => { if (e.target.matches('input,textarea,select')) return; const k = e.key; if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1); else return; e.preventDefault(); });
+  window.addEventListener('keydown', e => { if (e.target !== canvas && e.target !== document.body) return; const k = e.key; if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1); else return; e.preventDefault(); });
 
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }
-  $$('.tab').forEach(b => b.onclick = () => { $$('.tab').forEach(x => x.classList.remove('active')); b.classList.add('active'); ['tree', 'inv', 'unplaced'].forEach(id => $('#' + id).classList.toggle('hidden', id !== b.dataset.tab)); });
+  $$('.tab').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
   // ───────────────────────────────────────────────────────────── boot
   function init(data) {
+    if (!window.DCIM_CAN_OPERATE) S.editMode = false;
     // a browser draft is only restored if it was made on top of THIS exact dataset (otherwise a newer lab-data.json would be hidden by stale edits)
     S.dataBase = dataFingerprint(data);
     const draft = LS.get('draft', null);
@@ -1520,15 +1731,19 @@
     setupFilterUI(); buildStatic(); computeModel(); buildItems();
     setLabelMode(LS.get('labelMode', 'setups'), true); updateSaveBar();
     $('#tHeat').classList.toggle('active', S.heat); document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); document.body.classList.toggle('editmode', S.editMode); $('#btnEdit').classList.toggle('on', S.editMode); $('#btnEdit').textContent = S.editMode ? '✓ Editing' : 'Edit';
-    resize(); VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; $('#vOrbit').classList.add('active');
+    resize(); controls.maxDistance = Math.max(25, Math.hypot(S.data.room.width, S.data.room.depth, S.data.room.height) * 5);
+    camera.far = controls.maxDistance + 50; camera.updateProjectionMatrix();
+    VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
+    previousCamera.copy(camera.position); previousTarget.copy(controls.target); markView('orbit');
+    showTab(LS.get('sideTab', 'attn')); placeAttnDock();
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
     if (S.settings.url) connect(); else if (auto) { api('/api/version').then(() => connect()).catch(() => {}); }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk };
+  window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-  boot.then(init).catch(err => {
+  Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
     $('#loadFallback').classList.remove('hidden');
     $('#fileJson').onchange = e => { const f = e.target.files[0]; if (!f) return; f.text().then(t => { $('#loadFallback').classList.add('hidden'); init(JSON.parse(t)); }).catch(er => toast('Invalid JSON: ' + er.message, 'err')); };

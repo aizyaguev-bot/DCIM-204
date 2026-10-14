@@ -16,7 +16,7 @@ from app.models import Device
 async def inventory_client(db_session, tmp_path, monkeypatch):
     import app.main as main
     monkeypatch.setattr(store, "ITEMS_FILE", tmp_path / "rack_items.json")
-    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(lab_manager_password="test-password"))
+    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(accounts_enabled=False, lab_manager_password="test-password"))
     store.ITEMS_FILE.write_text(json.dumps({
         "Rack-01": [{"id": "ci-existing", "name": "Switch A", "type": "switch", "serial_number": "MT00123", "u": 1, "notes": "Keep this note", "custom_field": {"keep": True}}],
         "Rack-02": [],

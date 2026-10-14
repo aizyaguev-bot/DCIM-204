@@ -5,6 +5,8 @@ All tests mock the Raritan hardware driver so no live KVM is required.
 Integration tests against real KVMs live in test_kvm_regression.py.
 """
 import time
+import httpx
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import app.routers.kvms as kvms_module
@@ -190,13 +192,13 @@ async def test_viewer_url_404_for_unknown_device(client):
 # ── Auto-clear logic (tested by calling _refresh_background directly) ─────────
 
 async def test_auto_clear_removes_old_inactive_port():
-    """Port marked >2 min ago and not active → cleared."""
+    """Port marked >2 min ago and live status says not active → cleared."""
     dev_id = "test-dev"
     # Simulate marked 3 minutes ago: exp = now + TTL - 180
     kvms_module._in_use[dev_id] = {1: time.monotonic() + _IN_USE_TTL - 180}
 
     fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
-        KvmPort(number=1, label="", status="idle"),
+        KvmPort(number=1, label="", status="idle", status_source="live"),
     ])
     with patch.object(kvms_module, "_fetch_status", AsyncMock(return_value=fresh)):
         with patch.object(kvms_module, "ensure_session", AsyncMock()):
@@ -237,9 +239,205 @@ async def test_auto_clear_keeps_still_active_port():
     assert 1 in kvms_module._in_use.get(dev_id, {})
 
 
+@pytest.mark.parametrize("status,source", [
+    ("idle", "configured"),   # LX II / KX III sidebar.asp
+    ("empty", "configured"),
+    ("idle", "unknown"),      # static fallback or unnumbered REST row
+])
+async def test_auto_clear_keeps_mark_when_status_is_not_live(status, source):
+    """Sidebar/static ports never report 'active'; the manual mark must survive."""
+    dev_id = "test-dev"
+    kvms_module._in_use[dev_id] = {1: time.monotonic() + _IN_USE_TTL - 600}
+    fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
+        KvmPort(number=1, label="", status=status, status_source=source),
+    ])
+    with patch.object(kvms_module, "_fetch_status", AsyncMock(return_value=fresh)):
+        with patch.object(kvms_module, "ensure_session", AsyncMock()):
+            await kvms_module._refresh_background(dev_id, object())
+    assert 1 in kvms_module._in_use[dev_id]
+
+
+async def test_auto_clear_keeps_mark_for_port_missing_from_live_status():
+    dev_id = "test-dev"
+    kvms_module._in_use[dev_id] = {5: time.monotonic() + _IN_USE_TTL - 600}
+    fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
+        KvmPort(number=1, label="", status="idle", status_source="live"),
+    ])
+    with patch.object(kvms_module, "_fetch_status", AsyncMock(return_value=fresh)):
+        with patch.object(kvms_module, "ensure_session", AsyncMock()):
+            await kvms_module._refresh_background(dev_id, object())
+    assert 5 in kvms_module._in_use[dev_id]
+
+
+def _sidebar_html(*ports):
+    return "".join(f"J('PortId','P{n}') x J('PortNumber',{n})\n" for n in ports)
+
+
+@pytest.mark.parametrize("model,routes", [
+    ("LX II", {"/sidebar.asp": (200, _sidebar_html(1, 2))}),
+    ("KX III", {"/api/v1/targets": (404, ""), "/sidebar.asp": (200, _sidebar_html(1, 2))}),
+    ("LX II", {"/sidebar.asp": (500, "")}),  # static fallback
+])
+async def test_in_use_mark_survives_refreshes_from_sidebar_and_static_ports(monkeypatch, model, routes):
+    """End to end through the driver: an open console on a sidebar/static KVM stays IN USE."""
+    def transport(request):
+        code, body = routes.get(request.url.path, (200, ""))
+        return httpx.Response(code, text=body)
+
+    clock = [1000.0]
+    monkeypatch.setattr(kvms_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def make_driver(*args, **kwargs):
+        driver = RaritanKvmDriver("example.invalid", "u", "p", model=model)
+        driver._client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+        driver._session_client = lambda: httpx.AsyncClient(transport=httpx.MockTransport(transport))
+        return driver
+
+    monkeypatch.setattr(kvms_module, "RaritanKvmDriver", make_driver)
+    monkeypatch.setattr(kvms_module, "get_creds", lambda dev: ("u", "p"))
+    monkeypatch.setattr(kvms_module, "ensure_session", AsyncMock())
+    dev = SimpleNamespace(id="kvm-sb", ip="example.invalid", model=model, port_count=4, labels_json="{}")
+
+    await kvms_module.mark_port_in_use(dev.id, 1)
+    await kvms_module._refresh_background(dev.id, dev)
+    clock[0] += 121
+    await kvms_module._refresh_background(dev.id, dev)
+    clock[0] += 3600
+    await kvms_module._refresh_background(dev.id, dev)
+
+    status = kvms_module._cache[dev.id][1]
+    assert status.reachable and status.error is None
+    assert all(p.status_source != "live" for p in status.ports)
+    assert [p.number for p in _apply_overlays(dev.id, status, {}).ports if p.in_use] == [1]
+
+    await kvms_module.mark_port_free(dev.id, 1)
+    assert not any(p.in_use for p in _apply_overlays(dev.id, status, {}).ports)
+
+
+# ── Wrong credentials ────────────────────────────────────────────────────────
+
+LOGIN_PAGE = '<form action="auth.asp"><input type="password" name="password"><input name="action_login"></form>'
+
+
+def _auth_driver(model, handler, seen):
+    def transport(request):
+        seen.append(f"{request.method} {request.url.path}")
+        return handler(request)
+    driver = RaritanKvmDriver("example.invalid", "secret-user", "secret-password", model=model)
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    driver._session_client = lambda: httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    return driver
+
+
+@pytest.mark.parametrize("model,code,expected_requests,static_ports", [
+    ("KX III", 401, ["GET /", "GET /api/v1/targets", "POST /auth.asp"], False),
+    ("KX III", 403, ["GET /", "GET /api/v1/targets", "POST /auth.asp"], False),
+    ("LX II", 401, ["GET /", "GET /sidebar.asp", "POST /auth.asp"], True),
+    ("LX II", 403, ["GET /", "GET /sidebar.asp", "POST /auth.asp"], True),
+])
+async def test_wrong_credentials_report_auth_failure_and_stop_early(monkeypatch, model, code, expected_requests, static_ports):
+    seen = []
+    driver = _auth_driver(model, lambda r: httpx.Response(code, text="secret-password response-body"), seen)
+    monkeypatch.setattr(kvms_module, "RaritanKvmDriver", lambda *args, **kwargs: driver)
+    monkeypatch.setattr(kvms_module, "get_creds", lambda dev: ("secret-user", "secret-password"))
+    status = await kvms_module._fetch_status("kvm-auth", SimpleNamespace(
+        ip="example.invalid", model=model, port_count=4, labels_json="{}"))
+
+    assert status.reachable is True
+    assert status.error == "Device API authentication failed"
+    assert seen == expected_requests
+    if static_ports:  # LX II designed static list, never presented as live
+        assert [p.number for p in status.ports] == [1, 2, 3, 4]
+        assert all(p.status_source == "unknown" for p in status.ports)
+    else:
+        assert status.ports == []
+    assert all(t not in status.error for t in ("secret-user", "secret-password", "response-body", "https://"))
+    assert driver._client.is_closed
+
+
+@pytest.mark.parametrize("model", ["KX III", "LX II"])
+async def test_login_page_instead_of_data_is_an_auth_failure(monkeypatch, model):
+    seen = []
+    def handler(request):
+        if request.url.path == "/":
+            return httpx.Response(200, text=LOGIN_PAGE)
+        if request.url.path == "/api/v1/targets":
+            return httpx.Response(404)
+        return httpx.Response(200, text=LOGIN_PAGE)
+    driver = _auth_driver(model, handler, seen)
+    assert await driver.probe() is None
+    ports = await driver.get_ports(port_count=2)
+    await driver.close()
+    assert driver.auth_error == "Device API authentication failed"
+    assert seen[-1] == "POST /auth.asp"
+    assert ports == ([] if model == "KX III" else [
+        {"number": n, "label": f"Port {n}", "status": "idle", "status_source": "unknown"} for n in (1, 2)])
+
+
+async def test_form_login_with_cookie_then_login_page_sidebar_is_auth_failure():
+    seen = []
+    def handler(request):
+        if request.url.path == "/auth.asp":
+            return httpx.Response(200, text=LOGIN_PAGE, headers={"set-cookie": "pre=1; Path=/"})
+        if request.url.path == "/sidebar.asp" and request.headers.get("cookie"):
+            return httpx.Response(200, text=LOGIN_PAGE)
+        return httpx.Response(401)
+    driver = _auth_driver("LX II", handler, seen)
+    await driver.get_ports(port_count=2)
+    await driver.close()
+    assert driver.auth_error == "Device API authentication failed"
+    assert seen == ["GET /sidebar.asp", "POST /auth.asp", "GET /sidebar.asp"]
+
+
+async def test_form_login_success_after_basic_rejection_is_healthy():
+    """LX II firmware that refuses Basic auth but accepts the form sign-in."""
+    def handler(request):
+        if request.url.path == "/auth.asp":
+            return httpx.Response(200, text="<html>home</html>", headers={"set-cookie": "SID=1; Path=/"})
+        if request.url.path == "/sidebar.asp" and request.headers.get("cookie"):
+            return httpx.Response(200, text=_sidebar_html(2))
+        return httpx.Response(401)
+    driver = _auth_driver("LX II", handler, [])
+    ports = await driver.get_ports(port_count=3)
+    await driver.close()
+    assert driver.auth_error is None
+    assert [(p["number"], p["status"], p["status_source"]) for p in ports] == [
+        (1, "empty", "configured"), (2, "idle", "configured"), (3, "empty", "configured")]
+
+
+async def test_kx3_rest_rejection_with_working_form_login_is_healthy():
+    def handler(request):
+        if request.url.path == "/auth.asp":
+            return httpx.Response(200, text="<html>home</html>", headers={"set-cookie": "SID=1; Path=/"})
+        if request.url.path == "/sidebar.asp" and request.headers.get("cookie"):
+            return httpx.Response(200, text=_sidebar_html(1))
+        return httpx.Response(401)
+    seen = []
+    driver = _auth_driver("KX III", handler, seen)
+    ports = await driver.get_ports(port_count=2)
+    await driver.close()
+    assert driver.auth_error is None
+    assert "GET /sidebar.asp" in seen and seen.count("GET /sidebar.asp") == 1  # Basic attempt skipped
+    assert [p["status"] for p in ports] == ["idle", "empty"]
+
+
+async def test_auth_error_cleared_on_next_successful_read():
+    responses = {"code": 401}
+    def handler(request):
+        if request.url.path == "/api/v1/targets" and responses["code"] == 200:
+            return httpx.Response(200, json=[{"portNumber": 1, "name": "srv", "status": "idle"}])
+        return httpx.Response(responses["code"])
+    driver = _auth_driver("KX III", handler, [])
+    assert await driver.get_ports(port_count=1) == [] and driver.auth_error
+    responses["code"] = 200
+    ports = await driver.get_ports(port_count=1)
+    await driver.close()
+    assert driver.auth_error is None and ports[0]["status_source"] == "live"
+
+
 # ── _parse_kvm_status — driver-level status normalisation ────────────────────
 
-from drivers.raritan_kvm import _parse_kvm_status
+from drivers.raritan_kvm import RaritanKvmDriver, _parse_kvm_status
 
 @pytest.mark.parametrize("raw,expected", [
     # Active / in-use
@@ -267,3 +465,92 @@ from drivers.raritan_kvm import _parse_kvm_status
 ])
 def test_parse_kvm_status(raw, expected):
     assert _parse_kvm_status(raw) == expected
+
+
+@pytest.mark.parametrize("exception,expected", [
+    (httpx.ConnectTimeout(""), "ConnectTimeout"),
+    (httpx.ReadTimeout(""), "ReadTimeout"),
+    (httpx.WriteTimeout(""), "WriteTimeout"),
+    (httpx.PoolTimeout(""), "PoolTimeout"),
+    (httpx.ConnectError("[Errno 111] Connection refused"), "connection refused"),
+    (httpx.ConnectError("[Errno -2] Name or service not known"), "DNS failure"),
+    (httpx.ConnectError("nodename nor servname provided, or not known"), "DNS failure"),
+    (httpx.ConnectError("getaddrinfo failed"), "DNS failure"),
+    (httpx.ConnectError("Temporary failure in name resolution"), "DNS failure"),
+    (httpx.ConnectError("[Errno 111]"), "connection refused"),
+    (httpx.ConnectError("[Errno 113] No route to host"), "network unreachable"),
+    (httpx.ConnectError("[Errno 101] Network is unreachable"), "network unreachable"),
+    (httpx.ConnectError("[Errno 113]"), "network unreachable"),
+    (httpx.ConnectError("[Errno 101]"), "network unreachable"),
+    (httpx.ConnectError("SSL CERTIFICATE_VERIFY_FAILED"), "TLS handshake"),
+    (httpx.ProxyError(""), "ProxyError"),
+    (httpx.ConnectError("unknown failure"), "connection error"),
+    (RuntimeError("unknown failure"), "probe failed"),
+])
+async def test_kvm_probe_and_status_preserve_safe_failure_class(monkeypatch, exception, expected):
+    unsafe = " https://secret-user:secret-password@example.invalid/private response-body"
+    exception.args = (str(exception) + unsafe,)
+    def transport(request):
+        raise exception
+    driver = RaritanKvmDriver("example.invalid", "secret-user", "secret-password")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    try:
+        reason = await driver.probe()
+        assert expected in reason
+        assert await driver.ping() is False
+        monkeypatch.setattr(kvms_module, "RaritanKvmDriver", lambda *args, **kwargs: driver)
+        monkeypatch.setattr(kvms_module, "get_creds", lambda dev: ("secret-user", "secret-password"))
+        driver.get_ports = AsyncMock()
+        status = await kvms_module._fetch_status("probe-kvm", SimpleNamespace(ip="example.invalid", model="KX III"))
+        assert not status.reachable and status.error == reason
+        driver.get_ports.assert_not_awaited()
+        assert driver._client.is_closed
+        assert all(token not in status.error for token in ("secret-user", "secret-password", "https://", "response-body"))
+    finally:
+        await driver.close()
+
+
+@pytest.mark.parametrize("code,expected", [(200, None), (401, None), (404, None), (407, "HTTP 407"), (503, "HTTP 503")])
+async def test_kvm_probe_http_status_and_boolean_compatibility(monkeypatch, code, expected):
+    driver = RaritanKvmDriver("example.invalid", "", "")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(code, text="secret-password response-body")))
+    try:
+        reason = await driver.probe()
+        assert reason is None if expected is None else expected in reason
+        assert await driver.ping() is (expected is None)
+        if expected:
+            monkeypatch.setattr(kvms_module, "RaritanKvmDriver", lambda *args, **kwargs: driver)
+            monkeypatch.setattr(kvms_module, "get_creds", lambda dev: ("", ""))
+            status = await kvms_module._fetch_status("probe-kvm", SimpleNamespace(ip="example.invalid", model="KX III"))
+            assert not status.reachable and status.error == reason
+            assert "response-body" not in status.error and "secret-password" not in status.error
+    finally:
+        await driver.close()
+
+
+async def test_kvm_port_read_failure_after_probe_keeps_failure_class(monkeypatch):
+    from app import monitor_links
+    def transport(request):
+        if request.url.path == "/":
+            return httpx.Response(200)
+        raise httpx.ReadTimeout("https://secret-user:secret-password@example.invalid response-body")
+    driver = RaritanKvmDriver("example.invalid", "secret-user", "secret-password")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    monkeypatch.setattr(kvms_module, "RaritanKvmDriver", lambda *args, **kwargs: driver)
+    monkeypatch.setattr(kvms_module, "get_creds", lambda dev: ("secret-user", "secret-password"))
+    status = await kvms_module._fetch_status("probe-kvm", SimpleNamespace(
+        ip="example.invalid", model="KX III", port_count=2, labels_json="{}"))
+    assert not status.reachable
+    assert status.error == "Device API request timeout (ReadTimeout)"
+    assert "receiving data" in monitor_links.failure_reason(status.error)
+
+
+async def test_kvm_client_keeps_six_second_connect_and_read_timeouts():
+    driver = RaritanKvmDriver("example.invalid", "", "")
+    try:
+        client = await driver._client_ctx()
+        assert client.timeout.connect == client.timeout.read == 6.0
+        assert client.timeout.write == client.timeout.pool == 6.0
+    finally:
+        await driver.close()

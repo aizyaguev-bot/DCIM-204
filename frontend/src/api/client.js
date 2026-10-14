@@ -8,7 +8,15 @@ async function req(method, path, body) {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`${res.status}: ${text}`);
+    const err = new Error(`${res.status}: ${text}`);
+    err.status = res.status;
+    try {
+      const detail = JSON.parse(text).detail;
+      err.detail = typeof detail === "string" ? detail
+        : Array.isArray(detail) ? detail.map(e => e?.msg).filter(Boolean).join("; ") || undefined
+        : undefined;
+    } catch {}
+    throw err;
   }
   if (res.status === 204) return null;
   return res.json();
@@ -28,6 +36,9 @@ export const api = {
   // PDU
   getPduStatus: (id)          => req("GET",    `/api/pdus/${id}/status`),
   outletPower: (id, n, action)=> req("POST",   `/api/pdus/${id}/outlets/${n}/power`, { action }),
+  maintenanceList: ()         => req("GET",    "/api/pdus/maintenance"),
+  maintenanceShutdown: (id, password, reason) => req("POST", `/api/pdus/${encodeURIComponent(id)}/maintenance/shutdown`, { password, reason }),
+  maintenanceRestore:  (id, password)         => req("POST", `/api/pdus/${encodeURIComponent(id)}/maintenance/restore`, { password }),
 
   // KVM
   getKvmStatus: (id)          => req("GET",    `/api/kvms/${id}/status`),
