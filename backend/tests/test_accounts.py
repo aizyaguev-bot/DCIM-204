@@ -202,3 +202,20 @@ async def test_websocket_role_and_origin_are_checked(setup):
         assert getattr(error.value,"code",None)==4403
         with browser.websocket_connect("/api/kvms/d1/proxy/ws/test",headers={"Cookie":f"{accounts.COOKIE}={token}"}) as socket:
             assert socket.receive_json()=={"ok":True}
+        headers={"Cookie":f"{accounts.COOKIE}={token}","Origin":"http://testserver"}   # what a browser sends
+        with browser.websocket_connect("/api/kvms/d1/proxy/ws/test",headers=headers) as socket:
+            assert socket.receive_json()=={"ok":True}
+
+
+async def test_kvm_proxy_writes_need_same_origin_not_csrf_header(setup):
+    async with client(setup) as c:
+        await sign_in(c,"operator")
+        del c.headers["X-DCIM-CSRF"]
+        assert (await c.post("/api/kvms/k1/proxy/jsclient/action.asp",headers={"Origin":"http://test"})).status_code == 200
+        assert (await c.post("/api/kvms/k1/proxy/jsclient/action.asp")).status_code == 403
+        assert (await c.post("/api/kvms/k1/proxy/jsclient/action.asp",headers={"Origin":"https://evil.example"})).status_code == 403
+        assert (await c.post("/api/kvms/k1/proxyx",headers={"Origin":"http://test"})).status_code == 403
+        assert (await c.put("/api/rack-items",json={},headers={"Origin":"http://test"})).status_code == 403
+    async with client(setup) as c:
+        await sign_in(c,"viewer")
+        assert (await c.post("/api/kvms/k1/proxy/jsclient/action.asp",headers={"Origin":"http://test"})).status_code == 403

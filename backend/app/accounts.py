@@ -93,7 +93,12 @@ def same_origin(connection):
     if not origin: return connection.headers.get("sec-fetch-site") != "cross-site"
     expected = urlsplit(str(connection.url))
     supplied = urlsplit(origin)
-    return supplied.scheme == expected.scheme and supplied.netloc == expected.netloc
+    scheme = {"ws": "http", "wss": "https"}.get(expected.scheme, expected.scheme)
+    return supplied.scheme == scheme and supplied.netloc == expected.netloc
+
+
+def kvm_proxy_path(path):
+    return re.fullmatch(r"/api/kvms/[^/]+/proxy(/.*)?", path) is not None
 
 
 class AccountAccess:
@@ -126,7 +131,10 @@ class AccountAccess:
             return await deny(403, "Change your temporary password in Account settings first")
         if ROLES[user["role"]] < ROLES[required_role(path, method)]:
             return await deny(403, "Your role does not allow this action")
-        if unsafe and not secrets.compare_digest(connection.headers.get("x-dcim-csrf", ""), current["csrf_token"]):
+        # The KVM's own web client cannot send the CSRF header; its proxied writes rely on an explicit same-origin Origin.
+        if unsafe and kvm_proxy_path(path):
+            if not connection.headers.get("origin"): return await deny(403, "Cross-origin action rejected")
+        elif unsafe and not secrets.compare_digest(connection.headers.get("x-dcim-csrf", ""), current["csrf_token"]):
             return await deny(403, "Refresh the page and retry (invalid CSRF token)")
         await self.app(scope, receive, send)
 

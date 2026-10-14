@@ -168,22 +168,24 @@ def _rewrite(text: str, device_id: str, dev_ip: str, inject_head: str = "") -> s
     # Normalize :443 in absolute URLs
     text = text.replace(f"https://{dev_ip}:443/", f"https://{dev_ip}/")
 
+    # The original quote is kept: these attributes also occur inside JS strings (jQuery builds
+    # `"<a href='/a'>"`), where switching quotes would end the string and break the script.
     # Absolute https://ip/... URLs in HTML attributes (href, src, action, frame src)
     text = re.sub(
-        rf'(href|src|action|data-src)=["\']https?://{re.escape(dev_ip)}(/[^"\']*)["\']',
-        lambda m: f'{m.group(1)}="{proxy}{m.group(2)}"',
+        rf'(href|src|action|data-src)=(["\'])https?://{re.escape(dev_ip)}(/[^"\']*)\2',
+        lambda m: f'{m.group(1)}={m.group(2)}{proxy}{m.group(3)}{m.group(2)}',
         text,
     )
     # Root-relative paths /some/path in HTML attributes
     text = re.sub(
-        r'(href|src|action|data-src)=["\'](/(?!api/)[^"\']*)["\']',
-        lambda m: f'{m.group(1)}="{proxy}{m.group(2)}"',
+        r'(href|src|action|data-src)=(["\'])(/(?!api/)[^"\']*)\2',
+        lambda m: f'{m.group(1)}={m.group(2)}{proxy}{m.group(3)}{m.group(2)}',
         text,
     )
     # WebSocket URLs in JS
     text = re.sub(
-        rf'["\']wss?://{re.escape(dev_ip)}(/[^"\']*)["\']',
-        lambda m: f'"{proxy}/ws{m.group(1)}"',
+        rf'(["\'])wss?://{re.escape(dev_ip)}(/[^"\']*)\1',
+        lambda m: f'{m.group(1)}{proxy}/ws{m.group(2)}{m.group(1)}',
         text,
     )
     # JS strings with absolute paths for known KVM paths

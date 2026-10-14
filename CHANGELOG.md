@@ -2,6 +2,22 @@
 
 ---
 
+## v2.37.1 — 2026-10-14 — KVM console fix
+
+### Fixed
+- The KVM console opened as a white page. The proxy changed single quotes to
+  double quotes inside the KVM's own scripts, which broke jQuery. Rewritten
+  links now keep their original quotes.
+- With user accounts enabled, the console's live connection (WebSocket) was
+  always refused because `ws://` was compared with the browser's `http://`
+  origin. Same-site connections are accepted again; other sites are still
+  refused.
+- With user accounts enabled, the KVM web client's own requests were refused
+  for a missing CSRF header that it cannot send. Requests through the KVM
+  proxy now need an Operator session and a same-site `Origin` header instead.
+
+---
+
 ## v2.37.0 — 2026-10-13 — PDU maintenance mode, KVM fixes and twin daily-tracking view
 
 ### Added

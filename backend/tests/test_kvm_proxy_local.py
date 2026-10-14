@@ -93,6 +93,19 @@ console.log(JSON.stringify(calls));
     assert calls == [["ws://ftlab:8000/api/kvms/test/proxy/ws/stream?q=1",["binary"]]]*4
 
 
+def test_rewrite_keeps_quotes_so_scripts_stay_valid():
+    jquery = 'a.innerHTML="  <link/><table></table><a href=\'/a\'>a</a><input type=\'checkbox\'/>";var s=\'wss://192.0.2.15/x\';'
+    out = proxy._rewrite(jquery, "k1", "192.0.2.15")
+    assert out == ('a.innerHTML="  <link/><table></table><a href=\'/api/kvms/k1/proxy/a\'>a</a><input type=\'checkbox\'/>";'
+                   'var s=\'/api/kvms/k1/proxy/ws/x\';')
+    html = '<img src="/img/a.png"><a href=\'https://192.0.2.15/home.asp\'>h</a><script src="/api/x.js"></script>'
+    assert proxy._rewrite(html, "k1", "192.0.2.15") == (
+        '<img src="/api/kvms/k1/proxy/img/a.png"><a href=\'/api/kvms/k1/proxy/home.asp\'>h</a><script src="/api/x.js"></script>')
+    node = shutil.which("node")
+    assert node, "Node.js is needed to syntax-check the rewritten script"
+    subprocess.run([node, "-e", f"new Function({json.dumps(out)})"], check=True, capture_output=True, timeout=10)
+
+
 async def test_ws_relays_binary_and_text_and_cancels_when_client_disconnects(kvm, monkeypatch):
     proxy._sessions["test"] = "pp_session_id=secret-cookie"
     sent_to_device=[];sent_to_browser=[];options={};complete=asyncio.Event();cancelled=asyncio.Event()
