@@ -2,6 +2,21 @@
 
 ---
 
+## v2.37.2 — 2026-10-14 — KVM console in browsers that opened it before
+
+### Fixed
+- The KVM console could stay white after updating, because the browser kept
+  the broken copy of the KVM's scripts from the earlier version. The KVM sends
+  them without cache headers, so browsers reuse them for months. Console pages
+  and scripts now load from a new address, are never cached, and the browser's
+  "has it changed?" and partial-download requests are no longer passed on to
+  the KVM, so the browser always receives a complete, matching script.
+- While the KVM reports no picture, the console says that the server's screen
+  is probably asleep or off, and that moving the mouse or pressing a key wakes
+  it.
+
+---
+
 ## v2.37.1 — 2026-10-14 — KVM console fix
 
 ### Fixed

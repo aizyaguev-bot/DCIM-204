@@ -166,7 +166,7 @@ def test_autologin_redirects_to_same_origin_viewer(api, reachable_kvms):
             assert r.status_code == 302, f"{kvm['name']}: sign-in failed ({r.status_code})"
             location = urlsplit(r.headers["location"])
             assert not location.netloc
-            assert location.path == f"/api/kvms/{kvm['id']}/proxy/jsclient/Client.asp"
+            assert re.fullmatch(rf"/api/kvms/{re.escape(kvm['id'])}/proxy/~[^/]+/jsclient/Client\.asp", location.path)
             fragment = parse_qs(location.fragment)
             assert len(fragment["sessionId"][0]) >= 40
             assert fragment["portNo"] == [str(port)]

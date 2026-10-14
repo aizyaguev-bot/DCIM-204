@@ -56,6 +56,20 @@ _ssl_ctx = ssl.create_default_context()
 _ssl_ctx.check_hostname = False
 _ssl_ctx.verify_mode = ssl.CERT_NONE
 
+# The KVM serves its scripts without cache headers, so browsers keep a rewritten copy for months. Proxied pages
+# and assets live under this path segment, which must change whenever the rewriting changes, so browsers cannot
+# reuse copies made by an older rewrite. It is removed before the request reaches the device.
+ASSET_SEGMENT = "~r2"
+
+
+def _base(device_id: str) -> str:
+    return f"/api/kvms/{device_id}/proxy"
+
+
+def _prefix(device_id: str) -> str:
+    """Path prefix of proxied HTTP pages and assets."""
+    return f"{_base(device_id)}/{ASSET_SEGMENT}"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -102,7 +116,7 @@ async def _login(device_id: str, dev: Device, client: httpx.AsyncClient) -> None
 
 def _norm_location(location: str, dev_ip: str, device_id: str) -> str:
     """Rewrite a redirect Location header to point through our proxy."""
-    proxy = f"/api/kvms/{device_id}/proxy"
+    proxy = _prefix(device_id)
     # Strip explicit :443 port (HTTPS default)
     loc = location.replace(f"https://{dev_ip}:443/", f"https://{dev_ip}/")
     loc = loc.replace(f"http://{dev_ip}:80/", f"http://{dev_ip}/")
@@ -119,10 +133,11 @@ def _norm_location(location: str, dev_ip: str, device_id: str) -> str:
 # 1. Overrides location.hostname/host/origin so jsclient uses KVM IP for URL construction.
 # 2. Intercepts ALL WebSocket connections not already going to our proxy path.
 # 3. Intercepts fetch/XHR requests targeting the KVM IP.
+# 4. Explains the client's "No video" state, which usually means the server's screen is asleep.
 _OVERRIDE_TMPL = (
     '<script>\n'
     '(function(){\n'
-    '  var KI="%(kvm_ip)s",P="%(proxy)s",O=window.location;\n'
+    '  var KI="%(kvm_ip)s",P="%(proxy)s",B="%(base)s",O=window.location;\n'
     '  try{Object.defineProperty(window,"location",{configurable:true,get:function(){\n'
     '    return new Proxy(O,{get:function(t,p){\n'
     '      if(p==="hostname"||p==="host")return KI;\n'
@@ -132,11 +147,12 @@ _OVERRIDE_TMPL = (
     '    }});\n'
     '  }})}catch(e){}\n'
     '  var _W=window.WebSocket;\n'
-    '  var _pws=(O.protocol==="https:"?"wss":"ws")+"://"+O.host+P+"/ws";\n'
+    '  var _pws=(O.protocol==="https:"?"wss":"ws")+"://"+O.host+B+"/ws";\n'
     '  window.WebSocket=function PW(u,p){\n'
     '    var a=new URL(String(u),O.href),path=a.pathname+a.search;\n'
-    '    if(path.indexOf(P+"/ws/")===0)u=_pws+path.slice((P+"/ws").length);\n'
-    '    else{if(path.indexOf(P+"/")===0)path=path.slice(P.length);u=_pws+path;}\n'
+    '    if(path.indexOf(B+"/ws/")===0)u=_pws+path.slice((B+"/ws").length);\n'
+    '    else{if(path.indexOf(P+"/")===0)path=path.slice(P.length);\n'
+    '      else if(path.indexOf(B+"/")===0)path=path.slice(B.length);u=_pws+path;}\n'
     '    return p!==undefined?new _W(u,p):new _W(u);\n'
     '  };\n'
     '  window.WebSocket.prototype=_W.prototype;\n'
@@ -152,6 +168,27 @@ _OVERRIDE_TMPL = (
     '    if(typeof u==="string"&&_kiRe.test(u))u=O.origin+P+u.replace(/^https?:\\/\\/[^\\/]*/,"");\n'
     '    return _x.apply(this,[m,u].concat([].slice.call(arguments,2)));\n'
     '  };\n'
+    '  var _nv=0,_hint=null,_closed=false;\n'
+    '  setInterval(function(){try{\n'
+    '    var s=document.querySelector("#status-size p");\n'
+    '    if(!s||_closed)return;\n'
+    '    if(/\\d+\\s*x\\s*\\d+/.test(s.textContent)){_nv=0;if(_hint)_hint.style.display="none";return;}\n'
+    '    if(++_nv<4)return;\n'
+    '    if(!_hint){\n'
+    '      _hint=document.createElement("div");_hint.setAttribute("role","status");\n'
+    '      _hint.style.cssText="position:fixed;top:52px;left:50%%;transform:translateX(-50%%);z-index:2147483647;'
+    'max-width:640px;padding:8px 36px 8px 12px;border-radius:6px;background:#1f2937;color:#fff;'
+    'font:13px/1.4 Arial,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4)";\n'
+    '      _hint.textContent="No picture from this server: its screen is asleep or the server is off. '
+    'Move the mouse over the console or press a key to wake it.";\n'
+    '      var x=document.createElement("button");x.type="button";x.textContent="\\u00d7";x.title="Dismiss";\n'
+    '      x.style.cssText="position:absolute;top:4px;right:6px;border:0;background:none;color:#fff;'
+    'font-size:16px;cursor:pointer";\n'
+    '      x.onclick=function(){_closed=true;_hint.style.display="none";};\n'
+    '      _hint.appendChild(x);document.body.appendChild(_hint);\n'
+    '    }\n'
+    '    _hint.style.display="block";\n'
+    '  }catch(e){}},2000);\n'
     '})();\n'
     '</script>'
 )
@@ -159,7 +196,8 @@ _OVERRIDE_TMPL = (
 
 def _rewrite(text: str, device_id: str, dev_ip: str, inject_head: str = "") -> str:
     """Rewrite all URLs that reference the KVM device to go through our proxy."""
-    proxy = f"/api/kvms/{device_id}/proxy"
+    proxy = _prefix(device_id)
+    ws_proxy = f"{_base(device_id)}/ws"
 
     # Inject override script right after <head>
     if inject_head:
@@ -185,7 +223,7 @@ def _rewrite(text: str, device_id: str, dev_ip: str, inject_head: str = "") -> s
     # WebSocket URLs in JS
     text = re.sub(
         rf'(["\'])wss?://{re.escape(dev_ip)}(/[^"\']*)\1',
-        lambda m: f'{m.group(1)}{proxy}/ws{m.group(2)}{m.group(1)}',
+        lambda m: f'{m.group(1)}{ws_proxy}{m.group(2)}{m.group(1)}',
         text,
     )
     # JS strings with absolute paths for known KVM paths
@@ -289,7 +327,7 @@ async def kvm_console_url(
 
     # Serve jsclient through our proxy so all traffic comes from the VM's IP
     # (which matches the authenticated session), not the user's browser IP.
-    url = f"/api/kvms/{device_id}/proxy/jsclient/Client.asp"
+    url = f"{_prefix(device_id)}/jsclient/Client.asp"
     if fragment_parts:
         url += "#" + "&".join(fragment_parts)
 
@@ -333,7 +371,7 @@ async def kvm_autologin(
         if port_ids.get(port): fragment["portId"] = port_ids[port]
     # HTTP assets and WS traffic share the site's origin. The browser never has
     # to visit the device's self-signed HTTPS endpoint or trust its certificate.
-    destination = f"/api/kvms/{device_id}/proxy/jsclient/Client.asp#" + urlencode(fragment)
+    destination = f"{_prefix(device_id)}/jsclient/Client.asp#" + urlencode(fragment)
     return RedirectResponse(destination, status_code=302,
                             headers={"Cache-Control":"no-store", "Referrer-Policy":"no-referrer"})
 
@@ -355,6 +393,7 @@ async def kvm_proxy(
 ):
     dev = await _get_device(device_id, db)
 
+    path = re.sub(r"^~[^/]*(?:/|$)", "", path)
     target = f"https://{dev.ip}/{path}"
     if request.url.query:
         target += f"?{request.url.query}"
@@ -364,9 +403,12 @@ async def kvm_proxy(
         if device_id not in _sessions:
             await _login(device_id, dev, client)
 
+        # Without validators or a byte range the device always returns the full body, so a 304 can never
+        # revive a copy that an older rewrite produced and a rewritten body never claims a partial range.
         fwd_headers = {
             k: v for k, v in request.headers.items()
-            if k.lower() not in ("host", "connection", "transfer-encoding", "cookie")
+            if k.lower() not in ("host", "connection", "transfer-encoding", "cookie",
+                                 "if-modified-since", "if-none-match", "if-range", "range")
         }
         if device_id in _sessions:
             fwd_headers["Cookie"] = _sessions[device_id]
@@ -424,15 +466,16 @@ async def kvm_proxy(
                 if "text/html" in ct:
                     inject = _OVERRIDE_TMPL % {
                         "kvm_ip": dev.ip,
-                        "proxy": f"/api/kvms/{device_id}/proxy",
+                        "proxy": _prefix(device_id),
+                        "base": _base(device_id),
                     }
                 text = _rewrite(text, device_id, dev.ip, inject_head=inject)
                 content = text.encode("utf-8")
-                resp_headers.pop("etag", None)
-                if "text/html" in ct:
-                    resp_headers["cache-control"] = "no-store"
-                resp_headers.pop("content-length", None)
-                resp_headers.pop("Content-Length", None)
+                resp_headers = {
+                    k: v for k, v in resp_headers.items()
+                    if k.lower() not in {"etag", "last-modified", "expires", "cache-control", "content-length"}
+                }
+                resp_headers["cache-control"] = "no-store"
             except Exception:
                 pass
 
