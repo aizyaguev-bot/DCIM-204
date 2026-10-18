@@ -118,7 +118,11 @@ async def get_history(ctx, server=None, device_id=None, since_hours=168, limit=1
 async def resolve_entity(ctx, query):
     table = {"opt207": [{"kind": "server", "id": "opt207", "label": "opt207", "match": "exact"}],
              "rack-01": [{"kind": "rack", "id": "Rack-01", "label": "Rack-01", "match": "exact"}],
-             "pdu-rack01": [{"kind": "pdu", "id": "pdu-rack01", "label": "PDU Rack-01", "match": "exact"}]}
+             "pdu-rack01": [{"kind": "pdu", "id": "pdu-rack01", "label": "PDU Rack-01", "match": "exact"}],
+             "pdu rack-01": [{"kind": "pdu", "id": "pdu-rack01", "label": "PDU Rack-01", "match": "exact"},
+                             {"kind": "rack", "id": "Rack-01", "label": "Rack-01", "match": "fuzzy"}],
+             "rack": [{"kind": "rack", "id": "Rack-01", "label": "Rack-01", "match": "prefix"},
+                      {"kind": "rack", "id": "Rack-02", "label": "Rack-02", "match": "prefix"}]}
     candidates = table.get(query.casefold(), [])
     return ToolResult({"candidates": candidates, "ambiguous": len(candidates) > 1, "truncated": False},
                       [src("devices"), src("rack_items")], ["Candidate matches are not a confirmed selection."])
@@ -126,16 +130,28 @@ async def resolve_entity(ctx, query):
 
 async def get_dependencies(ctx, kind, id):
     servers = [{"id": "opt207", "label": "opt207", "port": "4"}, {"id": "opt208", "label": "opt208", "port": "5"}]
-    return ToolResult({"entity": {"kind": kind, "id": id}, "servers": servers, "connections": [], "pdus": [],
-                       "kvms": [], "items": [], "redundancy_hint": None, "found": True},
-                      [src("devices"), src("monitor_device_snapshots")], ["Switch names are free text."])
+    data = {"entity": {"kind": kind, "id": id}, "servers": servers, "connections": [], "pdus": [], "kvms": [],
+            "items": [], "redundancy_hint": None, "found": True}
+    if kind == "rack":
+        data.update(servers=[{"id": "opt207", "label": "opt207", "aliases": ["opt207"]}] if id == "Rack-01" else [],
+                    pdus=[{"id": "pdu-rack01", "name": "PDU Rack-01", "kind": "pdu"}] if id == "Rack-01" else [],
+                    connections=[{"kind": "switch", "server_key": "opt207", "switch": "SW-A", "port": "12"}]
+                    if id == "Rack-01" else [])
+    elif kind == "switch":
+        data.update(servers=[{"id": "opt207", "label": "opt207", "port": "12"}] if id == "SW-A" else [],
+                    found=id == "SW-A")
+    return ToolResult(data, [src("devices"), src("monitor_device_snapshots")], ["Switch names are free text."])
 
 
 async def get_power_and_environment(ctx, rack=None, pdu_id=None):
     return ToolResult(
         {"rack": rack, "pdu_id": pdu_id,
-         "pdus": [{"id": "pdu-rack01", "name": "PDU Rack-01", "total_watts": 1200.0, "watts_complete": True,
-                   "stale": False, "cache_as_of": iso(NOW - 30), "outlets": []}],
+         "pdus": [{"id": "pdu-rack01", "name": "PDU Rack-01", "rack": "Rack-01", "shared_racks": [],
+                   "total_watts": 1200.0, "watts_complete": True, "stale": False, "cache_as_of": iso(NOW - 30),
+                   "reachable": True, "checked_at": iso(NOW - 300), "snapshot_stale": False,
+                   "temperature": None, "humidity": None, "leak_detected": None,
+                   "outlets": [{"number": "4", "label": "opt207", "state": "off"},
+                               {"number": "5", "label": "opt208", "state": "on"}]}],
          "totals": {"pdu_ids": ["pdu-rack01"], "total_watts": 1200.0, "known_watts": 1200.0, "watts_complete": True},
          "thresholds": [],
          "capacity": {"assumption": "16 A / 208 V UI constant", "rated_amps_per_pdu": 16, "assumed_voltage": 208,
@@ -385,7 +401,7 @@ async def test_ledger_contains_only_real_tool_sources(fake_llm):
     assert cited <= ledger_ids
     assert [f["text"] for f in answer["facts"]] == ["opt207 במצב down."]
     assert "לא אומת: עובדה ממוצאת." in answer["missing_data"] and "עובדה ממוצאת" not in answer["summary"]
-    assert any("UPS telemetry is not monitored." in m for m in answer["missing_data"])
+    assert "הסתייגות: אין ניטור של UPS." in answer["missing_data"]  # fixed caveats are shown in Hebrew
 
 
 async def test_max_round_cap(fake_llm):
@@ -656,6 +672,9 @@ async def test_demo_reports_missing_tools_and_unknown_names():
     ("אילו רכיבים מושפעים מהמתג הזה?", "dependencies"), ("האם התקלה הזאת קרתה בעבר?", "history"),
     ("מה לבדוק קודם?", "problems"), ("האם אפשר להוסיף שרת לארון Rack-01?", "capacity"),
     ("הכן תכנית תחזוקה", "work"), ("What is down?", "problems"), ("שלום", "overview"),
+    ("מה המצב של ה-PDU הזה?", "entity_status"), ("מה המצב של PDU Rack-01?", "entity_status"),
+    ("אילו רכיבים מושפעים מתקלה במתג?", "dependencies"), ("איפה אפשר להוסיף שרת חדש?", "capacity"),
+    ("מה המצב במעבדה?", "overview"),
 ])
 def test_demo_classification(question, intent):
     assert demo.classify(question) == intent
@@ -911,3 +930,94 @@ async def test_demo_keeps_verified_findings_when_rendering_fails(monkeypatch, ca
     assert engine.validate(ANSWER_SCHEMA, answer) == []
     assert [f["text"] for f in answer["facts"]] == ["עובדה שנאספה לפני השגיאה."]
     assert "KeyError" in caplog.text and "unexpected shape" not in caplog.text
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# QA findings B2 / B5 and Hebrew detail wording.
+# ---------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("question,context", [
+    ("מה המצב של ה-PDU הזה?", {"tab": "power", "detail": {"kind": "pdu", "id": "pdu-rack01"}}),
+    ("מה המצב של PDU Rack-01?", {}),
+])
+async def test_demo_status_of_one_pdu_is_about_that_device(question, context):
+    result = await ask(question, ctx=make_ctx(assistant_anthropic_api_key=None), context=context)
+    answer = assert_demo(result)
+    summary = answer["summary"]
+    assert "סקירת מצב" not in summary and "PDU Rack-01" in summary and "OFF" in summary
+    assert "ונבדק מחדש" not in summary and "לא בוצעה עכשיו פנייה להתקן" in summary
+    assert ("מהמסך" in summary) == bool(context)   # the viewed item is named only when it was really used
+    assert any("שקעים לפי הבדיקה האחרונה" in f["text"] and "OFF" in f["text"] for f in answer["facts"])
+    assert any("opt207" in h["text"] and "4" in h["text"] for h in answer["hypotheses"])  # outlet 4 off + down
+    assert any(r["kind"] == "pdu" and r["id"] == "pdu-rack01" for r in answer["entity_refs"])
+
+
+async def test_demo_status_of_this_item_without_context_does_not_pretend():
+    result = await ask("מה המצב של ה-PDU הזה?", ctx=make_ctx(assistant_anthropic_api_key=None))
+    answer = result["answer"]
+    assert answer["summary"].startswith(demo.DEMO_PREFIX) and "מהמסך" not in answer["summary"]
+
+
+async def test_demo_switch_question_without_a_name_lists_known_switches():
+    result = await ask("אילו רכיבים מושפעים מתקלה במתג?", ctx=make_ctx(assistant_anthropic_api_key=None))
+    answer = assert_demo(result)
+    assert "SW-A" in answer["summary"] and "לא זוהה" not in answer["summary"]
+    assert any(f["text"].startswith("מתג SW-A: 1") and "opt207" in f["text"] for f in answer["facts"])
+    assert any("SW-A" in c for c in answer["checks"])
+
+
+async def test_demo_where_to_add_a_server_ranks_known_racks():
+    seen = []
+
+    async def plan_capacity(ctx, rack, power_w=None, units=None, needs_network=None):
+        seen.append(rack)
+        good = rack == "Rack-02"
+        return ToolResult({"rack": rack, "overall": "yes" if good else "conditional",
+                           "overall_text": "כל הממדים שנבדקו תקינים" if good else "מותנה - חסר מידע על קירור",
+                           "verdicts": {"space": "ok", "power": "ok", "cooling": "ok" if good else "unknown"},
+                           "missing_info": [] if good else ["נתוני קירור"], "assumptions": []},
+                          [src("plan:" + rack)], [])
+
+    tools = TOOLS + [spec("plan_capacity", plan_capacity,
+                          {"rack": {"type": "string"}, "power_w": {"type": "number"},
+                           "units": {"type": "integer"}, "needs_network": {"type": "boolean"}}, ("rack",))]
+    result = await ask("איפה אפשר להוסיף שרת חדש?", ctx=make_ctx(assistant_anthropic_api_key=None), tools=tools)
+    answer = assert_demo(result)
+    assert seen == ["Rack-01", "Rack-02"]
+    assert "Rack-02" in answer["summary"] and "לא זוהה" not in answer["summary"]
+    assert answer["recommendations"][0]["title"].endswith("Rack-02")
+    texts = [f["text"] for f in answer["facts"]]
+    first = next(i for i, t in enumerate(texts) if t.startswith("ארון Rack-02"))
+    second = next(i for i, t in enumerate(texts) if t.startswith("ארון Rack-01"))
+    assert first < second
+    assert any("לא ידוע: קירור" in t for t in texts)
+
+
+def test_problem_details_are_rendered_in_hebrew_from_structured_fields():
+    outlet = {"kind": "outlet_off", "outlet": "1",
+              "detail": "PDU reports outlet 1 OFF; server availability is unverified."}
+    assert demo.problem_text(outlet) == ("ה-PDU מדווח שהשקע 1 כבוי (OFF); לא ידוע אם השרת שמחובר אליו זמין",
+                                         None, None)
+    incident = {"kind": "open_ping_incident", "detail": "Recorded ICMP incident remains open."}
+    assert demo.problem_text(incident) == ("אירוע ping פתוח", None, None)
+    generic = {"kind": "device_unreachable", "detail": "Device observation is unreachable."}
+    assert demo.problem_text(generic) == ("ממשק הניהול של ההתקן אינו נגיש", None, None)
+    specific = {"kind": "ping_down", "detail": "100% packet loss"}
+    assert demo.problem_text(specific) == ("השרת אינו עונה ל-ping", None, "100% packet loss")
+    reason = {"kind": "active_maintenance", "detail": "Planned cable work"}
+    assert demo.problem_text(reason)[1] == "Planned cable work"
+    unknown = {"kind": "new_kind", "detail": "Something new happened."}
+    assert demo.problem_text(unknown) == ("בעיה רשומה (new_kind)", None, "Something new happened.")
+    assert demo.detail_suffix(None, "100% packet loss") == " פירוט טכני: 100% packet loss"
+    event = {"kind": "pdu_maintenance", "action": "shutdown", "device_id": "pdu-r01", "detail": "Planned cable work"}
+    assert demo.event_text(event) == "כיבוי שקעים לתחזוקה ב-pdu-r01. פירוט: \"Planned cable work\""
+
+
+async def test_demo_answers_do_not_mix_english_templates_into_hebrew_sentences():
+    result = await ask("מה נפל במעבדה?", ctx=make_ctx(assistant_anthropic_api_key=None))
+    text = json.dumps(result["answer"], ensure_ascii=False)
+    for template in ("Recorded ICMP incident", "PDU reports outlet", "Device observation is", "ICMP observation is"):
+        assert template not in text, template
+    facts = [f["text"] for f in result["answer"]["facts"]]
+    assert any(t.startswith("opt207: השרת אינו עונה ל-ping") and t.endswith("פירוט טכני: ICMP timeout.")
+               for t in facts), facts
+    assert any("השקע 4 כבוי (OFF)" in t for t in facts), facts

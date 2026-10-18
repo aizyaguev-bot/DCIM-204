@@ -65,6 +65,16 @@ PROBLEM_HE = {
 KIND_WORD = {"server": "שרת", "pdu": "PDU", "kvm": "KVM", "rack": "ארון", "item": "פריט", "switch": "מתג"}
 EVENT_HE = {"ping_incident": "אירוע ping", "pdu_maintenance": "פעולת תחזוקת PDU", "alert_email": "התראת דוא\"ל",
             "rack_item_move": "הזזת פריט", "tracking": "תנועת פריט"}
+MAINTENANCE_ACTION_HE = {"shutdown": "כיבוי שקעים לתחזוקה", "restore": "החזרת שקעים מתחזוקה",
+                         "denied": "בקשת תחזוקה שנדחתה"}
+DIMENSION_HE = {"space": "מקום", "power": "חשמל", "cooling": "קירור", "network": "רשת", "redundancy": "יתירות",
+                "weight": "משקל", "cabling": "כבילה"}
+# Detail strings the tools emit as fixed templates (no extra information beyond the problem kind/status fields).
+_TEMPLATE_DETAILS = {
+    "Recorded ICMP incident remains open.", "PDU maintenance is active.", "Monitor round is overdue.",
+    "Recorded alert condition.", "Recorded alert condition (observation is stale).",
+    "Recorded ICMP incident; temporal overlap does not establish a cause.", "Alert email subject only.",
+}
 
 # (intent, keywords) - first match wins; substring match on the lower-cased question.
 _RULES = (
@@ -73,6 +83,9 @@ _RULES = (
     ("work", ("טיוט", "תחזוק", "עבודה", "עבודות", "משימ", "maintenance", "draft", "work item", "task")),
     ("capacity", ("קיבול", "להוסיף", "הוספת", "עומס", "עמוס", "מקום פנוי", "capacity", "add a ", "add server",
                   "free shelf", "power load")),
+    # "מה המצב של <equipment>?" (the panel's first example for the viewed equipment) -> that equipment's status.
+    ("entity_status", ("מה המצב של", "מה מצב ה", "מה מצבו", "מה מצבה", "מה קורה עם", "status of", "state of",
+                       "how is ")),
     ("dependencies", ("מושפע", "תלוי", "תלות", "מתג", "switch", "depend", "impact", "affected")),
     ("server_status", ("לא זמין", "לא עונה", "לא מגיב", "למה", "סטטוס", "status", "unreachable", "not reachable",
                        "why ")),
@@ -83,7 +96,8 @@ _RULES = (
 
 
 def classify(question: str) -> str:
-    """Intent of a question: history, work, capacity, dependencies, server_status, problems or overview."""
+    """Intent of a question: history, work, capacity, entity_status, dependencies, server_status, problems or
+    overview."""
     text = f" {str(question).casefold()} "
     for intent, words in _RULES:
         if any(word in text for word in words):
@@ -129,6 +143,62 @@ def _ref(kind, ident, label=None) -> dict | None:
     if kind not in ENTITY_KINDS or ident in (None, ""):
         return None
     return {"kind": kind, "id": _text(ident, 200), "label": _text(label if label not in (None, "") else ident, 200)}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Hebrew wording for the tools' detail strings: chosen from the structured kind/status fields, never by parsing the
+# free text. Operator-entered text is quoted after "פירוט:"; an English tool/device message that has no Hebrew
+# template is kept verbatim after "פירוט טכני:".
+# ---------------------------------------------------------------------------------------------------------------
+def problem_text(problem: dict) -> tuple[str, str | None, str | None]:
+    """(Hebrew description, quoted operator text, technical English detail) for a list_current_problems entry."""
+    kind = str(problem.get("kind") or "")
+    detail = _text(problem.get("detail"), 140)
+    status = kind.split("_", 1)[1] if "_" in kind else ""
+    hebrew = PROBLEM_HE.get(kind) or f"בעיה רשומה ({_text(kind, 40)})"
+    quoted = technical = None
+    if kind == "outlet_off" and problem.get("outlet") not in (None, ""):
+        hebrew = (f"ה-PDU מדווח שהשקע {_text(problem.get('outlet'), 10)} כבוי (OFF); לא ידוע אם השרת שמחובר אליו "
+                  "זמין")
+    elif kind == "active_maintenance":
+        quoted = detail if detail and detail not in _TEMPLATE_DETAILS else None
+    elif kind.startswith("ping_"):
+        technical = detail if detail and detail != f"ICMP observation is {status}." else None
+    elif kind.startswith("device_"):
+        technical = detail if detail and detail != f"Device observation is {status}." else None
+    elif detail and detail not in _TEMPLATE_DETAILS:
+        technical = detail
+    return hebrew, quoted, technical
+
+
+def detail_suffix(quoted: str | None, technical: str | None) -> str:
+    parts = []
+    if quoted:
+        parts.append(f"פירוט: \"{quoted.rstrip('.')}\".")
+    if technical:
+        parts.append(f"פירוט טכני: {technical}")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def event_text(event: dict) -> str:
+    """Hebrew wording for a get_history event, from its kind/action fields."""
+    kind = event.get("kind")
+    detail = _text(event.get("detail"), 120)
+    if kind == "ping_incident":
+        return "אירוע ping (השרת לא ענה לבדיקות)"
+    if kind == "pdu_maintenance":
+        text = MAINTENANCE_ACTION_HE.get(event.get("action"), "פעולת תחזוקת PDU")
+        if event.get("device_id"):
+            text += f" ב-{_named('pdu', event.get('device_id'))}"
+        return text + (f". פירוט: \"{detail.rstrip('.')}\"" if detail else "")
+    if kind == "alert_email":
+        subject = _text(event.get("subject"), 120)
+        return "התראת דוא\"ל" + (f". נושא: \"{subject}\"" if subject else "")
+    if kind == "rack_item_move":
+        item = _text(event.get("item_id"), 60)
+        return "הזזת פריט" + (f" {item}" if item else "") + (f". הערה: \"{detail.rstrip('.')}\"" if detail else "")
+    base = EVENT_HE.get(kind) or f"אירוע ({_text(kind, 30)})"
+    return base + (f". פירוט טכני: {detail}" if detail and detail not in _TEMPLATE_DETAILS else "")
 
 
 class _Run:
@@ -202,6 +272,7 @@ class _Answer:
     def __init__(self) -> None:
         self.answer = empty_answer("")
         self.summary = ""
+        self.context_used: str | None = None   # set only by a handler that really answered about the viewed item
 
     def fact(self, text: str, ids: list[str]) -> None:
         if ids and len(self.answer["facts"]) < _MAX_FACTS:
@@ -321,12 +392,12 @@ async def _problems(run: _Run, out: _Answer, question: str, target: dict, contex
     for p in problems:
         entity = _dict(p.get("entity"))
         label = _text(entity.get("label") or entity.get("id"), 60)
-        kind = PROBLEM_HE.get(p.get("kind"), _text(p.get("kind"), 40))
+        hebrew, quoted, technical = problem_text(p)
         since = f", מאז {run.when(p.get('since_iso'))}" if p.get("since_iso") else ""
         seen = f", נצפה לאחרונה {run.when(p.get('last_seen_iso'))}" if p.get("last_seen_iso") else ""
         ids = _ids(result, str(p.get("source_id") or ""), *[str(i) for i in _list(p.get("related_source_ids"))])
-        out.fact(f"{label}: {kind} (חומרה {SEVERITY_HE.get(p.get('severity'), 'לא ידועה')}{since}{seen}). "
-                 f"פירוט: {_text(p.get('detail'), 140)}", ids)
+        out.fact(f"{label}: {hebrew} (חומרה {SEVERITY_HE.get(p.get('severity'), 'לא ידועה')}{since}{seen})."
+                 + detail_suffix(quoted, technical), ids)
         out.ref(_ref(entity.get("kind"), entity.get("id"), entity.get("label")))
     order = sorted(problems, key=lambda p: ("high", "medium", "unknown", "low").index(p.get("severity"))
                    if p.get("severity") in ("high", "medium", "unknown", "low") else 9)
@@ -458,16 +529,18 @@ async def _server_findings(run: _Run, out: _Answer, server: str, label: str, fac
 async def _server_status(run: _Run, out: _Answer, question: str, target: dict, context: dict) -> None:
     kind = target.get("kind")
     if target.get("from_context") and kind in ("pdu", "kvm", "item", "rack"):
-        await _device_status(run, out, kind, target["id"])
+        out.context_used = _named(kind, target["id"])
+        await _entity_report(run, out, kind, target["id"], target["id"])
         return
     if target.get("from_context") and kind == "server":
         server, label = target["id"], target["id"]
+        out.context_used = _named("server", server)
     elif target.get("query"):
         resolved = await _resolve(run, out, target["query"], ("server",))
         if resolved is None:
             return
-        if resolved.get("kind") in ("pdu", "kvm"):
-            await _device_status(run, out, resolved["kind"], resolved["id"])
+        if resolved.get("kind") in ("pdu", "kvm", "rack", "item"):
+            await _entity_report(run, out, resolved["kind"], resolved["id"], resolved.get("label"))
             return
         server, label = resolved["id"], resolved["label"]
     else:
@@ -505,9 +578,10 @@ async def _device_status(run: _Run, out: _Answer, kind: str, ident: str) -> None
         found = [p for p in _list(problems.data.get("problems")) if isinstance(p, dict)
                  and str(_dict(p.get("entity")).get("id")) == str(ident)]
         for p in found:
-            out.fact(f"{label}: {PROBLEM_HE.get(p.get('kind'), _text(p.get('kind'), 40))} "
-                     f"(חומרה {SEVERITY_HE.get(p.get('severity'), 'לא ידועה')}, נצפה {run.when(p.get('last_seen_iso'))}). "
-                     f"פירוט: {_text(p.get('detail'), 140)}", _ids(problems, str(p.get("source_id") or "")))
+            hebrew, quoted, technical = problem_text(p)
+            out.fact(f"{label}: {hebrew} (חומרה {SEVERITY_HE.get(p.get('severity'), 'לא ידועה')}, נצפה "
+                     f"{run.when(p.get('last_seen_iso'))})." + detail_suffix(quoted, technical),
+                     _ids(problems, str(p.get("source_id") or "")))
         if not found:
             out.fact(f"לא נרשמה בעיה נוכחית עבור {label}.", _ids(problems))
     out.ref(_ref(kind, ident, ident))
@@ -525,10 +599,13 @@ async def _dependencies(run: _Run, out: _Answer, question: str, target: dict, co
     text = str(question)
     kind = ident = label = None
     switch = re.search(r"(?:מתג|switch)\s+([^\s?,!]+)", text, re.IGNORECASE)
-    if switch and switch.group(1) not in ("הזה", "הזאת", "this"):
+    mentions_switch = re.search(r"מתג|switch", text, re.IGNORECASE) is not None
+    if switch and switch.group(1).casefold() not in ("הזה", "הזאת", "this"):
         kind, ident = "switch", switch.group(1).strip(".")
-    elif target.get("from_context") and target.get("kind") in ("pdu", "kvm", "server", "rack", "item"):
+    elif target.get("from_context") and target.get("kind") in ("pdu", "kvm", "server", "rack", "item") \
+            and not mentions_switch:
         kind, ident = target["kind"], target["id"]
+        out.context_used = _named(kind, ident)
     elif target.get("query"):
         resolved = await _resolve(run, out, target["query"], ("pdu", "kvm", "server", "rack", "item"))
         if resolved is None:
@@ -536,12 +613,19 @@ async def _dependencies(run: _Run, out: _Answer, question: str, target: dict, co
         kind, ident, label = resolved["kind"], resolved["id"], resolved.get("label")
         if kind not in ("pdu", "kvm", "server", "rack", "item"):
             kind = "server"
-    elif target.get("rack"):
+    elif target.get("rack") and not mentions_switch:
         kind, ident = "rack", target["rack"]
+    if not kind and mentions_switch:
+        await _list_switches(run, out)   # "which components are affected by a switch failure?" without a name
+        return
     if not kind:
         out.summary = "לא זוהה בשאלה רכיב (PDU, KVM, מתג, ארון או שרת) שאת התלויות בו יש לבדוק."
         out.check("שאל שוב עם שם הרכיב, למשל: אילו שרתים מחוברים ל-PDU pdu-rack03?")
         return
+    await _dependency_report(run, out, kind, ident, label)
+
+
+async def _dependency_report(run: _Run, out: _Answer, kind: str, ident: str, label: str | None = None) -> None:
     label = _text(label or ident, 60)
     named = _named(kind, label)
     result = await run.call("get_dependencies", kind=kind, id=ident)
@@ -602,6 +686,371 @@ def _impact_text(result: ToolResult) -> str:
             + (f"; בראש הרשימה: {', '.join(names)}" if names else "") + ".")
 
 
+_MAX_RACKS = 10
+_MAX_SWITCHES = 6
+
+
+def _rack_key(name: str):
+    return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", name)]
+
+
+async def known_racks(run: _Run) -> tuple[list[str], bool]:
+    """Rack names known to the system (racks with PDUs, plus rack names returned by resolve_entity for "rack"),
+    capped at _MAX_RACKS. Returns (racks, truncated)."""
+    racks: set[str] = set()
+    power = await run.call("get_power_and_environment")
+    for pdu in _list(power.data.get("pdus")) if power else []:
+        if isinstance(pdu, dict):
+            for rack in [pdu.get("rack"), *_list(pdu.get("shared_racks"))]:
+                if isinstance(rack, str) and rack.strip():
+                    racks.add(_text(rack, 40))
+    found = await _optional(run, "resolve_entity", query="rack")
+    for candidate in _list(found.data.get("candidates")) if found else []:
+        if isinstance(candidate, dict) and candidate.get("kind") == "rack" and candidate.get("id"):
+            racks.add(_text(candidate["id"], 40))
+    ordered = sorted(racks, key=_rack_key)
+    return ordered[:_MAX_RACKS], len(ordered) > _MAX_RACKS
+
+
+async def _list_switches(run: _Run, out: _Answer) -> None:
+    """No switch named: list the switches known from saved server assignments with their dependent servers."""
+    racks, truncated = await known_racks(run)
+    switches: dict[str, list[str]] = {}
+    evidence: list[str] = []
+    for rack in racks:
+        deps = await run.call("get_dependencies", kind="rack", id=rack)
+        if deps is None:
+            continue
+        evidence += _ids(deps)
+        for connection in _list(deps.data.get("connections")):
+            if isinstance(connection, dict) and connection.get("kind") == "switch" and connection.get("switch"):
+                switches.setdefault(_text(connection["switch"], 40), [])
+    if not switches:
+        out.summary = ("לא צוין מתג בשאלה, ובנתונים השמורים לא נמצאו שיוכי מתגים לשרתים בארונות הידועים. "
+                       "אין במערכת מלאי מתגים או מצב קישורים.")
+        if evidence:
+            out.fact(f"לא נמצאו שיוכי מתגים בשרתים של הארונות: {', '.join(racks)}.", evidence)
+        out.check("אם ידוע לך שם המתג, שאל: אילו רכיבים מושפעים מתקלה במתג <שם המתג>?")
+        return
+    names = sorted(switches, key=_rack_key)
+    for name in names[:_MAX_SWITCHES]:
+        result = await run.call("get_dependencies", kind="switch", id=name)
+        servers = [s for s in _list(result.data.get("servers")) if isinstance(s, dict)] if result else []
+        listed = ", ".join(_text(s.get("label") or s.get("id"), 30)
+                           + (f" (פורט {_text(s.get('port'), 20)})" if s.get("port") not in (None, "") else "")
+                           for s in servers[:10])
+        switches[name] = [_text(s.get("label") or s.get("id"), 30) for s in servers]
+        if result is not None:
+            out.fact(f"מתג {name}: {len(servers)} שרתים משויכים" + (f" - {listed}" if listed else "") + ".",
+                     _ids(result))
+            for s in servers[:10]:
+                out.ref(_ref("server", s.get("id"), s.get("label")))
+    summary_list = ", ".join(f"{name} ({len(switches[name])} שרתים)" for name in names[:_MAX_SWITCHES])
+    out.summary = (f"לא צוין מתג בשאלה, ולכן מוצגים המתגים שמופיעים בשיוכי השרתים: {summary_list}. "
+                   "תקלה במתג עלולה להשפיע על השרתים המשויכים אליו; השיוכים הם טקסט חופשי ולא בדיקה חיה.")
+    if len(names) > _MAX_SWITCHES:
+        out.missing(f"מוצגים {_MAX_SWITCHES} מתגים מתוך {len(names)}.")
+    if truncated:
+        out.missing(f"נבדקו {_MAX_RACKS} הארונות הראשונים בלבד.")
+    out.missing("רשימת המתגים נבנתה משיוכי השרתים בארונות הידועים; אין במערכת מלאי מתגים, מצב קישורים או VLAN.")
+    out.check(f"כדי לצמצם, שאל על מתג מסוים, למשל: אילו רכיבים מושפעים מתקלה במתג {names[0]}?")
+    out.check("לפני עבודה על מתג, אמת פיזית אילו שרתים מחוברים אליו.")
+
+
+async def _entity_report(run: _Run, out: _Answer, kind: str, ident: str, label: str | None = None) -> None:
+    """Status of one known piece of equipment."""
+    if kind in ("pdu", "kvm"):
+        await _device_report(run, out, kind, ident, label)
+    elif kind == "rack":
+        await _rack_status(run, out, ident)
+    elif kind == "switch":
+        await _dependency_report(run, out, "switch", ident, label)
+    elif kind == "server":
+        await _server_status(run, out, "", {"query": ident}, {})
+    else:
+        await _device_status(run, out, kind, ident)
+
+
+async def _device_report(run: _Run, out: _Answer, kind: str, ident: str, label: str | None = None) -> None:
+    """A PDU or KVM: last scheduled observation, outlets (PDU), load and environment (PDU, cache only), current
+    problems, dependent servers and recent maintenance. Nothing is refreshed and no device is contacted."""
+    named = _named(kind, label or ident)
+    bits: list[str] = []
+    power = None
+    outlets: list[dict] = []
+    off: list[dict] = []
+    if kind == "pdu":
+        power = await run.call("get_power_and_environment", pdu_id=ident)
+        entry = next((p for p in _list(power.data.get("pdus")) if isinstance(p, dict)
+                      and str(p.get("id")) == str(ident)), None) if power else None
+        if power is not None and entry is None:
+            out.fact(f"לא נמצא PDU עם המזהה {_text(ident, 60)} בנתוני החשמל השמורים.", _ids(power))
+        if entry:
+            named = _named("pdu", entry.get("name") or label or ident)
+            snapshot_ids = _ids(power, f"snapshot:{ident}", "monitor_device_snapshots")
+            reachable = entry.get("reachable")
+            reach = ("ה-PDU הגיב" if reachable is True else "ה-PDU לא הגיב" if reachable is False
+                     else "אין תוצאת בדיקה")
+            stale = " (הנתונים לא עדכניים)" if entry.get("snapshot_stale") else ""
+            when = run.when(entry.get("checked_at"))
+            out.fact(f"{named}: בבדיקה המתוזמנת האחרונה ({when}) {reach}{stale}.", snapshot_ids)
+            bits.append(f"{reach} בבדיקה המתוזמנת האחרונה ({when}){stale}")
+            outlets = [o for o in _list(entry.get("outlets")) if isinstance(o, dict)]
+            off = [o for o in outlets if o.get("state") == "off" and not o.get("missing")]
+            if outlets:
+                on = sum(1 for o in outlets if o.get("state") == "on")
+                other = len(outlets) - on - len(off)
+                listing = ", ".join(_text(o.get("number"), 6) + (f" ({_text(o.get('label'), 30)})" if o.get("label") else "")
+                                    for o in off[:10])
+                out.fact(f"שקעים לפי הבדיקה האחרונה: {on} דולקים (ON), {len(off)} כבויים (OFF)"
+                         + (f", {other} במצב לא ידוע" if other else "") + (f". כבויים: {listing}" if off else "") + ".",
+                         snapshot_ids)
+                bits.append(f"{len(off)} שקעים כבויים (OFF): {listing}" if off else "אין שקעים כבויים לפי הבדיקה")
+            watts = entry.get("total_watts")
+            cache_ids = _ids(power, f"pdu_cache:{ident}")
+            if isinstance(watts, (int, float)) and not entry.get("stale"):
+                out.fact(f"{named}: עומס ידוע {watts:.0f} W לפי קריאה שמורה מ-{run.when(entry.get('cache_as_of'))}.",
+                         cache_ids)
+                bits.append(f"עומס ידוע {watts:.0f} W")
+            else:
+                out.fact(f"{named}: אין קריאת עומס עדכנית (הקריאה חסרה, ישנה או לא אומתה).", cache_ids)
+            environment = []
+            if isinstance(entry.get("temperature"), (int, float)):
+                environment.append(f"טמפרטורה {entry['temperature']:g}°C")
+            if isinstance(entry.get("humidity"), (int, float)):
+                environment.append(f"לחות {entry['humidity']:g}%")
+            if isinstance(entry.get("leak_detected"), bool):
+                environment.append("זוהתה נזילה" if entry["leak_detected"] else "לא זוהתה נזילה")
+            if environment:
+                out.fact(f"חיישני הסביבה של {named} (קריאה שמורה, מיקום החיישן לא רשום): {', '.join(environment)}.",
+                         cache_ids)
+            rack = entry.get("rack")
+            if isinstance(rack, str) and rack:
+                shared = [r for r in _list(entry.get("shared_racks")) if isinstance(r, str)]
+                out.fact(f"{named} רשום בארון {_text(rack, 40)}"
+                         + (f" ומשותף גם לארון {', '.join(_text(r, 40) for r in shared)}" if shared else "") + ".",
+                         _ids(power, "devices"))
+                out.ref(_ref("rack", rack, rack))
+    else:
+        overview = await run.call("lab_status_overview")
+        view = next((d for d in _list(overview.data.get("devices")) if isinstance(d, dict)
+                     and str(d.get("device_id")) == str(ident)), None) if overview else None
+        if view:
+            named = _named(kind, view.get("label") or label or ident)
+            status = view.get("status")
+            when = run.when(view.get("checked_at"))
+            detail = _text(view.get("detail"), 140)
+            technical = detail if detail and detail != f"Device observation is {status}." else None
+            out.fact(f"{named}: לפי הבדיקה המתוזמנת האחרונה ({when}) המצב {STATUS_HE.get(status, _text(status, 30))}."
+                     + detail_suffix(None, technical), _ids(overview, str(view.get("source_id") or ""),
+                                                            "monitor_device_snapshots"))
+            bits.append(f"מצב {STATUS_HE.get(status, _text(status, 30))} בבדיקה המתוזמנת האחרונה ({when})")
+        elif overview is not None:
+            out.fact(f"לא נמצא {named} ברשימת ההתקנים המנוטרים.", _ids(overview))
+    out.ref(_ref(kind, ident, label or named))
+    if out.context_used:
+        out.context_used = named   # the device's real name once the tools returned it
+    problems = await run.call("list_current_problems")
+    all_problems = [p for p in _list(problems.data.get("problems")) if isinstance(p, dict)] if problems else []
+    found = [p for p in all_problems if str(_dict(p.get("entity")).get("id")) == str(ident)]
+    for p in found:
+        hebrew, quoted, technical = problem_text(p)
+        out.fact(f"{named}: {hebrew} (חומרה {SEVERITY_HE.get(p.get('severity'), 'לא ידועה')}, נצפה "
+                 f"{run.when(p.get('last_seen_iso'))})." + detail_suffix(quoted, technical),
+                 _ids(problems, str(p.get("source_id") or "")))
+    if problems is not None and not found:
+        out.fact(f"לא נרשמה בעיה נוכחית עבור {named}.", _ids(problems))
+    deps = await run.call("get_dependencies", kind=kind, id=ident)
+    servers = [s for s in _list(deps.data.get("servers")) if isinstance(s, dict)] if deps else []
+    if servers:
+        port_word = "שקע" if kind == "pdu" else "פורט"
+        out.fact(f"שרתים המחוברים ל-{named} לפי השיוכים השמורים: "
+                 + ", ".join(_text(s.get("label") or s.get("id"), 30)
+                             + (f" ({port_word} {_text(s.get('port'), 10)})" if s.get("port") not in (None, "") else "")
+                             for s in servers[:12]) + ".", _ids(deps))
+    down = {_text(_dict(p.get("entity")).get("label"), 60).casefold(): p for p in all_problems
+            if p.get("kind") == "ping_down"}
+    for outlet in off:
+        server = down.get(_text(outlet.get("label"), 60).casefold())
+        if server is not None:
+            name = _text(outlet.get("label"), 60)
+            out.hypothesis(f"ייתכן ש-{name} אינו זמין כי השקע {_text(outlet.get('number'), 6)} ב-{named} כבוי.",
+                           [f"ניטור ICMP מדווח ש-{name} אינו זמין.",
+                            f"ה-PDU מדווח שהשקע {_text(outlet.get('number'), 6)} במצב OFF."],
+                           "ברר ביומן התחזוקה מי כיבה את השקע ומדוע, ורק לאחר אישור הדלק אותו וודא שה-ping חוזר.",
+                           _ids(problems, "ping_targets") + _ids(power if kind == "pdu" else None,
+                                                                   f"snapshot:{ident}", "monitor_device_snapshots"))
+    history = await run.call("get_history", device_id=ident, since_hours=168)
+    if history is not None:
+        events = [e for e in _list(history.data.get("items")) if isinstance(e, dict)]
+        maintenance = [e for e in events if e.get("kind") == "pdu_maintenance"]
+        out.fact(f"ב-7 הימים האחרונים נרשמו {len(events)} אירועים הקשורים ל-{named}"
+                 + (f", מהם {len(maintenance)} פעולות תחזוקה" if maintenance else "") + ".", _ids(history))
+        for event in maintenance[:3]:
+            out.fact(f"{run.when(event.get('at_iso'))}: {event_text(event)}.",
+                     _ids(history, str(event.get("source_id") or "")))
+    bits.append(f"{len(found)} בעיות רשומות כרגע" if found else "אין בעיה רשומה כרגע (אין בכך הוכחה שהוא תקין)")
+    out.summary = (f"{named}: " + "; ".join(bits) + ". הנתונים מהבדיקה המתוזמנת האחרונה ומהקריאות השמורות; "
+                   "לא בוצעה עכשיו פנייה להתקן.")
+    if off:
+        numbers = ', '.join(_text(o.get('number'), 6) for o in off[:5])
+        out.check(f"ברר ביומן התחזוקה מדוע שקע {numbers} כבוי לפני שמדליקים אותו." if len(off) == 1 else
+                  f"ברר ביומן התחזוקה מדוע שקעים {numbers} כבויים לפני שמדליקים אותם.")
+    out.check(f"פתח את מסך {named} באתר כדי לראות קריאה עדכנית.")
+
+
+async def _rack_status(run: _Run, out: _Answer, rack: str) -> None:
+    rack = _text(rack, 40)
+    out.ref(_ref("rack", rack, rack))
+    deps = await run.call("get_dependencies", kind="rack", id=rack)
+    if deps is None:
+        out.summary = f"לא ניתן היה לקרוא את נתוני ארון {rack}."
+        return
+    data = deps.data
+    pdus = [d for d in _list(data.get("pdus")) if isinstance(d, dict)]
+    kvms = [d for d in _list(data.get("kvms")) if isinstance(d, dict)]
+    servers = [s for s in _list(data.get("servers")) if isinstance(s, dict)]
+    items = [i for i in _list(data.get("items")) if isinstance(i, dict)]
+    out.fact(f"בארון {rack} רשומים {len(pdus)} PDU, {len(kvms)} KVM, {len(servers)} שרתים ו-{len(items)} פריטי ציוד.",
+             _ids(deps))
+    for d in pdus + kvms:
+        out.ref(_ref(d.get("kind") or ("pdu" if d in pdus else "kvm"), d.get("id"), d.get("name")))
+    ids_in_rack = {str(d.get("id")) for d in pdus + kvms}
+    labels = set()
+    for s in servers:
+        labels.add(_text(s.get("label"), 60).casefold())
+        labels.update(_text(a, 60).casefold() for a in _list(s.get("aliases")))
+    problems = await run.call("list_current_problems")
+    relevant = [p for p in (_list(problems.data.get("problems")) if problems else []) if isinstance(p, dict)
+                and (str(_dict(p.get("entity")).get("id")) in ids_in_rack
+                     or _text(_dict(p.get("entity")).get("label"), 60).casefold() in labels)]
+    for p in relevant[:8]:
+        entity = _dict(p.get("entity"))
+        hebrew, quoted, technical = problem_text(p)
+        out.fact(f"{_text(entity.get('label') or entity.get('id'), 60)}: {hebrew} (חומרה "
+                 f"{SEVERITY_HE.get(p.get('severity'), 'לא ידועה')})." + detail_suffix(quoted, technical),
+                 _ids(problems, str(p.get("source_id") or "")))
+    if problems is not None and not relevant:
+        out.fact(f"לא נרשמו בעיות נוכחיות לרכיבים של ארון {rack}.", _ids(problems))
+    out.summary = (f"ארון {rack}: {len(pdus)} PDU, {len(kvms)} KVM ו-{len(servers)} שרתים רשומים; "
+                   + (f"{len(relevant)} בעיות רשומות כרגע." if relevant else
+                      "אין בעיות רשומות כרגע (אין בכך הוכחה שהכול תקין)."))
+    out.check(f"לבדיקת מקום וחשמל שאל: האם אפשר להוסיף שרת לארון {rack}?")
+
+
+_STATUS_PHRASE = re.compile(r"(?:מה\s+(?:המצב|מצב)\s+של|מה\s+מצב|מה\s+מצבו|מה\s+מצבה|מה\s+קורה\s+עם|status\s+of|"
+                            r"state\s+of|how\s+is)\s+(.+)", re.IGNORECASE)
+_KIND_HINTS = {"שרת": "server", "השרת": "server", "server": "server", "ארון": "rack", "הארון": "rack",
+               "rack": "rack", "מתג": "switch", "המתג": "switch", "switch": "switch", "pdu": "pdu", "kvm": "kvm",
+               "פריט": "item", "הפריט": "item"}
+_HEBREW = re.compile(r"[֐-׿]")
+
+
+def status_phrase(question: str) -> tuple[str, str | None, bool, bool]:
+    """From "מה המצב של <phrase>?": (Latin-script name, kind hint, refers to the viewed item, is a page)."""
+    match = _STATUS_PHRASE.search(str(question))
+    if not match:
+        return "", None, False, False
+    residual, hint, this, page = [], None, False, False
+    for word in match.group(1).split():
+        word = re.sub(r"^ה-?(?=[A-Za-z])", "", word).strip(" ?!.,;:\"'")
+        low = word.casefold()
+        hint = hint or _KIND_HINTS.get(low)
+        this = this or low in _THIS
+        page = page or low in ("עמוד", "העמוד", "page")
+        if word and not _HEBREW.search(word):
+            residual.append(word)
+    return " ".join(residual), hint, this, page
+
+
+async def _entity_status(run: _Run, out: _Answer, question: str, target: dict, context: dict) -> None:
+    """"מה המצב של <equipment>?": answer about that equipment (named, or the one being viewed)."""
+    name, hint, this, page = status_phrase(question)
+    detail = _dict(context.get("detail"))
+    if page and not name:
+        await _overview(run, out, question, target, context)
+        return
+    if this and detail and hint in (None, detail.get("kind")):
+        out.context_used = _named(detail["kind"], detail["id"])
+        await _entity_report(run, out, detail["kind"], detail["id"], detail["id"])
+        return
+    if hint == "switch" and name:
+        await _dependency_report(run, out, "switch", name, name)
+        return
+    if name:
+        prefer = (hint,) if hint else ("pdu", "kvm", "server", "rack", "item")
+        resolved = await _resolve(run, out, name, prefer)
+        if resolved is None:
+            return   # not found / ambiguous is already reported
+        await _entity_report(run, out, resolved["kind"], resolved["id"], resolved.get("label"))
+        return
+    if detail and not this:
+        out.context_used = _named(detail["kind"], detail["id"])
+        await _entity_report(run, out, detail["kind"], detail["id"], detail["id"])
+        return
+    if this:
+        out.missing("השאלה מתייחסת לרכיב \"הזה\", אך לא נשלח מהמסך רכיב נצפה; מוצגת סקירה כללית.")
+    await _overview(run, out, question, target, context)
+
+
+async def _capacity_all(run: _Run, out: _Answer, question: str, request: dict) -> None:
+    """"Where can I add a server?" without a rack: plan_capacity over the known racks, ranked by verdict."""
+    racks, truncated = await known_racks(run)
+    if not racks:
+        out.summary = "לא צוין ארון, ולא נמצאו בנתונים ארונות ידועים לבדיקה."
+        out.check("שאל שוב עם שם הארון (למשל Rack-01).")
+        return
+    if not run.has("plan_capacity"):
+        out.summary = (f"לא צוין ארון. ארונות ידועים: {', '.join(racks)}. כלי תכנון הקיבולת אינו זמין, ולכן ציין ארון "
+                       "כדי לבדוק מקום וחשמל.")
+        out.check(f"שאל: האם אפשר להוסיף שרת לארון {racks[0]}?")
+        return
+    plans = []
+    for rack in racks:
+        result = await run.call("plan_capacity", rack=rack, **request)
+        if result is not None:
+            plans.append((rack, result))
+    if not plans:
+        out.summary = "לא ניתן היה להעריך קיבולת לאף אחד מהארונות הידועים."
+        return
+    order = {"yes": 0, "conditional": 1, "no": 2}
+
+    def rank(entry):
+        verdicts = _dict(entry[1].data.get("verdicts"))
+        values = list(verdicts.values())
+        return (order.get(entry[1].data.get("overall"), 3), values.count("over"),
+                values.count("unknown") + values.count("tight"), _rack_key(entry[0]))
+
+    plans.sort(key=rank)
+    for rack, result in plans:
+        verdicts = _dict(result.data.get("verdicts"))
+        unknown = [DIMENSION_HE.get(d, _text(d, 20)) for d, v in verdicts.items() if v == "unknown"]
+        over = [DIMENSION_HE.get(d, _text(d, 20)) for d, v in verdicts.items() if v == "over"]
+        text = _text(result.data.get("overall_text") or result.data.get("overall") or "אין הערכה", 200)
+        out.fact(f"ארון {rack}: {text}" + (f" (חריגה: {', '.join(over)})" if over else "")
+                 + (f" (לא ידוע: {', '.join(unknown)})" if unknown else "") + ".", _ids(result))
+        out.ref(_ref("rack", rack, rack))
+    best_rack, best = plans[0]
+    best_text = _text(best.data.get("overall_text") or best.data.get("overall") or "אין הערכה", 200)
+    counts = {key: sum(1 for _, r in plans if r.data.get("overall") == key) for key in order}
+    out.recommendation(
+        title=f"מועמד ראשון להוספת שרת: ארון {best_rack}",
+        problem="צריך לבחור ארון להוספת שרת חדש.",
+        evidence=f"{best_text}. דירוג לפי הערכת כלי תכנון הקיבולת בכל הארונות הידועים.",
+        priority="medium",
+        next_step=f"שאל שאלה ממוקדת על ארון {best_rack} ואמת פיזית מקום, חשמל, רשת וקירור לפני ההתקנה.",
+        missing_info=[_text(m, 160) for m in _list(best.data.get("missing_info")) if isinstance(m, str)][:8],
+        ids=_ids(best), refs=[_ref("rack", best_rack, best_rack)])
+    power_note = f" (הספק הציוד החדש לפי השאלה: {request['power_w']:g} W)" if "power_w" in request else ""
+    out.summary = (f"לא צוין ארון, ולכן נבדקו {len(plans)} ארונות ידועים{power_note}: {counts['yes']} ללא הסתייגות, "
+                   f"{counts['conditional']} מותנים ו-{counts['no']} לא מומלצים. המועמד הראשון לפי הנתונים: ארון "
+                   f"{best_rack} - {best_text}. זה דירוג לפי הנתונים הקיימים ולא אישור סופי.")
+    if truncated:
+        out.missing(f"נבדקו {_MAX_RACKS} הארונות הראשונים בלבד.")
+    out.check(f"שאל על הארון המועמד: האם אפשר להוסיף שרת לארון {best_rack}?")
+    out.check("ודא פיזית מקום, משקל, קירור ופורט פנוי במתג לפני ההתקנה.")
+
+
 _POWER = re.compile(r"(\d+(?:\.\d+)?)\s*(kw|קילוואט|קילו-וואט|w|watts?|וואט|ואט)(?![A-Za-z])", re.IGNORECASE)
 _UNITS = re.compile(r"(?<![A-Za-z0-9-])(\d{1,2})\s*(?:u|יחידות|מדפים|מדף)(?![A-Za-z0-9])", re.IGNORECASE)
 _NETWORK = ("רשת", "מתג", "network", "switch")
@@ -626,6 +1075,10 @@ def capacity_request(question: str) -> dict:
 
 async def _capacity(run: _Run, out: _Answer, question: str, target: dict, context: dict) -> None:
     rack = target.get("rack")
+    text = str(question).casefold()
+    any_rack = any(word in text for word in ("איפה", "באיזה ארון", "לאיזה ארון", "where", "which rack"))
+    if any_rack and target.get("rack_from_context"):
+        rack = None   # "where can I add ...?" asks across racks, not about the rack on screen
     if not rack and target.get("query"):
         resolved = await _resolve(run, out, target["query"], ("rack", "server"))
         if resolved is None:
@@ -636,9 +1089,10 @@ async def _capacity(run: _Run, out: _Answer, question: str, target: dict, contex
             await _server_status(run, out, question, {"query": resolved["id"]}, context)
             return
     if not rack:
-        out.summary = "לא זוהה בשאלה ארון. ציין את שם הארון (למשל Rack-01) כדי לבדוק מקום, חשמל ותלויות."
-        out.check("שאל שוב עם שם הארון.")
+        await _capacity_all(run, out, question, capacity_request(question))
         return
+    if target.get("rack_from_context"):
+        out.context_used = _named("rack", rack)
     rack = _text(rack, 40)
     out.ref(_ref("rack", rack, rack))
     request = capacity_request(question)
@@ -731,7 +1185,7 @@ async def _capacity(run: _Run, out: _Answer, question: str, target: dict, contex
         ids=_ids(layout) + _ids(power) + _ids(plan), refs=[_ref("rack", rack, rack)])
     if utilization is not None and utilization >= 0.8:
         out.missing("העומס על אחד ה-PDU גבוה ביחס להנחת 16 A (סף 80% מהממשק הוא הנחה, לא סף מוגדר).")
-    from_screen = " (הארון נלקח מהמסך שבו אתה צופה)" if target.get("rack_from_context") else ""
+    from_screen = ""
     if "power_w" in request:
         from_screen += f" (הספק הציוד החדש לפי השאלה: {request['power_w']:g} W)"
     out.summary = (f"בדיקת קיבולת לארון {rack}{from_screen}: {shelves_text}; {power_text}."
@@ -748,8 +1202,10 @@ async def _history(run: _Run, out: _Answer, question: str, target: dict, context
     label = "המעבדה"
     if target.get("from_context") and target.get("kind") == "server":
         server = label = target["id"]
+        out.context_used = _named("server", server)
     elif target.get("from_context") and target.get("kind") in ("pdu", "kvm"):
         device_id, label = target["id"], _named(target["kind"], target["id"])
+        out.context_used = label
     elif target.get("query"):
         resolved = await _resolve(run, out, target["query"], ("server", "pdu", "kvm"))
         if resolved is None:
@@ -780,8 +1236,8 @@ async def _history(run: _Run, out: _Answer, question: str, target: dict, context
                  _ids(result, *sorted({str(e.get("source_id")) for e in events if e.get("source_id")})))
         for e in events[:8]:
             overlap = " (חופף בזמן לאירוע אחר; אין בכך קשר סיבתי)" if _list(e.get("co_occurred_with")) else ""
-            out.fact(f"{run.when(e.get('at_iso'))}: {EVENT_HE.get(e.get('kind'), _text(e.get('kind'), 30))} - "
-                     f"{_text(e.get('detail'), 100).rstrip('.')}{overlap}.", _ids(result, str(e.get("source_id") or "")))
+            out.fact(f"{run.when(e.get('at_iso'))}: {event_text(e)}{overlap}.",
+                     _ids(result, str(e.get("source_id") or "")))
         pings = counts.get("ping_incident", 0)
         out.summary = (f"כן: ב-{days} הימים האחרונים נרשמו {pings} אירועי ping עבור {label}." if pings else
                        f"ב-{days} הימים האחרונים לא נרשמו אירועי ping עבור {label}, אך נרשמו {len(events)} אירועים אחרים.")
@@ -811,15 +1267,16 @@ async def _work(run: _Run, out: _Answer, question: str, target: dict, context: d
         entity = _dict(p.get("entity"))
         label = _text(entity.get("label") or entity.get("id"), 60)
         kind = PROBLEM_HE.get(p.get("kind"), _text(p.get("kind"), 40))
+        hebrew, quoted, technical = problem_text(p)
         ref = _ref(entity.get("kind"), entity.get("id"), entity.get("label"))
         ids = _ids(result, str(p.get("source_id") or ""))
-        evidence = f"{kind}; נצפה {run.when(p.get('last_seen_iso'))}; פירוט: {_text(p.get('detail'), 120)}"
-        out.fact(f"{label}: {kind} (חומרה {SEVERITY_HE.get(p.get('severity'), 'לא ידועה')}).", ids)
+        evidence = f"{hebrew}; נצפה {run.when(p.get('last_seen_iso'))}." + detail_suffix(quoted, technical)
+        out.fact(f"{label}: {hebrew} (חומרה {SEVERITY_HE.get(p.get('severity'), 'לא ידועה')}).", ids)
         out.ref(ref)
         out.recommendation(title=f"טיפול ב-{label}", problem=kind, evidence=evidence,
                            priority=p.get("severity"), next_step=_check_for(p.get("kind")),
                            missing_info=["סיבת השורש אינה ידועה מהנתונים"], ids=ids, refs=[ref])
-        out.draft(title=f"בדיקת {label}: {kind}", description=f"{kind}. {_text(p.get('detail'), 200)}",
+        out.draft(title=f"בדיקת {label}: {kind}", description=f"{hebrew}." + detail_suffix(quoted, technical),
                   refs=[ref], priority=p.get("severity"),
                   rationale=f"מבוסס על נתוני הניטור ({p.get('source_id') or 'ניטור'}), נצפה {run.when(p.get('last_seen_iso'))}.",
                   steps=_steps_for(p.get("kind")))
@@ -890,7 +1347,9 @@ async def _overview(run: _Run, out: _Answer, question: str, target: dict, contex
     enabled = _dict(data.get("enabled_sources"))
     off = [name for name, on in enabled.items() if not on]
     if off:
-        out.missing("מקורות שאינם פעילים: " + ", ".join(_text(n, 30) for n in off) + ".")
+        names = {"ping_monitor": "ניטור ping", "email_alerts": "התראות דוא\"ל", "pxe": "התקנות PXE",
+                 "accounts": "חשבונות משתמשים"}
+        out.missing("מקורות שאינם פעילים: " + ", ".join(names.get(n, _text(n, 30)) for n in off) + ".")
     down = counts.get("down", 0) if isinstance(counts.get("down"), int) else 0
     out.summary = (f"סקירת מצב: {counts.get('up', 0)} יעדי ping זמינים, {down} לא זמינים, "
                    f"{counts.get('stale', 0)} לא עדכניים ו-{counts.get('unknown', 0)} במצב לא ידוע. "
@@ -899,6 +1358,7 @@ async def _overview(run: _Run, out: _Answer, question: str, target: dict, contex
 
 
 _HANDLERS = {"problems": _problems, "server_status": _server_status, "dependencies": _dependencies,
+             "entity_status": _entity_status,
              "capacity": _capacity, "history": _history, "work": _work, "overview": _overview}
 
 
@@ -921,9 +1381,9 @@ async def answer(*, question: str, history: list[dict] | None, context: dict | N
             log.warning("Assistant demo responder failed while rendering %s (%s).", intent, type(exc).__name__)
             out.summary = "לא ניתן היה להשלים את תשובת ההדגמה; מוצגים רק הממצאים שנאספו עד לשגיאה."
             out.missing("חלק מנתוני הכלים הגיעו במבנה לא צפוי ולא עובדו.")
-    if target.get("from_context") and tools:
-        out.summary = (out.summary + f" (הרכיב נלקח מהמסך שבו אתה צופה: {target.get('kind')} "
-                       f"{_text(target.get('id'), 60)}, ונבדק מחדש בכלים.)").strip()
+    if out.context_used:
+        # Only when the handler really answered about the viewed equipment; never claims a live re-check.
+        out.summary = (out.summary + f" (התשובה מתייחסת לרכיב מהמסך שבו אתה צופה: {out.context_used}.)").strip()
     reason_text = reason_hebrew(reason)
     extra = [f"התשובה הופקה במצב הדגמה ללא מודל שפה. {reason_text}"]
     extra.extend(run.missing)

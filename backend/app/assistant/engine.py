@@ -54,6 +54,62 @@ EAGER_INPUT_STREAMING = False
 _STATUS_RANK = {status: rank for rank, status in enumerate(("ok", "stale", "disabled", "missing", "unavailable"))}
 _STATUS_HE = {"stale": "נתונים לא עדכניים", "missing": "מקור חסר", "unavailable": "מקור לא זמין",
               "disabled": "מקור מושבת"}
+# Hebrew wording for the fixed caveat sentences the tools emit (exact match only; anything else is shown verbatim
+# as a technical detail). Shown to the owner in missing_data.
+CAVEAT_HE = {
+    "UPS telemetry is not monitored.": "אין ניטור של UPS.",
+    "Cooling/chillers telemetry is not monitored (placement is not telemetry).":
+        "אין ניטור של קירור וצ'ילרים (מיקום הצ'ילרים אינו מדידה).",
+    "Switch/link state is not monitored; saved switch assignments are topology only.":
+        "מצב מתגים וקישורים אינו מנוטר; שיוכי המתגים השמורים הם טופולוגיה בלבד.",
+    "Absence of recorded problems is not evidence that the lab is healthy.":
+        "היעדר בעיות רשומות אינו הוכחה שהמעבדה תקינה.",
+    "Email alerts disabled: alert conditions and email history are not monitored.":
+        "התראות הדוא\"ל כבויות: אין תנאי התראה ואין היסטוריית התראות.",
+    "Ping monitor disabled: persisted ICMP and device observations do not refresh.":
+        "ניטור ה-ping כבוי: תצפיות ה-ICMP וההתקנים השמורות אינן מתעדכנות.",
+    "Monitoring timezone unavailable; freshness is unknown.":
+        "אזור הזמן של הניטור אינו זמין, ולכן לא ידוע עד כמה הנתונים עדכניים.",
+    "Server has no ICMP monitoring target; availability is unknown.":
+        "לשרת אין יעד ניטור ICMP, ולכן הזמינות שלו אינה ידועה.",
+    "Rack sources conflict; candidates are ordered override, PDU, server inventory, twin. Verify location.":
+        "מקורות המיקום סותרים (סדר העדיפות: קביעה ידנית, PDU, מלאי שרתים, תאום דיגיטלי); יש לאמת את המיקום.",
+    "Co-occurred events overlap in recorded time only; no causal relationship is established. History retention "
+    "may be shorter than the requested window.":
+        "אירועים חופפים חופפים בזמן בלבד ואין בכך קשר סיבתי; ייתכן שההיסטוריה נשמרת לתקופה קצרה מהחלון שנבדק.",
+    "Switch assignments are free text; switch inventory, link state and service dependencies are unavailable.":
+        "שיוכי המתגים הם טקסט חופשי; אין מלאי מתגים, מצב קישורים או תלויות שירותים.",
+    "Feed A/B and UPS topology are not recorded. Multiple outlets do not establish independent power feeds.":
+        "הזנות A/B וטופולוגיית UPS אינן רשומות; כמה שקעים אינם מוכיחים הזנות חשמל בלתי תלויות.",
+    "Labels and stored associations are untrusted configuration, not verified physical cabling.":
+        "תוויות ושיוכים שמורים הם הגדרות שלא אומתו, לא כבילה פיזית שנבדקה.",
+    "Candidate matches are not a confirmed selection; ask for a unique identifier when ambiguous.":
+        "התאמות לשם אינן בחירה מאושרת; כשיש כמה התאמות יש לציין מזהה ייחודי.",
+    "No UPS telemetry, cooling telemetry or power history is available.":
+        "אין נתוני UPS, נתוני קירור או היסטוריית צריכת חשמל.",
+    "Chillers describe placement only. PDU environmental sensor location is not recorded.":
+        "נתוני הצ'ילרים מתארים מיקום בלבד; מיקום חיישני הסביבה של ה-PDU אינו רשום.",
+    "Unknown or stale watts do not establish rack load or available capacity.":
+        "קריאות הספק לא ידועות או ישנות אינן קובעות עומס ארון או קיבולת פנויה.",
+    "Shared PDUs are counted once by device id; loads across rack queries must not be added.":
+        "PDU משותף נספר פעם אחת לפי המזהה שלו; אין לחבר עומסים בין בדיקות של ארונות שונים.",
+    "U is a shelf index from the top, not a standard rack-unit height.":
+        "U הוא מספר מדף מלמעלה, לא יחידת גובה סטנדרטית של ארון.",
+    "Free shelves and automatic placement have low confidence; verify the physical rack mapping.":
+        "מדפים פנויים ומיקום אוטומטי הם ברמת ביטחון נמוכה; יש לאמת את מיפוי הארון בפועל.",
+    "Free shelves are unknown when required inventory or placement sources are missing or unavailable.":
+        "כשמקורות המלאי או המיקום חסרים, המדפים הפנויים אינם ידועים.",
+    "Item weight, height and depth are unavailable; shelf space is not proof equipment fits.":
+        "אין נתוני משקל, גובה ועומק; מדף פנוי אינו הוכחה שהציוד ייכנס.",
+    "Priority scores are a documented heuristic, not a measurement; redundancy is a hint, never verified.":
+        "ציוני העדיפות הם היוריסטיקה מתועדת ולא מדידה; יתירות היא רמז בלבד ולא אומתה.",
+    "Priority scores are a documented heuristic, not a measurement; absence of problems is not proof of health.":
+        "ציוני העדיפות הם היוריסטיקה מתועדת ולא מדידה; היעדר בעיות אינו הוכחה לתקינות.",
+    "Capacity verdicts use the latest cached readings only; no device was contacted and no load is predicted.":
+        "הערכות הקיבולת מבוססות על הקריאות השמורות האחרונות בלבד; לא בוצעה פנייה להתקן ואין חיזוי עומס.",
+    "Results were truncated; omitted entries must not be treated as absent.":
+        "התוצאות קוצרו; רשומות שהושמטו אינן בהכרח חסרות.",
+}
 _DEFAULT_NOTES = {
     "stale": "The data is older than its expected refresh interval.",
     "missing": "The data source has no data (file or record missing).",
@@ -276,9 +332,11 @@ class Ledger:
         for source in self._sources.values():
             if source.status != "ok":
                 label = _STATUS_HE.get(source.status, source.status)
-                detail = f" - {source.note}" if source.note else ""
+                detail = f". פירוט טכני: {source.note}" if source.note else ""
                 notes.append(f"{label}: {source.name} ({source.ref or source.id}){detail}")
-        notes.extend(f"הסתייגות מהנתונים: {caveat}" for caveat in self.caveats)
+        for caveat in self.caveats:
+            hebrew = CAVEAT_HE.get(caveat)
+            notes.append(f"הסתייגות: {hebrew}" if hebrew else f"הסתייגות (פירוט טכני): {caveat}")
         return notes
 
 
