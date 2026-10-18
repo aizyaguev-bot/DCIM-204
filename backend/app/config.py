@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     pxe_tick_seconds: float = Field(default=0.5, gt=0, le=5)
     pxe_sim_time_scale: float = Field(default=1.0, gt=0, le=10)
     pxe_sim_scenario: str = "happy"
+    # Lab assistant (read-only). Without a key, or with the LLM turned off, it answers in a clearly labelled demo mode.
+    assistant_enabled: bool = True
+    assistant_llm_enabled: bool = True
+    assistant_anthropic_api_key: SecretStr | None = None   # server .env only; never sent to the browser or logged
+    assistant_model: str = "claude-opus-5-5"
+    assistant_timeout_seconds: int = Field(default=90, ge=5, le=600)
+    assistant_per_minute: int = Field(default=6, ge=1, le=600)
+    assistant_per_hour: int = Field(default=60, ge=1, le=10000)
+    assistant_max_chars: int = Field(default=2000, ge=1, le=20000)
+    assistant_concurrency: int = Field(default=4, ge=1, le=64)
+    assistant_daily_limit: int = Field(default=300, ge=1, le=100000)   # language-model questions per day, all users
+    assistant_allow_open_llm: bool = False   # allow the LLM on a site with no accounts and no shared password
     database_url: str = f"sqlite+aiosqlite:///{pathlib.Path(__file__).parent.parent / 'lab_manager.db'}"
 
     model_config = SettingsConfigDict(

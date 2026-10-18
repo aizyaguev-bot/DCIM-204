@@ -89,6 +89,47 @@ async def test_role_protects_writes_and_console_gets(setup, username, expected):
         assert (await c.patch("/api/devices/k1/labels",json={})).status_code == expected
 
 
+CONV = "/api/assistant/conversations/" + "0123456789abcdef" * 2
+
+
+@pytest.mark.parametrize("path,method,role", [
+    # Exactly two explicit Viewer writes (SEC-AI-4); every assistant GET is Viewer through the generic rule.
+    ("/api/assistant/chat","POST","Viewer"), (CONV,"DELETE","Viewer"),
+    ("/api/assistant/status","GET","Viewer"), ("/api/assistant/conversations","GET","Viewer"), (CONV,"GET","Viewer"),
+    ("/api/assistant/work-items","GET","Viewer"),
+    ("/api/assistant/work-items","POST","Operator"), ("/api/assistant/work-items/w1","PATCH","Operator"),
+    ("/api/assistant/work-items/w1","DELETE","Operator"),
+    # Anything else keeps the default write rule (fullmatch: no prefix, suffix or trailing-slash variants).
+    ("/api/assistant/status","POST","Operator"), ("/api/assistant/conversations","POST","Operator"),
+    ("/api/assistant/conversations","DELETE","Operator"), ("/api/assistant/conversations/c1","DELETE","Operator"),
+    (CONV + "/x","DELETE","Operator"), (CONV + "/","DELETE","Operator"), ("/api/assistant/chat/","POST","Operator"),
+    ("/api/assistant/chatx","POST","Operator"), ("/api/assistant/chat/x","POST","Operator"),
+    ("/api/assistant/chat","PUT","Operator"), ("/api/assistant/chat","DELETE","Operator"),
+    ("/api/assistant/work-items/w1/chat","POST","Operator"),
+])
+def test_assistant_required_roles(path, method, role):
+    assert accounts.required_role(path, method) == role
+
+
+@pytest.mark.parametrize("username,can_save", [("viewer",False),("operator",True),("admin",True)])
+async def test_assistant_roles_through_middleware(setup, username, can_save):
+    async with client(setup) as c:
+        await sign_in(c,username)
+        assert (await c.get("/api/assistant/status")).status_code == 200
+        assert (await c.post("/api/assistant/chat",json={})).status_code == 200
+        assert (await c.post("/api/assistant/chat/",json={})).status_code == 200   # the middleware strips the slash
+        assert (await c.get(CONV)).status_code == 200
+        assert (await c.delete(CONV)).status_code == 200
+        assert (await c.delete(CONV + "/")).status_code == 200
+        assert (await c.get("/api/assistant/work-items")).status_code == 200
+        writer = 200 if can_save else 403
+        assert (await c.post("/api/assistant/work-items",json={})).status_code == writer
+        assert (await c.post("/api/assistant/work-items/",json={})).status_code == writer
+        assert (await c.patch("/api/assistant/work-items/w1",json={})).status_code == writer
+        assert (await c.delete("/api/assistant/conversations/c1")).status_code == writer
+        assert (await c.post("/api/assistant/chatx",json={})).status_code == writer
+
+
 async def test_csrf_origin_and_forged_registration_role(setup):
     async with client(setup) as c:
         r = await c.post("/api/auth/login",json={"username":"admin","password":PASSWORD},headers={"Origin":"https://evil.example"})
