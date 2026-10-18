@@ -59,10 +59,10 @@ class ToolContext:
     """Passed to every tool call. Tools open their own short DB sessions through `session_factory`
     (an async_sessionmaker) and close them before returning. `now` is epoch seconds for the whole request."""
     principal: Principal
-    session_factory: Any
-    settings: Any
-    now: float
-    project_root: Any = None     # pathlib.Path of the repository root (for read-only data/doc files)
+    session_factory: Any = field(repr=False)
+    settings: Any = field(repr=False)    # holds plain-text device passwords: never repr/log/dump it; read attributes by name
+    now: float = 0.0
+    project_root: Any = field(default=None, repr=False)   # pathlib.Path of the repository root (read-only files)
 
 
 ToolFunc = Callable[..., Awaitable[ToolResult]]   # async def tool(ctx: ToolContext, **args) -> ToolResult
