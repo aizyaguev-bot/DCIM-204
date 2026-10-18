@@ -21,6 +21,7 @@ import MaintenanceDialog from "./components/MaintenanceDialog";
 import WhatsNew from "./components/WhatsNew";
 import RemoteInstallView from "./pages/RemoteInstallView";
 import { pxeApi, errorText as pxeErrorText } from "./api/pxe";
+import AssistantPanel from "./components/assistant/AssistantPanel";
 
 export default function App() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
@@ -515,6 +516,7 @@ export default function App() {
       )}
 
       <WhatsNew version={version} onOpenChangelog={() => navigate("changelog")} />
+      <AssistantPanel context={{tab: mainTab, rack: new URLSearchParams(location.search).get("rack"), detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={navigate} openDetail={openDetail} devices={devices} />
       <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>
     </div>
   );

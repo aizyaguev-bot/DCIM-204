@@ -8,6 +8,7 @@
     "test:changelog": "node --test src/__tests__/changelog.test.js",
     "test:pxe": "node --test src/__tests__/pxe.test.js",
     "test:layout": "node --test src/__tests__/layout.test.js",
+    "test:assistant": "node --test src/__tests__/assistant.test.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
