@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import OperationalError
 
-from .. import inventory_store, monitor_links
+from .. import inventory_store
 from ..models import (
     AlertCondition, AlertEmail, AssetOwner, Device, Engineer, MonitorDeviceError,
     MonitorDeviceSnapshot, PduMaintenance, PduMaintenanceLog, PingIncident,
@@ -49,8 +49,11 @@ _FILES = {
 }
 # Select only the fields needed by the tools. Never select alert bodies,
 # recipients, credential columns, or serialized alert configurations.
+# Minimal explicit DeviceOut fields; labels_json backs DeviceOut.labels. Do not
+# pass ORM Device objects to joins that would select credential columns.
+_DEVICE_FIELDS = "id name kind ip rack labels_json enabled"
 _FIELDS = {
-    Device: "id name kind ip rack labels_json enabled",
+    Device: _DEVICE_FIELDS,
     PingTarget: "id source_key name host rack source enabled status checked_at last_up_at rtt_ms detail",
     PingTargetName: "target_id override",
     PingIncident: "id target_id host previous_up_at first_failed_at last_failed_at ended_at end_reason failed_checks",
@@ -61,7 +64,7 @@ _FIELDS = {
     PduMaintenance: "device_id started_at started_by reason outlets_off_json failed_json",
     PduMaintenanceLog: "id at device_id action by reason ok failed",
     AlertCondition: "key started_at checked_at",
-    AlertEmail: "id condition_key subject created_at sent_at",
+    AlertEmail: "subject created_at sent_at",
     Engineer: "id name",
     AssetOwner: "asset_key engineer_id legacy_name",
 }
@@ -77,10 +80,13 @@ _SECRET = re.compile(
     r"[A-Za-z0-9_-]*[\"']?\s*[=:]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", re.IGNORECASE,
 )
 _PRIVATE_KEY = re.compile(r"(?:.*(?:password|passwd|token|api[_ -]?key|secret|session[_ -]?hash).*|username_enc|email|recipient|body)", re.IGNORECASE)
+_MAX_LIST = 200
+_MAX_ARGUMENT = 120
+_BIDI = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
 
 def _text(value):
-    value = "".join(c for c in str(value) if not unicodedata.category(c).startswith("C"))
+    value = "".join(c for c in str(value) if c not in _BIDI and not unicodedata.category(c).startswith("C"))
     value = _EMAIL.sub("[redacted email]", value)
     value = _SECRET.sub("[redacted credential]", value)
     value = re.sub(r"\bBearer\s+\S+", "[redacted token]", value, flags=re.IGNORECASE)
@@ -99,6 +105,26 @@ def _safe(value):
     if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
+
+
+def _cap_lists(value):
+    """Bound every returned list, including nested relationships and summaries."""
+    if isinstance(value, list):
+        result, clipped = [], len(value) > _MAX_LIST
+        for child in value[:_MAX_LIST]:
+            limited, nested = _cap_lists(child)
+            result.append(limited)
+            clipped |= nested
+        return result, clipped
+    if isinstance(value, dict):
+        result, clipped = {}, False
+        for key, child in value.items():
+            result[key], nested = _cap_lists(child)
+            clipped |= nested
+        if clipped:
+            result["truncated"] = True
+        return result, clipped
+    return value, False
 
 
 def _epoch(value):
@@ -169,7 +195,13 @@ class _Evidence:
     def result(self, data):
         sources = [Source(**_safe(s.to_dict())) for s in self.sources.values()]
         caveats = self.caveats + [f"{s.name}: {s.note}" for s in sources if s.status != "ok"]
-        return ToolResult(_safe(data), sources, list(dict.fromkeys(_safe(caveats))))
+        data, clipped = _cap_lists(_safe(data))
+        caveats = list(dict.fromkeys(_safe(caveats)))
+        clipped |= len(sources) > _MAX_LIST or len(caveats) > _MAX_LIST
+        data["truncated"] = bool(data.get("truncated", False) or clipped)
+        if data["truncated"]:
+            caveats.insert(0, "Results are truncated; lists contain at most 200 entries. Additional evidence may exist.")
+        return ToolResult(data, sources[:_MAX_LIST], caveats[:_MAX_LIST])
 
 
 def _guard(ctx):
@@ -395,22 +427,34 @@ async def lab_status_overview(ctx: ToolContext) -> ToolResult:
         "monitor": {**monitor, "interval_minutes": interval_minutes(ctx.now, tz) if tz else None},
         "target_counts": counts, "target_total": len(targets), "open_incidents": len(rows[PingIncident]),
         "devices": devices, "maintenance": [_maintenance(r) for r in rows[PduMaintenance]],
-        "enabled_sources": {name: bool(getattr(ctx.settings, attr, False)) for name, attr in (
-            ("ping_monitor", "ping_monitor_enabled"), ("email_alerts", "email_alerts_enabled"),
-            ("pxe", "pxe_enabled"), ("accounts", "accounts_enabled"))},
+        "enabled_sources": {
+            "ping_monitor": bool(getattr(ctx.settings, "ping_monitor_enabled", False)),
+            "email_alerts": bool(getattr(ctx.settings, "email_alerts_enabled", False)),
+            "pxe": bool(getattr(ctx.settings, "pxe_enabled", False)),
+            "accounts": bool(getattr(ctx.settings, "accounts_enabled", False)),
+        },
         "accounts_mode": "individual" if getattr(ctx.settings, "accounts_enabled", False) else "legacy_shared",
         "data_files": {s.ref: s.status for s in ev.sources.values() if s.id.startswith("file:")},
     })
 
 
 def _bounded(value, maximum, name):
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ToolError(name + " must be a positive integer.")
-    return min(value, maximum)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ToolError(name + " must be an integer.")
+    return max(1, min(value, maximum))
+
+
+def _argument(value, name):
+    if not isinstance(value, str):
+        raise ToolError(name + " must be a nonempty string.")
+    value = _text(value).strip()[:_MAX_ARGUMENT]
+    if not value:
+        raise ToolError(name + " must be a nonempty string.")
+    return value
 
 
 async def list_current_problems(ctx: ToolContext, limit: int = 50) -> ToolResult:
-    limit = _bounded(limit, 500, "limit")
+    limit = _bounded(limit, _MAX_LIST, "limit")
     ev, tz, rows, targets, devices, monitor = await _current(ctx)
     problems = []
 
@@ -531,9 +575,7 @@ def _port_labels(device, snap):
 
 
 def _resolve(server, records):
-    if not isinstance(server, str) or not server.strip() or len(server) > 300:
-        raise ToolError("server must be a name, canonical server key or ping-target id (1 to 300 characters).")
-    query = server.strip().casefold()
+    query = _argument(server, "server").casefold()
     exact_id = [r for r in records if r["id"].casefold() == query]
     if exact_id:
         return exact_id
@@ -546,36 +588,60 @@ def _public_server(record):
     return {key: record[key] for key in ("id", "key", "label")}
 
 
-async def _connections(ctx, ev, tz, devices, snapshots):
-    if tz is not None:
-        try:
-            async with ctx.session_factory() as session:
-                return await monitor_links.connection_index(session, tz, ctx.now)
-        except OperationalError:
-            ev.add("monitor_device_snapshots", "Device connections", status="unavailable",
-                   note="Connection observations temporarily unavailable.")
-        except (ValueError, TypeError, KeyError, AttributeError):
-            ev.flag("monitor_device_snapshots", "unavailable", "Saved port observations have an invalid format.")
-    # Preserve independently readable configured associations, even when the
-    # observation join fails. These establish neither power nor console health.
+def _connections(ev, devices, snapshots, views):
+    """Mirror connection_index with only already selected, credential-free data.
+
+    The shared helper selects whole Device ORM rows. This projection preserves
+    its state/freshness rules without ever reading those credential columns.
+    """
     result = {}
     observed = {s["device_id"]: s for s in snapshots}
+    states = {v["device_id"]: v for v in views}
+    unavailable = ev.sources["monitor_device_snapshots"].status == "unavailable"
     for device in devices:
         if device["kind"] not in ("pdu", "kvm"):
             continue
         saved = _decode(device["labels_json"], dict)
         snap = observed.get(device["id"])
+        if snap and (snap["kind"], snap["ip"]) != (device["kind"], device["ip"]):
+            snap = None
+        ports = {str(p["number"]): p for p in _ports(snap["ports_json"]) or []} if snap else {}
+        view = states.get(device["id"], {})
         for number, label in _port_labels(device, snap).items():
             key = _key(label)
             if not key:
                 continue
+            state = view.get("status", "unknown")
+            status = {"unreachable": "error", "ok": "unknown"}.get(state, state)
+            detail = view.get("detail") or "Device observation is " + state + "."
+            port = ports.get(number)
+            if unavailable and state not in ("disabled", "stale", "paused", "pending"):
+                status, detail = "unknown", "Saved association only; port state is unavailable."
+            elif state == "ok" and port and not port.get("missing"):
+                status, detail = _port_status(device["kind"], port)
+            elif state == "ok":
+                detail = "Device responded, but this port's live state is unavailable."
             result.setdefault("server:" + key, {"pdu": [], "kvm": []})[device["kind"]].append({
                 "device_id": device["id"], "device_name": device["name"], "port": str(number),
-                "status": "unknown" if device["enabled"] else "disabled", "checked_at": None,
-                "detail": "Saved association only; port state is unavailable.",
-                "source_id": "devices" if number in saved else "monitor_device_snapshots",
+                "status": status, "checked_at": snap["checked_at"] if snap else None,
+                "detail": detail, "source_id": "devices" if number in saved and (unavailable or not snap) else "monitor_device_snapshots",
             })
     return result
+
+
+def _port_status(kind, port):
+    if kind == "pdu":
+        status = port.get("state")
+        if status in ("on", "off", "cycling"):
+            return status, "PDU reports outlet " + status.upper() + "; server availability is unverified."
+    elif port.get("status_source") == "live":
+        status = port.get("status")
+        if status in ("active", "idle", "empty"):
+            return status, "KVM reports port " + status + "; a console session was not tested."
+    elif port.get("status_source") == "configured":
+        status = "empty" if port.get("status") == "empty" else "configured"
+        return status, "KVM configuration only; live console health is unverified."
+    return "unknown", "Device responded, but this port's live state is unavailable."
 
 
 async def _owners(ctx, ev, files):
@@ -635,6 +701,8 @@ def _rack_candidates(record, files, devices, pdu):
 
 
 async def get_server_status(ctx: ToolContext, server: str) -> ToolResult:
+    _guard(ctx)
+    server = _argument(server, "server")
     ev, tz, rows, targets, device_views, _ = await _current(ctx)
     files = _files(ctx, ev)
     overrides = {n["target_id"]: n["override"] for n in rows[PingTargetName]}
@@ -657,7 +725,7 @@ async def get_server_status(ctx: ToolContext, server: str) -> ToolResult:
         sample["source_id"] = "ping_samples"
     active = [i for i in rows[PingIncident] if target and i["target_id"] == target["id"]]
     incident = _incident(min(active, key=lambda r: r["first_failed_at"])) if active else None
-    connections = (await _connections(ctx, ev, tz, rows[Device], rows[MonitorDeviceSnapshot])).get(
+    connections = _connections(ev, rows[Device], rows[MonitorDeviceSnapshot], device_views).get(
         "server:" + record["key"], {"pdu": [], "kvm": []})
     device_states = {d["device_id"]: d for d in device_views}
     output = {"pdu": [], "kvm": []}
@@ -710,9 +778,9 @@ def _connection_status(status, state):
 async def get_history(ctx: ToolContext, server: str | None = None, device_id: str | None = None,
                       since_hours: int = 168, limit: int = 100) -> ToolResult:
     _guard(ctx)
-    hours, limit = _bounded(since_hours, 2160, "since_hours"), _bounded(limit, 500, "limit")
-    if device_id is not None and (not isinstance(device_id, str) or not device_id.strip() or len(device_id) > 300):
-        raise ToolError("device_id must be a nonempty device id of at most 300 characters.")
+    hours, limit = _bounded(since_hours, 2160, "since_hours"), _bounded(limit, _MAX_LIST, "limit")
+    server = _argument(server, "server") if server is not None else None
+    device_id = _argument(device_id, "device_id") if device_id is not None else None
     ev = _Evidence(ctx)
     start = ctx.now - hours * 3600
     files = _files(ctx, ev, ("rack_items",))
@@ -778,9 +846,9 @@ async def get_history(ctx: ToolContext, server: str | None = None, device_id: st
             email_where.append(or_(*conditions) if conditions else AlertEmail.id.in_([]))
         emails = await _rows(ctx, ev, AlertEmail, where=email_where,
                              order=(func.coalesce(AlertEmail.sent_at, AlertEmail.created_at).desc(), AlertEmail.id.desc()), limit=limit + 1)
-        for row in emails:
+        for index, row in enumerate(emails):
             at = row["sent_at"] if row["sent_at"] is not None and start <= row["sent_at"] <= ctx.now else row["created_at"]
-            event("alert_email:" + row["id"], "alert_email", at, at, "Alert email subject only.",
+            event("alert_email:" + str(index), "alert_email", at, at, "Alert email subject only.",
                   "alert_emails", subject=row["subject"], created_at=iso(row["created_at"]), sent_at=_iso(row["sent_at"]))
     else:
         ev.add("alert_emails", "Alert emails", status="disabled", note="Email alerts disabled; stored history is not queried.")
@@ -853,13 +921,13 @@ TOOLS: list[ToolSpec] = [
     ToolSpec("lab_status_overview", "Read recorded monitor service state, target counts including stale/paused/unconfigured, open incidents, device snapshot freshness, active PDU maintenance, enabled features and missing/corrupt runtime files. No hardware is contacted. Unmonitored UPS, cooling and switch telemetry are always caveated.",
              {"type": "object", "additionalProperties": False, "properties": {}, "required": []}, "Viewer", lab_status_overview),
     ToolSpec("list_current_problems", "List recorded current problems with severity, entity, first/last observation time and evidence source. Current down plus open incident is high; device API failure is medium; stale/unknown is unknown. OFF outlets and maintenance do not establish server failure. Empty results never establish health.",
-             {"type": "object", "additionalProperties": False, "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}}, "required": []}, "Viewer", list_current_problems),
+             {"type": "object", "additionalProperties": False, "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}}, "required": []}, "Viewer", list_current_problems),
     ToolSpec("get_server_status", "Resolve an exact server label, canonical key or ping-target id without guessing ambiguous names. Read ICMP state and last 20 samples, open incident, recorded PDU/KVM connections with freshness, ordered rack evidence/conflicts, owner names, switch assignments and feeding-PDU maintenance. Does not test the server or its console.",
-             {"type": "object", "additionalProperties": False, "properties": {"server": {"type": "string", "minLength": 1, "maxLength": 300}}, "required": ["server"]}, "Viewer", get_server_status),
+             {"type": "object", "additionalProperties": False, "properties": {"server": {"type": "string", "minLength": 1, "maxLength": 120}}, "required": ["server"]}, "Viewer", get_server_status),
     ToolSpec("get_history", "Read retained ping incidents overlapping the window, ping sample summaries, PDU maintenance logs, enabled alert email subjects/timestamps only and rack-item tracking events. Optional server/device filters restrict evidence to known associations. Events sort newest first; overlapping events are co-occurred only, never causal. Window is capped at 2160 hours (90 days).",
              {"type": "object", "additionalProperties": False, "properties": {
-                 "server": {"type": ["string", "null"], "minLength": 1, "maxLength": 300},
-                 "device_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 300},
+                 "server": {"type": ["string", "null"], "minLength": 1, "maxLength": 120},
+                 "device_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 120},
                  "since_hours": {"type": "integer", "minimum": 1, "maximum": 2160, "default": 168},
-                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}}, "required": []}, "Viewer", get_history),
+                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100}}, "required": []}, "Viewer", get_history),
 ]

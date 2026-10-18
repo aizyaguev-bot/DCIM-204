@@ -1,13 +1,16 @@
 """Read-only status evidence must preserve failures, uncertainty and provenance."""
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import json
 import unicodedata
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -113,8 +116,10 @@ def assert_json_safe(result):
         elif isinstance(value, dict):
             for key, child in value.items():
                 assert isinstance(key, str)
+                walk(key)
                 walk(child)
         elif isinstance(value, list):
+            assert len(value) <= 200
             for child in value:
                 walk(child)
 
@@ -701,3 +706,248 @@ async def test_tools_are_viewer_read_only_and_do_not_contact_hardware(status_lab
     ):
         assert_json_safe(await call)
     assert all(call.await_count == 0 for call in forbidden_calls)
+
+
+async def test_every_tool_uses_only_explicit_public_settings_and_never_serialises_secrets(status_lab):
+    ctx, db = status_lab
+    device = pdu()
+    db.add_all([target(), device, snapshot(device)])
+    await db.commit()
+    secret_names = (
+        "pdu_password", "kvm_password", "lab_manager_master_key", "lab_manager_password",
+        "smtp_password", "email_alerts_to", "assistant_anthropic_api_key",
+    )
+    secrets = {name: "settings-secret-marker-" + str(index) for index, name in enumerate(secret_names)}
+    public = {
+        "ping_monitor_enabled": True, "email_alerts_enabled": True, "pxe_enabled": True,
+        "accounts_enabled": True, "ping_monitor_timezone": "UTC",
+    }
+
+    class GuardedSettings:
+        __slots__ = ("_values",)
+
+        def __init__(self):
+            object.__setattr__(self, "_values", {**public, **secrets})
+
+        def __getattribute__(self, name):
+            if name in public:
+                return object.__getattribute__(self, "_values")[name]
+            raise AssertionError("Settings may be read only by explicit public attribute names")
+
+        def __dir__(self):
+            raise AssertionError("Settings enumeration is forbidden")
+
+        def __iter__(self):
+            raise AssertionError("Settings serialization is forbidden")
+
+        def __repr__(self):
+            raise AssertionError("Settings serialization is forbidden")
+
+        __str__ = __repr__
+
+    ctx.settings = GuardedSettings()
+    results = [
+        await tools_status.lab_status_overview(ctx),
+        await tools_status.list_current_problems(ctx),
+        await tools_status.get_server_status(ctx, server="opt84"),
+        await tools_status.get_history(ctx),
+    ]
+    for result in results:
+        assert_json_safe(result)
+        serialised = json.dumps(result.to_dict())
+        assert all(marker not in serialised for marker in secrets.values())
+
+
+@pytest.mark.parametrize("name,args,key,expected", [
+    ("list_current_problems", {"limit": -9}, "limit", 1),
+    ("list_current_problems", {"limit": 0}, "limit", 1),
+    ("list_current_problems", {"limit": 99999}, "limit", 200),
+    ("get_history", {"limit": -9}, "limit", 1),
+    ("get_history", {"limit": 0}, "limit", 1),
+    ("get_history", {"limit": 99999}, "limit", 200),
+    ("get_history", {"since_hours": -9}, "since_hours", 1),
+    ("get_history", {"since_hours": 0}, "since_hours", 1),
+    ("get_history", {"since_hours": 99999}, "since_hours", 2160),
+])
+async def test_numeric_arguments_are_clamped_in_code(status_lab, name, args, key, expected):
+    ctx, _ = status_lab
+    result = await getattr(tools_status, name)(ctx, **args)
+    assert result.data[key] == expected
+
+
+@pytest.mark.parametrize("name,argument", [
+    ("list_current_problems", "limit"), ("get_history", "limit"), ("get_history", "since_hours"),
+])
+@pytest.mark.parametrize("value", [True, False, 1.5, "2", None])
+async def test_numeric_arguments_reject_booleans_and_nonintegers(status_lab, name, argument, value):
+    ctx, _ = status_lab
+    with pytest.raises(ToolError):
+        await getattr(tools_status, name)(ctx, **{argument: value})
+
+
+async def test_user_string_arguments_are_sanitised_and_capped_before_resolution_or_query(status_lab):
+    ctx, db = status_lab
+    server_id, device_id = "s" * 120, "d" * 120
+    server = target(server_id)
+    device = pdu(device_id)
+    db.add_all([server, device, snapshot(device)])
+    await db.flush()
+    db.add_all([
+        PingSample(target_id=server_id, host=server.host, checked_at=NOW - 20, status="up"),
+        PduMaintenanceLog(at=NOW - 10, device_id=device_id, action="shutdown", by="Fixture Operator"),
+    ])
+    await db.commit()
+    dirty_server = "\u200f" + server_id[:60] + "\x00" + server_id[60:] + "\u202eignored-suffix"
+    dirty_device = "\u200e" + device_id[:60] + "\u2066" + device_id[60:] + "\u2069ignored-suffix"
+
+    status = await tools_status.get_server_status(ctx, server=dirty_server)
+    by_server = await tools_status.get_history(ctx, server=dirty_server)
+    by_device = await tools_status.get_history(ctx, device_id=dirty_device)
+    assert status.data["status"] == "found" and status.data["server"]["id"] == server_id
+    assert {row["target_id"] for row in by_server.data["ping_samples_summary"]} == {server_id}
+    assert any(row.get("device_id") == device_id for row in by_device.data["items"])
+    for result in (status, by_server, by_device):
+        assert "ignored-suffix" not in json.dumps(result.to_dict())
+        assert_json_safe(result)
+
+
+async def test_sql_projections_exclude_credentials_and_history_aggregates_all_samples(status_lab):
+    ctx, db = status_lab
+    ctx.settings.email_alerts_enabled = True
+    server, device = target(), pdu(username_enc="sql-user-secret", password_enc="sql-password-secret")
+    db.add_all([server, device, snapshot(device)])
+    await db.flush()
+    db.add_all([PingSample(target_id=server.id, host=server.host, checked_at=NOW - offset, status="up")
+                for offset in range(1, 32)])
+    db.add(AlertEmail(
+        id="projection-email", condition_key="network:" + server.id, created_at=NOW - 10,
+        recipient="projection@example.invalid", subject="Projection-safe subject", body="sql-body-secret",
+        next_attempt_at=NOW - 10,
+    ))
+    await db.commit()
+    selects = []
+
+    def capture(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().lower().startswith("select"):
+            selects.append((statement.lower(), context.compiled.statement))
+
+    engine = db.bind.sync_engine
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        await tools_status.lab_status_overview(ctx)
+        await tools_status.list_current_problems(ctx)
+        status = await tools_status.get_server_status(ctx, server="opt84")
+        history = await tools_status.get_history(ctx)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert len(status.data["samples"]) == 20
+    assert sum(row["count"] for row in history.data["ping_samples_summary"]) == 31
+    assert any("from devices" in sql for sql, _ in selects)
+    assert any("from alert_emails" in sql for sql, _ in selects)
+    device_columns = {"id", "name", "kind", "model", "ip", "rack", "port_count", "notes", "enabled", "labels_json"}
+    email_columns = {"subject", "created_at", "sent_at"}
+    for sql, query in selects:
+        assert not any(forbidden in sql for forbidden in (
+            "username_enc", "password_enc", "alert_emails.body", "alert_emails.recipient",
+            "alert_emails.error", "alert_conditions.configuration", "from users", "from user_sessions", "from auth_throttles",
+        ))
+        for column in query.selected_columns:
+            table = getattr(getattr(column, "table", None), "name", None)
+            if table == "devices":
+                assert column.name in device_columns
+            elif table == "alert_emails":
+                assert column.name in email_columns
+        if "from ping_samples" in sql and "group by" not in sql:
+            assert query._limit_clause is not None and query._limit_clause.value <= 20
+    module_ast = ast.parse(Path(tools_status.__file__).read_text(encoding="utf-8"))
+    imported = [alias.name for node in ast.walk(module_ast) if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names]
+    assert not {"User", "UserSession", "AuthThrottle", "get_runner"} & set(imported)
+    assert not any("pxe.runner" in name for name in imported)
+
+
+async def test_every_result_removes_explicit_bidi_formatting_characters(status_lab):
+    ctx, db = status_lab
+    ctx.settings.email_alerts_enabled = True
+    bidi = "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+    device = pdu(name="PDU" + bidi + "Label")
+    db.add_all([
+        target(detail="Observation" + bidi + "detail", status="error"), device, snapshot(device),
+        PduMaintenance(device_id=device.id, started_at=NOW - 600, started_by="Operator" + bidi,
+                       reason="Maintenance" + bidi + "reason"),
+        PduMaintenanceLog(at=NOW - 500, device_id=device.id, action="shutdown", by="Operator" + bidi),
+        AlertEmail(id="bidi-email", condition_key="network:target-84", created_at=NOW - 400,
+                   recipient="recipient@example.invalid", subject="Alert" + bidi + "subject", body="Excluded",
+                   next_attempt_at=NOW - 400),
+    ])
+    await db.commit()
+    write_json(ctx, "rack_overrides.json", {"opt84": "Rack" + bidi + "A"})
+    write_json(ctx, "switch_assignments.json", {"opt84": {"switch": "Switch" + bidi + "A", "port": "1"}})
+    write_json(ctx, "opt_owners.json", {"opt84": "Fixture" + bidi + "Owner"})
+    results = [
+        await tools_status.lab_status_overview(ctx), await tools_status.list_current_problems(ctx),
+        await tools_status.get_server_status(ctx, server="opt84"), await tools_status.get_history(ctx),
+    ]
+    for result in results:
+        assert_json_safe(result)
+        rendered = json.dumps(result.to_dict(), ensure_ascii=False)
+        assert not any(char in rendered for char in bidi)
+
+
+async def test_large_results_cap_every_list_and_surface_truncation(status_lab):
+    ctx, db = status_lab
+    count = 205
+    servers = [target("candidate-" + str(index), name="Shared Name", key="manual:" + str(index), status="error")
+               for index in range(count)]
+    devices = [pdu("pdu-" + str(index), rack="Rack-" + str(index)) for index in range(count)]
+    db.add_all([target(), *servers, *devices, *(snapshot(device) for device in devices)])
+    await db.flush()
+    for index, device in enumerate(devices):
+        db.add_all([
+            PduMaintenance(device_id=device.id, started_at=NOW - 600, started_by="Fixture Operator",
+                           outlets_off_json=json.dumps(list(range(1, 206))) if index == 0 else "[1]"),
+            PduMaintenanceLog(at=NOW - DAY - index - 1, device_id=device.id, action="shutdown", by="Fixture Operator"),
+            PingSample(target_id=servers[index].id, host=servers[index].host, checked_at=NOW - 20, status="up"),
+            PingSample(target_id=servers[index].id, host=servers[index].host, checked_at=NOW - 10, status="up"),
+        ])
+    await db.commit()
+    keys = ["opt84 (" + str(index) + ")" for index in range(count)]
+    write_json(ctx, "rack_overrides.json", {key: "Saved-Rack-" + str(index) for index, key in enumerate(keys)})
+    write_json(ctx, "switch_assignments.json", {key: {"switch": "Switch-" + str(index), "port": str(index)}
+                                               for index, key in enumerate(keys)})
+    write_json(ctx, "opt_owners.json", {key: "Owner-" + str(index) for index, key in enumerate(keys)})
+
+    overview = await tools_status.lab_status_overview(ctx)
+    problems = await tools_status.list_current_problems(ctx, limit=200)
+    candidates = await tools_status.get_server_status(ctx, server="Shared Name")
+    status = await tools_status.get_server_status(ctx, server="opt84")
+    history = await tools_status.get_history(ctx, limit=200)
+    summary_only = await tools_status.get_history(ctx, since_hours=1, limit=200)
+    assert len(overview.data["devices"]) == len(overview.data["maintenance"]) == 200
+    assert len(problems.data["problems"]) == 200 and problems.data["total"] > 200
+    assert candidates.data["status"] == "ambiguous" and len(candidates.data["candidates"]) == 200
+    for field in ("pdu", "maintenance", "rack_candidates", "owner_names", "switch_assignments"):
+        assert len(status.data[field]) == 200
+    assert len(history.data["items"]) == len(history.data["ping_samples_summary"]) == 200
+    assert all(row["count"] == 2 for row in history.data["ping_samples_summary"])
+    assert summary_only.data["items"] == [] and len(summary_only.data["ping_samples_summary"]) == 200
+    for result in (overview, problems, candidates, status, history, summary_only):
+        assert result.data["truncated"] is True
+        assert_json_safe(result)
+
+
+async def test_nested_list_clipping_sets_root_truncation_even_with_one_record(status_lab):
+    ctx, db = status_lab
+    device = pdu()
+    db.add_all([
+        device, snapshot(device),
+        PduMaintenance(device_id=device.id, started_at=NOW - 600, started_by="Fixture Operator",
+                       outlets_off_json=json.dumps(list(range(1, 206)))),
+    ])
+    await db.commit()
+
+    result = await tools_status.lab_status_overview(ctx)
+    assert len(result.data["maintenance"]) == 1
+    assert len(result.data["maintenance"][0]["outlets_off"]) == 200
+    assert result.data["truncated"] is True
+    assert_json_safe(result)

@@ -183,6 +183,9 @@ async def test_missing_switch_store_is_explicit_evidence(lab):
     assert_result(result)
     assert any(source.status == "missing" and "switch" in (source.id + source.ref).lower()
                for source in result.sources)
+    assert result.data["search_complete"] is False
+    assert result.data["found"] is None
+    assert result.data["truncated"] is False
 
 
 async def test_old_snapshot_or_status_cache_labels_do_not_attach_to_reconfigured_device(lab):
@@ -301,6 +304,7 @@ async def test_resolve_returns_all_ambiguous_candidates_and_caps_at_ten(lab):
     capped = await tools_layout.resolve_entity(lab.ctx, query="duplicate")
     assert len(capped.data["candidates"]) <= 10
     assert capped.data["ambiguous"] is True
+    assert capped.data["truncated"] is True
 
 
 @pytest.mark.parametrize("query,kind,entity_id", [
@@ -630,3 +634,342 @@ async def test_tools_never_serialize_device_credentials_user_secrets_or_extra_in
         "inventory-pass-marker", "inventory-token-marker", "cache-password-marker",
     ):
         assert forbidden not in output
+
+
+SECRET_SETTINGS = (
+    "pdu_password", "kvm_password", "lab_manager_master_key", "lab_manager_password",
+    "smtp_password", "email_alerts_to", "assistant_anthropic_api_key",
+)
+ALLOWED_DOCS = (
+    "CHANGELOG.md", "docs/ping-monitoring.md", "docs/email-alerts.md",
+    "docs/device-api-diagnostics.md", "docs/vm-runbook.md", "docs/user-accounts.md",
+    "docs/barcode-scanning.md", "docs/navigation-and-owners.md",
+)
+
+
+class ExplicitSettingsOnly:
+    """Expose named values while rejecting accidental settings serialization."""
+
+    def __init__(self, values):
+        object.__setattr__(self, "_values", values)
+
+    def __getattribute__(self, name):
+        if name in ("__dict__", "model_dump", "model_dump_json", "dict", "json"):
+            raise AssertionError("Tools must read only explicitly named settings")
+        values = object.__getattribute__(self, "_values")
+        if name in values:
+            return values[name]
+        raise AttributeError(name)
+
+    def __dir__(self):
+        raise AssertionError("Tools must not enumerate settings")
+
+
+async def test_every_tool_leaves_seeded_settings_secrets_unserialized(lab):
+    markers = {name: f"SETTINGS_MARKER_{number}_opaque_value" for number, name in enumerate(SECRET_SETTINGS)}
+    lab.ctx.settings = ExplicitSettingsOnly({
+        **markers,
+        "ping_monitor_enabled": True,
+        "ping_monitor_timezone": "Asia/Jerusalem",
+        "email_alerts_enabled": False,
+        "email_voltage_min": None,
+        "email_voltage_max": 240.0,
+        "email_current_min": None,
+        "email_current_max": 12.0,
+        "email_watts_min": None,
+        "email_watts_max": 2400.0,
+    })
+    lab.db.add(device("pdu-a", {"1": "OPT11"}))
+    await lab.db.commit()
+    (lab.root / "CHANGELOG.md").write_text("# Changes\nneedle documented behavior", encoding="utf-8")
+
+    results = [
+        await tools_layout.resolve_entity(lab.ctx, query="pdu-a"),
+        await tools_layout.get_dependencies(lab.ctx, kind="pdu", id="pdu-a"),
+        await tools_layout.get_power_and_environment(lab.ctx, pdu_id="pdu-a"),
+        await tools_layout.get_rack_layout(lab.ctx, rack="Rack-01"),
+        await tools_layout.search_docs(lab.ctx, query="needle"),
+    ]
+
+    for result in results:
+        assert_result(result)
+        output = json.dumps(result.to_dict())
+        assert all(marker not in output for marker in markers.values())
+
+
+async def test_runtime_string_caps_apply_before_lookup_in_every_tool(lab):
+    identifier, rack = "d" * 120, "r" * 120
+    long_identifier, long_rack = identifier + "discarded" * 200, rack + "discarded" * 200
+    lab.db.add(device(identifier, rack=rack))
+    await lab.db.commit()
+    lab.save("items", {rack: [{"id": "item-a", "name": "Recorded item", "type": "switch"}]})
+    (lab.root / "CHANGELOG.md").write_text("# Limits\n" + identifier + " matched", encoding="utf-8")
+
+    resolved = await tools_layout.resolve_entity(lab.ctx, query=long_identifier)
+    dependencies = await tools_layout.get_dependencies(lab.ctx, kind="pdu" + " " * 400, id=long_identifier)
+    power = await tools_layout.get_power_and_environment(lab.ctx, rack=long_rack, pdu_id=long_identifier)
+    layout = await tools_layout.get_rack_layout(lab.ctx, rack=long_rack)
+    docs = await tools_layout.search_docs(lab.ctx, query=long_identifier)
+
+    assert any(row["kind"] == "pdu" and row["id"] == identifier and row["match"] == "exact"
+               for row in resolved.data["candidates"])
+    assert dependencies.data["entity"]["id"] == identifier and dependencies.data["found"] is True
+    assert power.data["pdu_id"] == identifier and power.data["rack"] == rack
+    assert len(power.data["pdus"]) == 1
+    assert layout.data["rack"] == rack and layout.data["items"][0]["id"] == "item-a"
+    assert docs.data["matches"]
+
+
+@pytest.mark.parametrize("limit,expected", [
+    (-99, 1), (0, 1), (1, 1), (3.8, 3), (999, 8),
+    (True, 5), (False, 5), ("9", 5), (None, 5),
+    (float("nan"), 5), (float("inf"), 5), (float("-inf"), 5),
+])
+async def test_doc_limit_is_clamped_at_runtime_and_invalid_numbers_default_to_five(lab, limit, expected):
+    for relative in ALLOWED_DOCS:
+        path = lab.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Guide\nneedle documented behavior", encoding="utf-8")
+
+    result = await tools_layout.search_docs(lab.ctx, query="needle", limit=limit)
+
+    assert len(result.data["matches"]) == expected
+
+
+@pytest.mark.parametrize("query,matching,distractor", [
+    ("ALPHA beta", "alpha BETA", "alpha between beta"),
+    ("a.*[0]", "A.*[0]", "alpha0"),
+    ("(admin|root)", "(ADMIN|ROOT)", "admin"),
+    ("[[]", "[[]", "["),
+    ("Straße [x].*", "STRASSE [X].*", "strasse xanything"),
+])
+async def test_docs_use_casefolded_whole_literal_substrings(lab, query, matching, distractor):
+    (lab.root / "docs").mkdir()
+    (lab.root / "CHANGELOG.md").write_text("# Literal\nprefix " + matching + " suffix", encoding="utf-8")
+    (lab.root / "docs" / "ping-monitoring.md").write_text("# Distractor\n" + distractor, encoding="utf-8")
+
+    result = await tools_layout.search_docs(lab.ctx, query=query)
+
+    assert [row["file"] for row in result.data["matches"]] == ["CHANGELOG.md"]
+
+
+def assert_lists_capped(value):
+    if isinstance(value, list):
+        assert len(value) <= 200
+        for child in value:
+            assert_lists_capped(child)
+    elif isinstance(value, dict):
+        for child in value.values():
+            assert_lists_capped(child)
+
+
+@pytest.mark.parametrize("pdu_count", [101, 205])
+async def test_power_list_and_source_saturation_never_produce_complete_totals(lab, pdu_count):
+    for number in range(pdu_count):
+        identifier = f"pdu-{number:03}"
+        lab.db.add(device(identifier))
+        lab.db.add(snapshot(identifier, lab.ctx.now - 10))
+        pdus._cache[identifier] = (time.monotonic(), PduStatus(
+            device_id=identifier, reachable=True, total_watts=1.0, watts_complete=True,
+        ))
+    await lab.db.commit()
+
+    result = await tools_layout.get_power_and_environment(lab.ctx, rack="Rack-01")
+
+    assert_lists_capped(result.to_dict())
+    assert len(result.data["pdus"]) <= min(200, pdu_count)
+    assert result.data["truncated"] is True
+    assert result.data["totals"]["total_watts"] is None
+    assert result.data["totals"]["watts_complete"] is False
+    assert len(result.sources) == 200
+
+
+async def test_nested_aliases_connections_outlets_inlets_and_caveats_are_capped(lab, monkeypatch):
+    labels = {str(number + 1): f"OPT11 ({number})" for number in range(205)}
+    lab.db.add(device("pdu-a", labels))
+    lab.db.add(snapshot("pdu-a", lab.ctx.now - 10, ports=[
+        {"number": number + 1, "label": label, "state": "on"}
+        for number, label in enumerate(labels.values())
+    ]))
+    await lab.db.commit()
+    pdus._cache["pdu-a"] = (time.monotonic(), PduStatus(
+        device_id="pdu-a", reachable=True, total_watts=205.0, watts_complete=True,
+        inlet_readings=[InletReading(number=number + 1, watts=1.0) for number in range(205)],
+    ))
+    monkeypatch.setattr(tools_layout, "_TOPOLOGY_CAVEATS", [f"Caveat {number}" for number in range(205)])
+
+    dependencies = await tools_layout.get_dependencies(lab.ctx, kind="pdu", id="pdu-a")
+    power = await tools_layout.get_power_and_environment(lab.ctx, pdu_id="pdu-a")
+
+    for result in (dependencies, power):
+        assert_lists_capped(result.to_dict())
+        assert result.data["truncated"] is True
+    assert len(dependencies.caveats) == 200
+    assert len(dependencies.data["servers"]) == 200
+    assert len(dependencies.data["servers"][0]["aliases"]) == 200
+    assert len(power.data["pdus"][0]["outlets"]) == 200
+    assert len(power.data["pdus"][0]["inlet_readings"]) == 200
+    assert power.data["totals"]["watts_complete"] is False
+    assert power.data["totals"]["total_watts"] is None
+
+
+async def test_saturated_inventory_never_claims_the_last_shelf_is_free(lab):
+    lab.save("items", {"Rack-01": [
+        {"id": f"item-{number}", "name": f"Item {number}", "type": "switch", "u": number + 1}
+        for number in range(205)
+    ]})
+    lab.save("twin", {"setups": [{
+        "id": "setup-a", "dcimRack": "Rack-01", "dcimMappingConfidence": "low",
+        "shelves": [f"shelf-{number}" for number in range(206)],
+    }]})
+
+    result = await tools_layout.get_rack_layout(lab.ctx, rack="Rack-01")
+
+    assert_lists_capped(result.to_dict())
+    assert len(result.data["items"]) == 200
+    assert result.data["truncated"] is True
+    assert result.data["placement_sources_complete"] is False
+    assert result.data["free_shelves"] is None
+
+
+async def test_database_reads_are_limited_and_device_projection_excludes_credentials(lab, monkeypatch):
+    lab.db.add(device("pdu-a"))
+    await lab.db.commit()
+    execute = lab.db.execute
+    statements = []
+
+    async def record(statement, *args, **kwargs):
+        statements.append(statement)
+        return await execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(lab.db, "execute", record)
+
+    await tools_layout.get_power_and_environment(lab.ctx, rack="Rack-01")
+    await tools_layout.get_rack_layout(lab.ctx, rack="Rack-01")
+
+    assert statements
+    device_statements = []
+    for statement in statements:
+        assert statement._limit_clause is not None
+        assert 1 <= statement._limit_clause.value <= 201
+        tables = {table.name for table in statement.get_final_froms() if hasattr(table, "name")}
+        assert not tables.intersection({"users", "user_sessions", "auth_throttles"})
+        if "devices" in tables:
+            device_statements.append(statement)
+            assert {column.key for column in statement.selected_columns} <= {
+                "id", "name", "kind", "model", "ip", "rack", "port_count", "labels_json", "enabled", "notes",
+            }
+    assert device_statements
+
+
+async def test_bidi_controls_are_removed_from_every_tool_result_string(lab):
+    bidi = "\u200e\u200f" + "".join(chr(number) for number in range(0x202A, 0x202F))
+    bidi += "".join(chr(number) for number in range(0x2066, 0x206A))
+    lab.db.add(device("pdu-a", {"1": "OPT11"}, name="Device" + bidi, notes="Notes" + bidi))
+    await lab.db.commit()
+    lab.save("items", {"Rack-01": [{
+        "id": "item-a", "name": "Item" + bidi, "type": "switch", "serial_number": "Serial" + bidi,
+    }]})
+    lab.save("owners", {"item:item-a": "Owner" + bidi})
+    (lab.root / "CHANGELOG.md").write_text("# Heading" + bidi + "\nneedle " + bidi, encoding="utf-8")
+
+    results = [
+        await tools_layout.resolve_entity(lab.ctx, query="pdu-a"),
+        await tools_layout.get_dependencies(lab.ctx, kind="rack", id="Rack-01"),
+        await tools_layout.get_power_and_environment(lab.ctx, rack="Rack-01"),
+        await tools_layout.get_rack_layout(lab.ctx, rack="Rack-01"),
+        await tools_layout.search_docs(lab.ctx, query="needle"),
+    ]
+
+    def check(value):
+        if isinstance(value, str):
+            assert not any(character in value for character in bidi)
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                check(key)
+                check(child)
+        elif isinstance(value, list):
+            for child in value:
+                check(child)
+
+    for result in results:
+        check(result.to_dict())
+
+
+async def test_owner_query_overflow_cannot_resurrect_an_omitted_cleared_owner(lab):
+    lab.db.add_all([
+        AssetOwner(asset_key=f"a-{number:03}", engineer_id=None, legacy_name=f"Owner {number}")
+        for number in range(200)
+    ])
+    lab.db.add(AssetOwner(asset_key="item:zzzz-cleared", engineer_id=None, legacy_name=""))
+    await lab.db.commit()
+    lab.save("owners", {"item:zzzz-cleared": "Obsolete legacy owner"})
+    lab.save("items", {"Rack-01": [{
+        "id": "zzzz-cleared", "name": "Safe item", "type": "switch", "owner": "Obsolete inventory owner",
+    }]})
+
+    result = await tools_layout.get_rack_layout(lab.ctx, rack="Rack-01")
+
+    assert result.data["items"][0]["owner"] is None
+    assert result.data["truncated"] is True
+    assert any(source.id == "asset_owners" and "truncated" in source.note for source in result.sources)
+
+
+async def test_optional_record_fields_cannot_drop_required_inventory_or_snapshot_identity(lab):
+    extras = {f"extra-{number}": number for number in range(205)}
+    lab.save("items", {"Rack-01": [{
+        **extras, "id": "item-a", "name": "Recorded item", "type": "switch", "u": 1,
+    }]})
+    lab.db.add(device("pdu-a"))
+    lab.db.add(snapshot("pdu-a", lab.ctx.now - 10, ports=[{
+        **extras, "number": 7, "label": "OPT11", "state": "on",
+    }]))
+    await lab.db.commit()
+
+    layout = await tools_layout.get_rack_layout(lab.ctx, rack="Rack-01")
+    dependencies = await tools_layout.get_dependencies(lab.ctx, kind="pdu", id="pdu-a")
+    power = await tools_layout.get_power_and_environment(lab.ctx, pdu_id="pdu-a")
+
+    assert layout.data["items"][0]["id"] == "item-a"
+    assert {(row["server_key"], str(row["port"])) for row in dependencies.data["servers"]} == {("opt11", "7")}
+    assert power.data["pdus"][0]["outlets"][0]["number"] == 7
+
+
+async def test_deep_optional_json_is_stopped_and_marks_placement_incomplete(lab):
+    nested = "too-deep-marker"
+    for _ in range(30):
+        nested = {"child": nested}
+    lab.save("items", {"Rack-01": [{
+        "id": "item-a", "name": "Recorded item", "type": "switch", "u": 1, "optional": nested,
+    }]})
+    lab.save("twin", twin_server())
+
+    result = await tools_layout.get_rack_layout(lab.ctx, rack="Rack-01")
+
+    assert result.data["items"][0]["id"] == "item-a"
+    assert result.data["truncated"] is True
+    assert result.data["free_shelves"] is None
+    assert result.data["placement_sources_complete"] is False
+    budget = tools_layout._Sources()
+    bounded = tools_layout._bounded(nested, budget)
+    cursor = bounded
+    while isinstance(cursor, dict):
+        cursor = cursor["child"]
+    assert cursor is None
+    assert budget.truncated is True
+
+
+@pytest.mark.parametrize("notes,expected_racks", [
+    (",".join(f"shared:Rack-{number:03}" for number in range(205)), 200),
+    ("x" * 60001 + ",shared:Rack-hidden", 0),
+], ids=["token-overflow", "character-overflow"])
+async def test_shared_rack_tokens_and_long_notes_are_bounded_before_scanning(lab, notes, expected_racks):
+    lab.db.add(device("pdu-a", notes=notes))
+    await lab.db.commit()
+
+    result = await tools_layout.get_power_and_environment(lab.ctx, pdu_id="pdu-a")
+
+    assert result.data["truncated"] is True
+    assert len(result.data["pdus"][0]["shared_racks"]) == expected_racks
+    assert "Rack-hidden" not in json.dumps(result.to_dict())
+    assert_lists_capped(result.to_dict())
