@@ -62,6 +62,29 @@
   only when `DCIM_LIVE_KVM_TESTS=1` and `DCIM_TEST_BASE_URL` are set. They no
   longer read `.env` or assume `localhost:8000`.
 
+### AI lab assistant
+- **Lab assistant**: a Hebrew (right-to-left) chat panel for every role,
+  Viewer included. Ask about equipment status, power, consoles, owners,
+  maintenance and the rack layout, or what switching something off would affect.
+- The assistant only reads lab data. Its tools are read-only: it never switches
+  power, opens a console or changes a setting. Each answer lists the sources it
+  used.
+- Without an Anthropic API key, or with the language model turned off, it
+  answers in a clearly labelled demo mode ("מצב הדגמה — ללא מודל שפה") built
+  from the real lab data by fixed rules. The key stays on the server
+  (`ASSISTANT_ANTHROPIC_API_KEY`, see `.env.assistant.example`) and is never
+  sent to the browser or written to logs. A site with no user accounts and no
+  shared password stays in demo mode unless `ASSISTANT_ALLOW_OPEN_LLM` is set.
+- Work items: the assistant drafts a task from an answer; Operator and Admin
+  accounts edit it and save it to the team's list.
+- Voice: dictate a question and have answers read aloud, in browsers that
+  support speech.
+- Questions are limited per user (per minute and per hour), language-model
+  questions have a daily cap for the whole site, and only a few questions are
+  answered at the same time.
+- Remote install (PXE) stays off by default: `PXE_ENABLED` is false and the
+  driver is the simulated one unless the server's `.env` changes them.
+
 ---
 
 ## v2.38.0 — 2026-10-19 — Automatic VM updates and public version check
