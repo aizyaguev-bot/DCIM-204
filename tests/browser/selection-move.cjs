@@ -1,5 +1,5 @@
 const {chromium}=require('playwright');
-const assert=require('node:assert/strict');const origin='http://127.0.0.1:8770';
+const assert=require('node:assert/strict');const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
 (async()=>{const b=await chromium.launch({headless:true,channel:'msedge'});const errors=[];try{
  const c=await b.newContext({viewport:{width:1440,height:1000}});await c.request.post(origin+'/api/auth/login',{data:{username:'admin',password:'test-password-123'}});
  assert.equal((await(await c.request.get(origin+'/api/version')).json()).version,'LOCAL PREVIEW - TEST DATA');
@@ -11,7 +11,8 @@ const assert=require('node:assert/strict');const origin='http://127.0.0.1:8770';
  assert.equal(await p.evaluate(()=>{const t=__twin;return [...t.S.recs.values()].some(r=>r.cat==='item'&&r.meshes.some(m=>{m.geometry.computeBoundingBox();const local=m.worldToLocal(t.camera.position.clone());const box=m.geometry.boundingBox.clone();box.min.addScalar(.001);box.max.addScalar(-.001);return box.containsPoint(local);}));}),false,'Camera zoomed inside equipment');
  await p.locator('#vReset').click();await p.waitForTimeout(750);await p.locator('#btnEdit').click();
  // Exercise the real Move button then the persisted move API on temporary inventory.
- const ids=await p.evaluate(()=>{const t=__twin;const r=[...t.S.recs.values()].find(r=>r.cat==='item'&&r.item?.type==='opt'&&r.item.live?.inDcim);const target=[...t.S.recs.values()].find(s=>s.cat==='shelf'&&s.setup!==r.setup);t.select(r.id,{keepCamera:true});return{id:r.id,key:r.item.dcim.optKey,target:target.id,rack:t.S.data.setups.find(s=>s.id===target.setup).dcimRack};});
+ // On a reused fixture the OPT may already sit elsewhere; a move back to its PDU's rack correctly clears the override.
+ const ids=await p.evaluate(()=>{const t=__twin;const r=[...t.S.recs.values()].find(r=>r.cat==='item'&&r.item?.type==='opt'&&r.item.live?.inDcim);const home=t.S.live.devices.find(d=>d.id===r.item.dcim.pdu)?.rack;const rackOf=s=>t.S.data.setups.find(x=>x.id===s.setup)?.dcimRack;const target=[...t.S.recs.values()].find(s=>s.cat==='shelf'&&s.setup!==r.setup&&rackOf(s)&&rackOf(s)!==home);t.select(r.id,{keepCamera:true});return{id:r.id,key:r.item.dcim.optKey,target:target.id,rack:rackOf(target)};});
  await p.locator('#eMove').click();assert.equal(await p.evaluate(()=>__twin.S.moveItem),ids.id);
  await p.evaluate(async target=>{await __twin.finishMove(__twin.S.recs.get(target));},ids.target);
  const overrides=await(await c.request.get(origin+'/api/rack-overrides')).json();assert.equal(overrides[ids.key],ids.rack);assert.equal(await p.evaluate(()=>__twin.S.moveItem),null);assert.equal(await p.evaluate(()=>__twin.controls.enableRotate),true);

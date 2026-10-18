@@ -13,6 +13,11 @@ root = Path(__file__).resolve().parents[2]
 data = Path(tempfile.mkdtemp(prefix='dcim-redesign-', ))
 os.environ.update(DATABASE_URL=f'sqlite+aiosqlite:///{data / "preview.db"}', LAB_MANAGER_PASSWORD='',
                   PING_MONITOR_ENABLED='false', EMAIL_ALERTS_ENABLED='false')
+# Remote PXE install runs against the simulated console only, with fast simulated timings.
+for key, value in (('PXE_ENABLED', 'true'), ('PXE_DRIVER', 'simulated'), ('PXE_TICK_SECONDS', '0.25'),
+                   ('PXE_SIM_TIME_SCALE', '0.3'), ('PXE_SIM_SCENARIO', 'happy')):
+    os.environ.setdefault(key, value)
+os.environ['PXE_DRIVER'] = 'simulated'
 account_test = os.environ.get('DCIM_TEST_ACCOUNTS') == '1'
 os.environ['ACCOUNTS_ENABLED'] = 'true' if account_test else 'false'
 if account_test:
@@ -21,18 +26,24 @@ sys.path.insert(0, str(root / 'backend'))
 from app import main, inventory_store
 from app.database import init_db, AsyncSessionLocal
 from app.models import Device, PingTarget, MonitorDeviceSnapshot
-from app.routers import pdus, kvms
+from app.routers import pdus, kvms, pxe, devices, kvm_proxy
+from app.pxe.runner import PxeRunner
+from app.config import get_settings
 from app.schemas import PduStatus, OutletState, InletReading, KvmStatus, KvmPort
 from drivers.raritan_kvm import RaritanKvmDriver
 from drivers.raritan_pdu import RaritanPduDriver
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.routing import Route
 
 import shutil
 shutil.copy2(main.TWIN_DIR / 'lab-data.json', data / 'lab-data.json')
 main.TWIN_DIR = data
+# main binds the twin data path and the /twin static mount at import time; saves must never reach the tracked file.
+main._TWIN_DATA_FILE = data / 'lab-data.json'
 
 for name in ('_RACK_POSITIONS_FILE', '_RACK_SLOTS_FILE', '_SWITCH_ASSIGN_FILE', '_RACK_OVERRIDES_FILE', '_OPT_OWNERS_FILE', '_CHILLERS_FILE'):
     setattr(main, name, data / getattr(main, name).name)
+devices._BACKEND_DIR = data
 inventory_store.ITEMS_FILE = data / 'rack_items.json'
 main._VERSION_FILE = data / 'version.txt'
 main._VERSION_FILE.write_text('LOCAL PREVIEW - TEST DATA')
@@ -66,17 +77,32 @@ class FakePdu:
 async def forbidden_rpc(*args, **kwargs):
     raise RuntimeError('Real hardware access forbidden in isolated preview')
 
+def forbidden_client(*args, **kwargs):
+    raise RuntimeError('Real hardware access forbidden in isolated preview')
+
 RaritanPduDriver._rpc = forbidden_rpc
-RaritanKvmDriver._get_client = forbidden_rpc
+RaritanPduDriver._client_ctx = forbidden_rpc
+RaritanKvmDriver._client_ctx = forbidden_rpc
+RaritanKvmDriver._session_client = forbidden_client
+# WebSocket requests bypass the HTTP boundary middleware below.
+kvm_proxy.ensure_session = forbidden_rpc
+kvm_proxy._login = forbidden_rpc
 pdus.RaritanPduDriver = FakePdu
 pdus._fetch_status = pdu_status
 kvms._fetch_status = kvm_status
 async def no_session(*args, **kwargs):
     pass
 kvms.ensure_session = no_session
+pxe.set_runner(PxeRunner(AsyncSessionLocal, get_settings, screens_dir=data / 'pxe_screens'))
 
 # Maintenance switches outlets only through FakePdu / pdu_status above.
 PDU_MAINTENANCE = re.compile(r'/api/pdus/maintenance|/api/pdus/[^/]+/maintenance/(shutdown|restore)')
+
+async def preview_lab_data(request):
+    return FileResponse(data / 'lab-data.json', headers={'Cache-Control': 'no-cache'})
+
+# A route, not middleware: the accounts middleware must still decide who may read the inventory.
+main.app.router.routes.insert(0, Route('/twin/lab-data.json', preview_lab_data, methods=['GET']))
 
 @main.app.middleware('http')
 async def preview_hardware_boundary(request, call_next):
@@ -120,6 +146,19 @@ async def lifespan(app):
     yield
 
 main.app.router.lifespan_context = lifespan
+
+# Preview a frontend build from a temporary folder without touching frontend/dist.
+preview_dist = os.environ.get('DCIM_PREVIEW_DIST')
+if preview_dist:
+    from starlette.routing import Mount
+    from starlette.staticfiles import StaticFiles
+    main.FRONTEND_DIST = Path(preview_dist)
+    routes = main.app.router.routes
+    for index, route in enumerate(routes):
+        if isinstance(route, Mount) and route.path == '/assets':
+            routes[index] = Mount('/assets', app=StaticFiles(directory=str(main.FRONTEND_DIST / 'assets')), name='assets')
+    print(f'PREVIEW_DIST={main.FRONTEND_DIST}', flush=True)
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(main.app, host='127.0.0.1', port=int(sys.argv[1]) if len(sys.argv)>1 else 8766, access_log=False)

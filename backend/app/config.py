@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     email_current_max: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     email_watts_min: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     email_watts_max: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Remote PXE install. raritan opens a KVM console only when the browser and screen reader are installed.
+    pxe_enabled: bool = False
+    pxe_driver: Literal["simulated", "raritan"] = "simulated"
+    pxe_old_repo_host: str = "webrepo"
+    pxe_new_repo_host: str = "192.168.136.101"
+    pxe_allowed_computers: str = ""        # comma-separated; required in raritan mode
+    pxe_max_active_jobs: int = Field(default=1, ge=1, le=8)
+    pxe_tick_seconds: float = Field(default=0.5, gt=0, le=5)
+    pxe_sim_time_scale: float = Field(default=1.0, gt=0, le=10)
+    pxe_sim_scenario: str = "happy"
     database_url: str = f"sqlite+aiosqlite:///{pathlib.Path(__file__).parent.parent / 'lab_manager.db'}"
 
     model_config = SettingsConfigDict(

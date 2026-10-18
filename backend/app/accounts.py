@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import posixpath
 import re
 import secrets
 import time
@@ -25,6 +26,7 @@ COOKIE = "dcim_session"
 DEFAULT_PREFS = {"start_page": "dashboard", "refresh_seconds": 15, "confirm_power": True, "compact_racks": False}
 PUBLIC = {"/api/auth/status", "/api/auth/login", "/api/auth/register"}
 ROLES = {"Viewer": 0, "Operator": 1, "Admin": 2}
+TWIN_ASSETS = {".html", ".htm", ".js", ".mjs", ".css", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".map"}
 
 
 def hash_password(password):
@@ -77,7 +79,10 @@ async def identity(connection):
 
 
 def required_role(path, method):
+    if path == "/api/pxe" or path.startswith("/api/pxe/"):
+        return "Admin" if re.fullmatch(r"/api/pxe/jobs/[^/]+/acknowledge", path) else "Operator"
     if (path == "/api/engineers" or path.startswith("/api/engineers/")) and method not in ("GET", "HEAD", "OPTIONS"): return "Admin"
+    if path == "/api/opt-owners" and method not in ("GET", "HEAD", "OPTIONS"): return "Admin"
     if path == "/api/users" or path.startswith("/api/users/"): return "Admin"
     if path.startswith("/api/kvms/") and any(part in path for part in ("/proxy", "/autologin", "/console-url", "/viewer")):
         return "Operator"
@@ -101,6 +106,14 @@ def kvm_proxy_path(path):
     return re.fullmatch(r"/api/kvms/[^/]+/proxy(/.*)?", path) is not None
 
 
+def twin_private(path):
+    """Under /twin/ only web assets and the folder index are public; lab-data.json and every other file need a
+    session. An allowlist, because Windows also serves a file as LAB-DA~1.JSO, lab-data.json. or lab-data.json::$DATA."""
+    if not path.lower().startswith("/twin/"): return False
+    rel = posixpath.normpath("/" + path[6:].replace("\\", "/")).lstrip("/")
+    return bool(rel) and posixpath.splitext(rel)[1].lower() not in TWIN_ASSETS
+
+
 class AccountAccess:
     def __init__(self, app): self.app = app
 
@@ -109,7 +122,7 @@ class AccountAccess:
             return await self.app(scope, receive, send)
         path = scope.get("path", "").rstrip("/")
         # Static assets stay public so the sign-in screen can load.
-        if not (path.startswith("/api") or path in ("/docs", "/redoc", "/openapi.json")):
+        if not (path.startswith("/api") or path in ("/docs", "/redoc", "/openapi.json") or twin_private(path)):
             return await self.app(scope, receive, send)
         connection = HTTPConnection(scope)
         method = scope.get("method", "GET")
@@ -137,7 +150,7 @@ class AccountAccess:
         # The KVM's own web client cannot send the CSRF header; its proxied writes rely on an explicit same-origin Origin.
         if unsafe and kvm_proxy_path(path):
             if not connection.headers.get("origin"): return await deny(403, "Cross-origin action rejected")
-        elif unsafe and not secrets.compare_digest(connection.headers.get("x-dcim-csrf", ""), current["csrf_token"]):
+        elif unsafe and not secrets.compare_digest(connection.headers.get("x-dcim-csrf", "").encode(), current["csrf_token"].encode()):
             return await deny(403, "Refresh the page and retry (invalid CSRF token)")
         await self.app(scope, receive, send)
 

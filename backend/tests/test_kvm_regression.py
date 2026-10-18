@@ -1,30 +1,32 @@
 """
 KVM regression tests — baseline commit: 25560de (confirmed working 2026-05-14)
 
-Run on the VM (backend must be running on port 8000, KVMs must be reachable):
+Opt-in only: these tests drive a running Lab Manager and its real KVMs, so they run
+only when DCIM_LIVE_KVM_TESTS=1 and DCIM_TEST_BASE_URL are both set. Otherwise every
+test is skipped without any network request. There is no default address and the
+repository .env is not read. On the VM (KVMs must be reachable):
 
     cd /opt/lab-manager/backend
-    python -m pytest tests/test_kvm_regression.py -v
+    DCIM_LIVE_KVM_TESTS=1 DCIM_TEST_BASE_URL=http://localhost:8000 python -m pytest tests/test_kvm_regression.py -v
 
-Authentication:
+Authentication (environment variables only):
   Accounts mode: set DCIM_TEST_USERNAME and DCIM_TEST_PASSWORD (an Operator or
   Admin account). Tests sign in via /api/auth/login and send the session
   cookie plus the X-DCIM-CSRF header.
-  Legacy mode: if LAB_MANAGER_PASSWORD is set in .env, HTTP Basic auth is used.
+  Legacy mode: if LAB_MANAGER_PASSWORD is set, HTTP Basic auth is used.
 Tests are skipped when the backend is unreachable or requires credentials
-that were not provided. DCIM_TEST_BASE_URL overrides http://localhost:8000.
+that were not provided.
 """
 
 import os
 import re
 import requests
 import pytest
-from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent.parent / ".env")
-
-BASE_URL = os.getenv("DCIM_TEST_BASE_URL", "http://localhost:8000").rstrip("/")
+LIVE = os.getenv("DCIM_LIVE_KVM_TESTS") == "1"
+BASE_URL = os.getenv("DCIM_TEST_BASE_URL", "").strip().rstrip("/")
+pytestmark = pytest.mark.skipif(not (LIVE and BASE_URL),
+                                reason="Live KVM tests are opt-in: set DCIM_LIVE_KVM_TESTS=1 and DCIM_TEST_BASE_URL")
 _pw = os.getenv("LAB_MANAGER_PASSWORD", "")
 AUTH = ("", _pw) if _pw else None
 ACCOUNT_USERNAME = os.getenv("DCIM_TEST_USERNAME", "")

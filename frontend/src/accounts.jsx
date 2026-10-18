@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import nvidiaLogo from "./assets/nvidia-logo.svg";
 
 const defaultPreferences = { start_page: "dashboard", refresh_seconds: 15, confirm_power: true, compact_racks: false };
 const legacy = { mode: "legacy", user: null, canOperate: true, canAdmin: true, preferences: defaultPreferences };
@@ -83,7 +84,7 @@ function SignIn() {
     finally{setBusy(false);}
   }
   return <div className="auth-screen"><div className="auth-panel">
-    <div><img src="/nvidia-logo.svg" alt="NVIDIA" width="120" height="24" className="mb-3"/><h1 className="text-xl font-bold text-white">Lab Manager</h1><p className="text-xs text-zinc-500 mt-1">Lab 204 · Yokneam · internal use only</p></div>
+    <div><img src={nvidiaLogo} alt="NVIDIA" width="120" height="24" className="mb-3"/><h1 className="text-xl font-bold text-white">Lab Manager</h1><p className="text-xs text-zinc-500 mt-1">Lab 204 · Yokneam · internal use only</p></div>
     {setup_required ? <p role="alert">User accounts need initialization. A lab administrator must configure the initial admin on the VM.</p> : <>
     {registration_enabled && <div className="auth-tabs" role="tablist"><button role="tab" aria-selected={!signup} onClick={()=>{setSignup(false);setError("");}}>Sign in</button><button role="tab" aria-selected={signup} onClick={()=>{setSignup(true);setError("");}}>Create account</button></div>}
     <form onSubmit={submit} className="account-fields">
@@ -180,7 +181,7 @@ export function UsersView() {
   return <main className="account-page max-w-none">
     <div className="flex flex-wrap justify-between items-end gap-4 mb-5"><div><h1 className="text-2xl font-bold text-white">Users</h1><p className="text-sm text-zinc-400 mt-2">Admin manages users and devices · Operator controls power and edits racks · Viewer can view.</p></div><button className="account-primary" onClick={()=>setAdding(true)}>Add user</button></div>
     <div className="user-kpis">{[["Users",users?.length],["Admins",users?.filter(u=>u.role==="Admin").length],["Operators",users?.filter(u=>u.role==="Operator").length],["Disabled",users?.filter(u=>!u.enabled).length]].map(([label,count])=><div key={label}><span>{label}</span><strong>{count??"—"}</strong></div>)}</div>
-    {error && <p className="account-error my-3" role="alert">{error}</p>}
+    {error && !adding && <p className="account-error my-3" role="alert">{error}</p>}
     <div className="user-table-wrap"><table className="user-table"><thead><tr>{["Name","Username","Role","Status","Created","Last sign-in","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>
       {users?.map(u=><tr key={u.id} className={!u.enabled?"opacity-60":""}><td className="font-semibold text-white">{u.name} {u.id===user.id&&<span className="text-zinc-500 font-normal">(you)</span>}</td><td className="font-mono">{u.username}</td>
         <td><select aria-label={`Role for ${u.username}`} value={u.role} disabled={busy||u.id===user.id} onChange={e=>action(()=>accountRequest(`/users/${u.id}`,"PATCH",{role:e.target.value}))}>{["Admin","Operator","Viewer"].map(r=><option key={r}>{r}</option>)}</select></td>

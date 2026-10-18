@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, Fragment } from "react";
-import { api } from "./api/client";
+import { api, deviceState, errorMessage } from "./api/client";
 import Header from "./components/Header";
 import StatsBar from "./components/StatsBar";
 import PduCard from "./components/PduCard";
@@ -19,6 +19,8 @@ import InlineKvmConsole from "./components/InlineKvmConsole";
 import MaintenanceColumn, { maintenanceStateFor } from "./components/MaintenanceColumn";
 import MaintenanceDialog from "./components/MaintenanceDialog";
 import WhatsNew from "./components/WhatsNew";
+import RemoteInstallView from "./pages/RemoteInstallView";
+import { pxeApi, errorText as pxeErrorText } from "./api/pxe";
 
 export default function App() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
@@ -28,8 +30,10 @@ export default function App() {
   const [view, setView] = useState({ kind: "dashboard" });
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "dcim" ? "racks" : tab === "sync" ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "scan", "monitoring", "twin", "admin", "changelog", "account"].includes(tab) ? tab : preferences.start_page;
+    return tab === "dcim" ? "racks" : tab === "sync" ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account"].includes(tab) ? tab : preferences.start_page;
   });
+  const [pxeConfig, setPxeConfig] = useState(undefined);   // undefined: loading, null: unavailable
+  const [pxeConfigError, setPxeConfigError] = useState("");
 
   const [editMode, setEditMode] = useState(false);
   const [summary, setSummary] = useState("");
@@ -105,6 +109,16 @@ export default function App() {
 
   useEffect(() => () => { for (const timer of kvmTimers.current) clearInterval(timer); }, []);
 
+  useEffect(() => {
+    if (!canOperate) { setPxeConfig(null); return; }
+    let active = true;
+    setPxeConfig(undefined);
+    pxeApi.config()
+      .then(config => { if (active) { setPxeConfig(config || null); setPxeConfigError(""); } })
+      .catch(error => { if (active) { setPxeConfig(null); setPxeConfigError(pxeErrorText(error)); } });
+    return () => { active = false; };
+  }, [canOperate]);
+
   function closeInlineConsole() {
     if (!inlineConsole) return;
     const { deviceId, port } = inlineConsole;
@@ -158,7 +172,7 @@ export default function App() {
       setDevices(data);
       setDeviceError("");
     } catch (e) {
-      setDeviceError(e.message);
+      setDeviceError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -169,7 +183,7 @@ export default function App() {
       const status = await api.getPduStatus(id);
       setPduStatuses(s => ({ ...s, [id]: status }));
       setLastUpdated(new Date());
-    } catch (e) { setPduStatuses(s => ({...s, [id]: {device_id:id, reachable:false, outlets:[], error:e.message}})); }
+    } catch (e) { setPduStatuses(s => ({...s, [id]: {device_id:id, requestFailed:true, outlets:[], error:errorMessage(e)}})); }
   }
 
   async function loadMaintenance() {
@@ -189,7 +203,7 @@ export default function App() {
       const status = await api.getKvmStatus(id);
       setKvmStatuses(s => ({ ...s, [id]: status }));
       setLastUpdated(new Date());
-    } catch (e) { setKvmStatuses(s => ({...s, [id]: {device_id:id, reachable:false, ports:[], error:e.message}})); }
+    } catch (e) { setKvmStatuses(s => ({...s, [id]: {device_id:id, requestFailed:true, ports:[], error:errorMessage(e)}})); }
   }
 
   async function handleRenameOpt(oldName, newName) {
@@ -205,6 +219,18 @@ export default function App() {
     ]);
   }
 
+  // Errors are rethrown for the caller to show; a 409 (labels changed elsewhere) reloads first.
+  async function saveLabels(id, labels, revision) {
+    try {
+      await api.updateLabels(id, labels, revision);
+    } catch (e) {
+      if (e.status === 409) { await loadDevices(); await refreshAllStatuses(); }
+      throw e;
+    }
+    await loadDevices();
+    await refreshAllStatuses();
+  }
+
   async function handleMarkKvmFree(id) {
     try {
       await api.markKvmFree(id);
@@ -214,12 +240,25 @@ export default function App() {
 
   async function handleOutletAction(device, outletNumber, action, confirmed = false) {
     if (!canOperate) return;
-    if (!confirmed && preferences.confirm_power && ["off", "cycle"].includes(action) && !confirm(`Power ${action} ${device.name}, outlet ${outletNumber}?`)) return;
+    const label = pduStatuses[device.id]?.outlets?.find(o => String(o.number) === String(outletNumber))?.label;
+    const target = label && !/^Outlet \d+$/.test(label) ? `${label} (${device.name} · outlet ${outletNumber})` : `${device.name}, outlet ${outletNumber}`;
+    if (!confirmed && preferences.confirm_power && ["off", "cycle"].includes(action) && !confirm(`Power ${action} ${target}?`)) return;
     try {
       await api.outletPower(device.id, outletNumber, action);
       await loadPduStatus(device.id);
     } catch (e) {
-      alert(`Action failed: ${e.message}`);
+      alert(`Action failed: ${e.detail || e.message}`);
+    }
+  }
+
+  async function handleTurnOnAll(device, numbers) {
+    if (!canOperate || !device || !numbers.length) return;
+    const results = await Promise.allSettled(numbers.map(n => api.outletPower(device.id, n, "on")));
+    const failed = numbers.filter((n, i) => results[i].status === "rejected");
+    await loadPduStatus(device.id);
+    if (failed.length) {
+      const reasons = [...new Set(results.filter(r => r.status === "rejected").map(r => errorMessage(r.reason)))].join("; ");
+      alert(`Turn on all outlets: ${failed.length} of ${numbers.length} ${numbers.length === 1 ? "outlet" : "outlets"} failed (${failed.join(", ")}). ${reasons}`);
     }
   }
 
@@ -229,17 +268,21 @@ export default function App() {
       await loadDevices();
       setAddOpen(false);
     } catch (e) {
-      alert(`Failed to add device: ${e.message}`);
+      alert(`Failed to add device: ${errorMessage(e)}`);
     }
   }
 
+  // Returns true only when the device was removed.
   async function handleDeleteDevice(id) {
-    if (!confirm("Remove this device?")) return;
+    const name = devices.find(d => d.id === id)?.name || "this device";
+    if (!confirm(`Remove ${name}? This cannot be undone.`)) return false;
     try {
       await api.deleteDevice(id);
       setDevices(d => d.filter(x => x.id !== id));
+      return true;
     } catch (e) {
-      alert(`Failed: ${e.message}`);
+      alert(`Could not remove ${name}: ${errorMessage(e)}`);
+      return false;
     }
   }
 
@@ -266,7 +309,7 @@ export default function App() {
         if (s.reachable && s.total_watts != null) { watts += s.total_watts; wattsKnown++; }
       }
       if (!s?.reachable || s.total_watts == null || s.watts_complete !== true) wattsComplete = false;
-      if (!s?.reachable && s) alerts++;
+      if (deviceState(s) === "offline") alerts++;
       if (s?.temperature != null) temps.push(s.temperature);
       if (s?.humidity    != null) humids.push(s.humidity);
       if (s?.leak_detected)       leakDetected = true;
@@ -300,7 +343,7 @@ export default function App() {
 
   const pageInfo = {
     racks: ["Racks", "Shelf layout, equipment and power across Lab 204."],
-    inventory: ["Inventory", "Servers and equipment with their location, owner, serial and barcode."],
+    inventory: ["Inventory", "Servers with their rack, power outlet, switch port and owner."],
     twin: ["3D Twin", "Explore the lab and its saved rack layout."],
     changelog: ["Changelog", "Changes and releases in Lab Manager."],
   }[mainTab];
@@ -308,11 +351,15 @@ export default function App() {
   const visiblePdus = pdus.filter(match);
   const visibleKvms = kvms.filter(match).sort((a, b) => a.name.localeCompare(b.name));
   const visibleInventoryRacks = inventoryRacks.filter(match).sort((a, b) => a.rack.localeCompare(b.rack));
+  const shownCount = mainTab === "power" ? visiblePdus.length : mainTab === "consoles" ? visibleKvms.length
+    : (filter === "all" || filter === "pdus" ? visiblePdus.length : 0) + (filter === "all" || filter === "kvms" ? visibleKvms.length : 0) + (filter === "all" || filter === "racks" ? visibleInventoryRacks.length : 0);
+  const filtersActive = !!search.trim() || rackFilter !== "all" || (mainTab === "dashboard" && filter !== "all");
+  const detailFrom = { power: "Power", consoles: "Consoles", admin: "Admin" }[mainTab] || "Dashboard";
 
   return (
     <div className="min-h-screen flex flex-col">
       <Header activeTab={mainTab} onNavigate={navigate} summary={summary} editMode={editMode} onEditChange={value => setEditMode(canOperate && value)} onHome={() => navigate("dashboard")}
-        onAccount={() => navigate("account")} onUsers={() => {navigate("admin");setAdminSection("users");}} />
+        onAccount={() => navigate("account")} onUsers={() => {navigate("admin");setAdminSection("users");}} remoteInstall={pxeConfig?.enabled === true} />
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
       {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
       {mainTab === "admin" && view.kind === "dashboard" && <nav className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>setAdminSection(id)}>{label}</button>)}</nav>}
@@ -327,16 +374,22 @@ export default function App() {
             const device = pdus.find(p => p.id === pduId);
             if (device) await handleOutletAction(device, outletNumber, action);
           }}
-          onLabelChange={async (pduId, newLabels) => {
-            await api.updateLabels(pduId, newLabels);
-            await loadDevices();
-            await refreshAllStatuses();
-          }}
+          onLabelChange={(pduId, newLabels, revision) => saveLabels(pduId, newLabels, revision ?? devices.find(d => d.id === pduId)?.labels_revision)}
           onRenameOpt={handleRenameOpt}
           onRefresh={loadDevices}
+          maintenance={maintenance}
         />
       )}
 
+      {view.kind === "dashboard" && mainTab === "pxe" && (canOperate && pxeConfig?.enabled === true
+        ? <RemoteInstallView config={pxeConfig} onOpenConsole={openKvmConsole} kvmNames={Object.fromEntries(kvms.map(k => [k.id, k.name]))} />
+        : <main className="device-page"><h1 className="text-2xl font-bold text-white">Remote install</h1>
+            <p role={pxeConfig === undefined ? "status" : "alert"} className="text-sm text-zinc-400 mt-2">
+              {!canOperate ? "Remote install requires the Operator or Admin role."
+                : pxeConfig === undefined ? "Loading remote install settings…"
+                : pxeConfigError ? `Remote install settings could not load: ${pxeConfigError}`
+                : "Remote install is not enabled on this server."}
+            </p></main>)}
       {view.kind === "dashboard" && mainTab === "scan" && <ScanView />}
       {view.kind === "dashboard" && mainTab === "account" && <AccountSettings />}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "users" && canAdmin && <UsersView />}
@@ -353,12 +406,13 @@ export default function App() {
           devices={devices}
           pduStatuses={pduStatuses}
           kvmStatuses={kvmStatuses}
+          onChanged={async () => { await loadDevices(); await refreshAllStatuses(); }}
         />
       )}
 
       {view.kind === "dashboard" && ["dashboard", "power", "consoles"].includes(mainTab) && (
         <main className="device-page">
-          <div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h1 className="text-2xl font-bold text-white">{mainTab === "consoles" ? "Remote consoles" : mainTab === "power" ? "Power distribution units" : "Dashboard"}</h1><p className="text-sm text-zinc-400 mt-1">{pdus.length} PDUs · {kvms.length} KVMs · {updatedText}</p></div><input aria-label="Search devices" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search devices, ports, IPs…" className="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm w-full sm:w-72"/></div>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h1 className="text-2xl font-bold text-white">{mainTab === "consoles" ? "Remote consoles" : mainTab === "power" ? "Power distribution units" : "Dashboard"}</h1><p className="text-sm text-zinc-400 mt-1">{pdus.length} {pdus.length === 1 ? "PDU" : "PDUs"} · {kvms.length} {kvms.length === 1 ? "KVM" : "KVMs"} · {updatedText}</p></div><input aria-label="Search devices" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search devices, ports, IPs…" className="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm w-full sm:w-72"/></div>
           {mainTab === "dashboard" && <Toolbar filter={filter} setFilter={setFilter} rackFilter={rackFilter} setRackFilter={setRackFilter} racks={racks}
             count={(filter === "all" || filter === "pdus" ? visiblePdus.length : 0) + (filter === "all" || filter === "kvms" ? visibleKvms.length : 0)}
             rackCount={filter === "all" || filter === "racks" ? visibleInventoryRacks.length : 0} onAdd={canAdmin ? () => setAddOpen(true) : null} />}
@@ -382,7 +436,13 @@ export default function App() {
               <InventoryRackCard key={rack.rack} rack={rack} items={rackItems ? rackItems[rack.rack] || [] : null} error={rackItemsError}
                 onOpen={() => navigate("racks", rack.rack)} />
             )}
-            {pdus.length + kvms.length + inventoryRacks.length === 0 && (
+            {shownCount === 0 && filtersActive && pdus.length + kvms.length + inventoryRacks.length > 0 && (
+              <div role="status" className="col-span-full text-center text-zinc-500 py-12">
+                <div className="mb-3">No devices match {search.trim() ? `"${search.trim()}"` : "the selected filters"}.</div>
+                <button className="underline text-nv-300" onClick={() => { setSearch(""); setFilter("all"); setRackFilter("all"); }}>Clear search and filters</button>
+              </div>
+            )}
+            {pdus.length + kvms.length + inventoryRacks.length === 0 && !deviceError && (
               <div className="col-span-full text-center text-zinc-500 py-16">
                 <div className="text-2xl mb-3">No devices yet</div>
                 <button disabled={!canAdmin} onClick={() => setAddOpen(true)} className="bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium px-4 py-2 rounded-lg">
@@ -402,7 +462,7 @@ export default function App() {
 
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "devices" && <main className="p-4 w-full mx-auto">
         <div className="flex items-center justify-between mb-5"><div><h1 className="text-xl font-semibold text-white">Devices</h1><p className="text-xs text-zinc-500 mt-1">Manage the connected PDUs and KVMs.</p></div><button disabled={!canAdmin} className="edit-toggle active" onClick={()=>setAddOpen(true)}>+ Add Device</button></div>
-        <div className="border border-zinc-800 rounded-xl overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-zinc-900 text-zinc-500"><tr>{["Name","Type","Address","Rack","Status","Actions"].map(h=><th key={h} className="p-3 font-medium">{h}</th>)}</tr></thead><tbody>{devices.filter(d=>["pdu","kvm"].includes(d.kind)).map(d=><tr key={d.id} className="border-t border-zinc-800"><td className="p-3 font-medium text-white">{d.name}</td><td className="p-3 uppercase">{d.kind}</td><td className="p-3 font-mono">{d.ip}</td><td className="p-3">{d.rack}</td><td className="p-3">{(pduStatuses[d.id] || kvmStatuses[d.id])?.reachable === true ? "Online" : (pduStatuses[d.id] || kvmStatuses[d.id])?.reachable === false ? "Offline" : "Pending"}</td><td className="p-3 whitespace-nowrap"><button className="text-nv-300 mr-4" onClick={()=>openDetail({kind:d.kind,id:d.id})}>Details</button><button disabled={!canAdmin} className="text-rose-400" onClick={()=>handleDeleteDevice(d.id)}>Remove</button></td></tr>)}</tbody></table></div>
+        <div className="border border-zinc-800 rounded-xl overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-zinc-900 text-zinc-500"><tr>{["Name","Type","Address","Rack","Status","Actions"].map(h=><th key={h} className="p-3 font-medium">{h}</th>)}</tr></thead><tbody>{devices.filter(d=>["pdu","kvm"].includes(d.kind)).map(d=><tr key={d.id} className="border-t border-zinc-800"><td className="p-3 font-medium text-white">{d.name}</td><td className="p-3 uppercase">{d.kind}</td><td className="p-3 font-mono">{d.ip}</td><td className="p-3">{d.rack}</td><td className="p-3" title={(pduStatuses[d.id] || kvmStatuses[d.id])?.error || undefined}>{{ online: "Online", offline: "Offline", error: "Error", unavailable: "Status unavailable", unknown: "Pending" }[deviceState(pduStatuses[d.id] || kvmStatuses[d.id])]}</td><td className="p-3 whitespace-nowrap"><button className="text-nv-300 mr-4" onClick={()=>openDetail({kind:d.kind,id:d.id})}>Details</button><button disabled={!canAdmin} className="text-rose-400" onClick={()=>handleDeleteDevice(d.id)}>Remove</button></td></tr>)}</tbody></table></div>
       </main>}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "help" && <main className="p-6 max-w-3xl text-sm space-y-5">
         <h1 className="text-xl font-semibold text-white">Help & About</h1><p>Lab Manager connects to your Raritan PDUs and KVMs. Device data refreshes every 15 seconds while the page is open.</p>
@@ -420,13 +480,11 @@ export default function App() {
           maintenanceMode={maintenance?.password_mode}
           onMaintenance={mode => setMaintenanceDialog({ mode, pduId: view.id })}
           onBack={() => history.back()}
+          from={detailFrom}
           onOutletAction={(n, a, confirmed) => handleOutletAction(pdus.find(p => p.id === view.id), n, a, confirmed)}
-          onDelete={() => { handleDeleteDevice(view.id); history.back(); }}
-          onLabelsSave={async (labels) => {
-            await api.updateLabels(view.id, labels);
-            await loadDevices();
-            await refreshAllStatuses();
-          }}
+          onTurnOnAll={numbers => handleTurnOnAll(pdus.find(p => p.id === view.id), numbers)}
+          onDelete={async () => { if (await handleDeleteDevice(view.id)) history.back(); }}
+          onLabelsSave={(labels, revision) => saveLabels(view.id, labels, revision)}
         />
       )}
 
@@ -435,14 +493,11 @@ export default function App() {
           device={kvms.find(k => k.id === view.id)}
           status={kvmStatuses[view.id]}
           onBack={() => history.back()}
+          from={detailFrom}
           onPortClick={(port) => openKvmConsole(view.id, port.number)}
-          onDelete={() => { handleDeleteDevice(view.id); history.back(); }}
+          onDelete={async () => { if (await handleDeleteDevice(view.id)) history.back(); }}
           onMarkFree={() => handleMarkKvmFree(view.id)}
-          onLabelsSave={async (labels) => {
-            await api.updateLabels(view.id, labels);
-            await loadDevices();
-            await refreshAllStatuses();
-          }}
+          onLabelsSave={(labels, revision) => saveLabels(view.id, labels, revision)}
         />
       )}
 

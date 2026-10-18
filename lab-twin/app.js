@@ -24,7 +24,7 @@
   const SEVERITIES = ['crit', 'warn', 'info'];
   const SEV_LABEL = { crit: 'Critical', warn: 'Warning', info: 'Info' };
   const SEV_COLOR = { crit: '#f43f5e', warn: '#fbbf24', info: '#38bdf8' };
-  const ATTN_ORDER = ['crit:leak', 'crit:pdu-down', 'crit:load', 'crit:temp', 'warn:opt-off', 'warn:opt-unknown', 'warn:kvm-down', 'warn:load', 'warn:temp', 'warn:unplaced', 'warn:unmapped-rack', 'warn:not-in-dcim', 'info:offline', 'info:stale', 'info:auto-u', 'info:mapping'];
+  const ATTN_ORDER = ['crit:leak', 'crit:pdu-down', 'crit:load', 'crit:temp', 'warn:opt-off', 'warn:opt-unknown', 'warn:kvm-down', 'warn:kvm-error', 'warn:load', 'warn:temp', 'warn:unplaced', 'warn:unmapped-rack', 'warn:not-in-dcim', 'info:offline', 'info:stale', 'info:auto-u', 'info:mapping'];
   const STALE_DAYS = 30, ATTN_TEMP_CRIT = 30, ATTN_TEMP_WARN = 27, ATTN_LOAD_CRIT = 0.95, ATTN_LOAD_WARN = 0.8;
 
   const LS = {
@@ -43,7 +43,7 @@
     settings: LS.get('settings', { url: '', pass: '', poll: true }),
     live: { connected: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
-    attention: [], attnFilter: LS.get('attnFilter', 'all'), attnDockCollapsed: LS.get('attnDockCollapsed', false), attnDockAll: false, detailStale: false, labelHover: null,
+    attention: [], attnFilter: LS.get('attnFilter', 'all'), attnDockCollapsed: LS.get('attnDockCollapsed', false), attnDockAll: false, detailStale: false, detailEdited: false, labelHover: null,
     heat: LS.get('heat', false), embed: /[?&]embed=1/.test(location.search), editMode: false, kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
@@ -201,7 +201,7 @@
       if (low) m.material = mat('#cbb994', { rough: .8, opacity: .5, unique: true });
       wallsGroup.add(m); wallsGroup.add(edges(m, low ? '#f43f5e' : '#a8977a', low));
       const rec = reg({ id: dr.id, cat: 'structure', def: dr, group: m, meshes: [m], edges: [], status: 'active', conf: dr.confidence, zone: null, anchor: new THREE.Vector3(m.position.x, dr.height + 0.05, m.position.z) });
-      makeLabel(rec, 'item' + (low ? ' low' : ''), `${dr.id}<small>door${low ? ' — verify' : ''}</small>`);
+      makeLabel(rec, 'item' + (low ? ' low' : ''), `${esc(dr.id)}<small>door${low ? ' — verify' : ''}</small>`);
     });
     // windows
     (d.structure.windows || []).forEach(wn => {
@@ -211,7 +211,7 @@
                     : box(wn.width, wn.height, 0.1, glass, wn.pos[0] + wn.width / 2, wn.sill + wn.height / 2, wn.pos[1]);
       wallsGroup.add(m); wallsGroup.add(edges(m, '#7dd3fc', wn.confidence === 'low'));
       const rec = reg({ id: wn.id, cat: 'structure', def: wn, group: m, meshes: [m], edges: [], status: 'active', conf: wn.confidence, zone: null, anchor: new THREE.Vector3(m.position.x, wn.sill + wn.height + 0.05, m.position.z) });
-      makeLabel(rec, 'item', `${wn.id}<small>window</small>`);
+      makeLabel(rec, 'item', `${esc(wn.id)}<small>window</small>`);
     });
     // pillar
     (d.structure.pillars || []).forEach(p => {
@@ -219,14 +219,14 @@
       const m = new THREE.Mesh(new THREE.CylinderGeometry(p.radius, p.radius, H, 32), mat('#7c7c86', { opacity: .55, unique: true })); m.position.set(cx, H / 2, cz);
       wallsGroup.add(m);
       const rec = reg({ id: p.id, cat: 'structure', def: p, group: m, meshes: [m], edges: [], status: 'active', conf: p.confidence, zone: null, anchor: new THREE.Vector3(cx, H * 0.75, cz) });
-      makeLabel(rec, 'item', `${p.id}<small>column</small>`);
+      makeLabel(rec, 'item', `${esc(p.id)}<small>column</small>`);
     });
     // fixtures (E-stop)
     (d.structure.fixtures || []).forEach(f => {
       const m = box(0.06, 0.1, 0.1, mat('#ef4444', { emissive: '#ef4444', emissiveIntensity: .4 }), f.pos[0] + 0.04, f.height, f.pos[1]);
       wallsGroup.add(m);
       const rec = reg({ id: f.id, cat: 'structure', def: f, group: m, meshes: [m], edges: [], status: 'active', conf: f.confidence, zone: null, anchor: new THREE.Vector3(f.pos[0] + 0.1, f.height + 0.1, f.pos[1]) });
-      makeLabel(rec, 'item', `${f.id}<small>emergency stop</small>`);
+      makeLabel(rec, 'item', `${esc(f.id)}<small>emergency stop</small>`);
     });
     // ceiling lights
     (d.structure.ceilingLights || []).forEach(([x, z]) => {
@@ -239,7 +239,7 @@
       m.renderOrder = 1; zonesGroup.add(m);
       const e = setEdgeOp(edges(m, zn.color, zn.confidence === 'low'), .55); zonesGroup.add(e);
       const rec = reg({ id: zn.id, cat: 'zone', def: zn, group: m, meshes: [m], edges: [e], status: 'active', conf: zn.confidence, zone: zn.id, anchor: new THREE.Vector3((x1 + x2) / 2, 0.02, (z1 + z2) / 2) });
-      makeLabel(rec, 'zone', `<span style="color:${zn.color}">${zn.id}</span>`);
+      makeLabel(rec, 'zone', `<span style="color:${esc(zn.color)}">${esc(zn.id)}</span>`);
     });
   }
 
@@ -297,7 +297,7 @@
       const nextY = nextLv ? shelfLevels[nextLv - 1] : h - p; const sh0 = y + 0.01, sh1 = nextY - st - 0.01;
       const slot = box(dd - 2 * p - 0.02, Math.max(0.1, sh1 - sh0), w - 2 * p - 0.02, mat('#22d3ee', { opacity: .22, unique: true, emissive: '#22d3ee', emissiveIntensity: .5, rough: 1 }), 0, (sh0 + sh1) / 2, 0);
       slot.material.depthWrite = false; slot.visible = false; slot.userData.id = sh.id; slot.userData.slot = true; g.add(slot); S.pickables.push(slot); srec.slot = slot;
-      makeLabel(srec, 'shelf', `${sh.id}<small>L${sh.level}</small>`);
+      makeLabel(srec, 'shelf', `${esc(sh.id)}<small>L${esc(sh.level)}</small>`);
     });
     return rec;
   }
@@ -525,7 +525,7 @@
       });
       // KVM cross-reference
       const kvmIdx = {};
-      kvms.forEach(k => { Object.entries(k.labels || {}).forEach(([p, lbl]) => { const key = optKey(lbl); (kvmIdx[key] = kvmIdx[key] || []).push({ kvm: k.id, kvmName: k.name, port: parseInt(p, 10), status: live.kvm[k.id]?.ports?.find(x => x.number === parseInt(p, 10))?.status }); }); });
+      kvms.forEach(k => { Object.entries(k.labels || {}).forEach(([p, lbl]) => { const key = optKey(lbl); (kvmIdx[key] = kvmIdx[key] || []).push({ kvm: k.id, kvmName: k.name, port: parseInt(p, 10), status: live.kvm[k.id]?.error ? 'error' : live.kvm[k.id]?.ports?.find(x => x.number === parseInt(p, 10))?.status }); }); });
       // U assignment per rack (rack_slots first, then sequential like buildRackRows)
       const byRack = {}; [...servers.values()].forEach(s => { (byRack[s.rack] = byRack[s.rack] || []).push(s); });
       Object.entries(byRack).forEach(([rack, list]) => {
@@ -563,8 +563,8 @@
       // 3) rack_items (custom equipment: switches, patch panels …)
       Object.entries(live.rackItems || {}).forEach(([rack, list]) => (list || []).forEach(ci => {
         const sid = setupByRack[rack] || null; const id = 'LIVE-' + ci.id;
-        const history = Array.isArray(ci.tracking_history) ? ci.tracking_history : [];
-        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', last_seen_at: ci.last_seen_at || null, tracking: { count: history.length, last: history[history.length - 1] || null }, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', live: { rack, u: ci.u }, ...pickOv(id) });
+        const history = Array.isArray(ci.tracking_history) ? ci.tracking_history : []; const owner = live.owners?.['item:' + ci.id] || null;
+        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', last_seen_at: ci.last_seen_at || null, tracking: { count: history.length, last: history[history.length - 1] || null }, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', owner, live: { rack, u: ci.u, owner }, ...pickOv(id) });
       }));
       // 4) chillers from DCIM
       if (live.chillers?.units?.length) {
@@ -580,8 +580,9 @@
       it.effStatus = it.status || 'unknown';
       if (it.type === 'opt' && it.live?.inDcim) it.effStatus = it.live.state === 'on' ? 'active' : it.live.state === 'off' ? 'inactive' : (it.status || 'unknown');
       if (it.type === 'pdu' && it.live) it.effStatus = it.live.reachable === false ? 'inactive' : it.live.reachable ? 'active' : it.effStatus;
-      if (it.type === 'kvm' && it.live) it.effStatus = it.live.reachable === false ? 'inactive' : it.live.reachable ? 'active' : it.effStatus;
-      if (it.type === 'opt' && it.live && it.live.owner) it.owner = it.live.owner;
+      // reachable + error = the KVM answered but its sign-in / API failed: not usable, never "active"
+      if (it.type === 'kvm' && it.live) it.effStatus = it.live.reachable === false || it.live.status?.error ? 'inactive' : it.live.reachable ? 'active' : it.effStatus;
+      if (it.type === 'opt' && it.live?.inDcim) it.owner = it.live.owner || null;   // DCIM (AssetOwner) is the owner source for live OPTs
     });
     // Equipment next to the PC (switch under test, UPS, SSD box …) = Lab Manager "rack items". When connected, the live
     // rack items are authoritative: a JSON equipment record with the same name is replaced by the live one (no doubles).
@@ -634,6 +635,10 @@
         else if (o.live.state !== 'on' && live.pdu?.[o.dcim?.pdu]?.reachable === true) add('warn', 'opt-unknown', o.id, `${o.name} state unknown`, `${where} לא מדווח מצב`, o.id, o.setup);
       });
       items.filter(k => k.type === 'kvm' && k.live?.reachable === false).forEach(k => add('warn', 'kvm-down', k.dcim?.deviceId || k.id, `${k.name} unreachable`, 'קונסולת ה-KVM לא זמינה — בדקו רשת וחשמל', k.id, k.setup));
+      (live.devices || []).filter(d => d.kind === 'kvm' && live.kvm?.[d.id]?.reachable && live.kvm[d.id].error).forEach(d => {
+        const k = items.find(i => i.type === 'kvm' && i.dcim?.deviceId === d.id);
+        add('warn', 'kvm-error', d.id, `${k?.name || d.name || d.id} sign-in failed`, `ה-KVM עונה אבל ההתחברות אליו נכשלה: ${live.kvm[d.id].error} — בדקו את פרטי ההתחברות של ההתקן ב-Lab Manager`, k?.id, k?.setup || model.setupByRack?.[d.rack] || null);
+      });
       bySetup(opts.filter(o => o.live && o.live.inDcim === false)).forEach((list, sid) => add('warn', 'not-in-dcim', sid || 'none', list.length === 1 ? `${list[0].name} not in DCIM labels` : `${list.length} OPTs not in DCIM labels`, `לא מופיעים בתוויות ה-PDU החיות: ${names(list)}`, list.length === 1 || !sid ? list[0].id : sid, sid));
       items.filter(i => i.id.startsWith('LIVE-') && i.type.startsWith('equip-') && i.last_seen_at).forEach(i => {
         const t = Date.parse(i.last_seen_at); if (!Number.isFinite(t)) return; const days = Math.floor((now - t) / 864e5);
@@ -641,7 +646,8 @@
       });
       bySetup(opts.filter(o => o.live?.inDcim && o.setup && o.placementConfidence === 'low')).forEach((list, sid) => add('info', 'auto-u', sid, list.length === 1 ? `${list[0].name} auto-placed (no explicit U)` : `${list.length} OPTs auto-placed (no explicit U)`, `המדף נקבע לפי סדר ולא לפי rack_slots — אשרו מיקום עם Move: ${names(list)}`, list.length === 1 ? list[0].id : sid, sid));
     } else {
-      add('info', 'offline', 'live', 'Live data off — connect the backend', 'מוצגים רק נתונים סטטיים מ-lab-data.json (מצב, הספק וסריקות דורשים חיבור)');
+      if (live?.signedOut) add('info', 'offline', 'live', 'Signed out — sign in to resume live data', 'ההתחברות פגה או שבוצעה יציאה — התחברו מחדש ל-Lab Manager והנתונים החיים יחזרו אוטומטית');
+      else add('info', 'offline', 'live', 'Live data off — connect the backend', 'מוצגים רק נתונים סטטיים מ-lab-data.json (מצב, הספק וסריקות דורשים חיבור)');
     }
     // static checks (also offline)
     [...(recs ? recs.values() : [])].filter(r => r.unplaced).forEach(r => add('warn', 'unplaced', r.id, `${r.def?.name || r.id} has no position`, 'אין מיקום בתלת ממד — מקמו במצב עריכה (Move) או ב-Lab Manager', r.id, r.setup));
@@ -722,33 +728,33 @@
   function dot(rec) { return `<span class="st ${rec.pconf === 'low' || rec.conf === 'low' ? 'low' : ''}" style="background:${STATUS_COLOR[rec.status]}"></span>`; }
   function renderTree() {
     const d = S.data; const el = $('#tree'); const open = LS.get('treeOpen', {});
-    const node = (rec, cls, extra = '', depth = 0) => `<div class="tn ${rec.filtered ? 'dim' : ''} ${S.selected === rec.id ? 'sel' : ''}" data-id="${rec.id}">${dot(rec)}<span class="id ${cls}">${rec.id}</span><span class="nm">${esc(rec.def.name || '')}</span>${extra}</div>`;
+    const node = (rec, cls, extra = '', depth = 0) => `<div class="tn ${rec.filtered ? 'dim' : ''} ${S.selected === rec.id ? 'sel' : ''}" data-id="${esc(rec.id)}">${dot(rec)}<span class="id ${cls}">${esc(rec.id)}</span><span class="nm">${esc(rec.def.name || '')}</span>${extra}</div>`;
     let html = '';
     d.zones.forEach(zn => {
-      html += `<div class="zone-h"><span class="sw" style="background:${zn.color}"></span>${zn.id} · ${esc(zn.name)}</div>`;
+      html += `<div class="zone-h"><span class="sw" style="background:${esc(zn.color)}"></span>${esc(zn.id)} · ${esc(zn.name)}</div>`;
       // setups in zone
       recsOf(r => r.cat === 'setup' && r.zone === zn.id).forEach(su => {
         const isOpen = open[su.id] !== false;
-        html += `<div class="tn grp ${isOpen ? 'open' : ''} ${su.filtered ? 'dim' : ''} ${S.selected === su.id ? 'sel' : ''}" data-id="${su.id}" data-grp="${su.id}"><span class="caret">▶</span>${dot(su)}<span class="id">${su.id}</span><span class="nm">${esc(su.def.name)}</span><span class="tag">${esc(dcimRackOf(su.def) || '—')}</span></div>`;
+        html += `<div class="tn grp ${isOpen ? 'open' : ''} ${su.filtered ? 'dim' : ''} ${S.selected === su.id ? 'sel' : ''}" data-id="${esc(su.id)}" data-grp="${esc(su.id)}"><span class="caret">▶</span>${dot(su)}<span class="id">${esc(su.id)}</span><span class="nm">${esc(su.def.name)}</span><span class="tag">${esc(dcimRackOf(su.def) || '—')}</span></div>`;
         if (isOpen) {
           html += `<div class="tgroup">`;
           recsOf(r => r.cat === 'shelf' && r.setup === su.id).sort((a, b) => b.level - a.level).forEach(sh => {
             const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id);
-            html += `<div class="tn ${sh.filtered ? 'dim' : ''} ${S.selected === sh.id ? 'sel' : ''}" data-id="${sh.id}">${dot(sh)}<span class="id shelf">${sh.id}</span><span class="nm">L${sh.level}${its.length ? '' : ' · empty'}</span></div>`;
-            its.forEach(it => { const lv = it.item.live; const tag = it.item.type === 'opt' ? (lv?.inDcim ? `<span class="tag ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'offp' : ''}">${lv.state}</span>${lv.sw ? `<span class="tag sw">${esc(lv.sw.switch)}${lv.sw.port ? '·' + lv.sw.port : ''}</span>` : ''}` : `<span class="tag">#${it.item.dcim?.outlet ?? '?'}</span>`) : `<span class="tag">${esc(it.item.type)}</span>`; html += `<div class="tgroup">${node(it, 'item', tag)}</div>`; });
+            html += `<div class="tn ${sh.filtered ? 'dim' : ''} ${S.selected === sh.id ? 'sel' : ''}" data-id="${esc(sh.id)}">${dot(sh)}<span class="id shelf">${esc(sh.id)}</span><span class="nm">L${esc(sh.level)}${its.length ? '' : ' · empty'}</span></div>`;
+            its.forEach(it => { const lv = it.item.live; const tag = it.item.type === 'opt' ? (lv?.inDcim ? `<span class="tag ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'offp' : ''}">${lv.state}</span>${lv.sw ? `<span class="tag sw">${esc(lv.sw.switch)}${lv.sw.port ? '·' + esc(lv.sw.port) : ''}</span>` : ''}` : `<span class="tag">#${esc(it.item.dcim?.outlet ?? '?')}</span>`) : `<span class="tag">${esc(it.item.type)}</span>`; html += `<div class="tgroup">${node(it, 'item', tag)}</div>`; });
           });
           recsOf(r => r.cat === 'item' && r.setup === su.id && !r.shelf).forEach(it => { html += node(it, 'item', `<span class="tag">${esc(it.item.placement === 'side-mount' ? 'side · ' + (it.item.side || 'right') : it.item.type)}</span>`); });
           html += `</div>`;
         }
       });
       recsOf(r => r.cat === 'storage' && r.zone === zn.id).forEach(st => {
-        html += `<div class="tn ${st.filtered ? 'dim' : ''} ${S.selected === st.id ? 'sel' : ''}" data-id="${st.id}">${dot(st)}<span class="id" style="color:#c4b5fd">${st.id}</span><span class="nm">${esc(st.def.name)}</span></div>`;
-        recsOf(r => r.cat === 'item' && r.item?.storage === st.id).forEach(it => { html += `<div class="tgroup">${node(it, 'item', `<span class="tag">×${it.item.quantity || 1}</span>`)}</div>`; });
+        html += `<div class="tn ${st.filtered ? 'dim' : ''} ${S.selected === st.id ? 'sel' : ''}" data-id="${esc(st.id)}">${dot(st)}<span class="id" style="color:#c4b5fd">${esc(st.id)}</span><span class="nm">${esc(st.def.name)}</span></div>`;
+        recsOf(r => r.cat === 'item' && r.item?.storage === st.id).forEach(it => { html += `<div class="tgroup">${node(it, 'item', `<span class="tag">×${esc(it.item.quantity || 1)}</span>`)}</div>`; });
       });
       recsOf(r => r.cat === 'item' && r.zone === zn.id && !r.setup && !r.item?.storage && !r.unplaced).forEach(it => { html += node(it, 'item', `<span class="tag">${esc(it.item.type)}</span>`); });
     });
     html += `<div class="zone-h"><span class="sw" style="background:#52525b"></span>Structure</div>`;
-    recsOf(r => r.cat === 'structure').forEach(r => { html += node(r, 'item', `<span class="tag">${r.conf}</span>`); });
+    recsOf(r => r.cat === 'structure').forEach(r => { html += node(r, 'item', `<span class="tag">${esc(r.conf)}</span>`); });
     el.innerHTML = html;
     $$('.tn', el).forEach(n => n.onclick = e => {
       const id = n.dataset.id;
@@ -758,14 +764,14 @@
   }
   function renderInventory() {
     const el = $('#inv'); const rows = [...S.recs.values()].filter(r => r.cat !== 'zone').sort((a, b) => a.id.localeCompare(b.id));
-    el.innerHTML = `<div class="inv-row inv-h"><span>ID</span><span>Name</span><span style="text-align:right">Where</span></div>` + rows.map(r => `<div class="inv-row ${r.filtered ? 'dim' : ''}" data-id="${esc(r.id)}"><span class="id">${dot(r)} ${esc(r.id)}</span><span class="nm" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.def.name || '')}</span><span class="loc">${r.shelf || r.setup || r.item?.storage || r.zone || (r.unplaced ? '—' : 'room')}</span></div>`).join('');
+    el.innerHTML = `<div class="inv-row inv-h"><span>ID</span><span>Name</span><span style="text-align:right">Where</span></div>` + rows.map(r => `<div class="inv-row ${r.filtered ? 'dim' : ''}" data-id="${esc(r.id)}"><span class="id">${dot(r)} ${esc(r.id)}</span><span class="nm" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.def.name || '')}</span><span class="loc">${esc(r.shelf || r.setup || r.item?.storage || r.zone || (r.unplaced ? '—' : 'room'))}</span></div>`).join('');
     $$('.inv-row[data-id]', el).forEach(n => n.onclick = () => select(n.dataset.id));
   }
   function renderUnplaced() {
     const el = $('#unplaced'); const list = [...S.recs.values()].filter(r => r.unplaced); const m = S.model;
     let html = '';
     if (m.unmappedRacks.length) html += `<div class="zone-h">DCIM racks without a physical setup</div>` + m.unmappedRacks.map(r => `<div class="tn"><span class="st" style="background:#fbbf24"></span><span class="id">${esc(r)}</span><span class="nm muted">assign it to a SETUP via the setup panel</span></div>`).join('');
-    if (list.length) html += `<div class="zone-h">Items with no position</div>` + list.map(r => `<div class="tn" data-id="${r.id}">${dot(r)}<span class="id item">${r.id}</span><span class="nm">${esc(r.def.name)}</span><span class="tag">${esc(r.item.type)}</span></div>`).join('');
+    if (list.length) html += `<div class="zone-h">Items with no position</div>` + list.map(r => `<div class="tn" data-id="${esc(r.id)}">${dot(r)}<span class="id item">${esc(r.id)}</span><span class="nm">${esc(r.def.name)}</span><span class="tag">${esc(r.item.type)}</span></div>`).join('');
     if (!html) html = `<div class="muted small" style="padding:8px">Everything is placed.</div>`;
     el.innerHTML = html; $('#unplacedCount').textContent = list.length + m.unmappedRacks.length;
     $$('.tn[data-id]', el).forEach(n => n.onclick = () => select(n.dataset.id));
@@ -785,7 +791,7 @@
       `<span class="st">Low-confidence objects <b class="${low ? 'warn' : ''}">${low}</b></span>`,
       live ? `<span class="st">Floor draw <b class="nv">${known ? (kw / 1000).toFixed(2) + ' kW' + (partial ? ' (partial)' : '') : '\u2014'}</b></span>` : `<span class="st muted">connect the backend for live power / state</span>`,
       temps.length ? `<span class="st">Temp <b class="${Math.max(...temps) > 24 ? 'warn' : ''}">${Math.min(...temps).toFixed(0)}–${Math.max(...temps).toFixed(0)}°C</b></span>` : '',
-      S.model.unmappedRacks.length ? `<span class="st">Unmapped DCIM racks <b class="warn">${S.model.unmappedRacks.join(', ')}</b></span>` : '',
+      S.model.unmappedRacks.length ? `<span class="st">Unmapped DCIM racks <b class="warn">${esc(S.model.unmappedRacks.join(', '))}</b></span>` : '',
     ].join('');
     $('#stAttn').onclick = () => { showTab('attn'); if (S.kiosk || S.attnDockCollapsed) { S.attnDockCollapsed = false; LS.set('attnDockCollapsed', false); renderAttention(); } };
   }
@@ -825,9 +831,11 @@
     const dock = $('#attnDock');
     if (dock) {
       const collapsed = !!S.attnDockCollapsed; const shown = S.attnDockAll ? indexed : indexed.slice(0, 5);
+      const dockScroll = $('.attn-dock-b', dock)?.scrollTop || 0;
       dock.className = 'attn-dock' + (collapsed ? ' collapsed' : '') + (worst ? ' sev-' + worst : '');
       dock.innerHTML = `<button type="button" class="attn-dock-h" id="attnDockToggle" aria-expanded="${!collapsed}" title="${collapsed ? 'הצגת הרשימה' : 'קיפול הרשימה'}"><span class="caret">${collapsed ? '▸' : '▾'}</span>Attention<span class="attn-sum">${c.crit ? `<b class="bad">${c.crit}</b>` : ''}${c.warn ? `<b class="warn">${c.warn}</b>` : ''}${c.info ? `<b class="info">${c.info}</b>` : ''}${list.length ? '' : '<b class="ok">✓</b>'}</span></button>` +
         (collapsed ? '' : `<div class="attn-dock-b">${shown.map(([e, i]) => attnRow(e, i, true)).join('') || '<div class="muted small attn-empty">✓ Nothing needs attention right now.</div>'}${list.length > 5 ? `<button type="button" class="attn-more" id="attnMore">${S.attnDockAll ? 'Show top 5' : `+${list.length - 5} more…`}</button>` : ''}</div>`);
+      const dockBody = $('.attn-dock-b', dock); if (dockBody) dockBody.scrollTop = dockScroll;
       $('#attnDockToggle').onclick = () => { S.attnDockCollapsed = !S.attnDockCollapsed; LS.set('attnDockCollapsed', S.attnDockCollapsed); renderAttention(); };
       const more = $('#attnMore'); if (more) more.onclick = () => { if (!S.kiosk && !S.attnDockAll) { showTab('attn'); return; } S.attnDockAll = !S.attnDockAll; renderAttention(); };
       bindAttnRows(dock); placeAttnDock();
@@ -858,17 +866,22 @@
 
   // ───────────────────────────────────────────────────────────── selection & detail panel
   function anchorOf(rec) { if (!rec.anchor) return null; return typeof rec.anchor === 'function' ? rec.anchor() : rec.anchor; }
-  // A live refresh must not throw away what the user is doing in the panel (typing, an open select, scroll position).
+  // A live refresh must not throw away what the user is doing in the panel (typing, an open select, unsaved editor input, scroll position).
   function detailBusy() {
     const a = document.activeElement; const d = $('#detail');
-    return !!a && a !== document.body && d.contains(a) && (S.editMode || a.matches('input, select, textarea'));
+    return S.detailEdited || (!!a && a !== document.body && d.contains(a) && (S.editMode || a.matches('input, select, textarea')));
   }
   function renderPanel(rec, keepScroll) {
     const body = $('#dBody'); const top = body.scrollTop;
-    S.detailStale = false;
+    S.detailStale = false; S.detailEdited = false;
     if (S.editMode) renderEditor(rec); else renderDetail(rec);
     if (keepScroll) body.scrollTop = top;
   }
+  // Unsaved editor input stays until Save / another selection re-renders the panel, even after focus leaves it.
+  // Controls that apply immediately re-render first, so their (detached) target does not count.
+  ['input', 'change', 'click'].forEach(type => $('#dBody').addEventListener(type, e => {
+    if (e.target.isConnected && (type !== 'click' || e.target.closest('.chip-lg, [data-step]'))) S.detailEdited = true;
+  }));
   $('#detail').addEventListener('focusout', () => setTimeout(() => {
     if (!S.detailStale || detailBusy()) return;
     const rec = S.recs.get(S.selected); if (rec) renderPanel(rec, true); else S.detailStale = false;
@@ -892,14 +905,14 @@
   $('#dClose').onclick = closeDetail;
   $('#dFocus').onclick = () => { const r = S.recs.get(S.selected); if (r) flyTo(r, true); };
 
-  function confPill(c) { return `<span class="pill conf-${c}"><span class="sw" style="background:currentColor"></span>${c}</span>`; }
+  function confPill(c) { return `<span class="pill conf-${esc(c)}"><span class="sw" style="background:currentColor"></span>${esc(c)}</span>`; }
   function statusPill(st) { return `<span class="pill" style="color:${STATUS_COLOR[st]};border-color:${STATUS_COLOR[st]}66;background:${STATUS_COLOR[st]}14"><span class="sw" style="background:${STATUS_COLOR[st]}"></span>${STATUS_LABEL[st]}</span>`; }
   const PHOTO_SRC = n => (window.LAB_PHOTOS && window.LAB_PHOTOS[n]) || `photos/photo-0${n}.jpg`;
   function photosHtml(list) {
     if (!list || !list.length) return `<div class="note muted">No photo shows this object directly (from DCIM data).</div>`;
-    return `<div class="photos">${list.map(n => `<a href="${PHOTO_SRC(n)}" target="_blank" title="${esc(S.data.meta.photoIndex[n] || '')}"><img src="${PHOTO_SRC(n)}" alt="photo ${n}"/><div class="pn">photo ${n}</div></a>`).join('')}</div>`;
+    return `<div class="photos">${list.map(n => `<a href="${esc(PHOTO_SRC(n))}" target="_blank" title="${esc(S.data.meta.photoIndex[n] || '')}"><img src="${esc(PHOTO_SRC(n))}" alt="photo ${esc(n)}"/><div class="pn">photo ${esc(n)}</div></a>`).join('')}</div>`;
   }
-  function link(id, text) { return `<a data-go="${id}">${esc(text || id)}</a>`; }
+  function link(id, text) { return `<a data-go="${esc(id)}">${esc(text || id)}</a>`; }
   function locationOf(rec) {
     const parts = [];
     if (rec.zone) { const z = S.data.zones.find(x => x.id === rec.zone); parts.push(link(rec.zone, z ? `${z.id} — ${z.name}` : rec.zone)); }
@@ -928,7 +941,7 @@
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(ov(rec.id).dcimRack !== undefined ? 'medium' : def.dcimMappingConfidence)}` : ''}</span>
       <span class="k">Owner</span><span class="v">${esc(it?.owner || def.owner || '—')}${it?.live?.owner ? ' <span class="muted small">(DCIM)</span>' : ''}</span>
       <span class="k">Location</span><span class="v">${locationOf(rec)}</span>
-      ${rec.cat === 'setup' ? `<span class="k">Setup</span><span class="v mono">${rec.id}</span>` : rec.setup ? `<span class="k">Setup</span><span class="v mono">${link(rec.setup)}</span>` : ''}
+      ${rec.cat === 'setup' ? `<span class="k">Setup</span><span class="v mono">${esc(rec.id)}</span>` : rec.setup ? `<span class="k">Setup</span><span class="v mono">${link(rec.setup)}</span>` : ''}
     </div></div>`;
 
     // ── OPT controls
@@ -936,17 +949,18 @@
       const dc = it.dcim || {}; const live = S.live.connected;
       const kv = (dc.kvm || []);
       html += `<div class="sec"><div class="sec-h">Connections <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? 'live · DCIM' : 'from DCIM seed (static)'}</span></div><div class="kv">
-        <span class="k">PDU outlet</span><span class="v mono">${dc.pduName ? link(pduItemId(dc.pdu), dc.pduName) : '—'} · <b>#${dc.outlet ?? '?'}</b></span>
+        <span class="k">PDU outlet</span><span class="v mono">${dc.pduName ? link(pduItemId(dc.pdu), dc.pduName) : '—'} · <b>#${esc(dc.outlet ?? '?')}</b></span>
         <span class="k">KVM port</span><span class="v">${kv.length ? kv.map(k => `<span class="pill kvm-pill">${esc(k.kvmName)} · port ${k.port}${k.status ? ' · ' + k.status : ''}</span>`).join(' ') : '<span class="muted">none</span>'}</span>
         <span class="k">Network switch</span><span class="v">${it.live?.sw?.switch ? `<span class="pill sw-pill">${esc(it.live.sw.switch)}${it.live.sw.port ? ' · port ' + it.live.sw.port : ''}</span>` : `<span class="muted">${live ? 'not assigned in DCIM' : 'needs backend (switch_assignments.json is runtime data)'}</span>`}</span>
-        <span class="k">DCIM rack / U</span><span class="v mono">${it.live?.rack ? `${esc(it.live.rack)} · U${String(it.live.u).padStart(2, '0')}${it.placementConfidence === 'low' ? ' <span class="muted">(auto)</span>' : ''}` : (S.recs.get(rec.setup)?.def ? dcimRackOf(S.recs.get(rec.setup).def) : '—')}</span>
+        <span class="k">DCIM rack / U</span><span class="v mono">${it.live?.rack ? `${esc(it.live.rack)} · U${String(it.live.u).padStart(2, '0')}${it.placementConfidence === 'low' ? ' <span class="muted">(auto)</span>' : ''}` : (S.recs.get(rec.setup)?.def ? esc(dcimRackOf(S.recs.get(rec.setup).def)) : '—')}</span>
       </div></div>`;
       html += `<div class="sec"><div class="sec-h">Power control</div>
         <div class="ctl-row">
-          <button class="btn btn-on" data-pw="on" ${live ? '' : 'disabled'}>Power On</button>
+          <button class="btn btn-on" data-pw="on" ${live && !inMaintenance(dc.pdu) ? '' : 'disabled'}${inMaintenance(dc.pdu) ? ' title="PDU in maintenance mode"' : ''}>Power On</button>
           <button class="btn btn-off" data-pw="off" ${live ? '' : 'disabled'}>Power Off</button>
-          <button class="btn btn-cycle" data-pw="cycle" ${live ? '' : 'disabled'}>Cycle</button>
+          <button class="btn btn-cycle" data-pw="cycle" ${live && !inMaintenance(dc.pdu) ? '' : 'disabled'}${inMaintenance(dc.pdu) ? ' title="PDU in maintenance mode"' : ''}>Cycle</button>
         </div>
+        ${inMaintenance(dc.pdu) ? '<div class="note muted" style="margin-top:6px">This PDU is in maintenance mode: Power On and Cycle stay blocked until it is restored in Lab Manager.</div>' : ''}
         ${kv.length ? `<div class="ctl-row" style="margin-top:6px">${kv.map(k => `<button class="btn btn-kvm" data-kvm="${esc(k.kvm)}" data-port="${k.port}" ${live ? '' : 'disabled'}>Open KVM console · ${esc(k.kvmName)} p${k.port}</button>`).join('')}</div>` : ''}
         ${live ? '' : '<div class="note muted" style="margin-top:8px">Connect the Lab Manager backend (⚙ Backend) to enable outlet control and KVM console — exactly the same API calls as the DCIM UI.</div>'}
         ${it.unmappedRack ? `<div class="warn-box" style="margin-top:8px">This OPT lives in DCIM rack <b>${esc(it.live.rack)}</b> which is not mapped to a physical SETUP yet.</div>` : ''}
@@ -965,35 +979,36 @@
     // ── KVM
     if (it?.type === 'kvm') {
       const st = it.live?.status; const live = S.live.connected; const labels = it.dcim?.labels || it.live?.device?.labels || {}; const n = it.dcim?.ports || it.live?.device?.port_count || 8;
-      const ports = st?.ports?.length ? st.ports : Array.from({ length: n }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Port ${i + 1}`, status: labels[String(i + 1)] ? 'idle' : 'empty' }));
-      html += `<div class="sec"><div class="sec-h">Ports <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? '<span style="color:#fda4af">unreachable</span>' : 'click a port to open the console') : 'static labels'}</span></div>
-        <div class="ogrid ${n <= 8 ? 'k8' : ''}">${ports.map(p => `<div class="ocell ${p.status}${p.in_use ? ' hl' : ''}" data-kport="${p.number}" title="${esc(p.label)}"><span class="n">p${p.number}</span><span class="l">${isDefaultOutletLabel(p.label) ? '—' : esc(p.label)}</span>${p.in_use ? '<span class="w">IN USE</span>' : ''}</div>`).join('')}</div></div>`;
+      const failed = live && st?.reachable && st.error;   // answered, but sign-in / API failed: port states are unknown
+      const ports = st?.ports?.length && !failed ? st.ports : Array.from({ length: n }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Port ${i + 1}`, status: failed ? 'unknown' : labels[String(i + 1)] ? 'idle' : 'empty' }));
+      html += `<div class="sec"><div class="sec-h">Ports <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? '<span style="color:#fda4af">unreachable</span>' : failed ? '<span style="color:#fda4af">sign-in failed</span>' : 'click a port to open the console') : 'static labels'}</span></div>
+        <div class="ogrid ${n <= 8 ? 'k8' : ''}">${ports.map(p => `<div class="ocell ${p.status}${p.in_use ? ' hl' : ''}" data-kport="${p.number}" title="${esc(p.label)}"><span class="n">p${p.number}</span><span class="l">${isDefaultOutletLabel(p.label) ? '—' : esc(p.label)}</span>${p.in_use ? '<span class="w">IN USE</span>' : ''}</div>`).join('')}</div>${failed ? `<div class="err-box" style="margin-top:8px">⚠ ${esc(st.error)}</div>` : ''}</div>`;
     }
     // ── Setup: mapping + contents
     if (rec.cat === 'setup') {
       const racks = [...new Set([...(S.data.dcim?.pdus || []).map(p => p.rack), ...S.model.liveRacks])].filter(Boolean).sort();
       const cur = dcimRackOf(def) || '';
       html += `<div class="sec"><div class="sec-h">DCIM rack mapping</div><div class="edit-grid">
-        <span>Rack in DCIM</span><select id="dRack"><option value="">— none —</option>${racks.map(r => `<option value="${esc(r)}" ${r === cur ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
+        <span>Rack in DCIM</span><select id="dRack" ${window.DCIM_CAN_OPERATE ? '' : 'disabled'}><option value="">— none —</option>${racks.map(r => `<option value="${esc(r)}" ${r === cur ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
       </div><div class="note muted" style="margin-top:6px">The photos do not show which physical rack is which DCIM rack. Change it here (saved in this browser) and use <b>Export JSON</b> to persist into lab-data.json.</div></div>`;
       const shelves = recsOf(r => r.cat === 'shelf' && r.setup === rec.id).sort((a, b) => b.level - a.level);
       html += `<div class="sec"><div class="sec-h">Shelves — what is on each level</div>` + shelves.map(sh => {
         const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id);
-        return `<div class="srow" data-go="${sh.id}"><span class="stripe" style="background:${STATUS_COLOR[sh.status]}"></span><span class="lvl">L${sh.level}</span><span class="nm" style="font-weight:500;color:#d4d4d8">${sh.id}</span><span class="sub">${its.length ? its.map(i => esc(i.item.name)).join(', ') : 'empty'}</span></div>`;
+        return `<div class="srow" data-go="${esc(sh.id)}"><span class="stripe" style="background:${STATUS_COLOR[sh.status]}"></span><span class="lvl">L${esc(sh.level)}</span><span class="nm" style="font-weight:500;color:#d4d4d8">${esc(sh.id)}</span><span class="sub">${its.length ? its.map(i => esc(i.item.name)).join(', ') : 'empty'}</span></div>`;
       }).join('') + `</div>`;
       const bay = recsOf(r => r.cat === 'item' && r.setup === rec.id && !r.shelf);
-      if (bay.length) html += `<div class="sec"><div class="sec-h">Rack-level equipment</div>${bay.map(i => `<div class="srow" data-go="${i.id}"><span class="stripe" style="background:${STATUS_COLOR[i.status]}"></span><span class="nm">${esc(i.item.name)}</span><span class="sub">${esc(i.item.type)}</span></div>`).join('')}</div>`;
+      if (bay.length) html += `<div class="sec"><div class="sec-h">Rack-level equipment</div>${bay.map(i => `<div class="srow" data-go="${esc(i.id)}"><span class="stripe" style="background:${STATUS_COLOR[i.status]}"></span><span class="nm">${esc(i.item.name)}</span><span class="sub">${esc(i.item.type)}</span></div>`).join('')}</div>`;
     }
     // ── Shelf contents
     if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
-      html += `<div class="sec"><div class="sec-h">On this shelf</div>${its.length ? its.map(i => { const lv = i.item.live; return `<div class="srow" data-go="${i.id}"><span class="stripe" style="background:${STATUS_COLOR[i.status]}"></span><span class="nm">${esc(i.item.name)}</span><span class="sub">${i.item.type === 'opt' ? `#${i.item.dcim?.outlet ?? '?'}${lv?.sw ? ' · ' + esc(lv.sw.switch) + (lv.sw.port ? '·' + lv.sw.port : '') : ''}` : esc(i.item.type)}</span>${lv?.inDcim ? `<span class="stt ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'off' : 'unk'}">${lv.state}</span>` : ''}</div>`; }).join('') : '<div class="note muted">Nothing assigned to this shelf.</div>'}
+      html += `<div class="sec"><div class="sec-h">On this shelf</div>${its.length ? its.map(i => { const lv = i.item.live; return `<div class="srow" data-go="${esc(i.id)}"><span class="stripe" style="background:${STATUS_COLOR[i.status]}"></span><span class="nm">${esc(i.item.name)}</span><span class="sub">${i.item.type === 'opt' ? `#${esc(i.item.dcim?.outlet ?? '?')}${lv?.sw ? ' · ' + esc(lv.sw.switch) + (lv.sw.port ? '·' + esc(lv.sw.port) : '') : ''}` : esc(i.item.type)}</span>${lv?.inDcim ? `<span class="stt ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'off' : 'unk'}">${lv.state}</span>` : ''}</div>`; }).join('') : '<div class="note muted">Nothing assigned to this shelf.</div>'}
         <div class="note muted" style="margin-top:6px">Shelf → OPT assignment comes from DCIM <code>rack_slots</code> when connected; otherwise a provisional top-down fill by outlet number.</div></div>`;
     }
     // ── Storage contents
     if (rec.cat === 'storage') {
       const its = recsOf(r => r.cat === 'item' && r.item?.storage === rec.id);
-      if (its.length) html += `<div class="sec"><div class="sec-h">Contents</div>${its.map(i => `<div class="srow" data-go="${i.id}"><span class="stripe" style="background:${STATUS_COLOR[i.status]}"></span><span class="nm">${esc(i.item.name)}</span><span class="sub">×${i.item.quantity || 1}</span></div>`).join('')}</div>`;
+      if (its.length) html += `<div class="sec"><div class="sec-h">Contents</div>${its.map(i => `<div class="srow" data-go="${esc(i.id)}"><span class="stripe" style="background:${STATUS_COLOR[i.status]}"></span><span class="nm">${esc(i.item.name)}</span><span class="sub">×${esc(i.item.quantity || 1)}</span></div>`).join('')}</div>`;
     }
     // ── Edit (mutates lab-data.json in memory → Save to server / Download)
     const isLive = rec.id.startsWith('LIVE-');
@@ -1072,6 +1087,20 @@
     const known = people.some(p => p.name === current);
     return `<select id="eOwner" aria-label="Owner"><option value="">— ללא בעלים —</option>${current && !known ? `<option value="${esc(current)}" selected>${esc(current)} (קיים)</option>` : ''}${people.map(p => `<option value="${esc(p.name)}" ${p.name === current ? 'selected' : ''} ${!p.active ? 'disabled' : ''}>${esc(p.name)}${p.active ? '' : ' (לא פעיל)'}</option>`).join('')}</select>`;
   }
+  // Owners of live DCIM objects live in Lab Manager (AssetOwner): OPT key = label.trim().toLowerCase(), rack item key = item:<id>.
+  // `owner` in lab-data.json stays only for static items.
+  function dcimOwnerKey(it) {
+    if (!S.live.connected || !it) return null;
+    if (it.type === 'opt' && it.live?.inDcim && it.dcim?.optKey) return it.dcim.optKey;
+    if (it.id.startsWith('LIVE-') && it.type.startsWith('equip-')) return 'item:' + it.id.slice(5);
+    return null;
+  }
+  async function saveDcimOwner(key, name) {
+    const person = name ? S.live.engineers.find(p => p.name === name) : null;
+    if (name && !person) throw new Error('Choose an engineer from the list');
+    S.live.owners = await api('/api/opt-owners/' + encodeURIComponent(key), { method: 'PUT', body: JSON.stringify({ engineer_id: person ? person.id : null }) });
+    computeModel(); buildItems();
+  }
   function findDef(id) { const d = S.data; return d.setups.find(x => x.id === id) || d.shelves.find(x => x.id === id) || d.storage.find(x => x.id === id) || d.items.find(x => x.id === id) || null; }
   function patchDef(id, patch) { const def = findDef(id); if (!def) return false; Object.entries(patch).forEach(([k, v]) => { if (v === undefined) delete def[k]; else def[k] = v; }); markDirty(); return true; }
   function nextItemId() { let n = 0; S.data.items.forEach(i => { const m = /^ITEM-(\d+)$/.exec(i.id); if (m) n = Math.max(n, +m[1]); }); return 'ITEM-' + String(n + 1).padStart(4, '0'); }
@@ -1109,19 +1138,42 @@
   const rackItemVersions = new WeakMap();
   async function api(path, opts = {}) {
     const base = (S.settings.url || '').replace(/\/$/, '');
-    const headers = { ...(opts.headers || {}) }; if (opts.body) headers['Content-Type'] = 'application/json'; if (S.settings.pass) headers.Authorization = 'Basic ' + btoa('x:' + S.settings.pass);
-    const r = await fetch(base + path, { ...opts, headers });
-    if (!r.ok) throw new Error(`${r.status} ${await r.text().catch(() => '')}`.trim());
-    if (r.status === 204) return null;
+    const { withEtag, ...init } = opts;
+    const headers = { ...(init.headers || {}) }; if (init.body) headers['Content-Type'] = 'application/json'; if (S.settings.pass) headers.Authorization = 'Basic ' + btoa('x:' + S.settings.pass);
+    const r = await fetch(base + path, { ...init, headers });
+    if (r.status === 401) signedOut();
+    if (!r.ok) {
+      // user-facing errors show the server's `detail`, not the raw "409 {json}" body
+      const text = await r.text().catch(() => ''); let detail = '';
+      try { const d = JSON.parse(text).detail; detail = typeof d === 'string' ? d : Array.isArray(d) ? d.map(x => x && x.msg).filter(Boolean).join('; ') : ''; } catch { /* not JSON */ }
+      throw Object.assign(new Error(detail || `${r.status} ${text}`.trim()), { status: r.status, detail });
+    }
+    if (r.status === 204) return withEtag ? { data: null, etag: r.headers.get('ETag') } : null;
     const data = await r.json();
     if (path === '/api/rack-items' && data && typeof data === 'object') rackItemVersions.set(data, r.headers.get('ETag'));
-    return data;
+    return withEtag ? { data, etag: r.headers.get('ETag') } : data;
+  }
+  // Lab Manager layout stores: fresh GET → apply only this edit → PUT with If-Match (only when the GET sent an ETag) → one retry on 409.
+  async function saveLayout(path, edit) {
+    for (let attempt = 1; ; attempt++) {
+      const { data, etag } = await api(path, { withEtag: true });
+      const next = edit(JSON.parse(JSON.stringify(data || {})));
+      try { await api(path, { method: 'PUT', headers: etag ? { 'If-Match': etag } : {}, body: JSON.stringify(next) }); return next; }
+      catch (e) { if (e.status !== 409 || attempt > 1) throw e; }
+    }
+  }
+  // after a failed Lab Manager move, show what the server actually stores
+  async function reloadLayout() {
+    const fresh = await Promise.all(['/api/rack-slots', '/api/rack-overrides', '/api/rack-positions', '/api/rack-items'].map(p => api(p).catch(() => null)));
+    ['rackSlots', 'rackOverrides', 'rackOrder', 'rackItems'].forEach((key, i) => { if (fresh[i]) S.live[key] = fresh[i]; });
   }
   const INVENTORY_PATHS = {
     devices: '/api/devices/', rackSlots: '/api/rack-slots', rackOrder: '/api/rack-positions',
     sw: '/api/switch-assignments', owners: '/api/opt-owners', rackItems: '/api/rack-items',
-    chillers: '/api/chillers', rackOverrides: '/api/rack-overrides', engineers: '/api/engineers',
+    chillers: '/api/chillers', rackOverrides: '/api/rack-overrides', engineers: '/api/engineers', maintenance: '/api/pdus/maintenance',
   };
+  // A PDU in maintenance mode refuses power on / cycle until it is restored in Lab Manager.
+  const inMaintenance = pduId => !!(S.live.connected && pduId && S.live.maintenance?.pdus?.[pduId]);
   async function readLiveInventory() {
     // Share the same inventory source on connection and every live refresh.
     // Failed requests must not clear previously loaded devices or placements.
@@ -1139,10 +1191,11 @@
     S.live.connected = false;
     pill('connecting', 'Connecting…'); $('#sStatus').textContent = 'Connecting…';
     try {
+      await window.DCIM_ACCOUNT_REFRESH?.();   // a new sign-in has a new CSRF token and maybe another role
       const inventory = await readLiveInventory();
       if (session !== liveSession) return;
       if (!Array.isArray(inventory.devices)) throw new Error('Could not load devices');
-      Object.assign(S.live, inventory, { connected: true, error: null });
+      Object.assign(S.live, inventory, { connected: true, error: null, signedOut: false });
       const devices = S.live.devices;
       pill('online', `${window.LAB_DEMO ? 'DEMO (simulated)' : 'Live'} · ${devices.filter(d => d.kind === 'pdu').length} PDU · ${devices.filter(d => d.kind === 'kvm').length} KVM`);
       $('#sStatus').textContent = `Connected — ${devices.length} devices.`;
@@ -1159,7 +1212,28 @@
       computeModel(); buildItems();
     }
   }
-  function disconnect() { ++liveSession; S.live.connected = false; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
+  function disconnect() { ++liveSession; S.live.connected = false; S.live.signedOut = false; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
+  // 401 = the session expired or the user signed out: never keep showing frozen data as "Live".
+  // Data polling stops; only the public auth status is checked until someone signs in again.
+  function signedOut() {
+    if (!S.live.signedOut) {
+      ++liveSession; S.live.signedOut = true; S.live.connected = false; S.live.pdu = {}; S.live.kvm = {};
+      if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null;
+      pill('error', 'Signed out · sign in to resume'); $('#sStatus').textContent = 'Signed out — sign in to Lab Manager again; live data resumes automatically.';
+      toast('Signed out — live data paused until you sign in again', 'err');
+      computeModel(); buildItems();
+    }
+    if (!S.live.timer) S.live.timer = setInterval(resumeAfterSignIn, POLL_MS);
+  }
+  async function resumeAfterSignIn() {
+    if (!S.live.signedOut) return;
+    try {
+      const auth = await (await fetch((S.settings.url || '').replace(/\/$/, '') + '/api/auth/status', { cache: 'no-store' })).json();
+      if (S.live.signedOut && (auth.mode === 'legacy' || auth.user)) connect();
+    } catch { /* still unreachable */ }
+  }
+  window.addEventListener('focus', resumeAfterSignIn);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resumeAfterSignIn(); });
   async function refreshStatuses() {
     const session = liveSession;
     if (!S.live.connected || refreshInFlight === session) return;
@@ -1186,6 +1260,7 @@
     if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
     if (window.DCIM_ACCOUNT_PREFS.confirm_power && ['off', 'cycle'].includes(action) && !confirm(`Power ${action} outlet ${outlet}?`)) return;
     if (!S.live.connected) { toast('Connect the backend first', 'err'); return; }
+    if (action !== 'off' && inMaintenance(pduId)) { toast('This PDU is in maintenance mode — restore it in Lab Manager first', 'err'); return; }
     const old = btn ? btn.innerHTML : null; if (btn) { btn.disabled = true; btn.innerHTML = `<span class="busy"></span> ${action}…`; }
     try {
       await api(`/api/pdus/${pduId}/outlets/${outlet}/power`, { method: 'POST', body: JSON.stringify({ action }) });
@@ -1205,10 +1280,12 @@
   let popEl = null;
   function outletMenu(e, pduItem, outlet) {
     if (popEl) popEl.remove();
+    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
     if (!S.live.connected) { toast('Connect the backend to control outlets', 'err'); return; }
     const r = e.currentTarget.getBoundingClientRect(); popEl = document.createElement('div'); popEl.className = 'pop';
     const lbl = pduItem.live?.status?.outlets?.find(o => o.number === outlet)?.label || pduItem.dcim?.labels?.[String(outlet)] || `Outlet ${outlet}`;
-    popEl.innerHTML = `<div class="pt">${esc(pduItem.name)} · #${outlet} · ${esc(lbl)}</div><button class="btn btn-on" data-a="on">Power On</button><button class="btn btn-off" data-a="off">Power Off</button><button class="btn btn-cycle" data-a="cycle">Power Cycle</button>`;
+    const maint = inMaintenance(pduItem.dcim?.deviceId) ? ' disabled title="PDU in maintenance mode"' : '';
+    popEl.innerHTML = `<div class="pt">${esc(pduItem.name)} · #${outlet} · ${esc(lbl)}${maint ? ' · maintenance' : ''}</div><button class="btn btn-on" data-a="on"${maint}>Power On</button><button class="btn btn-off" data-a="off">Power Off</button><button class="btn btn-cycle" data-a="cycle"${maint}>Power Cycle</button>`;
     const openUp = r.bottom > window.innerHeight / 2; popEl.style.left = Math.min(Math.max(r.left + r.width / 2 - 100, 8), window.innerWidth - 210) + 'px'; popEl.style.top = (openUp ? r.top - 130 : r.bottom + 4) + 'px';
     document.body.appendChild(popEl);
     $$('button', popEl).forEach(b => b.onclick = () => { outletAction(pduItem.dcim.deviceId, outlet, b.dataset.a, b); setTimeout(() => popEl && popEl.remove(), 400); });
@@ -1477,17 +1554,17 @@
     const u = shelfToU(sid, target.cat === 'shelf' ? target.id : null);
     if (kind === 'opt') {
       const key = mit.dcim.optKey;
-      const slots = JSON.parse(JSON.stringify(S.live.rackSlots || {})); const ov = { ...(S.live.rackOverrides || {}) }; const order = JSON.parse(JSON.stringify(S.live.rackOrder || {}));
-      Object.keys(slots).forEach(r => { if (slots[r] && key in slots[r]) delete slots[r][key]; });
-      (slots[rack] = slots[rack] || {})[key] = u;
       const pduRack = S.live.devices.find(d => d.id === mit.dcim.pdu)?.rack || null;
-      if (rack === pduRack) delete ov[key]; else ov[key] = rack;
-      Object.keys(order).forEach(r => { if (Array.isArray(order[r])) order[r] = order[r].filter(k => k !== key); });
-      (order[rack] = order[rack] || []).push(key);
-      await api('/api/rack-slots', { method: 'PUT', body: JSON.stringify(slots) });
-      await api('/api/rack-overrides', { method: 'PUT', body: JSON.stringify(ov) });
-      await api('/api/rack-positions', { method: 'PUT', body: JSON.stringify(order) }).catch(() => {});
-      S.live.rackSlots = slots; S.live.rackOverrides = ov; S.live.rackOrder = order;
+      // rack first: if a later store fails, the OPT is already in the right rack (auto U) instead of losing its old U
+      S.live.rackOverrides = await saveLayout('/api/rack-overrides', ov => { if (rack === pduRack) delete ov[key]; else ov[key] = rack; return ov; });
+      S.live.rackSlots = await saveLayout('/api/rack-slots', slots => {
+        Object.keys(slots).forEach(r => { if (slots[r] && key in slots[r]) delete slots[r][key]; });
+        (slots[rack] = slots[rack] || {})[key] = u; return slots;
+      });
+      S.live.rackOrder = await saveLayout('/api/rack-positions', order => {
+        Object.keys(order).forEach(r => { if (Array.isArray(order[r])) order[r] = order[r].filter(k => k !== key); });
+        (order[rack] = order[rack] || []).push(key); return order;
+      });
       return `${rack} · U${u}`;
     }
     // DCIM rack item (switch / patch panel …)
@@ -1510,7 +1587,7 @@
     if (kind) {
       toast(`Moving ${name} in Lab Manager…`);
       try { const where = await dcimMove(mit, kind, target); toast(`${name} → ${target.id} (${where} saved in Lab Manager)`, 'ok'); }
-      catch (e) { toast('Move failed: ' + e.message, 'err'); return; }
+      catch (e) { toast('Move failed: ' + e.message, 'err'); await reloadLayout(); computeModel(); buildItems(); return; }
     }
     if (def) {
       const patch = { setup: null, shelf: null, storage: undefined, placement: undefined, pos: undefined, side: undefined, placementConfidence: 'high' };
@@ -1535,6 +1612,7 @@
       html += `<div class="sec big"><div class="note">Live from Lab Manager (DCIM). Moving it here writes the rack / U slot back into Lab Manager.</div>
         <label class="lbl-lg">Where</label><div class="where"><span class="where-txt">${esc(loc)}</span></div>
         ${movesViaDcim(it) ? `<div class="row-lg"><button class="btn-lg btn-cyan" id="eMove">⇄ Move… (tap a shelf)</button></div>` : ''}
+        ${dcimOwnerKey(it) ? `<label class="lbl-lg">Owner (saved in Lab Manager)</label>${ownerPicker(it.owner)}` : ''}
         <button class="btn-lg" id="eMaterialize">＋ Add a physical record of it here</button></div>`;
     } else if (rec.cat === 'item') {
       const loc = it.shelf ? shelfName(it.shelf) : it.placement === 'side-mount' ? `${it.setup} · hung on the ${it.side || 'right'} side` : it.placement === 'bottom-bay' ? `${it.setup} · bottom bay` : it.placement === 'rack-strips' ? `${it.setup} · power strips` : it.storage ? it.storage : it.pos ? `free · x ${it.pos[0]} z ${it.pos[1]}` : 'not placed';
@@ -1549,10 +1627,10 @@
         <label class="lbl-lg">Type</label><select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         <label class="lbl-lg">Owner</label>${ownerPicker(it.owner)}
         <label class="lbl-lg">PDU · outlet</label>
-        <div class="row-lg"><select class="in-lg" id="ePdu" style="flex:2"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${x.id}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
-          <div class="stepper"><button data-step="-1">−</button><input id="eOutlet" type="number" min="1" max="48" value="${it.dcim?.outlet ?? ''}" placeholder="#" /><button data-step="1">＋</button></div></div>
+        <div class="row-lg"><select class="in-lg" id="ePdu" style="flex:2"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${esc(x.id)}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+          <div class="stepper"><button data-step="-1">−</button><input id="eOutlet" type="number" min="1" max="48" value="${esc(it.dcim?.outlet ?? '')}" placeholder="#" /><button data-step="1">＋</button></div></div>
         <label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(it.notes || '')}</textarea>
-        <input type="hidden" id="eStatus" value="${it.status || 'unknown'}" />
+        <input type="hidden" id="eStatus" value="${esc(it.status || 'unknown')}" />
       </div>
       <div class="sec big actions">
         <button class="btn-lg btn-save" id="eSave">✓ Save</button>
@@ -1561,23 +1639,23 @@
       </div>`;
     } else if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
-      html += `<div class="sec big"><div class="lbl-lg">On ${rec.id} · level L${rec.level} · ${rec.setup}</div>
-        ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>${esc(i.item.typeLabel || i.item.type)}${i.item.dcim?.outlet ? ' · outlet #' + i.item.dcim.outlet : ''}</small></span><button class="btn-lg sm" data-edit="${i.id}">Edit</button><button class="btn-lg sm btn-cyan" data-move="${i.id}">Move</button></div>`).join('') : '<div class="note">Shelf is empty.</div>'}
+      html += `<div class="sec big"><div class="lbl-lg">On ${esc(rec.id)} · level L${esc(rec.level)} · ${esc(rec.setup)}</div>
+        ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>${esc(i.item.typeLabel || i.item.type)}${i.item.dcim?.outlet ? ' · outlet #' + esc(i.item.dcim.outlet) : ''}</small></span><button class="btn-lg sm" data-edit="${esc(i.id)}">Edit</button><button class="btn-lg sm btn-cyan" data-move="${esc(i.id)}">Move</button></div>`).join('') : '<div class="note">Shelf is empty.</div>'}
         <button class="btn-lg btn-save" id="eAddHere">＋ Add device on this shelf</button></div>
-        <div class="sec big"><label class="lbl-lg">Shelf status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${def.status || 'unknown'}"/><label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>`;
+        <div class="sec big"><label class="lbl-lg">Shelf status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${esc(def.status || 'unknown')}"/><label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>`;
     } else if (rec.cat === 'setup') {
       const racks = [...new Set([...(S.data.dcim?.pdus || []).map(p => p.rack), ...S.model.liveRacks])].filter(Boolean).sort(); const cur = def.dcimRack || '';
       const shelves = recsOf(r => r.cat === 'shelf' && r.setup === rec.id).sort((a, b) => b.level - a.level);
       html += `<div class="sec big"><label class="lbl-lg">Name</label><input class="in-lg" id="eName" value="${esc(def.name)}"/>
         <label class="lbl-lg">DCIM rack (which Rack-0X is this physically?)</label><select class="in-lg" id="dRack"><option value="">— none —</option>${racks.map(r => `<option value="${esc(r)}" ${r === cur ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
-        <label class="lbl-lg">Status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${def.status || 'unknown'}"/>
+        <label class="lbl-lg">Status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${esc(def.status || 'unknown')}"/>
         <label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>
-        <div class="sec big"><div class="lbl-lg">Shelves (tap to edit)</div>${shelves.map(sh => { const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id); return `<div class="itm-lg" data-go="${sh.id}"><span class="lvl-lg">L${sh.level}</span><span class="itm-name">${its.length ? its.map(i => esc(i.item.name)).join(', ') : '<i>empty</i>'}<small>${sh.id}</small></span><span class="chev">›</span></div>`; }).join('')}
+        <div class="sec big"><div class="lbl-lg">Shelves (tap to edit)</div>${shelves.map(sh => { const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id); return `<div class="itm-lg" data-go="${esc(sh.id)}"><span class="lvl-lg">L${esc(sh.level)}</span><span class="itm-name">${its.length ? its.map(i => esc(i.item.name)).join(', ') : '<i>empty</i>'}<small>${esc(sh.id)}</small></span><span class="chev">›</span></div>`; }).join('')}
         <button class="btn-lg" id="eAddBay">＋ Add rack-level item (bottom bay)</button></div>`;
     } else if (rec.cat === 'storage') {
       const its = recsOf(r => r.cat === 'item' && r.item?.storage === rec.id);
-      html += `<div class="sec big"><label class="lbl-lg">Name</label><input class="in-lg" id="eName" value="${esc(def.name)}"/><label class="lbl-lg">Status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${def.status || 'unknown'}"/><label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>
-        <div class="sec big"><div class="lbl-lg">Contents</div>${its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>×${i.item.quantity || 1}</small></span><button class="btn-lg sm" data-edit="${i.id}">Edit</button></div>`).join('') || '<div class="note">Empty.</div>'}<button class="btn-lg" id="eAddStore">＋ Add item here</button></div>`;
+      html += `<div class="sec big"><label class="lbl-lg">Name</label><input class="in-lg" id="eName" value="${esc(def.name)}"/><label class="lbl-lg">Status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${esc(def.status || 'unknown')}"/><label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>
+        <div class="sec big"><div class="lbl-lg">Contents</div>${its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>×${esc(i.item.quantity || 1)}</small></span><button class="btn-lg sm" data-edit="${esc(i.id)}">Edit</button></div>`).join('') || '<div class="note">Empty.</div>'}<button class="btn-lg" id="eAddStore">＋ Add item here</button></div>`;
     } else {
       html += `<div class="sec big"><div class="note">${esc(def.notes || 'Nothing editable here — tap a rack, shelf or device.')}</div></div>`;
     }
@@ -1589,19 +1667,22 @@
     $$('[data-move]', body).forEach(el => el.onclick = e => { e.stopPropagation(); startMove(el.dataset.move); });
     $$('[data-step]', body).forEach(b => b.onclick = () => { const i = $('#eOutlet'); i.value = Math.min(48, Math.max(1, (parseInt(i.value, 10) || 0) + parseInt(b.dataset.step, 10))); });
     const mv = $('#eMove'); if (mv) mv.onclick = () => startMove(rec.id);
+    const eo = $('#eOwner'); if (eo && isLive) eo.onchange = () => { const key = dcimOwnerKey(it); if (key) saveDcimOwner(key, eo.value.trim() || null).then(() => toast('Owner saved in Lab Manager', 'ok')).catch(e => { toast('Owner not saved: ' + e.message, 'err'); select(rec.id, { keepCamera: true }); }); };
     $$('[data-side]', body).forEach(b => b.onclick = () => { const v = b.dataset.side; const patch = v === 'bay' ? { shelf: null, placement: 'bottom-bay', side: undefined } : { shelf: null, placement: 'side-mount', side: v, mountHeight: it.mountHeight || 1.45 }; patchDef(rec.id, patch); rebuildAll(); select(rec.id, { keepCamera: true }); });
     const un = $('#eUnplace'); if (un) un.onclick = () => { patchDef(rec.id, { setup: null, shelf: null, placement: undefined, storage: undefined, pos: undefined }); rebuildAll(); select(rec.id, { keepCamera: true }); toast('Item unplaced — find it under Unplaced', 'ok'); };
     const dr = $('#dRack'); if (dr) dr.onchange = () => { patchDef(rec.id, { dcimRack: dr.value || null, dcimMappingConfidence: 'medium' }); rebuildAll(); select(rec.id, { keepCamera: true }); toast(`${rec.id} → ${dr.value || 'no DCIM rack'}`, 'ok'); };
     const sv = $('#eSave'); if (sv) sv.onclick = () => {
       const patch = { status: $('#eStatus').value, notes: $('#eNotes')?.value ?? def.notes };
       if ($('#eName')) patch.name = $('#eName').value.trim() || def.name;
+      const ownerKey = rec.cat === 'item' ? dcimOwnerKey(it) : null; const owner = $('#eOwner') ? $('#eOwner').value.trim() || null : null;
       if (rec.cat === 'item') {
-        patch.type = $('#eType').value; patch.owner = $('#eOwner').value.trim() || null;
+        patch.type = $('#eType').value; if (!ownerKey) patch.owner = owner;
         const pdu = $('#ePdu').value, outlet = parseInt($('#eOutlet').value, 10);
         if (pdu) { const pd = (S.data.dcim?.pdus || []).find(x => x.id === pdu); patch.dcim = { ...(it.dcim || {}), pdu, pduName: pd?.name, outlet: isNaN(outlet) ? undefined : outlet, optKey: optKey(patch.name) }; }
         else if (it.dcim) { const { pdu: _p, pduName: _n, outlet: _o, ...rest } = it.dcim; patch.dcim = Object.keys(rest).length ? rest : undefined; }
       }
       patchDef(rec.id, patch); rebuildAll(); select(rec.id, { keepCamera: true }); toast('Saved — press “Save to server” when done', 'ok');
+      if (ownerKey && owner !== (it.owner || null)) saveDcimOwner(ownerKey, owner).then(() => toast('Owner saved in Lab Manager', 'ok')).catch(e => toast('Owner not saved: ' + e.message, 'err'));
     };
     const rp = $('#eReplace'); if (rp) rp.onclick = () => {
       const name = prompt('Name of the NEW device (the old one is kept as “dismantled” history):', it.name); if (!name) return;
@@ -1689,7 +1770,7 @@
     env.innerHTML = `<div class="e-title">Lab environment <small>avg of ${tN || hN} sensor${(tN || hN) === 1 ? '' : 's'}</small></div>
       <div class="e-row"><span class="e-ic">🌡</span><b class="e-${tCls}">${tAvg == null ? '—' : tAvg.toFixed(1) + '°C'}</b>${tN > 1 ? `<small>${tMin.toFixed(1)}–${tMax.toFixed(1)}</small>` : ''}</div>
       <div class="e-row"><span class="e-ic">💧</span><b>${hAvg == null ? '—' : hAvg.toFixed(0) + '%'}</b><small>humidity</small></div>
-      <div class="e-row"><span class="e-ic">${leaks.length ? '⚠' : '●'}</span><b class="${leaks.length ? 'e-bad' : 'e-ok'}">${leaks.length ? 'LEAK · ' + leaks.join(', ') : 'no leaks'}</b></div>
+      <div class="e-row"><span class="e-ic">${leaks.length ? '⚠' : '●'}</span><b class="${leaks.length ? 'e-bad' : 'e-ok'}">${leaks.length ? 'LEAK · ' + esc(leaks.join(', ')) : 'no leaks'}</b></div>
       <div class="e-row e-foot"><small>${kwKnown ? (kwTot / 1000).toFixed(2) + ' kW total' + (kwPartial ? ' (partial)' : '') : '\u2014'}</small></div>`;
   }
   $('#tHeat').onclick = () => { S.heat = !S.heat; LS.set('heat', S.heat); $('#tHeat').classList.toggle('active', S.heat); updateTelemetry(); };
@@ -1704,8 +1785,8 @@
       const t = S.live.connected ? rackTelemetry(su) : null;
       return { color: t && !t.loading ? STATUS_COLOR[t.reachable ? 'active' : 'inactive'] : STATUS_COLOR[su.status || 'unknown'], n: 0, w: null };
     };
-    bar.innerHTML = S.data.setups.map(su => { const d = rackDot(su); return `<button data-jump="${su.id}" class="${S.selected === su.id ? 'on' : ''}" title="${d.n ? `${d.n} item${d.n === 1 ? '' : 's'} need attention` : esc(su.id)}"><span><span class="rb-dot" style="background:${d.color}"></span>${esc(su.dcimRack || su.id)}${d.n ? `<span class="rb-n sev-${d.w}">${d.n}</span>` : ''}</span><small>${esc(su.name.split('—')[0].replace('Rack', '').trim())}</small></button>`; }).join('') +
-      S.data.storage.map(st => `<button data-jump="${st.id}" class="${S.selected === st.id ? 'on' : ''}"><span><span class="rb-dot" style="background:${STATUS_COLOR[st.status || 'unknown']}"></span>${st.id.replace('STORAGE-', 'ST-')}</span><small>${esc(st.name.split(' ').slice(0, 2).join(' '))}</small></button>`).join('');
+    bar.innerHTML = S.data.setups.map(su => { const d = rackDot(su); return `<button data-jump="${esc(su.id)}" class="${S.selected === su.id ? 'on' : ''}" title="${d.n ? `${d.n} item${d.n === 1 ? '' : 's'} need attention` : esc(su.id)}"><span><span class="rb-dot" style="background:${d.color}"></span>${esc(su.dcimRack || su.id)}${d.n ? `<span class="rb-n sev-${d.w}">${d.n}</span>` : ''}</span><small>${esc(su.name.split('—')[0].replace('Rack', '').trim())}</small></button>`; }).join('') +
+      S.data.storage.map(st => `<button data-jump="${esc(st.id)}" class="${S.selected === st.id ? 'on' : ''}"><span><span class="rb-dot" style="background:${STATUS_COLOR[st.status || 'unknown']}"></span>${esc(st.id.replace('STORAGE-', 'ST-'))}</span><small>${esc(st.name.split(' ').slice(0, 2).join(' '))}</small></button>`).join('');
     $$('[data-jump]', bar).forEach(b => b.onclick = () => select(b.dataset.jump, { fly: true }));
   }
   function zoomBy(f) { markView(null); const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
@@ -1742,9 +1823,15 @@
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
   window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab };
-  const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+  const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
+    if (err.status === 401) {   // accounts mode: the inventory file is only served to a signed-in session
+      const fb = $('#loadFallback'); $('.modal-h', fb).textContent = 'Sign in required';
+      $('.modal-b', fb).innerHTML = '<p>The Digital Twin shows the lab inventory only to signed-in users.</p><p>Sign in to Lab Manager, then reload this page.</p><p><a class="btn btn-primary" href="/" target="_top">Open Lab Manager</a> <button class="btn" type="button" id="fbReload">Reload</button></p>';
+      $('#fbReload').onclick = () => location.reload();
+      fb.classList.remove('hidden'); pill('error', 'Signed out · sign in to view'); return;
+    }
     $('#loadFallback').classList.remove('hidden');
     $('#fileJson').onchange = e => { const f = e.target.files[0]; if (!f) return; f.text().then(t => { $('#loadFallback').classList.add('hidden'); init(JSON.parse(t)); }).catch(er => toast('Invalid JSON: ' + er.message, 'err')); };
   });

@@ -15,6 +15,16 @@ export function versionOf(title) {
   return (/^(v\d+(?:\.\d+)*)\b/.exec(String(title || "")) || [])[1] || null;
 }
 
+// Changelog card heading: the version (or "Unreleased") and the rest of the title.
+export function sectionHeading(title) {
+  const text = String(title || "").trim();
+  const version = versionOf(text);
+  const unreleased = !version && /^unreleased\b/i.test(text);
+  const label = version || (unreleased ? "Unreleased" : text);
+  const detail = version || unreleased ? text.slice(label.length).replace(/^[\s—–-]+/, "") : "";
+  return { label, detail, unreleased };
+}
+
 // Sections newer than the version this browser last saw. Unknown or missing
 // "seen" versions show only the newest release (and the Unreleased notes above it).
 export function releaseNotesSince(text, seen, current, max = 6) {

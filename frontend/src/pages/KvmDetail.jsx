@@ -1,30 +1,41 @@
 import { Fragment, useState } from "react";
 import StatusDot from "../components/StatusDot";
 import {useAccounts} from "../accounts";
+import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
 
-export default function KvmDetail({ device, status, onBack, onPortClick, onDelete, onLabelsSave, onMarkFree }) {
+export default function KvmDetail({ device, status, onBack, from, onPortClick, onDelete, onLabelsSave, onMarkFree }) {
   const {canOperate,canAdmin} = useAccounts();
   const [editMode, setEditMode] = useState(false);
   const [draftLabels, setDraftLabels] = useState({});
+  const [draftRevision, setDraftRevision] = useState(undefined);
+  const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
   if (!device) return null;
   const ports = status?.ports || [];
   const active = ports.filter(p => p.status === "active").length;
   const inUsePorts = ports.filter(p => p.in_use);
   const isLx = device.model?.includes("LX");
+  const state = deviceState(status);
 
   function startEdit() {
+    // Saved labels win over the status reading so the map matches the revision sent with it.
     const current = {};
-    ports.forEach(p => { current[p.number] = p.label || ""; });
+    ports.forEach(p => { current[p.number] = device.labels?.[String(p.number)] ?? p.label ?? ""; });
     setDraftLabels(current);
+    setDraftRevision(device.labels_revision);
+    setSaveError("");
     setEditMode(true);
   }
 
   async function saveLabels() {
     setSaving(true);
+    setSaveError("");
     try {
-      await onLabelsSave(draftLabels);
+      await onLabelsSave(draftLabels, draftRevision);
       setEditMode(false);
+    } catch (e) {
+      setSaveError(errorMessage(e));
+      if (e.status === 409) setEditMode(false);
     } finally {
       setSaving(false);
     }
@@ -32,7 +43,7 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
 
   return (
     <main className="flex-1 px-6 py-5 max-w-[1600px] w-full mx-auto">
-      <BackBar onBack={onBack} crumbs={["Dashboard", device.name]} />
+      <BackBar onBack={onBack} crumbs={[from || "Dashboard", device.name]} />
       <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-5">
         <section className="lg:col-span-2 bg-zinc-900/70 border border-zinc-800 rounded-xl">
           <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
@@ -49,9 +60,12 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
               <span className="flex-1">KVM in use — {inUsePorts.map(p => p.label || `Port ${p.number}`).join(", ")}</span>
               <button disabled={!canOperate} onClick={e => { e.stopPropagation(); onMarkFree && onMarkFree(); }}
-                title="Mark as free"
-                className="text-emerald-600 hover:text-emerald-300 transition leading-none px-1">✕</button>
+                title="Mark as free" aria-label="Mark KVM free"
+                className="w-6 h-6 inline-flex items-center justify-center rounded text-emerald-600 hover:text-emerald-300 hover:bg-emerald-500/10 transition leading-none">✕</button>
             </div>
+          )}
+          {state === "error" && (
+            <div role="alert" className="px-4 py-2.5 bg-rose-500/10 border-b border-rose-500/30 text-rose-300 text-xs">⚠ {status.error}</div>
           )}
           {isLx && (
             <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs">
@@ -80,9 +94,10 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
                 </div>
               )}
             </div>
+            {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
             {ports.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
-                {status?.reachable === false ? `Cannot reach device: ${status.error}` : "Loading…"}
+                {state === "offline" ? `Cannot reach device: ${status.error}` : state === "error" ? "The port list is unavailable." : state === "unavailable" ? `Status unavailable: ${status.error}` : "Loading…"}
               </div>
             ) : (
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -112,8 +127,8 @@ export default function KvmDetail({ device, status, onBack, onPortClick, onDelet
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4">
             <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Summary</div>
             <Row label="Status">
-              <StatusDot status={status?.reachable ? "online" : "offline"} />
-              <span className="ml-1.5">{status?.reachable ? "Online" : status ? "Offline" : "Unknown"}</span>
+              <StatusDot status={STATE_DOT[state]} />
+              <span className="ml-1.5">{STATE_TEXT[state]}</span>
             </Row>
             <Row label="Rack" v={device.rack} />
             <Row label="IP" v={device.ip} />

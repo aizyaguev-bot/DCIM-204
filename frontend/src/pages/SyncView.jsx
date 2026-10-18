@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { api } from "../api/client";
+import { api, errorMessage } from "../api/client";
 import {useAccounts} from "../accounts";
 
 function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, onCancel }) {
@@ -26,17 +26,18 @@ function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, on
           value={label}
           onChange={e => setLabel(e.target.value)}
           placeholder="— empty —"
+          aria-label={`OPT label for ${row.pdu_name} outlet ${row.outlet_number}`}
           className={`${inp} w-32`}
         />
       </td>
       <td className="px-3 py-2" colSpan={2}>
         <div className="flex gap-2 items-center">
-          <select value={kvmDeviceId} onChange={e => { setKvmDeviceId(e.target.value); setKvmPort(""); }} className={`${sel} flex-1 min-w-[130px]`}>
+          <select value={kvmDeviceId} onChange={e => { setKvmDeviceId(e.target.value); setKvmPort(""); }} aria-label={`KVM for outlet ${row.outlet_number}`} className={`${sel} flex-1 min-w-[130px]`}>
             <option value="">— none —</option>
             {kvms.map(k => <option key={k.id} value={k.id}>{k.name}</option>)}
           </select>
           {kvmDeviceId && kvmPorts.length > 0 ? (
-            <select value={kvmPort} onChange={e => setKvmPort(e.target.value)} className={`${sel} w-24`}>
+            <select value={kvmPort} onChange={e => setKvmPort(e.target.value)} aria-label={`KVM port for outlet ${row.outlet_number}`} className={`${sel} w-24`}>
               <option value="">port…</option>
               {kvmPorts.map(p => (
                 <option key={p.number} value={p.number}>
@@ -45,7 +46,7 @@ function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, on
               ))}
             </select>
           ) : kvmDeviceId ? (
-            <input type="number" min="1" value={kvmPort} onChange={e => setKvmPort(e.target.value)} placeholder="port #" className={`${inp} w-20`} />
+            <input type="number" min="1" value={kvmPort} onChange={e => setKvmPort(e.target.value)} placeholder="port #" aria-label={`KVM port for outlet ${row.outlet_number}`} className={`${inp} w-20`} />
           ) : null}
         </div>
       </td>
@@ -64,7 +65,7 @@ function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, on
   );
 }
 
-export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
+export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged }) {
   const {canOperate} = useAccounts();
   const [editing, setEditing] = useState(null); // { pdu_id, outlet_number }
   const [saving,  setSaving]  = useState(false);
@@ -170,15 +171,10 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
       }
 
       setEditing(null);
-      // Reload statuses via parent (trigger re-render naturally on next poll)
-      // For immediate feedback, force a status refresh
-      await Promise.all([
-        fetch(`/api/pdus/${row.pdu_id}/status`).catch(() => {}),
-        ...(origKvm ? [fetch(`/api/kvms/${origKvm.device_id}/status`).catch(() => {})] : []),
-        ...(draft.kvmDeviceId ? [fetch(`/api/kvms/${draft.kvmDeviceId}/status`).catch(() => {})] : []),
-      ]);
+      await onChanged?.();
     } catch (e) {
-      alert(`Save failed: ${e.message}`);
+      alert(`Save failed: ${errorMessage(e)}`);
+      onChanged?.();
     } finally {
       setSaving(false);
     }
@@ -187,16 +183,16 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
   const pdusWithNoStatus = pdus.filter(p => !pduStatuses[p.id]);
 
   return (
-    <div className="max-w-[1400px] mx-auto px-6 py-5">
+    <div className="max-w-[1400px] mx-auto px-4 sm:px-6 py-5">
       <div className="flex items-start justify-between mb-5 gap-4 flex-wrap">
         <div>
           <h2 className="text-lg font-semibold text-zinc-100">PDU ↔ KVM Sync Map</h2>
-          <p className="text-xs text-zinc-400 mt-0.5">כל האאוטלטים — ערוך label וKVM ללא cascade</p>
+          <p dir="rtl" className="text-xs text-zinc-400 mt-0.5">כל האאוטלטים — ערוך label וKVM ללא cascade</p>
         </div>
       </div>
 
       {pdusWithNoStatus.length > 0 && (
-        <div className="mb-4 text-xs text-amber-400 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2">
+        <div dir="rtl" className="mb-4 text-xs text-amber-400 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2">
           ממתין לסטטוס: {pdusWithNoStatus.map(p => p.name).join(", ")}
         </div>
       )}
@@ -204,6 +200,8 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
       <div className="flex gap-3 mb-4 flex-wrap items-center">
         <input
           type="text"
+          dir="auto"
+          aria-label="Search outlets"
           placeholder="חיפוש לפי OPT, PDU, outlet…"
           value={search}
           onChange={e => setSearch(e.target.value)}
@@ -215,7 +213,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
             { id: "assigned", label: `מוקצה (${totalAssigned})` },
             { id: "empty",    label: `ריק (${totalEmpty})` },
           ].map(f => (
-            <button key={f.id} onClick={() => setFilter(f.id)}
+            <button key={f.id} dir="rtl" onClick={() => setFilter(f.id)} aria-pressed={filter === f.id}
               className={`px-3 py-1 rounded text-xs font-medium transition ${
                 filter === f.id
                   ? "bg-nv-400/20 text-nv-300 border border-nv-400/30"
@@ -227,7 +225,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
         </div>
       </div>
 
-      <div className="rounded-xl border border-zinc-800/60 overflow-hidden">
+      <div className="rounded-xl border border-zinc-800/60 overflow-x-auto">
         <table className="w-full text-sm border-collapse">
           <thead>
             <tr className="bg-zinc-900/60 border-b border-zinc-800">
@@ -263,7 +261,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
                 if (row.noStatus) {
                   elements.push(
                     <tr key={`ns-${row.pdu_id}`} className="opacity-40">
-                      <td colSpan={7} className="px-4 py-2 text-xs text-zinc-500 italic">לא נטען עדיין…</td>
+                      <td colSpan={7} dir="rtl" className="px-4 py-2 text-xs text-zinc-500 italic">לא נטען עדיין…</td>
                     </tr>
                   );
                   return elements;
@@ -297,6 +295,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
                     <td className="px-3 py-2.5 text-zinc-400 font-mono text-sm">{row.kvm ? `#${row.kvm.port}` : <span className="text-zinc-700">—</span>}</td>
                     <td className="px-3 py-2.5 text-right">
                       <button disabled={!canOperate} onClick={() => setEditing(key)}
+                        aria-label={`Edit ${row.pdu_name} outlet ${row.outlet_number}${row.label ? ` (${row.label})` : ""}`}
                         className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded transition">
                         Edit
                       </button>
@@ -307,10 +306,10 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses }) {
               });
             })()}
             {filtered.length === 0 && allRows.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-12 text-zinc-500">ממתין לסטטוס PDU…</td></tr>
+              <tr><td colSpan={7} dir="rtl" className="text-center py-12 text-zinc-500">ממתין לסטטוס PDU…</td></tr>
             )}
             {filtered.length === 0 && allRows.length > 0 && (
-              <tr><td colSpan={7} className="text-center py-10 text-zinc-500">אין תוצאות לפילטר הזה</td></tr>
+              <tr><td colSpan={7} dir="rtl" className="text-center py-10 text-zinc-500">אין תוצאות לפילטר הזה</td></tr>
             )}
           </tbody>
         </table>

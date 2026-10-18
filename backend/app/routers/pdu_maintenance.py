@@ -1,37 +1,32 @@
 """PDU maintenance: switch off every powered outlet after server-side password re-confirmation."""
-import asyncio, hashlib, json, re, secrets, time
+import json, time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import case, delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import accounts
+from .. import confirm
 from ..config import get_settings
 from ..database import get_db
-from ..models import AuthThrottle, PduMaintenance, PduMaintenanceLog, User
+from ..models import PduMaintenance, PduMaintenanceLog
 from . import pdus
 
 router = APIRouter(prefix="/api/pdus", tags=["pdu-maintenance"])
 
-SHARED_BY = "shared-password"
-MAX_PASSWORD = 256
-MAX_REASON = 200
+SHARED_BY = confirm.SHARED_BY
+MAX_PASSWORD = confirm.MAX_PASSWORD
+MAX_REASON = confirm.MAX_REASON
 LOG_LIMIT = 50
 LOG_KEEP = 500
-FAILURE_LIMIT = 10
-FAILURE_WINDOW = 300
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+FAILURE_LIMIT = confirm.FAILURE_LIMIT
+FAILURE_WINDOW = confirm.FAILURE_WINDOW
 
-# One password check at a time, so a pending attempt never counts toward another request's limit.
-_confirm_lock = asyncio.Lock()
+_confirm_lock = confirm.confirm_lock
 
 
 def password_mode() -> str:
-    settings = get_settings()
-    if settings.accounts_enabled: return "account"
-    if settings.lab_manager_password: return "shared"
-    return "unavailable"
+    return confirm.password_mode(get_settings())
 
 
 def _state(row: PduMaintenance) -> dict:
@@ -55,77 +50,19 @@ async def _log(db: AsyncSession, device_id: str, action: str, by: str, reason: s
 
 
 async def _read_body(request: Request, need_reason: bool) -> tuple[str, str]:
-    # Parsed by hand: a pydantic 422 body would echo the submitted password.
-    try: body = await request.json()
-    except ValueError: body = None
-    if not isinstance(body, dict): raise HTTPException(400, "Invalid request body")
-    password = body.get("password")
-    if not isinstance(password, str) or not password: raise HTTPException(400, "Password is required")
-    if len(password) > MAX_PASSWORD: raise HTTPException(400, "Password is too long")
-    reason = ""
-    if need_reason:
-        raw = body.get("reason") if isinstance(body.get("reason"), str) else ""
-        if _CONTROL.search(raw): raise HTTPException(400, "Reason contains unsupported characters")
-        reason = raw.strip()
-        if not 1 <= len(reason) <= MAX_REASON: raise HTTPException(400, f"Reason is required (1–{MAX_REASON} characters)")
+    password, reason, _ = await confirm.read_body(request, "required" if need_reason else "none")
     return password, reason
 
 
 def _require_password_mode():
-    if password_mode() == "unavailable":
-        raise HTTPException(403, "Maintenance actions require a configured password")
-
-
-async def _refund_attempt(db: AsyncSession, digest: str):
-    await db.execute(update(AuthThrottle).where(AuthThrottle.key == digest, AuthThrottle.attempts > 0)
-                     .values(attempts=AuthThrottle.attempts - 1))
-    await db.commit()
-
-
-async def _reserve_attempt(db: AsyncSession, key: str) -> str:
-    """Counts an attempt in a maintenance-only throttle namespace; refunded unless the password turns out wrong."""
-    now = time.time()
-    digest = hashlib.sha256(key.encode()).hexdigest()
-    expired = AuthThrottle.window_at < now - FAILURE_WINDOW
-    statement = update(AuthThrottle).where(AuthThrottle.key == digest).values(
-        attempts=case((expired, 1), else_=AuthThrottle.attempts + 1),
-        window_at=case((expired, now), else_=AuthThrottle.window_at)).returning(AuthThrottle.attempts)
-    attempts = (await db.execute(statement)).scalar_one_or_none()
-    if attempts is None:
-        db.add(AuthThrottle(key=digest, attempts=1, window_at=now))
-        try:
-            await db.commit()
-            attempts = 1
-        except IntegrityError:
-            await db.rollback()
-            attempts = (await db.execute(statement)).scalar_one()
-    await db.commit()
-    if attempts > FAILURE_LIMIT:
-        await _refund_attempt(db, digest)
-        raise HTTPException(429, "Too many attempts. Try again in five minutes.", headers={"Retry-After": "300"})
-    return digest
+    confirm.require_password_mode(get_settings())
 
 
 async def _confirm(request: Request, db: AsyncSession, device_id: str, password: str, attempted: str) -> str:
     """Verifies the re-entered password and returns the audit name; denials are logged, never the password."""
-    async with _confirm_lock:
-        if password_mode() == "account":
-            current = accounts.account(request)
-            by = current["user"]["username"]
-            # ":" cannot occur in usernames, so these keys never collide with login throttle keys.
-            digest = await _reserve_attempt(db, "maint:user:" + by)
-            user = await db.get(User, current["user"]["id"])
-            valid = bool(user) and await asyncio.to_thread(accounts.verify_password, password, user.password_hash)
-        else:
-            by = SHARED_BY
-            digest = await _reserve_attempt(db, "maint:client:" + (request.client.host if request.client else "unknown"))
-            valid = secrets.compare_digest(password.encode(), get_settings().lab_manager_password.encode())
-        if not valid:
-            await _log(db, device_id, "denied", by, attempted)
-            await db.commit()
-            raise HTTPException(403, "Password is incorrect")
-        await _refund_attempt(db, digest)
-    return by
+    async def denied(by: str):
+        await _log(db, device_id, "denied", by, attempted)
+    return await confirm.verify(request, db, password, get_settings(), _confirm_lock, denied)
 
 
 async def _switch(dev, numbers: list[int], action: str) -> list[tuple[int, bool]]:

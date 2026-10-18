@@ -98,8 +98,8 @@ async def pdu_status(
     cached = _cache.get(device_id)
     age = time.monotonic() - cached[0] if cached else float("inf")
 
-    if cached and age < _CACHE_TTL:
-        # Fresh — apply latest DB labels and return instantly
+    if cached:
+        # Apply the latest DB labels and return instantly; stale data is also refreshed in the background
         status = cached[1]
         labels = json.loads(dev.labels_json or "{}")
         if labels:
@@ -109,12 +109,9 @@ async def pdu_status(
                 label = labels.get(key, o.label)
                 updated.append(o.model_copy(update={"label": label}))
             status = status.model_copy(update={"outlets": updated})
+        if age >= _CACHE_TTL:
+            background_tasks.add_task(_refresh_background, device_id, dev)
         return status
-
-    if cached:
-        # Stale — return old data instantly, refresh in background
-        background_tasks.add_task(_refresh_background, device_id, dev)
-        return cached[1]
 
     # First load — fetch now
     result = await _fetch_status(device_id, dev)

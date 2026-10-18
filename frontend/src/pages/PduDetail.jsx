@@ -2,34 +2,47 @@ import { Fragment, useState } from "react";
 import StatusDot from "../components/StatusDot";
 import {useAccounts} from "../accounts";
 import { formatMaintenanceTime } from "../components/MaintenanceColumn";
+import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
 
 const MAINTENANCE_BLOCKED = "PDU is in maintenance mode; restore it from the Maintenance column first";
+const OFFLINE_BLOCKED = "PDU is unreachable; outlet power actions are unavailable";
 
-export default function PduDetail({ device, status, maintenance, maintenanceMode, onMaintenance, onBack, onOutletAction, onDelete, onLabelsSave }) {
+export default function PduDetail({ device, status, maintenance, maintenanceMode, onMaintenance, onBack, from, onOutletAction, onTurnOnAll, onDelete, onLabelsSave }) {
   const {canOperate,canAdmin} = useAccounts();
   const [editMode, setEditMode] = useState(false);
   const [draftLabels, setDraftLabels] = useState({});
+  const [draftRevision, setDraftRevision] = useState(undefined);
+  const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
   if (!device) return null;
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;
+  const state = deviceState(status);
   const inMaintenance = !!maintenance;
+  const turnOnBlocked = inMaintenance ? MAINTENANCE_BLOCKED : state === "offline" ? OFFLINE_BLOCKED : state !== "online" ? "Outlet states are not available" : undefined;
   const maintenanceReady = canOperate && maintenanceMode != null && maintenanceMode !== "unavailable";
   const maintenanceHint = maintenanceMode === "unavailable" ? "Maintenance actions require a configured password"
     : maintenanceMode == null ? "Maintenance state is not loaded yet" : undefined;
 
   function startEdit() {
+    // Saved labels win over the status reading so the map matches the revision sent with it.
     const current = {};
-    outlets.forEach(o => { current[o.number] = o.label || ""; });
+    outlets.forEach(o => { current[o.number] = device.labels?.[String(o.number)] ?? o.label ?? ""; });
     setDraftLabels(current);
+    setDraftRevision(device.labels_revision);
+    setSaveError("");
     setEditMode(true);
   }
 
   async function saveLabels() {
     setSaving(true);
+    setSaveError("");
     try {
-      await onLabelsSave(draftLabels);
+      await onLabelsSave(draftLabels, draftRevision);
       setEditMode(false);
+    } catch (e) {
+      setSaveError(errorMessage(e));
+      if (e.status === 409) setEditMode(false);
     } finally {
       setSaving(false);
     }
@@ -37,14 +50,14 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
 
   return (
     <main className="flex-1 px-6 py-5 max-w-[1600px] w-full mx-auto">
-      <BackBar onBack={onBack} crumbs={["Dashboard", device.name]} />
+      <BackBar onBack={onBack} crumbs={[from || "Dashboard", device.name]} />
       {inMaintenance && (
         <div role="status" className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 flex flex-wrap items-center gap-3">
           <div className="flex-1 min-w-0 text-sm">
             <div className="font-semibold text-amber-300">
               In maintenance since {formatMaintenanceTime(maintenance.started_at)}{maintenance.started_by ? ` by ${maintenance.started_by}` : ""}
             </div>
-            {maintenance.reason && <div className="text-zinc-300 break-words">{maintenance.reason}</div>}
+            {maintenance.reason && <div dir="auto" className="text-zinc-300 break-words">{maintenance.reason}</div>}
             <div className="text-xs text-zinc-400 mt-0.5">
               {(maintenance.outlets_off || []).length} outlet{(maintenance.outlets_off || []).length === 1 ? "" : "s"} will be restored: {(maintenance.outlets_off || []).join(", ") || "none"}
               {maintenance.failed?.length > 0 && <span className="text-rose-300"> · Failed outlets: {maintenance.failed.join(", ")}</span>}
@@ -90,12 +103,13 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
                 </div>
               )}
             </div>
+            {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
             {outlets.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
-                {status?.reachable === false ? `Cannot reach device: ${status.error}` : "Loading…"}
+                {state === "offline" ? `Cannot reach device: ${status.error}` : state === "unavailable" ? `Status unavailable: ${status.error}` : "Loading…"}
               </div>
             ) : (
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                 {outlets.map(o => {
                   const hasName = !/^Outlet \d+$/.test(o.label);
                   const isOn = o.state === "on";
@@ -132,7 +146,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
                           }
                         </div>
                       </div>
-                      <PowerButtons outlet={o} locked={inMaintenance} onAction={a => onOutletAction(o.number, a)} />
+                      <PowerButtons outlet={o} locked={inMaintenance} offline={state === "offline"} onAction={a => onOutletAction(o.number, a)} />
                     </div>
                   );
                 })}
@@ -145,8 +159,8 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4">
             <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Summary</div>
             <Row label="Status">
-              <StatusDot status={status?.reachable ? "online" : "offline"} />
-              <span className="ml-1.5">{status?.reachable ? "Online" : status ? "Offline" : "Unknown"}</span>
+              <StatusDot status={STATE_DOT[state]} />
+              <span className="ml-1.5">{STATE_TEXT[state]}</span>
             </Row>
             <Row label="Rack" v={device.rack} />
             <Row label="IP" v={device.ip} />
@@ -163,9 +177,9 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
           <EnvSensorsPanel status={status} />
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4 space-y-1">
             <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Quick actions</div>
-            <button disabled={!canOperate || inMaintenance} title={inMaintenance ? MAINTENANCE_BLOCKED : undefined}
+            <button disabled={!canOperate || !!turnOnBlocked} title={turnOnBlocked}
               className="w-full text-left text-sm px-3 py-2 rounded hover:bg-zinc-800 text-zinc-200 disabled:opacity-50 disabled:hover:bg-transparent"
-              onClick={() => { if (confirm("Turn ON all outlets?")) outlets.forEach(o => o.state !== "on" && onOutletAction(o.number, "on")); }}>
+              onClick={() => { if (confirm(`Turn ON all outlets of ${device.name}?`)) onTurnOnAll(outlets.filter(o => o.state !== "on").map(o => o.number)); }}>
               ⏻ Turn on all outlets
             </button>
             {inMaintenance ? (
@@ -241,19 +255,22 @@ function PencilIcon() {
   );
 }
 
-function PowerButtons({ outlet, locked, onAction }) {
+function PowerButtons({ outlet, locked, offline, onAction }) {
   const {canOperate} = useAccounts();
   if (!canOperate) return <span className="text-xs text-zinc-600">Read only</span>;
   const on = outlet.state === "on";
+  const name = outlet.label || `Outlet ${outlet.number}`;
+  const blocked = offline ? OFFLINE_BLOCKED : locked ? MAINTENANCE_BLOCKED : undefined;
+  const base = "h-9 sm:h-7 rounded border disabled:opacity-40 disabled:cursor-not-allowed";
   return (
     <div className="flex gap-1">
       {on ? (
         <>
-          <button disabled={locked} onClick={() => onAction("cycle")} title={locked ? MAINTENANCE_BLOCKED : "Cycle"} className="w-7 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-sm disabled:opacity-40 disabled:cursor-not-allowed">↻</button>
-          <button onClick={() => onAction("off")} title="Off" className="w-7 h-7 rounded border border-zinc-700 hover:border-rose-500/60 hover:bg-rose-500/10 text-zinc-300 text-sm">⏻</button>
+          <button disabled={!!blocked} onClick={() => onAction("cycle")} aria-label={`Power cycle ${name}`} title={blocked || "Cycle"} className={`${base} w-9 sm:w-7 text-sm border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300`}>↻</button>
+          <button disabled={offline} onClick={() => onAction("off")} aria-label={`Power off ${name}`} title={offline ? OFFLINE_BLOCKED : "Off"} className={`${base} w-9 sm:w-7 text-sm border-rose-500/40 hover:border-rose-500/70 hover:bg-rose-500/10 text-rose-300`}>⏻</button>
         </>
       ) : (
-        <button disabled={locked} onClick={() => onAction("on")} title={locked ? MAINTENANCE_BLOCKED : undefined} className="px-2 h-7 rounded border border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-xs disabled:opacity-40 disabled:cursor-not-allowed">on</button>
+        <button disabled={!!blocked} onClick={() => onAction("on")} aria-label={`Power on ${name}`} title={blocked} className={`${base} px-2 min-w-9 sm:min-w-0 border-zinc-700 hover:border-nv-400/60 hover:bg-nv-400/10 text-zinc-300 text-xs`}>on</button>
       )}
     </div>
   );

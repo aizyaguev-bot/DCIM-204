@@ -221,8 +221,21 @@ cd backend
 python -m pytest tests/ --ignore=tests/test_kvm_regression.py
 ```
 
-`test_kvm_regression.py` requires the live lab; run it on the deployment host when
-applicable. After deployment, use **Check all now**, verify a known server, and
+`test_kvm_regression.py` drives the live lab, so it is opt-in: unless both
+`DCIM_LIVE_KVM_TESTS=1` and `DCIM_TEST_BASE_URL` are set, every test is skipped and no
+request is sent. Run it on the deployment host:
+
+```sh
+cd backend
+DCIM_LIVE_KVM_TESTS=1 DCIM_TEST_BASE_URL=http://localhost:8000 python -m pytest tests/test_kvm_regression.py -v
+```
+
+Credentials come only from the environment: `DCIM_TEST_USERNAME` and `DCIM_TEST_PASSWORD`
+(an Operator or Admin account) in accounts mode, or `LAB_MANAGER_PASSWORD` in
+shared-password mode. `deploy.sh` runs this command after the restart and passes only those
+three values from the repository `.env`; values already in the environment win.
+
+After deployment, use **Check all now**, verify a known server, and
 confirm there are no **Needs address**, **Probe error** or **Overdue** entries left
 unexplained. The implementation was tested locally; lab DNS/ICMP connectivity must
 be verified from the real monitoring host.

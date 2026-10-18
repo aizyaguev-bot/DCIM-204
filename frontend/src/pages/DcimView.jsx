@@ -2,6 +2,9 @@ import { sumKnown, reading } from "../power";
 import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
 import { loadRackItems, saveRackItems, MAIN_STORAGE } from "../api/inventory";
+import { loadLayout, saveLayout } from "../api/layout";
+import { splitSections, sectionHeading, versionOf } from "../api/changelog";
+import { SectionBody, plain } from "../components/WhatsNew";
 import {useAccounts, accountRequest} from "../accounts";
 import {OwnerSelect, useEngineers} from "../engineers";
 
@@ -139,7 +142,7 @@ function TabBtn({ label, icon, active, onClick }) {
 }
 function CloseBtn({ onClose }) {
   return (
-    <button onClick={onClose}
+    <button onClick={onClose} aria-label="Close"
       className="flex items-center justify-center w-7 h-7 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-100 transition border border-zinc-700/50 flex-shrink-0">
       {Icon.x}
     </button>
@@ -159,8 +162,11 @@ function useEscClose(onClose) {
 const SLOT_H = 48;   // height of an occupied U row
 const EMPTY_H = 20;  // height of an empty U row
 
+// Module-level: rows remount when their shelf changes, which must not drop or orphan a pending open.
+let pendingOpen = null;
+
 // Inline-rename text span
-function InlineName({ value, onRename, className }) {
+function InlineName({ value, onRename, onOpen, className }) {
   const editMode = useContext(EditContext);
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(value);
@@ -183,9 +189,14 @@ function InlineName({ value, onRename, className }) {
     );
   }
   return (
-    <span onDoubleClick={e => { e.stopPropagation(); if (editMode) setEditing(true); }}
-      onClick={e => { if (editMode) e.stopPropagation(); }}
-      title={editMode ? "Double-click to rename" : value}
+    <span onDoubleClick={e => { e.stopPropagation(); clearTimeout(pendingOpen); if (editMode) setEditing(true); }}
+      onClick={e => {
+        if (!editMode) return;
+        // Opening waits out the double-click window so a double-click still renames.
+        e.stopPropagation(); clearTimeout(pendingOpen);
+        if (onOpen) pendingOpen = setTimeout(onOpen, 250);
+      }}
+      title={editMode ? "Click to open · double-click to rename" : value}
       className={`${className} cursor-text select-none`}>
       {value}
     </span>
@@ -199,7 +210,7 @@ function ServerCell({ server, sw, owner, onSelect, onRename }) {
     role="button" tabIndex={0} aria-label={`View ${server.name}`} onKeyDown={e => { if (e.key === "Enter") onSelect?.(server); }}>
     <span className="server-led"/>
     <div className="flex-1 min-w-0">
-      <InlineName value={server.name} onRename={onRename} className="server-name"/>
+      <InlineName value={server.name} onRename={onRename} onOpen={() => onSelect?.(server)} className="server-name"/>
       <div className="server-meta"><span className="whitespace-nowrap">{server.state === "unknown" ? "—" : reading(server.watts, 0, " W")}</span>
         {owner && <span className="owner-pill" title={owner}>{owner}</span>}
         {sw?.switch && !owner && <span className="truncate" title={sw.switch}>{sw.switch}</span>}
@@ -215,7 +226,7 @@ function EquipCell({ item, onSelect, onRename }) {
   return <div className="equipment-cell" data-type={item.type} onClick={() => onSelect?.(item)}
     role="button" tabIndex={0} aria-label={`View ${item.name}`} onKeyDown={e => { if (e.key === "Enter") onSelect?.(item); }}>
     <span className="equipment-type">{meta.label}</span>
-    <InlineName value={item.name} onRename={onRename} className="equipment-name"/>
+    <InlineName value={item.name} onRename={onRename} onOpen={() => onSelect?.(item)} className="equipment-name"/>
     {(item.serial_number || item.barcode) && <span className="equipment-serial" title={item.serial_number || item.barcode}>SN: {item.serial_number || item.barcode}</span>}
     {item.shelf_position && <span className="equipment-serial">{item.shelf_position}</span>}
   </div>;
@@ -431,6 +442,7 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
     if (!name.trim() || !u) return;
     setBusy(true);
     try { await onSave({ id: genId(), name: name.trim(), type, u: parseInt(u, 10), notes: notes.trim() }); }
+    catch { /* the save already told the user why */ }
     finally { setBusy(false); }
   }
 
@@ -479,7 +491,7 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
 }
 
 // ─── EDIT EQUIPMENT PANEL (custom items) ──────────────────────────────────────
-function EditEquipmentPanel({ item, rackName, allRacks, owner, onOwnerChange, onClose, onSave, onDelete, onMove }) {
+function EditEquipmentPanel({ item, rackName, allRacks, owner, ownersLoaded, onOwnerChange, onClose, onSave, onDelete, onMove }) {
   useEscClose(onClose);
   const [name,      setName]      = useState(item.name);
   const [type,      setType]      = useState(item.type || "other");
@@ -493,6 +505,7 @@ function EditEquipmentPanel({ item, rackName, allRacks, owner, onOwnerChange, on
   async function submit() {
     setBusy(true);
     try { await onSave({ ...item, name: name.trim(), type, u: u === "" ? item.u : parseInt(u,10), notes: notes.trim() }); setSaved(true); setTimeout(()=>setSaved(false),2000); }
+    catch { /* the save already told the user why */ }
     finally { setBusy(false); }
   }
 
@@ -500,6 +513,7 @@ function EditEquipmentPanel({ item, rackName, allRacks, owner, onOwnerChange, on
     if (!moveRack) return;
     setMoving(true);
     try { await onMove(item, moveRack); onClose(); }
+    catch { /* the save already told the user why */ }
     finally { setMoving(false); }
   }
 
@@ -515,7 +529,7 @@ function EditEquipmentPanel({ item, rackName, allRacks, owner, onOwnerChange, on
           <CloseBtn onClose={onClose}/>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          <div><SL>Owner / Engineer</SL><OwnerSelect owner={owner} label={`Owner for ${item.name}`} onChange={id=>onOwnerChange(`item:${item.id}`,id)}/></div>
+          <div><SL>Owner / Engineer</SL><OwnerSelect owner={owner} disabled={!ownersLoaded} label={`Owner for ${item.name}`} onChange={id=>onOwnerChange(`item:${item.id}`,id)}/></div>
           <div><SL>Name</SL>
             <input value={name} onChange={e=>setName(e.target.value)}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
@@ -562,7 +576,7 @@ function EditEquipmentPanel({ item, rackName, allRacks, owner, onOwnerChange, on
           </button>
         </div>
         <div className="px-5 py-4 border-t border-zinc-800/40">
-          <button onClick={async()=>{ if(!confirm(`Delete "${item.name}"?`))return; await onDelete(item); onClose(); }}
+          <button onClick={async()=>{ if(!confirm(`Delete "${item.name}"?`))return; try { await onDelete(item); onClose(); } catch { /* the save already told the user why */ } }}
             className="w-full py-2 text-xs font-medium text-rose-600 hover:text-rose-400 border border-rose-900/40 hover:border-rose-800/60 rounded-lg transition">
             Delete from rack
           </button>
@@ -573,7 +587,7 @@ function EditEquipmentPanel({ item, rackName, allRacks, owner, onOwnerChange, on
 }
 
 // ─── MOVE OPT SECTION (inside ServerEditPanel) ────────────────────────────────
-function MoveOptSection({ server, pdu, pdus, rackDevices, rackOverrides, onRackOverrideChange, onLabelChange, onClose }) {
+function MoveOptSection({ server, pdu, pdus, rackDevices, onRackOverrideChange, onLabelChange, onClose }) {
   const allRacks = [...new Set((rackDevices || pdus).map(p => p.rack).filter(Boolean))].sort();
   const [targetRack,   setTargetRack]   = useState("");
   const [targetPduId,  setTargetPduId]  = useState("");
@@ -613,11 +627,10 @@ function MoveOptSection({ server, pdu, pdus, rackDevices, rackOverrides, onRackO
         await onLabelChange(effectivePduId, updated);
       }
       // Always set rack override so OPT displays under target rack
-      const updated = { ...(rackOverrides || {}), [server.id]: targetRack };
-      await onRackOverrideChange(updated);
+      await onRackOverrideChange(server.id, targetRack);
       onClose();
     } catch (e) {
-      setErr(e.message || "Move failed.");
+      setErr(e.detail || e.message || "Move failed.");
     } finally { setMoving(false); }
   }
 
@@ -659,7 +672,7 @@ function MoveOptSection({ server, pdu, pdus, rackDevices, rackOverrides, onRackO
 }
 
 // ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, rackOverrides, optOwners, onOwnerChange, onRackOverrideChange, onClose, onOutletAction, onLabelChange, onRenameOpt, onSlotsChange, onSwitchChange }) {
+function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, optOwners, ownersLoaded, onOwnerChange, onRackOverrideChange, onClose, onOutletAction, onLabelChange, onRenameOpt, onSlotSave, onSwitchSave }) {
   useEscClose(onClose);
   const pdu   = pdus.find(p => p.id === server.pduId);
   const curU  = (rackSlots[server.rack] || {})[server.id];
@@ -672,17 +685,20 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   const [swPort, setSwPort] = useState(curSw.port != null ? String(curSw.port) : "");
   const [doing,  setDoing]  = useState(null);
   const [saved,  setSaved]  = useState(null);
+  const [error,  setError]  = useState("");
 
   const isOn = server.state==="on", isOff=server.state==="off";
   const led  = isOn?"bg-nv-400 shadow-[0_0_7px_#76b900]":isOff?"bg-red-700":"bg-zinc-700";
   function tick(k){setSaved(k);setTimeout(()=>setSaved(s=>s===k?null:s),2000);}
+  // A failed save shows the server's reason, never the success tick, and frees the buttons again.
+  async function attempt(key,action){setDoing(key);setError("");try{await action();tick(key);return true;}catch(e){setError(e.detail||e.message||"The change was not saved.");return false;}finally{setDoing(null);}}
 
   async function power(a){if(!onOutletAction)return;setDoing(a);try{await onOutletAction(server.pduId,server.outlet,a);}finally{setDoing(null);}}
-  async function saveName(){if(!name.trim())return;setDoing("name");if(onRenameOpt&&name.trim()!==server.name){await onRenameOpt(server.name,name.trim());}else if(pdu&&onLabelChange){await onLabelChange(server.pduId,{...pdu.labels,[String(server.outlet)]:name.trim()});}setDoing(null);tick("name");}
-  async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;setDoing("outlet");const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await onLabelChange(server.pduId,updated);setDoing(null);tick("outlet");}
-  async function saveSlot(){const u=parseInt(uSlot,10);if(isNaN(u)||u<1)return;setDoing("slot");const up={...rackSlots,[server.rack]:{...(rackSlots[server.rack]||{}),[server.id]:u}};onSlotsChange(up);await fetch("/api/rack-slots",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("slot");}
-  async function saveSw(){setDoing("sw");const up={...switchAssignments};if(swName.trim()||swPort)up[server.id]={switch:swName.trim(),port:swPort?parseInt(swPort,10):null};else delete up[server.id];onSwitchChange(up);await fetch("/api/switch-assignments",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});setDoing(null);tick("sw");}
-  async function remove(){if(!pdu||!onLabelChange)return;if(!confirm(`Remove "${server.name}" from DCIM?`))return;const l={...pdu.labels};delete l[String(server.outlet)];await onLabelChange(server.pduId,l);onClose();}
+  async function saveName(){if(!name.trim())return;await attempt("name",async()=>{if(onRenameOpt&&name.trim()!==server.name){await onRenameOpt(server.name,name.trim());}else if(pdu&&onLabelChange){await onLabelChange(server.pduId,{...pdu.labels,[String(server.outlet)]:name.trim()});}});}
+  async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await attempt("outlet",()=>onLabelChange(server.pduId,updated));}
+  async function saveSlot(){const u=parseInt(uSlot,10);if(isNaN(u)||u<1)return;await attempt("slot",()=>onSlotSave(server.rack,server.id,u));}
+  async function saveSw(){const value=swName.trim()||swPort?{switch:swName.trim(),port:swPort?parseInt(swPort,10):null}:null;await attempt("sw",()=>onSwitchSave(server.id,value));}
+  async function remove(){if(!pdu||!onLabelChange)return;if(!confirm(`Remove "${server.name}" from DCIM?`))return;const l={...pdu.labels};delete l[String(server.outlet)];if(await attempt("remove",()=>onLabelChange(server.pduId,l)))onClose();}
 
   const SetBtn=({id,onClick,disabled})=>(
     <button onClick={onClick} disabled={disabled||doing===id}
@@ -720,6 +736,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {error&&<div role="alert" className="rounded-lg border border-rose-900/60 bg-rose-950/30 px-3 py-2 text-xs text-rose-300 break-words">{error}</div>}
           {onOutletAction&&server.pduId&&server.outlet!=null&&(
             <div><SL>Power control</SL>
               <div className="grid grid-cols-3 gap-1.5">
@@ -727,7 +744,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
                   {a:"off",l:"Power Off",c:"bg-rose-900/40 hover:bg-rose-900/70 text-rose-400 border-rose-800/40"},
                   {a:"cycle",l:"Cycle",c:"bg-amber-900/30 hover:bg-amber-900/60 text-amber-400 border-amber-800/40"}
                 ].map(({a,l,c})=>(
-                  <button key={a} onClick={()=>power(a)} disabled={!!doing}
+                  <button key={a} onClick={()=>power(a)} disabled={!!doing||(a==="on"?isOn:isOff)}
                     className={`flex flex-col items-center justify-center py-2.5 text-[10px] font-semibold rounded-xl border transition gap-1 ${c} disabled:opacity-40`}>
                     {doing===a&&<Spinner/>}{l}
                   </button>
@@ -798,12 +815,12 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
           </div>
 
           <div><SL>Owner / Engineer</SL>
-            <OwnerSelect owner={optOwners?.[server.id]||""} label={`Owner for ${server.name}`} onChange={id=>onOwnerChange(server.id,id)}/>
+            <OwnerSelect owner={optOwners?.[server.id]||""} disabled={!ownersLoaded} label={`Owner for ${server.name}`} onChange={id=>onOwnerChange(server.id,id)}/>
             {optOwners?.[server.id]&&<div className="mt-1 text-[10px] text-purple-600">{optOwners[server.id]}</div>}
           </div>
 
           <MoveOptSection server={server} pdu={pdu} pdus={pdus} rackDevices={rackDevices}
-            rackOverrides={rackOverrides} onRackOverrideChange={onRackOverrideChange}
+            onRackOverrideChange={onRackOverrideChange}
             onLabelChange={onLabelChange} onClose={onClose}/>
         </div>
 
@@ -1331,7 +1348,7 @@ function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClo
 }
 
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
-function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onCustomItemsChange, onRefresh, pdus, rackDevices, chillers, chillersLoaded, onChillersChange, optOwners }) {
+function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onSaveItems, onRefresh, pdus, rackDevices, chillers, chillersLoaded, onChillersChange, optOwners }) {
   const {canAdmin} = useAccounts();
   const [selectedRack,   setSelectedRack]   = useState(() => new URLSearchParams(location.search).get("rack"));
   const [addOptFor,      setAddOptFor]      = useState(null);
@@ -1345,13 +1362,11 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
 
   function handleAssignChiller(chillerId, rack, u) {
     if (!editMode) return;
-    const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, rack, u: u ?? null} : c)};
-    onChillersChange?.(updated);
+    onChillersChange?.(doc => ({...doc, units: (doc?.units||[]).map(c => c.id===chillerId ? {...c, rack, u: u ?? null} : c)}));
   }
   function handleUnassignChiller(chillerId) {
     if (!editMode) return;
-    const updated = {...chillers, units: (chillers?.units||[]).map(c => c.id===chillerId ? {...c, u: null} : c)};
-    onChillersChange?.(updated);
+    onChillersChange?.(doc => ({...doc, units: (doc?.units||[]).map(c => c.id===chillerId ? {...c, u: null} : c)}));
   }
   const chillerUnits = chillers?.units || [];
 
@@ -1398,9 +1413,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
   }
 
   async function handleSaveEquip(rackName, item) {
-    const updated = { ...customItems, [rackName]: [...(customItems[rackName]||[]), item] };
-    const saved = await saveRackItems(updated, customItems);
-    onCustomItemsChange(saved);
+    await onSaveItems({ ...customItems, [rackName]: [...(customItems[rackName]||[]), item] });
     setAddEquipFor(null);
   }
 
@@ -1419,7 +1432,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
         <>
           {editMode && <div role="status" className="edit-mode-notice"><strong>Edit mode.</strong> Drag an OPT to another shelf or rack. Click Done when finished.</div>}
           <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-            <div className="text-xs text-zinc-500">{editMode ? "Drag a grip to reorder or move across racks · Double-click a name to rename" : "Select a rack or asset for details · Turn on Edit to change the layout"}</div>
+            <div className="text-xs text-zinc-500">{editMode ? "Click a server to open it · Double-click its name to rename · Drag a grip to reorder or move across racks" : "Select a rack or asset for details · Turn on Edit to change the layout"}</div>
             <div className="flex items-center gap-2 flex-shrink-0">
               {editMode && canAdmin && <button onClick={() => setAddRackOpen(true)}
                 className="flex items-center gap-1.5 text-sm font-semibold text-nv-400 border border-nv-400/40 hover:border-nv-400/70 hover:bg-nv-400/8 px-3 py-1.5 rounded-xl transition">
@@ -1508,7 +1521,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
 }
 
 // ─── INVENTORY VIEW ───────────────────────────────────────────────────────────
-function InventoryView({ servers, switchAssignments, rackSlots, customItems, optOwners, onOwnerChange }) {
+function InventoryView({ servers, switchAssignments, rackSlots, customItems, optOwners, ownersLoaded, onOwnerChange }) {
   const editMode = useContext(EditContext);
   const [rack,  setRack]  = useState("all");
   const [state, setState] = useState("all");
@@ -1533,7 +1546,7 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search…" className="bg-zinc-900 border border-zinc-800 rounded-lg pl-7 pr-3 py-1.5 text-sm w-44 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/></div>
         <select value={rack} onChange={e=>setRack(e.target.value)} className="bg-zinc-900 border border-zinc-800 rounded-lg text-sm px-2.5 py-1.5 focus:outline-none focus:border-nv-400/50"><option value="all">All racks</option>{racks.map(r=><option key={r}>{r}</option>)}</select>
         <select value={state} onChange={e=>setState(e.target.value)} className="bg-zinc-900 border border-zinc-800 rounded-lg text-sm px-2.5 py-1.5 focus:outline-none focus:border-nv-400/50"><option value="all">All states</option><option value="on">On</option><option value="off">Off</option><option value="unknown">Unknown</option></select>
-        <span className="ml-auto text-[10px] text-zinc-700">{rows.length} / {servers.length}</span>
+        <span className="ml-auto text-[11px] text-zinc-500">{rows.length} / {servers.length}</span>
       </div>
       <div className="border border-zinc-800/60 rounded-xl overflow-hidden bg-zinc-900/30">
         <div className="overflow-x-auto">
@@ -1547,14 +1560,14 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
                   <td className="px-3 py-2"><div className="flex items-center gap-2"><div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isOn?"bg-emerald-400 shadow-[0_0_3px_#34d399]":isOff?"bg-red-700":"bg-zinc-800"}`}/><span className="font-mono text-[11px] font-semibold text-zinc-200">{s.name}</span></div></td>
                   <td className="px-3 py-2 text-xs text-zinc-500 font-mono">{s.rack||"—"}</td>
                   <td className="px-3 py-2"><Pill color={isOn?"green":isOff?"red":"zinc"} sm>{s.state||"?"}</Pill></td>
-                  <td className="px-3 py-2 font-mono text-xs text-right">{s.watts!=null?<span className={isOn?"text-nv-400/80":"text-zinc-600"}>{s.watts.toFixed(0)}</span>:<span className="text-zinc-800">—</span>}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-zinc-600 text-right">{u!=null?`U${u}`:<span className="text-zinc-800">—</span>}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-zinc-600 text-right">{s.outlet!=null?`#${s.outlet}`:<span className="text-zinc-800">—</span>}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-right">{s.watts!=null?<span className={isOn?"text-nv-400/80":"text-zinc-500"}>{s.watts.toFixed(0)}</span>:<span className="text-zinc-500">—</span>}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-zinc-500 text-right">{u!=null?`U${u}`:<span className="text-zinc-500">—</span>}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-zinc-500 text-right">{s.outlet!=null?`#${s.outlet}`:<span className="text-zinc-500">—</span>}</td>
                   <td className="px-3 py-2 text-xs text-zinc-500">{s.pduName||"—"}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-zinc-700">{s.pduIp||"—"}</td>
-                  <td className="px-3 py-2 text-xs">{sw?.switch?<Pill color="cyan" sm>{sw.switch}{sw.port?`·${sw.port}`:""}</Pill>:<span className="text-zinc-800">—</span>}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-zinc-500">{s.pduIp||"—"}</td>
+                  <td className="px-3 py-2 text-xs">{sw?.switch?<Pill color="cyan" sm>{sw.switch}{sw.port?`·${sw.port}`:""}</Pill>:<span className="text-zinc-500">—</span>}</td>
                   <td className="px-3 py-2 text-xs min-w-[110px]">
-                    {editMode?<OwnerSelect owner={ow||""} label={`Owner for ${s.name}`} onChange={id=>onOwnerChange(s.id,id)}/>:<span className={ow?"text-zinc-200":"text-zinc-600"}>{ow||"Owner not set"}</span>}
+                    {editMode?<OwnerSelect owner={ow||""} disabled={!ownersLoaded} label={`Owner for ${s.name}`} onChange={id=>onOwnerChange(s.id,id)}/>:<span className={ow?"text-zinc-200":"text-zinc-500"}>{ow||"Owner not set"}</span>}
                   </td>
                 </tr>
               );})}
@@ -1578,7 +1591,7 @@ function PowerView({ rackStats }) {
   const sorted=[...rackStats].sort((a,b)=>(b.totalWatts??-1)-(a.totalWatts??-1));
   const top=rackStats.flatMap(r=>r.servers).filter(s=>s.watts>0).sort((a,b)=>b.watts-a.watts).slice(0,10);
   if(!rackStats.length)return<div className="text-zinc-600 text-sm py-24 text-center">No power data.</div>;
-  const Tile=({label,val,sub,hi})=>(<div className="bg-zinc-900/50 border border-zinc-800/60 rounded-xl px-4 py-3"><div className={`text-lg font-bold tabular-nums ${hi?"text-nv-400":"text-zinc-100"}`}>{val}</div><div className="text-[10px] text-zinc-600 mt-0.5">{label}</div>{sub&&<div className="text-[9px] text-zinc-700 mt-0.5">{sub}</div>}</div>);
+  const Tile=({label,val,sub,hi})=>(<div className="bg-zinc-900/50 border border-zinc-800/60 rounded-xl px-4 py-3"><div className={`text-lg font-bold tabular-nums ${hi?"text-nv-400":"text-zinc-100"}`}>{val}</div><div className="text-[11px] text-zinc-500 mt-0.5">{label}</div>{sub&&<div className="text-[11px] text-zinc-500 mt-0.5">{sub}</div>}</div>);
   const aCol=(p)=>p>80?"#ef4444":p>55?"#f59e0b":"#76b900";
   const aCls=(p)=>p>80?"text-rose-400":p>55?"text-amber-400":"text-zinc-200";
   const recs=[...allPdus].filter(p=>p.reachable===true&&p.wattsComplete&&p.amps!=null&&p.outletsTotal>0).sort((a,b)=>b.headroomAmps-a.headroomAmps).slice(0,8);
@@ -1594,7 +1607,7 @@ function PowerView({ rackStats }) {
       </div>
       <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
         <div className="px-5 py-3 border-b border-zinc-800/50 text-sm font-semibold text-zinc-200 flex justify-between"><span>Per rack</span><span className="text-[10px] text-zinc-600 font-normal">highest draw first</span></div>
-        <div className="p-5 space-y-3">{sorted.map(r=>{const cap=r.totalWatts!=null&&r.maxWatts>0?Math.min(100,r.totalWatts/r.maxWatts*100):null;const col=aCol(cap||0);const rA=r.totalAmps;return(<div key={r.rack}><div className="flex items-center justify-between mb-1"><div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${r.pduOnline?"bg-nv-400":"bg-zinc-700"}`}/><span className="text-xs font-mono text-zinc-300 w-20 truncate">{r.rack}</span><Pill color={r.pduOnline?"nv":r.pduData.length?"red":"zinc"} sm>{r.pduOnline?"online":r.pduData.length?"offline":"no PDU"}</Pill></div><div className="flex items-center gap-4 text-xs font-mono">{rA!=null&&<span className="text-zinc-500">{r.currentEstimated ? "~" : ""}{rA.toFixed(1)} A{r.ampsComplete ? "" : " (partial)"}</span>}<span className="text-zinc-400">{r.totalWatts!=null?`${r.totalWatts.toFixed(0)} W${r.wattsComplete ? "" : " (partial)"}`:<span className="text-zinc-700">—</span>}</span></div></div><div className="relative h-3.5 bg-zinc-800/50 rounded overflow-hidden"><div className="h-full rounded transition-all duration-700" style={{width:`${r.totalWatts==null?0:(r.totalWatts/maxR)*100}%`,background:col}}/>{r.totalWatts!=null&&cap!=null&&<span className="absolute inset-0 flex items-center pl-2 text-[8px] font-semibold text-zinc-950">{(r.totalWatts/1000).toFixed(2)} kW · {cap.toFixed(0)}% (estimate){!r.wattsComplete ? " (partial)" : ""}</span>}</div></div>);})}</div>
+        <div className="p-5 space-y-3">{sorted.map(r=>{const cap=r.totalWatts!=null&&r.maxWatts>0?Math.min(100,r.totalWatts/r.maxWatts*100):null;const col=aCol(cap||0);const rA=r.totalAmps;return(<div key={r.rack}><div className="flex items-center justify-between mb-1"><div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${r.pduOnline?"bg-nv-400":"bg-zinc-700"}`}/><span className="text-xs font-mono text-zinc-300 w-20 truncate">{r.rack}</span><Pill color={r.pduOnline?"nv":r.pduData.length?"red":"zinc"} sm>{r.pduOnline?"online":r.pduData.length?"offline":"no PDU"}</Pill></div><div className="flex items-center gap-4 text-xs font-mono">{rA!=null&&<span className="text-zinc-500">{r.currentEstimated ? "~" : ""}{rA.toFixed(1)} A{r.ampsComplete ? "" : " (partial)"}</span>}<span className="text-zinc-400">{r.totalWatts!=null?`${r.totalWatts.toFixed(0)} W${r.wattsComplete ? "" : " (partial)"}`:<span className="text-zinc-700">—</span>}</span></div></div><div className="relative h-3.5 bg-zinc-800/50 rounded overflow-hidden"><div className="h-full rounded transition-all duration-700" style={{width:`${r.totalWatts==null?0:(r.totalWatts/maxR)*100}%`,background:col}}/></div>{r.totalWatts!=null&&cap!=null&&<div className="mt-1 text-[11px] text-zinc-500 tabular-nums">{(r.totalWatts/1000).toFixed(2)} kW · {cap.toFixed(0)}% (estimate){!r.wattsComplete ? " (partial)" : ""}</div>}</div>);})}</div>
       </div>
       {allPdus.length>0&&<div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
         <div className="px-5 py-3 border-b border-zinc-800/50 flex items-baseline justify-between"><span className="text-sm font-semibold text-zinc-200">Amperage per PDU</span><span className="text-[10px] text-zinc-600">rated 16 A per circuit</span></div>
@@ -1635,28 +1648,20 @@ function ChangelogView() {
   const [text,setText]=useState("");const [loading,setLoading]=useState(true);
   useEffect(()=>{fetch("/api/changelog").then(r=>r.json()).then(d=>setText(d.changelog||"")).catch(()=>setText("Could not load.")).finally(()=>setLoading(false));},[]);
   if(loading)return<div className="text-zinc-600 text-sm py-10 text-center animate-pulse">Loading…</div>;
-  const blocks=[];let cur=null;
-  text.split("\n").forEach(line=>{const m=line.match(/^##\s+(v[\d.]+)\s*[—–-]\s*(.+)/);if(m){if(cur)blocks.push(cur);cur={ver:m[1],date:m[2].trim(),lines:[]};}else if(cur)cur.lines.push(line);});
-  if(cur)blocks.push(cur);
-  if(!blocks.length)return<pre className="text-xs text-zinc-500 font-mono whitespace-pre-wrap">{text}</pre>;
+  // Same parser and renderer as What's new, so Unreleased sections get their own cards.
+  const sections=splitSections(text);
+  if(!sections.length)return<pre className="text-xs text-zinc-500 font-mono whitespace-pre-wrap">{text}</pre>;
+  const current=sections.findIndex(s=>versionOf(s.title));
   return(
-    <div className="space-y-3 max-w-2xl">{blocks.map((b,i)=>(
-      <div key={b.ver} className={`border rounded-xl overflow-hidden ${i===0?"border-nv-400/30 bg-nv-400/4":"border-zinc-800/60 bg-zinc-900/30"}`}>
-        <div className={`px-4 py-2.5 border-b flex items-center gap-2.5 ${i===0?"border-nv-400/20 bg-nv-400/8":"border-zinc-800/50 bg-zinc-900/50"}`}>
-          <span className={`font-mono text-sm font-bold ${i===0?"text-nv-400":"text-zinc-300"}`}>{b.ver}</span>
-          {i===0&&<span className="text-[9px] px-1.5 py-px bg-nv-400/20 text-nv-400 border border-nv-400/30 rounded font-bold tracking-wide">CURRENT</span>}
-          <span className="text-[10px] text-zinc-600 ml-auto font-mono">{b.date}</span>
+    <div className="space-y-3 max-w-2xl">{sections.map((s,i)=>{const {label,detail,unreleased}=sectionHeading(s.title);const hi=i===current;return(
+      <section key={`${i}:${s.title}`} className={`border rounded-xl overflow-hidden ${hi?"border-nv-400/30 bg-nv-400/4":unreleased?"border-amber-500/30 bg-amber-500/5":"border-zinc-800/60 bg-zinc-900/30"}`}>
+        <div className={`px-4 py-2.5 border-b flex items-center gap-2.5 ${hi?"border-nv-400/20 bg-nv-400/8":"border-zinc-800/50 bg-zinc-900/50"}`}>
+          <h3 className={`font-mono text-sm font-bold ${hi?"text-nv-400":unreleased?"text-amber-300":"text-zinc-300"}`}>{plain(label)}</h3>
+          {hi&&<span className="text-[9px] px-1.5 py-px bg-nv-400/20 text-nv-400 border border-nv-400/30 rounded font-bold tracking-wide">CURRENT</span>}
+          {detail&&<span className="text-xs text-zinc-500 ml-auto font-mono text-right">{plain(detail)}</span>}
         </div>
-        <div className="px-4 py-3 space-y-0.5">{b.lines.map((line,j)=>{
-          const h3=line.match(/^###\s+(.+)/),bul=line.match(/^[-*]\s+(.+)/),sub=line.match(/^\s{2,}[-*]\s+(.+)/);
-          if(h3)return<div key={j} className="text-[9px] font-bold uppercase tracking-widest text-zinc-600 mt-3 mb-1 first:mt-0">{h3[1]}</div>;
-          if(sub)return<div key={j} className="text-[10px] text-zinc-600 pl-4 flex gap-1.5"><span className="text-zinc-700">↳</span>{sub[1]}</div>;
-          if(bul)return<div key={j} className="text-[11px] text-zinc-400 flex gap-2"><span className="text-zinc-700">·</span><span>{bul[1]}</span></div>;
-          if(!line.trim())return null;
-          return<div key={j} className="text-[10px] text-zinc-600">{line}</div>;
-        })}</div>
-      </div>
-    ))}</div>
+        <div className="px-4 py-3"><SectionBody body={s.body}/></div>
+      </section>);})}</div>
   );
 }
 
@@ -1698,10 +1703,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [customItems,       setCustomItems]       = useState({});
   const [rackOverrides,     setRackOverrides]     = useState({});
   const [optOwners,         setOptOwners]         = useState({});
+  const [ownersLoaded,      setOwnersLoaded]      = useState(false);
   const [chillers,          setChillers]          = useState({units:[],connections:[]});
   const [chillersLoaded,    setChillersLoaded]    = useState(false);
   const [selectedServerId,  setSelectedServerId]  = useState(null);
   const [selectedCustom,    setSelectedCustom]    = useState(null);
+  const [layoutError,       setLayoutError]       = useState("");
 
   useEffect(()=>{
     Promise.all([
@@ -1710,19 +1717,67 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       fetch("/api/switch-assignments").then(r=>r.json()).catch(()=>({})),
       loadRackItems().catch(()=>({})),
       fetch("/api/rack-overrides").then(r=>r.json()).catch(()=>({})),
-      fetch("/api/opt-owners").then(r=>r.json()).catch(()=>({})),
+      fetch("/api/opt-owners").then(r=>r.ok?r.json():null).catch(()=>null),
       fetch("/api/chillers").then(r=>r.json()).catch(()=>({units:[],connections:[]})),
     ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
-      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});setOptOwners(owners||{});setChillers(chill||{units:[],connections:[]});setChillersLoaded(true);
+      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});if(owners){setOptOwners(owners);setOwnersLoaded(true);}setChillers(chill||{units:[],connections:[]});setChillersLoaded(true);
     });
   },[]);
 
-  const handleChillersChange = useCallback(async (updated) => {
-    setChillers(updated);
-    await fetch("/api/chillers",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(updated)}).catch(()=>{});
-  },[]);
+  // One layout edit: saved against the server's current document; on failure the optimistic
+  // state is undone, the store reloaded, and the error rethrown for the caller to show.
+  const persistLayout = useCallback(async (path, edit, setState, previous) => {
+    try {
+      setState(await saveLayout(path, edit));
+    } catch (e) {
+      setState(previous);
+      loadLayout(path).then(({ data }) => setState(data)).catch(() => {});
+      throw e;
+    }
+  }, []);
 
-  useEffect(()=>{let active=true;accountRequest("/opt-owners").then(data=>{if(active)setOptOwners(data);}).catch(()=>{});return()=>{active=false;};},[engineerRevision]);
+  const handleChillersChange = useCallback(async (edit) => {
+    const previous = chillers;
+    setChillers(edit(chillers));
+    setLayoutError("");
+    await persistLayout("/api/chillers", edit, setChillers, previous)
+      .catch(e => setLayoutError(`The cooling assignment was not saved: ${e.message}`));
+  },[chillers, persistLayout]);
+
+  const handleSlotSave = useCallback((rack, id, u) => {
+    const edit = doc => ({ ...doc, [rack]: { ...(doc?.[rack] || {}), [id]: u } });
+    const previous = rackSlots;
+    setRackSlots(edit(rackSlots));
+    return persistLayout("/api/rack-slots", edit, setRackSlots, previous);
+  }, [rackSlots, persistLayout]);
+
+  const handleSwitchSave = useCallback((id, value) => {
+    const edit = doc => { const next = { ...doc }; if (value) next[id] = value; else delete next[id]; return next; };
+    const previous = switchAssignments;
+    setSwitchAssignments(edit(switchAssignments));
+    return persistLayout("/api/switch-assignments", edit, setSwitchAssignments, previous);
+  }, [switchAssignments, persistLayout]);
+
+  const handleRackOverrideSave = useCallback((id, rack) => {
+    const edit = doc => ({ ...doc, [id]: rack });
+    const previous = rackOverrides;
+    setRackOverrides(edit(rackOverrides));
+    return persistLayout("/api/rack-overrides", edit, setRackOverrides, previous);
+  }, [rackOverrides, persistLayout]);
+
+  // inventory.js reports a rejected equipment save; a stale list is replaced by the reloaded one.
+  const saveItems = useCallback(async (updated) => {
+    try {
+      const saved = await saveRackItems(updated, customItems);
+      setCustomItems(saved);
+      return saved;
+    } catch (e) {
+      if (e.reloaded) setCustomItems(e.reloaded);
+      throw e;
+    }
+  }, [customItems]);
+
+  useEffect(()=>{let active=true;accountRequest("/opt-owners").then(data=>{if(active){setOptOwners(data);setOwnersLoaded(true);}}).catch(()=>{});return()=>{active=false;};},[engineerRevision]);
   const handleOwnerChange = useCallback(async (assetKey, engineerId) => {
     setOptOwners(await accountRequest(`/opt-owners/${encodeURIComponent(assetKey)}`,"PUT",{engineer_id:engineerId}));
   },[]);
@@ -1793,9 +1848,13 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
 
   const handleReorder = useCallback((rackName,newIds)=>{
     if (!editMode) return;
-    const n={...rackOrder,[rackName]:newIds};setRackOrder(n);
-    fetch("/api/rack-positions",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(n)}).catch(()=>{});
-  },[rackOrder,editMode]);
+    const edit = doc => ({ ...doc, [rackName]: newIds });
+    const previous = rackOrder;
+    setRackOrder(edit(rackOrder));
+    setLayoutError("");
+    persistLayout("/api/rack-positions", edit, setRackOrder, previous)
+      .catch(e => setLayoutError(`The new order was not saved: ${e.message}`));
+  },[rackOrder,editMode,persistLayout]);
 
   async function _reloadPositions() {
     const [positions, slots, switches] = await Promise.all([
@@ -1833,27 +1892,26 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
     if (!rackName) return;
     const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===item.id ? {...i, name: newName} : i) };
-    setCustomItems(await saveRackItems(updated, customItems));
-  }, [customItems]);
+    await saveItems(updated).catch(() => {});
+  }, [customItems, saveItems]);
 
   // Save custom item edits
   const handleSaveCustom = useCallback(async (item) => {
     const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
     if (!rackName) return;
     const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===item.id ? item : i) };
-    const saved = await saveRackItems(updated, customItems);
-    setCustomItems(saved);
+    const saved = await saveItems(updated);
     // update selectedCustom so panel reflects changes
     setSelectedCustom(saved[rackName].find(i => i.id === item.id));
-  }, [customItems]);
+  }, [customItems, saveItems]);
 
   // Delete custom item
   const handleDeleteCustom = useCallback(async (item) => {
     const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
     if (!rackName) return;
     const updated = { ...customItems, [rackName]: customItems[rackName].filter(i => i.id !== item.id) };
-    setCustomItems(await saveRackItems(updated, customItems));
-  }, [customItems]);
+    await saveItems(updated);
+  }, [customItems, saveItems]);
 
   // Move custom item to a different rack
   const handleMoveCustom = useCallback(async (item, targetRack) => {
@@ -1864,8 +1922,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       [srcRack]: customItems[srcRack].filter(i => i.id !== item.id),
       [targetRack]: [...(customItems[targetRack] || []), { ...item, u: 0, shelf_position: "" }],
     };
-    setCustomItems(await saveRackItems(updated, customItems));
-  }, [customItems]);
+    await saveItems(updated);
+  }, [customItems, saveItems]);
 
   // Derive live server data from servers list — no stale closure race possible
   const selectedServer = selectedServerId ? servers.find(s => s.id === selectedServerId) ?? null : null;
@@ -1884,6 +1942,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
 
   return (
     <EditContext.Provider value={editMode}><main className="flex-1 px-4 pb-5 w-full mx-auto">
+      {layoutError&&<div role="alert" className="mb-4 flex items-start gap-3 rounded-lg border border-rose-900 bg-rose-950/30 px-3 py-2 text-sm text-rose-300"><span className="flex-1 break-words">{layoutError}</span><button type="button" className="underline text-xs" onClick={()=>setLayoutError("")}>Dismiss</button></div>}
       {!controlledSection && <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
           <h2 className="text-sm font-bold tracking-tight text-zinc-100">DCIM</h2>
@@ -1905,10 +1964,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onSelect={s => setSelectedServerId(s.id)} onSelectCustom={setSelectedCustom}
           onLabelChange={handleLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
-          onCustomItemsChange={setCustomItems} onRefresh={onRefresh}
+          onSaveItems={saveItems} onRefresh={onRefresh}
           pdus={pdus} rackDevices={rackDevices} chillers={chillers} chillersLoaded={chillersLoaded} onChillersChange={handleChillersChange} optOwners={optOwners}/>
       )}
-      {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems} optOwners={optOwners} onOwnerChange={handleOwnerChange}/>}
+      {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems} optOwners={optOwners} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}
       {section==="changelog"&&<ChangelogView/>}
 
@@ -1916,14 +1975,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       {selectedServer&&editMode&&(
         <Portal>
           <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
-            switchAssignments={switchAssignments} rackOverrides={rackOverrides} optOwners={optOwners} onOwnerChange={handleOwnerChange}
-            onRackOverrideChange={async upd => {
-              setRackOverrides(upd);
-              await fetch("/api/rack-overrides",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(upd)}).catch(()=>{});
-            }}
+            switchAssignments={switchAssignments} optOwners={optOwners} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}
+            onRackOverrideChange={handleRackOverrideSave}
             onClose={()=>setSelectedServerId(null)}
             onOutletAction={onOutletAction} onLabelChange={handleLabelChange} onRenameOpt={handleRenameOpt}
-            onSlotsChange={setRackSlots} onSwitchChange={setSwitchAssignments}/>
+            onSlotSave={handleSlotSave} onSwitchSave={handleSwitchSave}/>
         </Portal>
       )}
 
@@ -1931,7 +1987,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       {selectedCustom&&selectedCustomRack&&editMode&&(
         <Portal>
           <EditEquipmentPanel item={selectedCustom} rackName={selectedCustomRack}
-            owner={optOwners[`item:${selectedCustom.id}`]||""} onOwnerChange={handleOwnerChange}
+            owner={optOwners[`item:${selectedCustom.id}`]||""} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}
             allRacks={racks} onClose={()=>setSelectedCustom(null)}
             onSave={handleSaveCustom} onDelete={handleDeleteCustom} onMove={handleMoveCustom}/>
         </Portal>

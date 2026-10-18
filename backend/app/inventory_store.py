@@ -13,6 +13,8 @@ from fastapi import HTTPException
 ITEMS_FILE = Path(__file__).resolve().parent.parent / "rack_items.json"
 HISTORY_LIMIT = 100
 TRACKING_FIELDS = ("tracking_history", "last_seen_at")
+LAYOUT_CONFLICT = "This layout was changed in another session. Reload and try again."
+LAYOUT_SAVE_FAILED = "The layout could not be saved. Please retry."
 
 
 def read_items():
@@ -42,10 +44,10 @@ def check_revision(data, expected):
 
 
 @contextmanager
-def locked_items():
-    """Also serialize writers across uvicorn workers on the Linux deployment."""
+def locked_file(path, detail):
+    """Also serialize writers across uvicorn workers on the Linux deployment. The lock file sits next to `path`."""
     try:
-        with ITEMS_FILE.with_suffix(".lock").open("a+b") as lock:
+        with path.with_suffix(".lock").open("a+b") as lock:
             if os.name == "nt":
                 import msvcrt
                 if lock.tell() == 0:
@@ -57,7 +59,7 @@ def locked_items():
                 import fcntl
                 fcntl.flock(lock, fcntl.LOCK_EX)
             try:
-                yield read_items()
+                yield
             finally:
                 if os.name == "nt":
                     lock.seek(0)
@@ -65,21 +67,49 @@ def locked_items():
                 else:
                     fcntl.flock(lock, fcntl.LOCK_UN)
     except OSError as exc:
-        raise HTTPException(503, "Equipment inventory could not be saved. Please retry.") from exc
+        raise HTTPException(503, detail) from exc
 
 
-def write_items(data):
+@contextmanager
+def locked_items():
+    with locked_file(ITEMS_FILE, "Equipment inventory could not be saved. Please retry."):
+        yield read_items()
+
+
+def write_json(path, data, prefix=None, ensure_ascii=True):
+    """Atomic: a temporary file in the same folder replaces `path`."""
     filename = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=ITEMS_FILE.parent, prefix=".rack-items-", suffix=".tmp", encoding="utf-8", delete=False) as out:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=prefix or f".{path.stem}-", suffix=".tmp", encoding="utf-8", delete=False) as out:
             filename = out.name
-            json.dump(data, out, indent=2, ensure_ascii=False)
+            json.dump(data, out, indent=2, ensure_ascii=ensure_ascii)
             out.flush()
             os.fsync(out.fileno())
-        os.replace(filename, ITEMS_FILE)
+        os.replace(filename, path)
     finally:
         if filename and os.path.exists(filename):
             os.unlink(filename)
+
+
+def write_items(data):
+    write_json(ITEMS_FILE, data, prefix=".rack-items-", ensure_ascii=False)
+
+
+def read_layout(path, default):
+    """A missing or unreadable layout file reads as the store's empty value, as before."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def save_layout(path, payload, expected, default):
+    """If-Match is optional, so old kiosk pages keep saving; a stale revision leaves the file untouched."""
+    with locked_file(path, LAYOUT_SAVE_FAILED):
+        if expected and expected != revision(read_layout(path, default)):
+            raise HTTPException(409, LAYOUT_CONFLICT)
+        write_json(path, payload)
+    return revision(payload)
 
 
 def location(rack, item):

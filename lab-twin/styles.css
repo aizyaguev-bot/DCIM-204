@@ -432,3 +432,36 @@ body.kiosk .envpanel { top: 76px; min-width: 240px; font-size: 14px; } body.kios
 body.kiosk .lbl .lt { font-size: 12px; } body.kiosk .lbl .lt .lt-bar { width: 36px; height: 4px; }
 body.kiosk .attn-dock { width: 380px; } body.kiosk .attn-dock-h { font-size: 13px; padding: 12px 14px; } body.kiosk .attn-row { font-size: 15px; padding: 10px 10px; min-height: 48px; } body.kiosk .attn-row.compact { padding: 8px 10px; } body.kiosk .attn-row .attn-txt small { font-size: 12.5px; } body.kiosk .attn-more { font-size: 14px; padding: 10px; }
 body.kiosk .attn-badge { font-size: 13px; padding: 2px 8px; } body.kiosk .stats .st-attn { padding: 4px 14px; }
+
+/* ─── narrow screens (phones, the 3D Twin tab on a phone): no page-level overflow, 3D view stacked above the lists, compact edge controls ─── */
+@media (max-width: 720px) {
+  .hdr, body.embed .hdr { height: auto; flex-wrap: wrap; gap: 6px 8px; padding: 6px 10px; }
+  .brand-text { display: none; }
+  .search-wrap { order: 3; flex: 1 1 100%; max-width: none; margin: 0; }
+  .hdr-right, .stats, .toolbar, .rackbar { overflow-x: auto; scrollbar-width: none; }
+  .hdr-right::-webkit-scrollbar, .stats::-webkit-scrollbar, .toolbar::-webkit-scrollbar, .rackbar::-webkit-scrollbar { display: none; }
+  .hdr-right { flex: 1 1 0; min-width: 0; gap: 6px; }
+  .stats { gap: 14px; padding: 0 10px; }
+  body:not(.kiosk) .layout { grid-template-columns: 1fr; grid-template-rows: minmax(240px, 60%) minmax(0, 1fr); }
+  body:not(.kiosk) .viewport { order: -1; }
+  body:not(.kiosk) .side { border-right: 0; border-top: 1px solid rgba(39,39,42,.6); overflow-y: auto; padding: 8px; }
+  body:not(.kiosk) .side .card.grow { order: -1; flex: none; }
+  /* an open detail panel takes the lists' place under the 3D view instead of squeezing the canvas out */
+  body:not(.kiosk) .detail, body.editmode:not(.kiosk) .detail { width: auto; border-left: 0; border-top: 1px solid rgba(39,39,42,.7); }
+  body:not(.kiosk) .layout:has(> .detail:not(.hidden)) > .side { display: none; }
+  /* the Attention tab is right below the 3D view here, so the floating dock would only cover the canvas */
+  body:not(.kiosk) .attn-dock { display: none; }
+  .toolbar { left: 8px; right: 8px; top: 8px; flex-wrap: nowrap; gap: 6px; }
+  .tb-group { flex: 0 0 auto; }
+  .tb { padding: 5px 8px; }
+  .rackbar { left: 8px; right: 8px; bottom: 46px; transform: none; max-width: none; flex-wrap: nowrap; justify-content: flex-start; }
+  .rackbar button { flex: 0 0 auto; min-height: 32px; padding: 4px 8px; font-size: 11px; }
+  .zoombar { right: 8px; gap: 4px; }
+  .zb { width: 34px; height: 34px; font-size: 16px; }
+  #pL, #pR, #pF, #pB, .zb-sep { display: none; }
+  .hint { left: 0; right: 0; bottom: 0; max-width: none; border-radius: 0; font-size: 11.5px; line-height: 1.45; padding: 4px 10px; }
+  .compass, .envpanel { display: none; }
+  .savebar { left: 8px; right: 8px; flex-wrap: wrap; }
+  .movebanner { max-width: calc(100% - 16px); font-size: 13px; }
+  .toast { max-width: calc(100vw - 24px); }
+}

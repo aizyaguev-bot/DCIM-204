@@ -22,7 +22,7 @@ WebSocket:
   FastAPI's WebSocket endpoint tunnels them through to the device.
 """
 
-import asyncio, re, ssl, logging, html, inspect
+import asyncio, json, re, ssl, logging, html, inspect
 from urllib.parse import urlencode
 import httpx
 import websockets
@@ -49,6 +49,19 @@ STRIP_RESP_HEADERS = frozenset({
     "transfer-encoding",
     "connection",
     "keep-alive",
+})
+
+# In legacy mode the browser's Authorization carries the shared site password. It, the site's
+# CSRF token and the client-address headers (plus every x-forwarded-*) never reach a device.
+STRIP_REQ_HEADERS = frozenset({
+    "host",
+    "connection",
+    "transfer-encoding",
+    "cookie",
+    "authorization",
+    "proxy-authorization",
+    "x-dcim-csrf",
+    "forwarded",
 })
 
 # SSL context that ignores self-signed certs
@@ -137,7 +150,7 @@ def _norm_location(location: str, dev_ip: str, device_id: str) -> str:
 _OVERRIDE_TMPL = (
     '<script>\n'
     '(function(){\n'
-    '  var KI="%(kvm_ip)s",P="%(proxy)s",B="%(base)s",O=window.location;\n'
+    '  var KI=%(kvm_ip)s,P=%(proxy)s,B=%(base)s,O=window.location;\n'
     '  try{Object.defineProperty(window,"location",{configurable:true,get:function(){\n'
     '    return new Proxy(O,{get:function(t,p){\n'
     '      if(p==="hostname"||p==="host")return KI;\n'
@@ -192,6 +205,14 @@ _OVERRIDE_TMPL = (
     '})();\n'
     '</script>'
 )
+
+
+def _override_script(kvm_ip: str, proxy: str, base: str) -> str:
+    """Values go in as JSON string literals with <, > and & escaped, so they can end neither
+    the JavaScript string nor the surrounding <script> element."""
+    def literal(value: str) -> str:
+        return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return _OVERRIDE_TMPL % {"kvm_ip": literal(kvm_ip), "proxy": literal(proxy), "base": literal(base)}
 
 
 def _rewrite(text: str, device_id: str, dev_ip: str, inject_head: str = "") -> str:
@@ -407,8 +428,8 @@ async def kvm_proxy(
         # revive a copy that an older rewrite produced and a rewritten body never claims a partial range.
         fwd_headers = {
             k: v for k, v in request.headers.items()
-            if k.lower() not in ("host", "connection", "transfer-encoding", "cookie",
-                                 "if-modified-since", "if-none-match", "if-range", "range")
+            if k.lower() not in STRIP_REQ_HEADERS and not k.lower().startswith("x-forwarded-")
+            and k.lower() not in ("if-modified-since", "if-none-match", "if-range", "range")
         }
         if device_id in _sessions:
             fwd_headers["Cookie"] = _sessions[device_id]
@@ -464,11 +485,7 @@ async def kvm_proxy(
                 text = content.decode("utf-8", errors="replace")
                 inject = ""
                 if "text/html" in ct:
-                    inject = _OVERRIDE_TMPL % {
-                        "kvm_ip": dev.ip,
-                        "proxy": _prefix(device_id),
-                        "base": _base(device_id),
-                    }
+                    inject = _override_script(dev.ip, _prefix(device_id), _base(device_id))
                 text = _rewrite(text, device_id, dev.ip, inject_head=inject)
                 content = text.encode("utf-8")
                 resp_headers = {

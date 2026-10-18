@@ -2,6 +2,68 @@
 
 ---
 
+## Unreleased — Remote PXE install
+
+### Added
+- **Remote install** for Operator and Admin accounts. Choose a computer from its
+  live KVM port label, reboot it, pick the network boot entry and the install
+  profile, and review the `inst.repo` / `inst.ks` host change before the
+  installer starts. Reboot and install each ask for the operator password.
+  If an install may already have started, that computer stays blocked until an
+  Admin acknowledges it. Leaving the page cancels a job that was never started,
+  so it does not keep the computer blocked.
+- With `PXE_DRIVER=raritan`, an allowlisted computer is driven through its
+  Raritan JavaScript console. That path stays unavailable until the console
+  browser and a screen reader are installed, and it does not send the install
+  key unless the edited line on screen matches the review.
+
+### Changed
+- With user accounts enabled, the 3D twin's lab data needs a signed-in session.
+  Without one, the twin shows "Sign in required" with a link to Lab Manager, so
+  a wall screen showing the twin must stay signed in (a Viewer account is enough).
+- With user accounts enabled, replacing all owners at once (`PUT /api/opt-owners`)
+  is Admin-only. Setting the owner of a single asset, which the app and the twin
+  use, is unchanged.
+
+### Fixed
+- Outlet power errors showed raw server output such as `409: {"detail": …}`.
+  They now show the server's message.
+- 3D twin: moving equipment could overwrite layout changes saved meanwhile in
+  another session, and a failed save could still say "saved in Lab Manager".
+  A move now starts from the latest saved layout and shows the server's message
+  when it fails.
+- 3D twin: text from the saved twin data and rack item IDs could run script in
+  the page. It is now always shown as plain text.
+- 3D twin: after a session expired, the twin kept showing "Live" with frozen
+  data. It now shows "Signed out", stops polling, and reconnects after sign-in.
+- 3D twin: a KVM that answers but fails to sign in was shown as active. It now
+  shows the sign-in error and appears under Attention.
+- 3D twin: owners of live Lab Manager equipment could not be changed in the
+  twin, and rack items showed no owner. The twin now shows and saves owners in
+  Lab Manager.
+- 3D twin: Power On and Cycle stayed available for outlets of a PDU in
+  maintenance, and power errors showed raw server output. They are now disabled
+  with the reason, and errors show the server's message.
+- 3D twin: Viewer accounts saw outlet power buttons, could change the rack
+  mapping locally, and saw a "Save to server" button that the server refuses.
+  These controls are now hidden for Viewers.
+- 3D twin: unsaved input in the editor was lost when live data refreshed, and
+  the kiosk Attention list jumped back to the top on every refresh.
+- KVM console: requests forwarded to the KVM no longer include Lab Manager's own
+  sign-in, CSRF or forwarding headers, and device values written into the
+  console page are encoded so they cannot run script.
+- A CSRF header with non-ASCII characters caused a server error. It is now
+  refused with 403.
+
+### Notes
+- Remote install stays off until `PXE_ENABLED` is set. The default driver is
+  simulated and does not open a KVM, switch a PDU outlet, or reboot a computer.
+- The live KVM regression tests in `backend/tests/test_kvm_regression.py` run
+  only when `DCIM_LIVE_KVM_TESTS=1` and `DCIM_TEST_BASE_URL` are set. They no
+  longer read `.env` or assume `localhost:8000`.
+
+---
+
 ## v2.38.0 — 2026-10-19 — Automatic VM updates and public version check
 
 ### Added

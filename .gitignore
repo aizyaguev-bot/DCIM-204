@@ -25,6 +25,7 @@ backend/switch_assignments.json
 backend/rack_items.json
 backend/rack_items.lock
 backend/.rack-items-*.tmp
+backend/pxe_screens/
 .barcode-backups/
 .barcode-install.lock
 .monitor-backups/

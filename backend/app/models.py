@@ -208,3 +208,63 @@ class AlertWorkerState(Base):
     next_probe_at: Mapped[float] = mapped_column(Float, default=0)
     last_completed_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     error: Mapped[str] = mapped_column(String, default="")
+
+
+class PxeJob(Base):
+    """One remote PXE install; active_key/active_port_key are set while the computer/KVM port is held."""
+    __tablename__ = "pxe_jobs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    computer_key: Mapped[str] = mapped_column(String, index=True)
+    computer_name: Mapped[str] = mapped_column(String)
+    kvm_device_id: Mapped[str] = mapped_column(String)
+    kvm_port: Mapped[int] = mapped_column(Integer)
+    pdu_targets_json: Mapped[str] = mapped_column(String, default="[]")
+    reboot_method: Mapped[str] = mapped_column(String)          # manual | kvm_cad | pdu_cycle
+    driver: Mapped[str] = mapped_column(String)                 # simulated | raritan
+    sim_scenario: Mapped[str] = mapped_column(String, default="")
+    state: Mapped[str] = mapped_column(String, index=True)
+    state_entered_at: Mapped[float] = mapped_column(Float)
+    deadline_at: Mapped[float] = mapped_column(Float)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    boot_options_json: Mapped[str] = mapped_column(String, default="[]")
+    boot_choice: Mapped[str] = mapped_column(String, default="")
+    grub_options_json: Mapped[str] = mapped_column(String, default="[]")
+    grub_choice: Mapped[str] = mapped_column(String, default="")
+    original_cmdline: Mapped[str] = mapped_column(String, default="")
+    new_cmdline: Mapped[str] = mapped_column(String, default="")
+    rewrite_changes_json: Mapped[str] = mapped_column(String, default="{}")
+    rewrite_hash: Mapped[str] = mapped_column(String, default="")
+    install_sent_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    install_may_have_started: Mapped[bool] = mapped_column(Boolean, default=False)
+    completion_signal: Mapped[str] = mapped_column(String, default="")
+    failed_step: Mapped[str] = mapped_column(String, default="")
+    error_code: Mapped[str] = mapped_column(String, default="")
+    error_detail: Mapped[str] = mapped_column(String, default="")
+    active_key: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    active_port_key: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    lease_owner: Mapped[str] = mapped_column(String, default="")
+    lease_until: Mapped[float] = mapped_column(Float, default=0)
+    screenshot_seq: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str] = mapped_column(String)
+    created_at: Mapped[float] = mapped_column(Float, index=True)
+    updated_at: Mapped[float] = mapped_column(Float)
+
+
+class PxeRunSlot(Base):
+    """One row per running PXE job; slots 0..pxe_max_active_jobs-1 make the global limit atomic in the DB."""
+    __tablename__ = "pxe_run_slots"
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[str] = mapped_column(String, unique=True)
+
+
+class PxeJobEvent(Base):
+    __tablename__ = "pxe_job_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("pxe_jobs.id"), index=True)
+    at: Mapped[float] = mapped_column(Float)
+    from_state: Mapped[str] = mapped_column(String, default="")
+    to_state: Mapped[str] = mapped_column(String, default="")
+    actor: Mapped[str] = mapped_column(String)
+    action: Mapped[str] = mapped_column(String)
+    detail: Mapped[str] = mapped_column(String, default="")
+    screenshot_ref: Mapped[str] = mapped_column(String, default="")

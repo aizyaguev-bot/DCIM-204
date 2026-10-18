@@ -79,6 +79,23 @@ async def test_pdu_status_applies_db_labels_to_cached_outlets(client, pdu_device
     assert r.json()["outlets"][0]["label"] == "GPU-Node"
 
 
+async def test_pdu_status_stale_cache_returns_current_labels(client, pdu_device, monkeypatch):
+    dev_id = pdu_device["id"]
+    cached = make_pdu_status(device_id=dev_id, outlets=[
+        OutletState(number=1, label="Old-Name", state="on", watts=100.0),
+    ])
+    pdus_module._cache[dev_id] = (time.monotonic() - pdus_module._CACHE_TTL - 10, cached)
+    refreshed = []
+
+    async def refresh(device_id, dev):
+        refreshed.append(device_id)
+    monkeypatch.setattr(pdus_module, "_refresh_background", refresh)
+    await client.patch(f"/api/devices/{dev_id}/labels", json={"1": "GPU-Node"})
+    r = await client.get(f"/api/pdus/{dev_id}/status")
+    assert r.json()["outlets"][0]["label"] == "GPU-Node"
+    assert refreshed == [dev_id]  # still refreshed in the background
+
+
 async def test_pdu_status_first_load_calls_driver(client, pdu_device):
     dev_id = pdu_device["id"]
     mock_status = PduStatus(device_id=dev_id, reachable=False, error="timeout")

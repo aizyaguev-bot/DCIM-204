@@ -1,21 +1,22 @@
-import sys, os, base64, secrets, asyncio, json
+import sys, os, base64, secrets, asyncio, json, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from contextlib import asynccontextmanager
 import pathlib
 
 from .database import init_db, AsyncSessionLocal, get_db
 from .models import Device
-from .routers import devices, pdus, pdu_maintenance, kvms, kvm_proxy, inventory, monitoring
+from .routers import devices, pdus, pdu_maintenance, kvms, kvm_proxy, inventory, monitoring, pxe
 from .ping_monitor import monitor_loop
 from .alerts import alert_loop
 from .accounts import AccountAccess, bootstrap_admin, router as accounts_router
-from . import inventory_store
+from . import confirm, inventory_store
 from .config import get_settings
 from sqlalchemy import select
 
@@ -64,9 +65,44 @@ async def lifespan(app: FastAPI):
         monitor.cancel()
         alerts.cancel()
         await asyncio.gather(warmup, monitor, alerts, return_exceptions=True)
+        if pxe._runner is not None:
+            await pxe._runner.aclose()  # stops PXE job loops and closes their consoles
 
 
 app = FastAPI(title="Lab Manager", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    """No `input` or `ctx`: a submitted value, such as a password, is never echoed back."""
+    errors = [{key: error[key] for key in ("loc", "msg", "type") if key in error} for error in exc.errors()]
+    return JSONResponse({"detail": errors}, status_code=422)
+
+
+_basic_failures: dict[str, float] = {}  # client address -> time of its last wrong Basic password
+_basic_lock = asyncio.Lock()            # one throttled check at a time, so pending attempts never count for each other
+
+
+def _basic_password_ok(auth: str, password: str) -> bool:
+    try:
+        decoded = base64.b64decode(auth[6:]).decode()
+        _, provided = decoded.split(":", 1)
+        return secrets.compare_digest(provided, password)
+    except Exception:
+        return False
+
+
+async def _basic_throttle(peer: str, valid: bool):
+    """The maintenance password throttle's table, limit and window, per client address; a right password is refunded."""
+    async with _basic_lock, AsyncSessionLocal() as db:
+        try:
+            digest = await confirm.reserve_attempt(db, "basic:client:" + peer)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+        if valid:
+            await confirm.refund_attempt(db, digest)
+    return None
+
 
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
@@ -79,13 +115,19 @@ async def basic_auth(request: Request, call_next):
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
-        try:
-            decoded = base64.b64decode(auth[6:]).decode()
-            _, provided = decoded.split(":", 1)
-            if secrets.compare_digest(provided, password):
-                return await call_next(request)
-        except Exception:
-            pass
+        valid = _basic_password_ok(auth, password)
+        peer = request.client.host if request.client else "unknown"
+        now = time.monotonic()
+        for key in [k for k, at in _basic_failures.items() if now - at >= confirm.FAILURE_WINDOW]:
+            del _basic_failures[key]
+        if not valid:
+            _basic_failures[peer] = now  # marked before any await, so a concurrent right guess is throttled as well
+        # Only addresses with a recent wrong password go through the throttle table.
+        denied = await _basic_throttle(peer, valid) if peer in _basic_failures else None
+        if denied:
+            return denied
+        if valid:
+            return await call_next(request)
     return Response(
         status_code=401,
         headers={"WWW-Authenticate": 'Basic realm="Lab Manager"'},
@@ -108,6 +150,7 @@ app.include_router(kvms.router)
 app.include_router(kvm_proxy.router)
 app.include_router(inventory.router)
 app.include_router(monitoring.router)
+app.include_router(pxe.router)
 app.include_router(accounts_router)
 from . import engineers
 app.include_router(engineers.router)
@@ -131,53 +174,44 @@ async def get_changelog():
     return {"changelog": text}
 
 
+def _get_layout(path, default, response: Response):
+    data = inventory_store.read_layout(path, default)
+    response.headers["ETag"] = inventory_store.revision(data)
+    response.headers["Cache-Control"] = "no-store"
+    return data
+
+
+def _save_layout(path, default, payload: dict, if_match: str | None, response: Response):
+    response.headers["ETag"] = inventory_store.save_layout(path, payload, if_match, default)
+    return {"ok": True}
+
+
 @app.get("/api/rack-positions")
-async def get_rack_positions():
-    try:
-        return json.loads(_RACK_POSITIONS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+async def get_rack_positions(response: Response):
+    return _get_layout(_RACK_POSITIONS_FILE, {}, response)
 
 
 @app.put("/api/rack-positions")
-async def save_rack_positions(payload: dict):
-    try:
-        _RACK_POSITIONS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return {"ok": True}
+async def save_rack_positions(payload: dict, response: Response, if_match: str | None = Header(default=None)):
+    return _save_layout(_RACK_POSITIONS_FILE, {}, payload, if_match, response)
 
 
 @app.get("/api/rack-slots")
-async def get_rack_slots():
-    try:
-        return json.loads(_RACK_SLOTS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+async def get_rack_slots(response: Response):
+    return _get_layout(_RACK_SLOTS_FILE, {}, response)
 
 @app.put("/api/rack-slots")
-async def save_rack_slots(payload: dict):
-    try:
-        _RACK_SLOTS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return {"ok": True}
+async def save_rack_slots(payload: dict, response: Response, if_match: str | None = Header(default=None)):
+    return _save_layout(_RACK_SLOTS_FILE, {}, payload, if_match, response)
 
 
 @app.get("/api/switch-assignments")
-async def get_switch_assignments():
-    try:
-        return json.loads(_SWITCH_ASSIGN_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+async def get_switch_assignments(response: Response):
+    return _get_layout(_SWITCH_ASSIGN_FILE, {}, response)
 
 @app.put("/api/switch-assignments")
-async def save_switch_assignments(payload: dict):
-    try:
-        _SWITCH_ASSIGN_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return {"ok": True}
+async def save_switch_assignments(payload: dict, response: Response, if_match: str | None = Header(default=None)):
+    return _save_layout(_SWITCH_ASSIGN_FILE, {}, payload, if_match, response)
 
 
 @app.get("/api/rack-items")
@@ -195,19 +229,12 @@ async def save_rack_items(payload: dict, response: Response, if_match: str | Non
 
 
 @app.get("/api/rack-overrides")
-async def get_rack_overrides():
-    try:
-        return json.loads(_RACK_OVERRIDES_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+async def get_rack_overrides(response: Response):
+    return _get_layout(_RACK_OVERRIDES_FILE, {}, response)
 
 @app.put("/api/rack-overrides")
-async def save_rack_overrides(payload: dict):
-    try:
-        _RACK_OVERRIDES_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return {"ok": True}
+async def save_rack_overrides(payload: dict, response: Response, if_match: str | None = Header(default=None)):
+    return _save_layout(_RACK_OVERRIDES_FILE, {}, payload, if_match, response)
 
 
 @app.get("/api/opt-owners")
@@ -220,19 +247,12 @@ async def save_opt_owners(payload: dict, db=Depends(get_db)):
 
 
 @app.get("/api/chillers")
-async def get_chillers():
-    try:
-        return json.loads(_CHILLERS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {"units": [], "connections": []}
+async def get_chillers(response: Response):
+    return _get_layout(_CHILLERS_FILE, {"units": [], "connections": []}, response)
 
 @app.put("/api/chillers")
-async def save_chillers(payload: dict):
-    try:
-        _CHILLERS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return {"ok": True}
+async def save_chillers(payload: dict, response: Response, if_match: str | None = Header(default=None)):
+    return _save_layout(_CHILLERS_FILE, {"units": [], "connections": []}, payload, if_match, response)
 
 
 _TWIN_DATA_FILE = TWIN_DIR / "lab-data.json"

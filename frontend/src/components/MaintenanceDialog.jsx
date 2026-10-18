@@ -28,10 +28,16 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
   const panelRef = useRef(null);
   const passwordRef = useRef(null);
   const reasonRef = useRef(null);
+  const cancelRef = useRef(null);
   const mounted = useRef(true);
   const busyRef = useRef(false);
+  const keyHandler = useRef(null);
+  keyHandler.current = onKeyDown;
 
   const unavailable = passwordMode === "unavailable";
+  // Unknown outlet states: nothing can be switched off, and the server would refuse anyway.
+  const unreachable = shutdown && status?.reachable === false;
+  const blocked = unavailable || unreachable;
   const outlets = status?.outlets || [];
   const byNumber = new Map(outlets.map(o => [o.number, o]));
   const onOutlets = outlets.filter(o => o.state === "on");
@@ -52,9 +58,13 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
   useEffect(() => {
     mounted.current = true;
     const opener = document.activeElement;
-    (shutdown ? reasonRef.current : passwordRef.current)?.focus();
+    (blocked ? cancelRef.current : shutdown ? reasonRef.current : passwordRef.current)?.focus();
+    // On the document: a click on plain text moves focus to <body>, outside the panel.
+    const listener = e => keyHandler.current(e);
+    document.addEventListener("keydown", listener);
     return () => {
       mounted.current = false;
+      document.removeEventListener("keydown", listener);
       if (passwordRef.current) passwordRef.current.value = "";
       if (opener instanceof HTMLElement && document.contains(opener)) opener.focus();
     };
@@ -74,13 +84,14 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
       .filter(el => !el.disabled && el.offsetParent !== null);
     if (focusable.length === 0) return;
     const first = focusable[0], last = focusable[focusable.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    if (!panelRef.current.contains(document.activeElement) || document.activeElement === (e.shiftKey ? first : last)) {
+      e.preventDefault(); (e.shiftKey ? last : first).focus();
+    }
   }
 
   async function submit(e) {
     e.preventDefault();
-    if (busyRef.current || unavailable || !device) return;
+    if (busyRef.current || blocked || !device) return;
     const trimmed = reason.trim();
     if (shutdown && (trimmed.length < 1 || trimmed.length > 200)) {
       setError("Enter a reason (1–200 characters).");
@@ -127,7 +138,6 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
       <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="maint-dialog-title" aria-describedby="maint-dialog-desc"
-        onKeyDown={onKeyDown}
         className="bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl w-full max-w-md max-h-[calc(100vh-32px)] overflow-y-auto">
         <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between">
           <div id="maint-dialog-title" className={`font-medium ${shutdown ? "text-rose-300" : "text-nv-300"}`}>{title}</div>
@@ -155,7 +165,9 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
                   <div className="text-xs text-zinc-500">{[device?.rack, device?.model].filter(Boolean).join(" · ")}</div>
                 </div>
                 {shutdown ? (
-                  outlets.length === 0
+                  unreachable
+                    ? <p role="alert" className="text-amber-300">This PDU is unreachable, so its outlet states are unknown and no outlet can be switched off. Try again when it is back online.</p>
+                    : outlets.length === 0
                     ? <p className="text-amber-300">Outlet states are not loaded. The server reads them live and switches off only the outlets that are on.</p>
                     : <p className="text-zinc-300"><strong className="text-rose-300">{onOutlets.length}</strong> of {outlets.length} outlets are on and will be switched off.</p>
                 ) : (
@@ -189,7 +201,7 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
               {shutdown && (
                 <label className="block">
                   <div className="text-xs text-zinc-400 mb-1">Reason <span className="text-rose-400" aria-hidden="true">*</span></div>
-                  <input ref={reasonRef} value={reason} onChange={e => setReason(e.target.value)} required maxLength={200} disabled={busy || unavailable}
+                  <input ref={reasonRef} value={reason} onChange={e => setReason(e.target.value)} required maxLength={200} disabled={busy || blocked}
                     placeholder="e.g. Rack rewiring"
                     className="w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-nv-400/60" />
                 </label>
@@ -198,7 +210,7 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
               <label className="block">
                 <div className="text-xs text-zinc-400 mb-1">{passwordLabel(passwordMode)}</div>
                 <input ref={passwordRef} type="password" name="maintenance-password" autoComplete="current-password" required maxLength={256}
-                  disabled={busy || unavailable}
+                  disabled={busy || blocked}
                   aria-invalid={error ? "true" : undefined} aria-describedby={error ? "maint-dialog-error" : undefined}
                   className="w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-nv-400/60" />
               </label>
@@ -206,9 +218,9 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
               {error && <p id="maint-dialog-error" role="alert" className="text-xs text-rose-300">{error}</p>}
             </div>
             <div className="px-5 py-3 border-t border-zinc-800 flex justify-end gap-2">
-              <button type="button" onClick={close} disabled={busy} className="text-sm px-3 py-1.5 rounded hover:bg-zinc-800 text-zinc-300 disabled:opacity-40">Cancel</button>
-              <button type="submit" disabled={busy || unavailable}
-                className={`text-sm px-3.5 py-1.5 rounded font-medium disabled:opacity-50 ${shutdown ? "bg-rose-500 hover:bg-rose-400 text-white" : "bg-nv-400 hover:bg-nv-300 text-zinc-950"}`}>
+              <button type="button" ref={cancelRef} onClick={close} disabled={busy} className="text-sm px-3 py-1.5 rounded hover:bg-zinc-800 text-zinc-300 disabled:opacity-40">Cancel</button>
+              <button type="submit" disabled={busy || blocked}
+                className={`text-sm px-3.5 py-1.5 rounded font-medium disabled:opacity-50 ${shutdown ? "bg-rose-700 hover:bg-rose-600 text-white" : "bg-nv-400 hover:bg-nv-300 text-zinc-950"}`}>
                 {busy ? (shutdown ? "Switching off…" : "Restoring…") : title}
               </button>
             </div>

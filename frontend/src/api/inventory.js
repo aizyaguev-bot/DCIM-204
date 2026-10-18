@@ -35,6 +35,11 @@ export async function saveRackItems(updated, previous) {
     versions.set(saved.data, saved.revision);
     return saved.data;
   } catch (error) {
+    // A stale revision would fail every later save too; callers apply error.reloaded instead.
+    if (error.status === 409 || error.status === 428) {
+      error.reloaded = await loadRackItems().catch(() => null);
+      if (error.reloaded) error.message = "Equipment changed in another session. The equipment list was reloaded; review it and try again.";
+    }
     // Older equipment dialogs do not render server errors themselves.
     window.alert(error.message);
     throw error;

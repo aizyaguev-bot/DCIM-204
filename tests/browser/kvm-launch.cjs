@@ -8,6 +8,8 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8774';
   const errors = [], checks = [], unexpectedWrites = [];
   async function login(username, blockPopup = false) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    // What's new opens over the page in a fresh profile; it is not under test here.
+    await context.addInitScript(() => { try { localStorage.setItem('dcim.seenVersion', 'LOCAL PREVIEW - TEST DATA'); } catch {} });
     await context.route('**/*', route => {
       const request = route.request();
       if (!request.url().startsWith(origin + '/')) return route.abort();

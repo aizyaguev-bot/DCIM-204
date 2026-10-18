@@ -105,7 +105,7 @@ def test_injected_websocket_urls_are_proxied_once_and_keep_subprotocols():
     node = shutil.which("node")
     assert node, "Node.js is needed to test the real injected browser script"
     prefix = f"/api/kvms/test/proxy/{proxy.ASSET_SEGMENT}"
-    js = (proxy._OVERRIDE_TMPL % {"kvm_ip":"192.0.2.15","proxy":prefix,"base":"/api/kvms/test/proxy"})
+    js = proxy._override_script("192.0.2.15",prefix,"/api/kvms/test/proxy")
     js = js.removeprefix("<script>\n").removesuffix("</script>")
     urls = ['wss://192.0.2.15/stream?q=1','/api/kvms/test/proxy/ws/stream?q=1','ws://ftlab:8000/api/kvms/test/proxy/ws/stream?q=1',
             '/stream?q=1',f'{prefix}/stream?q=1','/api/kvms/test/proxy/stream?q=1']
@@ -125,7 +125,7 @@ console.log(JSON.stringify(calls));
 def test_injected_hint_explains_no_video_until_the_kvm_reports_a_picture():
     node = shutil.which("node")
     assert node, "Node.js is needed to test the real injected browser script"
-    js = proxy._OVERRIDE_TMPL % {"kvm_ip":"192.0.2.15","proxy":"/p/~r2","base":"/p"}
+    js = proxy._override_script("192.0.2.15","/p/~r2","/p")
     js = js.removeprefix("<script>\n").removesuffix("</script>")
     harness = '''
 const location={protocol:'http:',host:'h',origin:'http://h',href:'http://h/p/~r2/jsclient/Client.asp'};

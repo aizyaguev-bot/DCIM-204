@@ -88,11 +88,11 @@ function TargetSettings({ target, onSaved }) {
     finally { setBusy(false); }
   }
   return <form onSubmit={save} className="space-y-3 border-b border-zinc-800 pb-5 mb-5">
-    <label className="block text-xs text-zinc-400">שם השרת לתצוגה
+    <label className="block text-xs text-zinc-400"><span dir="rtl">שם השרת לתצוגה</span>
       <input aria-label="שם השרת לתצוגה" className={`${input} mt-2`} value={syncName&&target.source==="inventory"?target.inventory_name:name} onChange={e=>setName(e.target.value)} readOnly={syncName&&target.source==="inventory"} required maxLength={160} disabled={busy}/>
     </label>
-    {target.source==="inventory"&&<label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={syncName} onChange={e=>{setSyncName(e.target.checked);setName(target.name);}} disabled={busy}/>סנכרון שם אוטומטי מהמלאי</label>}
-    <p className="text-xs text-zinc-500">שם התצוגה לא משנה את כתובת הבדיקה או את חיבורי ה־PDU וה־KVM.</p>
+    {target.source==="inventory"&&<label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={syncName} onChange={e=>{setSyncName(e.target.checked);setName(target.name);}} disabled={busy}/><span dir="rtl">סנכרון שם אוטומטי מהמלאי</span></label>}
+    <p dir="rtl" className="text-xs text-zinc-500">שם התצוגה לא משנה את כתובת הבדיקה או את חיבורי ה־PDU וה־KVM.</p>
     <label className="block text-xs text-zinc-400">IP address or DNS hostname
       <input aria-label={`Address for ${target.name}`} className={`${input} mt-2`} value={host} onChange={e => setHost(e.target.value)} maxLength={253} placeholder="e.g. opt133 or 10.7.30.25" disabled={busy} />
     </label>
@@ -219,7 +219,9 @@ export default function MonitoringView() {
     </div>
     {error && <div role="alert" className="rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Monitoring could not refresh: {error}. Previously displayed results may be out of date.</div>}
     {notice && <div role="status" className="text-sm text-nv-400">{notice}</div>}
-    {problem && <div role="alert" className="rounded-lg border border-amber-900 bg-amber-950/30 p-3 text-sm text-amber-300">Monitor {data.service.replaceAll("_", " ")}. {data.error || "Check that the Lab Manager backend is running and monitoring is enabled."}</div>}
+    {problem && <div role="alert" className="rounded-lg border border-amber-900 bg-amber-950/30 p-3 text-sm text-amber-300">{data.service === "disabled"
+      ? "Monitoring is turned off in the server configuration, so no checks run. Ask a lab administrator to enable it."
+      : <>Monitor {data.service.replaceAll("_", " ")}. {data.error || "Check that the Lab Manager backend is running and monitoring is enabled."}</>}</div>}
     {adding && <AddServer onSaved={refresh} onClose={() => setAdding(false)} />}
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 flex flex-wrap items-center justify-between gap-4">
       <div className="flex flex-wrap gap-x-8 gap-y-3 text-sm"><div><span className="text-zinc-500 text-xs block mb-1">07:00–20:00</span><strong className="font-medium">Every 5 minutes</strong></div><div><span className="text-zinc-500 text-xs block mb-1">20:00–07:00</span><strong className="font-medium">Every 30 minutes</strong></div><div><span className="text-zinc-500 text-xs block mb-1">Timezone · every day</span><strong className="font-medium">{timezone}</strong></div></div>

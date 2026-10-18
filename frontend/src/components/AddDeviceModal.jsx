@@ -1,6 +1,30 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function AddDeviceModal({ onClose, onAdd, racks }) {
+  const panelRef = useRef(null);
+  const nameRef = useRef(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  // On the document so Escape and the Tab trap still work after a click on plain text.
+  useEffect(() => {
+    const opener = document.activeElement;
+    nameRef.current?.focus();
+    const onKey = e => {
+      if (e.key === "Escape") { e.preventDefault(); closeRef.current(); return; }
+      if (e.key !== "Tab" || !panelRef.current) return;
+      const focusable = [...panelRef.current.querySelectorAll("button, input, select, textarea, [href], [tabindex]:not([tabindex='-1'])")].filter(el => !el.disabled);
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (!panelRef.current.contains(document.activeElement) || document.activeElement === (e.shiftKey ? first : last)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      if (opener instanceof HTMLElement && document.contains(opener)) opener.focus();
+    };
+  }, []);
+
   const [kind, setKind] = useState("pdu");
   const [form, setForm] = useState({
     name: "", ip: "", rack: racks[0] || "",
@@ -17,10 +41,10 @@ export default function AddDeviceModal({ onClose, onAdd, racks }) {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} className="bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl w-full max-w-md">
+      <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="add-device-title" onClick={e => e.stopPropagation()} className="bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl w-full max-w-md">
         <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between">
-          <div className="font-medium">Add device</div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-100 w-7 h-7 rounded hover:bg-zinc-800">✕</button>
+          <div id="add-device-title" className="font-medium">Add device</div>
+          <button onClick={onClose} aria-label="Close" className="text-zinc-400 hover:text-zinc-100 w-7 h-7 rounded hover:bg-zinc-800">✕</button>
         </div>
         <div className="p-5">
           <div className="flex gap-1 mb-4 p-1 bg-zinc-900 rounded-md">
@@ -34,7 +58,7 @@ export default function AddDeviceModal({ onClose, onAdd, racks }) {
           {[["Display name", "name", "text", "PDU-Rack-C2"], ["IP address", "ip", "text", "10.7.30.x"]].map(([label, key, type, ph]) => (
             <label key={key} className="block mb-3">
               <div className="text-xs text-zinc-400 mb-1">{label}</div>
-              <input type={type} className={inp} value={form[key]} onChange={upd(key)} placeholder={ph} />
+              <input ref={key === "name" ? nameRef : undefined} type={type} className={inp} value={form[key]} onChange={upd(key)} placeholder={ph} />
             </label>
           ))}
           <label className="block mb-3">

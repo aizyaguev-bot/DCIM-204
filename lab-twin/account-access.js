@@ -5,7 +5,8 @@
   let csrf = null;
   window.DCIM_CAN_OPERATE = false;
   window.DCIM_ACCOUNT_PREFS = { confirm_power: true, refresh_seconds: 15 };
-  window.DCIM_ACCOUNT_READY = (async () => {
+  // Also re-run after a new sign-in: the CSRF token, role and preferences belong to the current session.
+  window.DCIM_ACCOUNT_REFRESH = async () => {
     if (location.protocol === 'file:') { window.DCIM_CAN_OPERATE = true; return; }
     try {
       const response = await originalFetch('/api/auth/status', {cache:'no-store'});
@@ -19,13 +20,14 @@
     } catch { /* A failed auth check leaves actions disabled. */ }
     finally {
       document.body.classList.toggle('account-viewer', !window.DCIM_CAN_OPERATE);
-      if (!window.DCIM_CAN_OPERATE) {
-        const style = document.createElement('style');
-        style.textContent = '.account-viewer #btnEdit,.account-viewer #btnSave,.account-viewer [data-pw],.account-viewer [data-kvm]{display:none!important}';
+      if (!window.DCIM_CAN_OPERATE && !document.getElementById('accountViewerStyle')) {
+        const style = document.createElement('style'); style.id = 'accountViewerStyle';
+        style.textContent = '.account-viewer #btnEdit,.account-viewer #sbSave,.account-viewer [data-pw],.account-viewer [data-kvm]{display:none!important}';
         document.head.appendChild(style);
       }
     }
-  })();
+  };
+  window.DCIM_ACCOUNT_READY = window.DCIM_ACCOUNT_REFRESH();
   window.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input, location.href);
     const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();

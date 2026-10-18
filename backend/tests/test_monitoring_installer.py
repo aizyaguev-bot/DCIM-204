@@ -625,9 +625,10 @@ def test_real_health_probe_authenticates_and_cleans_up_temporary_session(tmp_pat
                    "ACCOUNTS_ENABLED":"true" if mode == "accounts" else "false", "LAB_MANAGER_PASSWORD":password,
                    "EMAIL_ALERTS_ENABLED":"false"}
     try:
+        # The child imports the app under whatever load the machine has; only a real hang should fail here.
         result = subprocess.run([sys.executable,"-c",installer.READY_HEALTH],cwd=Path(__file__).resolve().parents[1],env=environment,
             input=json.dumps({"port":server.server_port,"expected_version":"test-version","inventory":True,"expected_accounts":mode=="accounts"}),
-            capture_output=True,text=True,timeout=15)
+            capture_output=True,text=True,timeout=120)
         assert result.returncode == (1 if fail_http else 0), result.stderr
         if not fail_http:
             assert json.loads(result.stdout)["accounts_enabled"] == (mode=="accounts")

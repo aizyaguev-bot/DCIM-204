@@ -64,7 +64,7 @@ export default function MaintenanceColumn({ pdus, pduStatuses, maintenance, erro
                       {st ? (
                         <div className="text-xs mt-1 space-y-0.5">
                           <div className="text-amber-300">In maintenance since {formatMaintenanceTime(st.started_at)}{st.started_by ? ` by ${st.started_by}` : ""}</div>
-                          {st.reason && <div className="text-zinc-400 break-words">{st.reason}</div>}
+                          {st.reason && <div dir="auto" className="text-zinc-400 break-words">{st.reason}</div>}
                           <div className="text-zinc-500">{(st.outlets_off || []).length} outlet{(st.outlets_off || []).length === 1 ? "" : "s"} to restore</div>
                           {st.failed?.length > 0 && <div className="text-rose-300">Failed outlets: {st.failed.join(", ")}</div>}
                         </div>
@@ -113,7 +113,7 @@ export default function MaintenanceColumn({ pdus, pduStatuses, maintenance, erro
                   <div className="text-zinc-500 mt-0.5">
                     {entry.by || "unknown"}
                     {entry.action !== "denied" && ` · ${entry.ok ?? 0} ok${entry.failed ? ` · ${entry.failed} failed` : ""}`}
-                    {entry.reason ? ` · ${entry.reason}` : ""}
+                    {entry.reason ? <> · <bdi>{entry.reason}</bdi></> : ""}
                   </div>
                 </li>
               );

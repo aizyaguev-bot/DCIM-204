@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-import uuid, json, pathlib
+import asyncio, uuid, json, pathlib
 
+from .. import inventory_store
 from ..database import get_db
 from ..models import Device, PduMaintenance
 from ..pdu_locks import maintenance_lock
@@ -13,6 +14,13 @@ from ..crypto import encrypt, decrypt
 router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 _BACKEND_DIR = pathlib.Path(__file__).parent.parent.parent
+_labels_lock = asyncio.Lock()
+
+
+async def _one_label_writer():
+    """Label writes cascade across devices; one at a time keeps a labels revision check valid until the commit."""
+    async with _labels_lock:
+        yield
 
 
 async def _rename_monitor_and_owner(db, old_name, new_name):
@@ -48,7 +56,14 @@ async def _rename_monitor_and_owner(db, old_name, new_name):
 
 
 def _rename_server_ids_in_file(path: pathlib.Path, id_renames: dict[str, str]) -> None:
-    """Rename server IDs inside rack_positions / rack_slots / switch_assignments JSON files."""
+    """Rename server IDs inside rack_positions / rack_slots / switch_assignments / rack_overrides JSON files,
+    with the same per-file lock and atomic writer as their PUT endpoints."""
+    if path.exists():
+        with inventory_store.locked_file(path, inventory_store.LAYOUT_SAVE_FAILED):
+            _rename_server_ids_locked(path, id_renames)
+
+
+def _rename_server_ids_locked(path: pathlib.Path, id_renames: dict[str, str]) -> None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -73,15 +88,15 @@ def _rename_server_ids_in_file(path: pathlib.Path, id_renames: dict[str, str]) -
                 data[rack] = new_slots
                 changed = True
 
-    elif name == "switch_assignments.json":
-        # { server_id: { switch, port } }
+    elif name in ("switch_assignments.json", "rack_overrides.json"):
+        # { server_id: { switch, port } } / { server_id: rack }
         new_data = {id_renames.get(k, k): v for k, v in data.items()}
         if new_data != data:
             data = new_data
             changed = True
 
     if changed:
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        inventory_store.write_json(path, data)
 
 
 @router.get("/", response_model=list[DeviceOut])
@@ -90,8 +105,20 @@ async def list_devices(db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
+def _check_address(ip: str):
+    """One IP address or DNS host name: no scheme, port, path, quotes or spaces (it reaches drivers and proxied pages)."""
+    from ..ping_monitor import validate_host
+    try:
+        if ip != ip.strip():
+            raise ValueError
+        validate_host(ip)
+    except ValueError:
+        raise HTTPException(422, "Enter a single IP address or DNS host name (no http://, port, path, quotes or spaces).") from None
+
+
 @router.post("/", response_model=DeviceOut, status_code=201)
 async def create_device(body: DeviceCreate, db: AsyncSession = Depends(get_db)):
+    _check_address(body.ip)
     dev = Device(
         id=str(uuid.uuid4()),
         name=body.name,
@@ -130,6 +157,8 @@ async def _locked_device(device_id: str, db: AsyncSession):
 @router.put("/{device_id}", response_model=DeviceOut)
 async def update_device(device_id: str, body: DeviceCreate, db: AsyncSession = Depends(get_db)):
     async with _locked_device(device_id, db) as dev:
+        if body.ip != dev.ip:
+            _check_address(body.ip)  # an unchanged saved address never blocks other edits
         if body.ip != dev.ip or body.kind != dev.kind:
             await _reject_if_in_maintenance(device_id, db)
         dev.name = body.name
@@ -153,9 +182,18 @@ async def update_labels(
     device_id: str,
     labels: dict,
     db: AsyncSession = Depends(get_db),
+    if_match: str | None = Header(default=None),
+    _writer: None = Depends(_one_label_writer),
 ):
     dev = await _get_or_404(device_id, db)
+    if if_match and if_match != inventory_store.revision(dev.labels):
+        raise HTTPException(409, "Port labels on this device were changed in another session. Reload and try again.")
     old_labels = json.loads(dev.labels_json) if dev.labels_json else {}
+    if any(not isinstance(v, str) for v in labels.values()):
+        raise HTTPException(422, "Label values must be text")
+    # Keys this device already has are accepted whatever they are, so saved maps keep round-tripping.
+    if any(not (k.isascii() and k.isdigit()) and k not in old_labels for k in labels):
+        raise HTTPException(422, "Port keys must be numbers")
     new_labels = {str(k): v for k, v in labels.items() if v}
 
     # Detect renames: same port key, different non-empty value
@@ -185,11 +223,11 @@ async def update_labels(
 
         # Also rename server IDs in DCIM runtime JSON files so rack positions/slots stay intact
         id_renames = {old.lower(): new.lower() for old, new in renames.items()}
-        for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json"):
+        for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json", "rack_overrides.json"):
             _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames)
 
     await db.commit()
-    return {"ok": True, "synced": list(renames.keys())}
+    return {"ok": True, "synced": list(renames.keys()), "labels_revision": inventory_store.revision(new_labels)}
 
 
 @router.get("/sync-map")
@@ -214,7 +252,7 @@ async def get_sync_map(db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/direct-label", status_code=200)
-async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db)):
+async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db), _writer: None = Depends(_one_label_writer)):
     """Set a label on one device port without cascading to other devices."""
     device_id = body.get("device_id")
     port = str(body.get("port", "")).strip()
@@ -233,7 +271,7 @@ async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/rename-opt", status_code=200)
-async def rename_opt(body: dict, db: AsyncSession = Depends(get_db)):
+async def rename_opt(body: dict, db: AsyncSession = Depends(get_db), _writer: None = Depends(_one_label_writer)):
     """Rename an OPT globally across all PDUs, KVMs, and DCIM position files."""
     old_name = (body.get("old_name") or "").strip()
     new_name = (body.get("new_name") or "").strip()
@@ -254,7 +292,7 @@ async def rename_opt(body: dict, db: AsyncSession = Depends(get_db)):
             updated.append(dev.name)
 
     id_renames = {old_name.lower(): new_name.lower()}
-    for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json"):
+    for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json", "rack_overrides.json"):
         _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames)
 
     await db.commit()

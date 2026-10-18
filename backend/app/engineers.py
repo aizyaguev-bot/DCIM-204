@@ -149,6 +149,9 @@ async def assign_owner(asset_key: str, body: OwnerEdit, db: AsyncSession = Depen
 async def replace_legacy_owners(payload, db):
     if any(not isinstance(v, str) or len(v) > 120 for v in payload.values()):
         raise HTTPException(422, "Owner names must be text up to 120 characters")
+    # Assets missing from the payload are cleared, so a list without any owner would clear them all.
+    if not any(v.strip() for v in payload.values()):
+        raise HTTPException(422, "An owner list without any owner would remove every owner, so it was not saved. Change owners one at a time instead.")
     people = {p.name_key:p for p in (await db.execute(select(Engineer))).scalars()}
     current = {a.asset_key:a for a in (await db.execute(select(AssetOwner))).scalars()}
     for asset in set(await owner_map(db)) | set(payload):

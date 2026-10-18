@@ -1,5 +1,7 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from typing import Optional
+
+from .inventory_store import revision
 
 class DeviceBase(BaseModel):
     name: str
@@ -20,6 +22,12 @@ class DeviceOut(DeviceBase):
     labels: dict = {}       # parsed from Device.labels_json via the ORM property
 
     model_config = {"from_attributes": True}
+
+    @computed_field
+    @property
+    def labels_revision(self) -> str:
+        """Optional If-Match value for PATCH /api/devices/{id}/labels."""
+        return revision(self.labels)
 
 class OutletState(BaseModel):
     number: int

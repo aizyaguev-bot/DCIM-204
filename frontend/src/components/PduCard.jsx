@@ -1,13 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import StatusDot from "./StatusDot";
 import {useAccounts} from "../accounts";
+import { deviceState, STATE_DOT, STATE_TEXT } from "../api/client";
 
 export default function PduCard({ device, status, inMaintenance = false, onOpen, onOutletAction }) {
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;
   const totalW = status?.reachable ? status.total_watts : null;
-  const reachable = status ? status.reachable : null;
-  const devStatus = reachable === false ? "offline" : reachable === true ? "online" : "unknown";
+  const state = deviceState(status);
 
   return (
     <section className="device-card" aria-label={device.name}>
@@ -18,7 +18,7 @@ export default function PduCard({ device, status, inMaintenance = false, onOpen,
         <button onClick={onOpen} className="flex-1 min-w-0 text-left group">
           <div className="flex items-center gap-2">
             <span className="device-name group-hover:text-nv-400 transition truncate">{device.name}</span>
-            <StatusDot status={devStatus} label />
+            <span className="inline-flex items-center gap-1.5 shrink-0"><StatusDot status={STATE_DOT[state]} /><span className="text-xs font-normal text-zinc-400">{STATE_TEXT[state]}</span></span>
           </div>
           <div className="device-subtitle" title={`${device.model} · ${device.ip} · ${device.rack}`}>{device.model} · {device.ip} · {device.rack}</div>
         </button>
@@ -28,19 +28,19 @@ export default function PduCard({ device, status, inMaintenance = false, onOpen,
         <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs">In maintenance · restore power from the Maintenance column</div>
       )}
       {status?.error && (
-        <div className="px-4 py-2 bg-rose-500/10 border-b border-rose-500/30 text-rose-300 text-xs">⚠ {status.error}</div>
+        <div className={`px-4 py-2 border-b text-xs ${state === "unavailable" ? "bg-zinc-800/40 border-zinc-700/60 text-zinc-400" : "bg-rose-500/10 border-rose-500/30 text-rose-300"}`}>⚠ {status.error}</div>
       )}
       <div className="px-4 py-3">
         {outlets.length > 0 ? (
           <div className="grid grid-cols-6 gap-1.5">
             {outlets.map((o, i) => (
-              <OutletCell key={o.number} outlet={o} index={i} totalCount={outlets.length} locked={inMaintenance}
+              <OutletCell key={o.number} outlet={o} index={i} totalCount={outlets.length} locked={inMaintenance} offline={state === "offline"}
                 onAction={a => onOutletAction(o.number, a)} />
             ))}
           </div>
         ) : (
           <div className="text-xs text-zinc-600 text-center py-4">
-            {reachable === false ? "Cannot reach device" : "Loading outlets…"}
+            {{ offline: "Cannot reach device", unavailable: "Status unavailable" }[state] || "Loading outlets…"}
           </div>
         )}
       </div>
@@ -55,11 +55,12 @@ export default function PduCard({ device, status, inMaintenance = false, onOpen,
   );
 }
 
-function OutletCell({ outlet, index, totalCount, locked, onAction }) {
+function OutletCell({ outlet, index, totalCount, locked, offline, onAction }) {
   const {canOperate} = useAccounts();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ top: 0, left: 0, openUp: false });
   const btnRef = useRef(null);
+  const menuRef = useRef(null);
   const isOn = outlet.state === "on";
 
   const hasName = !/^Outlet \d+$/.test(outlet.label);
@@ -90,12 +91,31 @@ function OutletCell({ outlet, index, totalCount, locked, onAction }) {
     return () => window.removeEventListener("scroll", close, true);
   }, [open]);
 
+  useEffect(() => {
+    // preventScroll: a scroll closes the menu (see above).
+    if (open) (menuRef.current?.querySelector('[role="menuitem"]') || menuRef.current)?.focus({ preventScroll: true });
+  }, [open]);
+
+  const closeMenu = () => { setOpen(false); btnRef.current?.focus(); };
+  const act = action => { onAction(action); closeMenu(); };
+  function onMenuKeyDown(e) {
+    const items = [...menuRef.current.querySelectorAll('[role="menuitem"]')];
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(); }
+    else if (e.key === "Tab") setOpen(false);
+    else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && items.length) {
+      e.preventDefault();
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      items[(items.indexOf(document.activeElement) + step + items.length) % items.length].focus();
+    }
+  }
+
   return (
     <>
       <button
         ref={btnRef}
         onClick={handleClick}
         title={`${outlet.label}\n${isOn ? `${outlet.watts == null ? "\u2014" : outlet.watts + "W"}` : outlet.state}`}
+        aria-haspopup="menu" aria-expanded={open}
         data-state={outlet.state} data-labelled={hasName}
         className={`pdu-outlet-cell ${cls} hover:brightness-125 transition`}
       >
@@ -107,8 +127,8 @@ function OutletCell({ outlet, index, totalCount, locked, onAction }) {
           {/* full-screen backdrop */}
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           {/* popup */}
-          <div
-            className="fixed z-50 w-52 bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl p-2 text-sm"
+          <div ref={menuRef} role="menu" aria-label={`${outlet.label || `Outlet ${outlet.number}`} power`} tabIndex={-1} onKeyDown={onMenuKeyDown}
+            className="fixed z-50 w-52 bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl p-2 text-sm focus:outline-none"
             style={{
               top: pos.openUp ? undefined : pos.top,
               bottom: pos.openUp ? window.innerHeight - pos.top : undefined,
@@ -120,20 +140,22 @@ function OutletCell({ outlet, index, totalCount, locked, onAction }) {
                 Outlet {outlet.number} · {isOn ? `${outlet.watts == null ? "\u2014" : outlet.watts + "W"} / ${outlet.current == null ? "\u2014" : outlet.current + "A"}` : outlet.state}
               </div>
             </div>
-            {!canOperate ? <p className="text-xs text-zinc-500 px-2 py-1">Viewer · read only</p> : locked ? (
+            {!canOperate ? <p className="text-xs text-zinc-500 px-2 py-1">Viewer · read only</p> : offline ? (
+              <p className="text-xs text-rose-300 px-2 py-1">PDU is unreachable; outlet power actions are unavailable</p>
+            ) : locked ? (
               <>
                 <p className="text-xs text-amber-300 px-2 py-1">PDU is in maintenance mode; restore it from the Maintenance column first</p>
-                {isOn && <MI onClick={() => { onAction("off"); setOpen(false); }} icon="⏻" label="Turn off" danger />}
+                {isOn && <MI onClick={() => act("off")} icon="⏻" label="Turn off" danger />}
               </>
             ) : isOn ? (
               <>
-                <MI onClick={() => { onAction("cycle"); setOpen(false); }} icon="↻" label="Power cycle" />
+                <MI onClick={() => act("cycle")} icon="↻" label="Power cycle" />
                 <MI
-                  onClick={() => { onAction("off"); setOpen(false); }}
+                  onClick={() => act("off")}
                   icon="⏻" label="Turn off" danger />
               </>
             ) : (
-              <MI onClick={() => { onAction("on"); setOpen(false); }} icon="⏻" label="Turn on" success />
+              <MI onClick={() => act("on")} icon="⏻" label="Turn on" success />
             )}
           </div>
         </>
@@ -145,8 +167,8 @@ function OutletCell({ outlet, index, totalCount, locked, onAction }) {
 function MI({ onClick, icon, label, danger, success }) {
   const c = danger ? "hover:bg-rose-500/15 text-rose-300" : success ? "hover:bg-nv-400/15 text-nv-300" : "hover:bg-zinc-800 text-zinc-200";
   return (
-    <button onClick={onClick} className={`w-full text-left px-2 py-1.5 rounded ${c} flex items-center gap-2`}>
-      <span className="w-4 text-center">{icon}</span>{label}
+    <button role="menuitem" tabIndex={-1} onClick={onClick} className={`w-full text-left px-2 py-1.5 rounded ${c} flex items-center gap-2 focus:outline-none focus-visible:ring-1 focus-visible:ring-nv-400`}>
+      <span className="w-4 text-center" aria-hidden="true">{icon}</span>{label}
     </button>
   );
 }

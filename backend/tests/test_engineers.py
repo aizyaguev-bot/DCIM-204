@@ -111,3 +111,22 @@ async def test_directory_duplicates_validation_and_corrupt_legacy_data(directory
         directory.saved.write_text("invalid JSON")
         assert (await c.get("/api/opt-owners")).status_code == 503
         assert directory.saved.read_text() == "invalid JSON"
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+async def test_bulk_replace_refuses_an_owner_list_without_owners(directory, monkeypatch, legacy):
+    import app.main as main
+    directory.app.put("/api/opt-owners")(main.save_opt_owners)
+    if legacy:
+        monkeypatch.setattr(accounts, "get_settings", lambda: SimpleNamespace(accounts_enabled=False))
+    async with client(directory) as c:
+        if not legacy:
+            await login(c)
+        before = (await c.get("/api/opt-owners")).json()
+        assert before == {"opt11":"Roy Mendelson", "opt12":"Existing unknown owner"}
+        for payload in ({}, {"opt11":"  "}):
+            r = await c.put("/api/opt-owners", json=payload)
+            assert r.status_code == 422 and "every owner" in r.json()["detail"]
+        assert (await c.get("/api/opt-owners")).json() == before
+        r = await c.put("/api/opt-owners", json={**before, "opt13":"Adam Cohen"})
+        assert r.status_code == 200 and (await c.get("/api/opt-owners")).json() == {**before, "opt13":"Adam Cohen"}

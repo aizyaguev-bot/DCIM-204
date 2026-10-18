@@ -62,7 +62,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .app-subnav { display: flex; gap: 18px; padding: 0 16px; border-bottom: 1px solid #333333; overflow-x: auto; }
 .app-subnav button { padding: 12px 2px; color: #a7a7a7; font-size: 13px; white-space: nowrap; border-bottom: 2px solid transparent; }
 .app-subnav button[aria-current="page"] { border-color: #76b900; color: #9fe040; }
-.app-footer { padding: 18px 16px; margin-top: auto; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; color: #757575; font: 11px Consolas, monospace; }
+.app-footer { padding: 18px 16px; margin-top: auto; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; color: #8a8a8a; font: 11px Consolas, monospace; }
 .device-page { flex: 1; width: 100%; padding: 20px 16px; }
 .device-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .device-filter { height: 32px; padding: 0 14px; border: 1px solid #333333; border-radius: 2px; font-size: 13px; color: #ccc; }
@@ -79,7 +79,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .device-icon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 34px; height: 34px; border-radius: 2px; background: #161616; border: 1px solid #333333; color: #a7a7a7; }
 .device-name { font-size: 15px; font-weight: 700; color: #fff; }
 .device-subtitle { color: #a7a7a7; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.device-details { padding: 0; color: #a7a7a7; font-size: 12px; white-space: nowrap; }
+.device-details { padding: 3px 6px; min-height: 24px; color: #a7a7a7; font-size: 12px; white-space: nowrap; }
 .device-details:hover { color: #9fe040; }
 .device-card-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 10px 16px; border-top: 1px solid #2a2a2a; font-size: 12px; color: #a7a7a7; }
 .device-note { padding: 6px 16px; background: #2a1c08; color: #f0c060; font-size: 12px; border-bottom: 1px solid #2a2a2a; }
@@ -97,7 +97,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .rack-kpi:first-child { border: 0; }
 .rack-kpi strong { display: block; font: 700 22px "JetBrains Mono", Consolas, monospace; color: #fff; }
 .rack-kpi span { display: block; font-size: 12px; color: #a7a7a7; margin-top: 2px; }
-.rack-kpi small { font-size: 11px; color: #757575; }
+.rack-kpi small { font-size: 11px; color: #8a8a8a; }
 .rack-card { padding: 12px 16px 16px; border: 1px solid #333333; background: #161616; border-radius: 2px; box-shadow: none; font-family: "JetBrains Mono", Consolas, monospace; }
 .rack-card[data-status="offline"] { border-color: #5a1a1a; }
 .rack-card-header { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
@@ -112,11 +112,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .rack-meta { display: flex; gap: 7px; font-size: 10px; color: #a7a7a7; margin: 5px 0 10px; white-space: nowrap; overflow-x: auto; }
 .rack-shelves { background: #0c0c0c; border: 1px solid #2a2a2a; border-radius: 2px; padding: 8px; }
 .shelf-row { display: flex; align-items: stretch; gap: 8px; min-height: 44px; margin-bottom: 6px; }
-.shelf-index { display: flex; align-items: center; flex: 0 0 16px; font-size: 10px; color: #757575; }
+.shelf-index { display: flex; align-items: center; flex: 0 0 16px; font-size: 11px; color: #a7a7a7; }
 .shelf-grip { width: 12px; display: flex; align-items: center; color: #757575; cursor: grab; touch-action: none; }
 .shelf-content { display: flex; gap: 6px; flex: 1; min-width: 0; flex-wrap: wrap; }
 .shelf-empty { height: 18px; display: flex; gap: 8px; margin: 6px 0; align-items: center; }
-.shelf-empty .shelf-index { color: #333; }
+.shelf-empty .shelf-index { color: #8a8a8a; }
 .shelf-empty-line { flex: 1; height: 1px; background: #1a1a1a; }
 .server-cell { display: flex; flex: 1 1 90px; align-items: center; gap: 7px; padding: 6px 10px; min-height: 42px; min-width: 0; border-radius: 2px; background: #141414; border: 1px solid #333; cursor: pointer; }
 .server-cell.on { background: linear-gradient(180deg, #1b2c10, #0f1808); border-color: #3f6a14; }
@@ -210,6 +210,14 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .page-intro h1 { font-size: 24px; line-height: 1.2; font-weight: 700; color: #fff; }
 .page-intro p { color: #a7a7a7; font-size: 14px; margin-top: 6px; }
 .edit-mode-notice { border: 1px solid #76b900; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; background: #161616; }
+/* Header marks the edges of the tab strip that hide tabs; the fade is the "more tabs" hint. */
+.app-tabs[data-overflow-end="true"] { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
+.app-tabs[data-overflow-start="true"] { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent); }
+.app-tabs[data-overflow-start="true"][data-overflow-end="true"] { -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); }
+@media (max-width: 1600px) {
+  .app-header { gap: 16px; }
+  .app-tabs button { padding: 0 8px; font-size: 13px; }
+}
 @media (max-width: 1200px) {
   .app-header { flex-wrap: wrap; gap: 0 12px; padding-top: 12px; }
   .app-tabs { order: 3; flex-basis: 100%; height: 44px; margin-top: 10px; }

@@ -1,6 +1,6 @@
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
-const origin='http://127.0.0.1:8770';
+const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
 (async()=>{
  const browser=await chromium.launch({headless:true,channel:'msedge'});
  const failures=[];const checks=[];
