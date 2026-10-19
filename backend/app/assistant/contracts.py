@@ -6,6 +6,7 @@ lead; workers add fields only through the lead. Nothing in this module touches t
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
 
@@ -81,6 +82,35 @@ class ToolSpec:
 class ToolError(Exception):
     """Raised by a tool for a bad argument or an unavailable source. The message is shown to the model and the
     user, so it must be plain English without secrets, internal addresses or stack traces."""
+
+
+_REDACTIONS = (
+    (re.compile(r"(?i)(https?://)[^\s/@]+(?::[^\s/@]+)?@"), r"\1[redacted]@"),
+    (re.compile(r"\b[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[A-Za-z]{2,}\b"), "[redacted email]"),
+    (re.compile(r"(?i)(?<!\w)[\"']?[A-Za-z0-9_-]*(?:password|passwd|pwd|username|api[_ -]?key|token|session[_ -]?hash|secret)"
+                r"[A-Za-z0-9_-]*[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"), "[redacted credential]"),
+    (re.compile(r"(?i)\b(?:Basic|Bearer)\s+\S+"), "[redacted credential]"),
+    (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{10,}"), "[redacted key]"),
+)
+
+
+def redact_text(value: str) -> str:
+    """Remove credential-looking fragments (key=value secrets, URL userinfo, e-mail addresses, Basic/Bearer tokens,
+    API keys) from one untrusted string. The single shared rule for every tool result that reaches the model."""
+    for pattern, replacement in _REDACTIONS:
+        value = pattern.sub(replacement, value)
+    return value
+
+
+def redact_tree(value: Any) -> Any:
+    """redact_text applied to every string (dict keys included) inside nested dicts/lists/tuples."""
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return {redact_text(k) if isinstance(k, str) else k: redact_tree(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_tree(v) for v in value]
+    return value
 
 
 def iso(ts: float | None) -> str | None:
