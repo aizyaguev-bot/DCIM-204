@@ -24,6 +24,20 @@
 - With user accounts enabled, replacing all owners at once (`PUT /api/opt-owners`)
   is Admin-only. Setting the owner of a single asset, which the app and the twin
   use, is unchanged.
+- Without user accounts (shared site password), wrong passwords are limited
+  per client address: after 10 in 5 minutes the site answers "Too many attempts.
+  Try again in five minutes." until the window ends. Correct passwords do not
+  count.
+- A device address must be a single IP address or DNS host name, without
+  `http://`, a port, a path, quotes or spaces. A saved address that is not
+  changed never blocks other edits of the device.
+- Saving PDU or KVM port labels no longer overwrites labels that someone else
+  saved in the meantime. The save is refused with "Port labels on this device
+  were changed in another session. Reload and try again." Label values must be
+  text, and new label keys must be port numbers.
+- The main tab bar keeps the current tab in view, fades the edge that hides
+  more tabs, and scrolls sideways with the mouse wheel. Tabs are more compact on
+  screens up to 1600 px wide.
 
 ### Fixed
 - Outlet power errors showed raw server output such as `409: {"detail": …}`.
@@ -54,6 +68,23 @@
   console page are encoded so they cannot run script.
 - A CSRF header with non-ASCII characters caused a server error. It is now
   refused with 403.
+- Invalid requests (HTTP 422) repeated the submitted values, such as a
+  password, in the error response. They no longer do.
+- The sign-in screen showed a broken NVIDIA logo. The logo is now part of the
+  app.
+- A PDU whose reading was waiting for a background refresh showed its outlet
+  labels from before the last label change. Current labels now show at once.
+- Ping Monitor: with monitoring turned off in the server configuration, the
+  page now says so and asks for a lab administrator instead of showing a
+  generic error. Hebrew settings labels read right to left.
+- Users: an error in the Add user dialog showed twice. It now shows only in the
+  dialog.
+- The inline KVM console now moves keyboard focus to its Close button when it
+  opens.
+- PDU maintenance log: a reason in Hebrew no longer reorders the rest of the
+  line.
+- Stopping or restarting Lab Manager now also stops remote-install jobs and
+  closes their consoles.
 
 ### Notes
 - Remote install stays off until `PXE_ENABLED` is set. The default driver is
