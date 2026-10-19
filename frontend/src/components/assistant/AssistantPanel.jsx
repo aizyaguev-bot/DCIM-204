@@ -3,7 +3,7 @@ import { useAccounts } from "../../accounts";
 import {
   getStatus, sendMessage, listConversations, getConversation, resetConversation, normalizeAnswer, normalizeSources,
   normalizeMessages, normalizeConversations, mergeContext, contextKey, contextLabel, errorText, isRetryable, rateLimitText,
-  charCountText, formatAsOf, sourceStatusLabel, knownRacks, DEFAULT_MAX_CHARS,
+  charCountText, formatAsOf, sourceStatusLabel, knownRacks, shouldReloadStatus, ANSWER_MODES, DEFAULT_MAX_CHARS,
 } from "../../api/assistant";
 import { answerToSpeech, mergeTranscript } from "../../api/speech";
 import AnswerView from "./AnswerView";
@@ -88,6 +88,10 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   const controllerRef = useRef(null);  // the question in flight (Stop / close abort it)
   const sessionRef = useRef(null);     // aborted when the panel closes: status, conversation and list loads
   const historySeq = useRef(0);
+  const statusSeq = useRef(0);         // a newer /status load supersedes an older one still in flight
+  const statusAtRef = useRef(null);    // Date.now() of the last successful /status load
+  const statusRef = useRef(status);    // latest /status for code that runs after a long await
+  statusRef.current = status;
   const conversationRef = useRef(conversationId);
   conversationRef.current = conversationId;
   const launcherRef = useRef(null);
@@ -146,6 +150,8 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
       controllerRef.current = null;
       writeOpen(false);
       try { localStorage.removeItem(CONVERSATION_KEY); } catch { /* nothing stored */ }
+      statusSeq.current += 1;
+      statusAtRef.current = null;
       setOpen(false); setDraft(null); setPending(null); setFailed(null); setMessages([]); setConversationId(null);
       setLoadedId(null); setStatus(undefined); setStatusError(null); setHistory({ loading: false, error: null, list: null });
     };
@@ -169,6 +175,11 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   useEffect(() => {
     if (open && status === undefined && !statusLoading && !statusError) loadStatus();
   }, [open, status, statusLoading, statusError]);
+  // D1: the server's mode can change at any time (key added, daily cap), so on every open a /status that failed
+  // or is older than 60 s is read again; after each answer, see send().
+  useEffect(() => {
+    if (open && shouldReloadStatus({ status, statusError, loadedAt: statusAtRef.current, opened: true })) loadStatus();
+  }, [open]);
   useEffect(() => {
     if (open && conversationId && loadedId !== conversationId && !pending) loadConversation(conversationId);
   }, [open, conversationId, loadedId, pending]);
@@ -215,14 +226,18 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   }
 
   async function loadStatus() {
+    const seq = ++statusSeq.current;
     setStatusLoading(true); setStatusError(null);
     try {
       const data = await getStatus({ signal: sessionRef.current?.signal });
+      if (seq !== statusSeq.current) return;
+      statusAtRef.current = Date.now();
       setStatus(data && typeof data === "object" ? data : {});
     } catch (err) {
+      if (seq !== statusSeq.current) return;
       if (err.code !== "aborted") setStatusError(err);   // closed while loading: loaded again on the next open
     } finally {
-      setStatusLoading(false);
+      if (seq === statusSeq.current) setStatusLoading(false);
     }
   }
 
@@ -304,11 +319,14 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
       setMessages(list => [...list, {
         id: res?.message_id ? String(res.message_id) : `local-a-${Date.now()}`, role: "assistant",
         answer: normalizeAnswer(res?.answer), sources: normalizeSources(res?.sources),
-        mode: res?.mode === "llm" || res?.mode === "demo" ? res.mode : null,
+        mode: ANSWER_MODES.includes(res?.mode) ? res.mode : null,
         demo_reason: typeof res?.demo_reason === "string" ? res.demo_reason : null,
         elapsed_ms: Number.isFinite(res?.elapsed_ms) ? res.elapsed_ms : null, created_at: new Date().toISOString(),
       }]);
       setHistory(h => (h.list ? { ...h, list: null } : h));   // the list is reloaded next time it is shown
+      // D1: an answer in another mode than /status says (e.g. LLM after a key was added) -> read /status again so the
+      // header banner and the egress note match what really answered.
+      if (shouldReloadStatus({ status: statusRef.current, answerMode: res?.mode })) loadStatus();
     } catch (err) {
       if (epoch !== epochRef.current) return;
       if (err.status === 429) setRateUntil(Date.now() + (err.retryAfter || 60) * 1000);

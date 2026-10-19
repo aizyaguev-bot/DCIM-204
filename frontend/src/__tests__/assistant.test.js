@@ -5,6 +5,7 @@ import {
   parseRetryAfter, errorText, isRetryable, rateLimitText, formatAge, formatAsOf, sourceStatusLabel, priorityLabel, entityLink,
   normalizeAnswer, normalizeSources, normalizeMessages, normalizeConversations, draftFromRecommendation, cleanContext,
   mergeContext, contextKey, contextLabel, charCountText, bidiSegments, knownRacks, safeId, CHAT_TIMEOUT_MS,
+  statusIsStale, modeChanged, shouldReloadStatus, answerModeBadge, STATUS_MAX_AGE_MS, LLM_ANSWER_BADGE, DEMO_ANSWER_BADGE,
 } from "../api/assistant.js";
 
 const realFetch = globalThis.fetch;
@@ -340,4 +341,67 @@ test("bidiSegments isolates ids, IPs and names inside Hebrew text", () => {
   assert.deepEqual(bidiSegments("השרתים OPT71, OPT72 בארון").filter(s => s.ltr).map(s => s.text), ["OPT71, OPT72"]);
   assert.deepEqual(bidiSegments("PDU 07: בדוק את KVM 01").filter(s => s.ltr).map(s => s.text), ["PDU 07", "KVM 01"]);
   assert.deepEqual(bidiSegments("נצפה ב־2026-10-18 11:59 לפני 3 דקות").filter(s => s.ltr), []);
+});
+
+test("D1: /status is stale after 60 s and an answer in another mode means it is out of date", () => {
+  const t0 = Date.parse("2026-10-19T08:00:00Z");
+  assert.equal(STATUS_MAX_AGE_MS, 60_000);
+  assert.equal(statusIsStale(null, t0), true);
+  assert.equal(statusIsStale(undefined, t0), true);
+  assert.equal(statusIsStale(t0, t0 + 59_999), false);
+  assert.equal(statusIsStale(t0, t0 + 60_000), true);
+  assert.equal(statusIsStale(t0, t0 + 5_000, 1_000), true);
+  assert.equal(modeChanged({ mode: "demo" }, "llm"), true);
+  assert.equal(modeChanged({ mode: "llm" }, "demo"), true);
+  assert.equal(modeChanged({ mode: "llm" }, "llm"), false);
+  assert.equal(modeChanged(undefined, "demo"), true);
+  assert.equal(modeChanged({ mode: "demo" }, undefined), false);
+  assert.equal(modeChanged({ mode: "demo" }, "other"), false);
+});
+
+test("D1: shouldReloadStatus after an answer and when the panel opens", () => {
+  const t0 = Date.parse("2026-10-19T08:00:00Z");
+  const demo = { enabled: true, mode: "demo" };
+  // after an answer: only a different, known mode triggers a reload
+  assert.equal(shouldReloadStatus({ status: demo, answerMode: "llm" }), true);
+  assert.equal(shouldReloadStatus({ status: demo, answerMode: "demo" }), false);
+  assert.equal(shouldReloadStatus({ status: demo, answerMode: null }), false);
+  assert.equal(shouldReloadStatus({ status: demo }), false);
+  // on open: a fresh status is kept, a 60 s old one or a failed one is read again; the first load is not doubled
+  assert.equal(shouldReloadStatus({ status: demo, loadedAt: t0, now: t0 + 30_000, opened: true }), false);
+  assert.equal(shouldReloadStatus({ status: demo, loadedAt: t0, now: t0 + 60_000, opened: true }), true);
+  assert.equal(shouldReloadStatus({ status: undefined, statusError: { status: 503 }, opened: true }), true);
+  assert.equal(shouldReloadStatus({ status: undefined, loadedAt: null, now: t0, opened: true }), false);
+});
+
+test("D1: a mode change seen in an answer leads to a fresh /status (stubbed server switches demo -> llm)", async t => {
+  const calls = stubFetch(t, [
+    { body: { enabled: true, mode: "demo", model: "claude-opus-5-5" } },
+    { body: { conversation_id: "c1", message_id: "m1", mode: "llm", answer: { summary: "תשובה" }, sources: [] } },
+    { body: { enabled: true, mode: "llm", model: "claude-opus-5-5", egress_note: "נשלח ל-Anthropic" } },
+    { body: { conversation_id: "c1", message_id: "m2", mode: "llm", answer: { summary: "עוד" }, sources: [] } },
+  ]);
+  let status = await getStatus();
+  const first = await sendMessage({ message: "מה נפל?" });
+  assert.equal(shouldReloadStatus({ status, answerMode: first.mode }), true);
+  status = await getStatus();
+  assert.equal(status.mode, "llm");
+  const second = await sendMessage({ conversationId: "c1", message: "ועוד?" });
+  assert.equal(shouldReloadStatus({ status, answerMode: second.mode }), false);
+  assert.deepEqual(calls.map(c => `${c.method} ${c.url}`), [
+    "GET /api/assistant/status", "POST /api/assistant/chat", "GET /api/assistant/status", "POST /api/assistant/chat",
+  ]);
+});
+
+test("D1: every answer gets its own mode badge", () => {
+  assert.equal(LLM_ANSWER_BADGE, "נענה על ידי מודל שפה (Claude) · הנתונים נשלחו ל-Anthropic");
+  assert.deepEqual(answerModeBadge("llm"), { tone: "llm", text: LLM_ANSWER_BADGE, reason: "" });
+  assert.deepEqual(answerModeBadge("llm", "ignored"), { tone: "llm", text: LLM_ANSWER_BADGE, reason: "" });
+  assert.deepEqual(answerModeBadge("demo", "  לא הוגדר מפתח API לשרת.  "), { tone: "demo", text: DEMO_ANSWER_BADGE, reason: "לא הוגדר מפתח API לשרת." });
+  assert.deepEqual(answerModeBadge("demo"), { tone: "demo", text: "מצב הדגמה — ללא מודל שפה", reason: "" });
+  assert.equal(answerModeBadge(null), null);
+  assert.equal(answerModeBadge("other"), null);
+  // stored conversations keep the mode, so reopened answers get the same badge
+  const [, stored] = normalizeMessages([{ id: "1", role: "user", text: "q" }, { id: "2", role: "assistant", text: "a", answer: {}, mode: "llm" }]);
+  assert.equal(answerModeBadge(stored.mode).tone, "llm");
 });

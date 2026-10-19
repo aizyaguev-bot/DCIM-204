@@ -263,7 +263,45 @@ export function normalizeAnswer(raw) {
   };
 }
 
-export const SOURCE_STATUS_LABELS = { ok: "עדכני", stale: "ישן", missing: "חסר", unavailable: "לא זמין", disabled: "כבוי" };
+// ---------------------------------------------------------------------------------------------------------------
+// Answer mode (D1). The server can switch between demo and LLM at any time (a key added, the daily cap reset or
+// reached), so the panel never trusts an old /status: it reloads it when an answer's mode differs from it, and when
+// the panel opens with a /status older than STATUS_MAX_AGE_MS. Every answer also carries its own mode badge.
+// ---------------------------------------------------------------------------------------------------------------
+export const STATUS_MAX_AGE_MS = 60_000;
+export const ANSWER_MODES = ["llm", "demo"];
+export const LLM_ANSWER_BADGE = "נענה על ידי מודל שפה (Claude) · הנתונים נשלחו ל-Anthropic";
+export const DEMO_ANSWER_BADGE = "מצב הדגמה — ללא מודל שפה";
+
+// True when /status was never loaded successfully or was loaded maxAgeMs or more ago.
+export function statusIsStale(loadedAt, now = Date.now(), maxAgeMs = STATUS_MAX_AGE_MS) {
+  return !Number.isFinite(loadedAt) || now - loadedAt >= maxAgeMs;
+}
+
+// True when an answer's mode shows that the mode in /status (or the lack of one) is out of date.
+export function modeChanged(status, answerMode) {
+  return ANSWER_MODES.includes(answerMode) && status?.mode !== answerMode;
+}
+
+// The panel's single reload rule. After an answer: reload when its mode differs from /status.
+// When the panel opens: reload when /status failed before, or when a loaded one is stale.
+// (The very first load, with nothing loaded and no error yet, is started by the panel itself.)
+export function shouldReloadStatus({ status, statusError, loadedAt, now = Date.now(), answerMode, opened = false } = {}) {
+  if (answerMode !== undefined) return modeChanged(status, answerMode);
+  if (!opened) return false;
+  if (statusError) return true;
+  return status !== undefined && status !== null && statusIsStale(loadedAt, now);
+}
+
+// Per-answer badge: which engine answered and, for the LLM, that the question and lab data left the site.
+// {tone: "llm" | "demo", text, reason} or null for an answer without a known mode.
+export function answerModeBadge(mode, demoReason) {
+  if (mode === "llm") return { tone: "llm", text: LLM_ANSWER_BADGE, reason: "" };
+  if (mode === "demo") return { tone: "demo", text: DEMO_ANSWER_BADGE, reason: typeof demoReason === "string" ? demoReason.trim() : "" };
+  return null;
+}
+
+export const SOURCE_STATUS_LABELS ={ ok: "עדכני", stale: "ישן", missing: "חסר", unavailable: "לא זמין", disabled: "כבוי" };
 
 export function sourceStatusLabel(status) {
   return SOURCE_STATUS_LABELS[status] || "לא ידוע";

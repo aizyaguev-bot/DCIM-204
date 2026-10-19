@@ -1,6 +1,6 @@
 import { Fragment } from "react";
 import {
-  bidiSegments, draftFromRecommendation, entityLink, formatAge, formatAsOf, priorityLabel, sourceStatusLabel,
+  answerModeBadge, bidiSegments, draftFromRecommendation, entityLink, formatAge, formatAsOf, priorityLabel, sourceStatusLabel,
 } from "../../api/assistant";
 
 // Renders one assistant answer (contracts.ANSWER_SCHEMA after normalizeAnswer) as React elements only.
@@ -122,11 +122,14 @@ export default function AnswerView({ answer, sources = [], mode, demoReason, mes
   const recTitles = new Set(answer.recommendations.map(r => r.title.trim()).filter(Boolean));
   const extraDrafts = answer.work_item_drafts.map((d, i) => ({ d, i })).filter(({ d }) => !recTitles.has(d.title.trim()));
   const weakSources = sources.filter(s => s.status !== "ok").length;
+  const badge = answerModeBadge(mode, demoReason);   // per answer: /status may be older than the mode that answered
 
   return (
     <div className="space-y-4 text-sm leading-relaxed text-zinc-200">
-      {mode === "demo" && <p className="rounded border border-amber-800 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-200">
-        <strong>מצב הדגמה — ללא מודל שפה</strong>{demoReason ? <span dir="auto"> · {demoReason}</span> : null}</p>}
+      {badge?.tone === "demo" && <p data-answer-mode="demo" className="rounded border border-amber-800 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-200">
+        <strong>{badge.text}</strong>{badge.reason ? <span dir="auto"> · {badge.reason}</span> : null}</p>}
+      {badge?.tone === "llm" && <p data-answer-mode="llm" className="rounded border border-nv-400/40 bg-nv-400/10 px-2 py-0.5 text-[11px] text-nv-300">
+        <Bidi text={badge.text} /></p>}
       {answer.summary && <p className="whitespace-pre-line text-zinc-100"><Bidi text={answer.summary} /></p>}
 
       {answer.facts.length > 0 && <section>
