@@ -85,10 +85,10 @@ class ToolError(Exception):
 
 
 _REDACTIONS = (
-    (re.compile(r"(?i)(https?://)[^\s/@]+(?::[^\s/@]+)?@"), r"\1[redacted]@"),
-    (re.compile(r"\b[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[A-Za-z]{2,}\b"), "[redacted email]"),
-    (re.compile(r"(?i)(?<!\w)[\"']?[A-Za-z0-9_-]*(?:password|passwd|pwd|username|api[_ -]?key|token|session[_ -]?hash|secret)"
-                r"[A-Za-z0-9_-]*[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"), "[redacted credential]"),
+    (re.compile(r"(?i)(https?://)[^\s/@:]{1,256}(?::[^\s/@]{0,256})?@"), r"\1[redacted]@"),
+    (re.compile(r"\b[\w.!#$%&'*+/=?^`{|}~-]{1,64}@[\w.-]{1,253}\.[A-Za-z]{2,24}\b"), "[redacted email]"),
+    (re.compile(r"(?i)(?<!\w)[\"']?[A-Za-z0-9_-]{0,64}(?:password|passwd|pwd|username|api[_ -]?key|token|session[_ -]?hash|secret)"
+                r"[A-Za-z0-9_-]{0,64}[\"']?\s{0,8}[:=]\s{0,8}(?:\"[^\"]{0,512}\"|'[^']{0,512}'|[^\s,;]{1,512})"), "[redacted credential]"),
     (re.compile(r"(?i)\b(?:Basic|Bearer)\s+\S+"), "[redacted credential]"),
     (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{10,}"), "[redacted key]"),
 )

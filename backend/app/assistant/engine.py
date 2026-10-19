@@ -31,6 +31,7 @@ from typing import Any, Callable
 from . import prompts
 from .contracts import (
     ANSWER_SCHEMA, ROLE_ORDER, SOURCE_STATUSES, Source, ToolContext, ToolError, ToolResult, ToolSpec, empty_answer,
+    redact_text, redact_tree,
 )
 
 log = logging.getLogger(__name__)
@@ -296,6 +297,11 @@ def _merge(current: Source, new: Source) -> Source:
                   note=worse.note or current.note or new.note)
 
 
+def _redacted(value) -> str:
+    """A redacted string field; anything that is not a string becomes empty (never str() of an unknown object)."""
+    return redact_text(value) if isinstance(value, str) else ""
+
+
 class Ledger:
     """Every source an executed tool really returned in this request (and was shown to the model), deduplicated
     by id: a duplicate keeps the worse status and the older as_of. Plus the tools' caveats in first-seen order."""
@@ -308,6 +314,9 @@ class Ledger:
         for source in result.sources or []:
             if not isinstance(source, Source) or not isinstance(source.id, str) or not source.id:
                 continue
+            # Defense in depth: results from run_tool are already redacted; this also covers direct callers.
+            source = dataclasses.replace(source, id=redact_text(source.id), name=_redacted(source.name),
+                                         ref=_redacted(source.ref), note=_redacted(source.note))
             if source.status not in _STATUS_RANK:
                 source = dataclasses.replace(source, status="unavailable",
                                              note=source.note or "The tool reported an unknown source status.")
@@ -317,7 +326,8 @@ class Ledger:
             current = self._sources.get(source.id)
             self._sources[source.id] = source if current is None else _merge(current, source)
         for caveat in result.caveats or []:
-            if isinstance(caveat, str) and caveat.strip() and caveat not in self.caveats:
+            caveat = redact_text(caveat) if isinstance(caveat, str) else None
+            if caveat and caveat.strip() and caveat not in self.caveats:
                 self.caveats.append(caveat)
 
     def ids(self) -> set[str]:
@@ -370,8 +380,9 @@ def ground_answer(answer: dict, ledger_ids: set[str], extra_missing: list[str] |
 
 
 def finalize(answer: dict, ledger: Ledger, extra_missing: list[str] | None = None) -> dict:
-    """Ground an answer against the ledger and surface the ledger's gaps in missing_data."""
-    return ground_answer(answer, ledger.ids(), list(extra_missing or []) + ledger.missing_notes())
+    """Ground an answer against the ledger and surface the ledger's gaps in missing_data; the final text passes
+    contracts.redact_tree as the last layer (LLM and demo answers alike)."""
+    return redact_tree(ground_answer(answer, ledger.ids(), list(extra_missing or []) + ledger.missing_notes()))
 
 
 def safe_answer(summary: str, missing: list[str] | None = None) -> dict:
@@ -395,27 +406,75 @@ def parse_answer(text: str) -> tuple[dict | None, str | None]:
 # ---------------------------------------------------------------------------------------------------------------
 # Tool execution.
 # ---------------------------------------------------------------------------------------------------------------
+def _reject(value):
+    """json.dumps `default`: refuse anything that is not plain JSON. The message never contains str(value)."""
+    raise TypeError(f"{type(value).__name__} is not JSON-serialisable")
+
+
+def dumps_strict(value) -> str:
+    """JSON for the model: plain JSON types only (no default=str, no NaN/Infinity)."""
+    return json.dumps(value, ensure_ascii=False, default=_reject, allow_nan=False)
+
+
+_SERIALISATION_ERRORS = (TypeError, ValueError, OverflowError, RecursionError)
+
+
+def _source_from(value: dict) -> Source | None:
+    """Rebuild a Source from its redacted, JSON-validated dict (all values are JSON primitives here)."""
+    if not isinstance(value, dict) or not isinstance(value.get("id"), str) or not value["id"]:
+        return None
+
+    def text(key):
+        item = value.get(key)
+        return item if isinstance(item, str) else ("" if item is None else json.dumps(item))
+
+    as_of = value.get("as_of") if isinstance(value.get("as_of"), str) else None
+    age_s = value.get("age_s")
+    age_s = float(age_s) if isinstance(age_s, (int, float)) and not isinstance(age_s, bool) else None
+    status = value.get("status") if value.get("status") in SOURCE_STATUSES else "unavailable"
+    return Source(id=value["id"], name=text("name"), ref=text("ref"), as_of=as_of, age_s=age_s, status=status,
+                  note=text("note"))
+
+
+def sanitize_result(result: ToolResult) -> ToolResult:
+    """The single gate between a tool and everything downstream (model envelope, ledger, demo text): a copy with
+    contracts.redact_tree applied to data, sources and caveats (dict keys included), validated as strict JSON.
+    Raises TypeError/ValueError when the result is not plain JSON (the caller turns that into a generic error)."""
+    raw = {"data": result.data,
+           "sources": [s.to_dict() if isinstance(s, Source) else s for s in (result.sources or [])],
+           "caveats": list(result.caveats or [])}
+    clean = redact_tree(raw)
+    dumps_strict(clean)
+    if not isinstance(clean["data"], dict):
+        raise TypeError("tool data must be a JSON object")
+    sources = [s for s in (_source_from(v) for v in clean["sources"]) if s is not None]
+    caveats = [c for c in clean["caveats"] if isinstance(c, str)]
+    return ToolResult(data=clean["data"], sources=sources, caveats=caveats)
+
+
 def tool_envelope(name: str, result: ToolResult) -> str:
-    """The tool_result content sent to the model: JSON marked as untrusted data, at most ~MAX_RESULT_CHARS."""
-    payload = {"untrusted_data": True, "tool": name, "result": result.to_dict()}
-    text = json.dumps(payload, ensure_ascii=False, default=str)
+    """The tool_result content sent to the model: redacted strict JSON marked as untrusted data, at most
+    ~MAX_RESULT_CHARS. Raises TypeError/ValueError for non-JSON content (never serialised with str())."""
+    body = redact_tree(result.to_dict())
+    tool = redact_text(str(name))
+    text = dumps_strict({"untrusted_data": True, "tool": tool, "result": body})
     if len(text) <= MAX_RESULT_CHARS:
         return text
-    body = result.to_dict()
-    data_text = json.dumps(body["data"], ensure_ascii=False, default=str)
-    head = {"untrusted_data": True, "tool": name, "truncated": True,
+    data_text = dumps_strict(body["data"])
+    head = {"untrusted_data": True, "tool": tool, "truncated": True,
             "note": (f"The result exceeded {MAX_RESULT_CHARS} characters. sources and caveats are complete; "
                      "data_prefix is the start of the data JSON and is incomplete. Call the tool again with "
                      "narrower arguments if the missing part matters, and mention the truncation."),
             "result": {"sources": body["sources"], "caveats": body["caveats"], "data_prefix": ""}}
-    room = max(1_000, MAX_RESULT_CHARS - len(json.dumps(head, ensure_ascii=False, default=str)))
+    room = max(1_000, MAX_RESULT_CHARS - len(dumps_strict(head)))
     head["result"]["data_prefix"] = data_text[:room]
-    return json.dumps(head, ensure_ascii=False, default=str)
+    return dumps_strict(head)
 
 
 async def run_tool(spec: ToolSpec | None, name: str, args, ctx: ToolContext) -> ToolResult | str:
-    """Run one tool after the role and argument checks. Returns the ToolResult or a plain error message."""
-    safe_name = _clip(str(name), 80)
+    """Run one tool after the role and argument checks. Returns the sanitised ToolResult (see sanitize_result) or a
+    plain, redacted error message."""
+    safe_name = redact_text(_clip(str(name), 80))
     if spec is None:
         return f"Unknown tool or tool not permitted for this user: {safe_name}."
     if not ctx.principal.allows(spec.required_role):
@@ -424,11 +483,11 @@ async def run_tool(spec: ToolSpec | None, name: str, args, ctx: ToolContext) -> 
         return "Tool input must be a JSON object."
     errors = validate(spec.input_schema, args)
     if errors:
-        return "Invalid arguments: " + "; ".join(errors[:5])
+        return redact_text("Invalid arguments: " + "; ".join(errors[:5]))
     try:
         result = await spec.func(ctx, **args)
     except ToolError as exc:
-        return _clip(str(exc) or "The tool could not read its data source.", 500)
+        return redact_text(_clip(str(exc) or "The tool could not read its data source.", 500))
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - a broken tool must not break the answer; never echo its message
@@ -437,7 +496,11 @@ async def run_tool(spec: ToolSpec | None, name: str, args, ctx: ToolContext) -> 
     if not isinstance(result, ToolResult):
         log.warning("Assistant tool %s returned an invalid result type.", spec.name)
         return TOOL_INTERNAL_ERROR
-    return result
+    try:
+        return sanitize_result(result)
+    except _SERIALISATION_ERRORS as exc:
+        log.warning("Assistant tool %s returned data that is not plain JSON (%s).", spec.name, type(exc).__name__)
+        return TOOL_INTERNAL_ERROR
 
 
 class Budget:
@@ -472,7 +535,12 @@ async def _execute_tool_uses(blocks: list, by_name: dict[str, ToolSpec], ctx: To
         if not isinstance(outcome, ToolResult):
             results.append(_error(block, outcome))
             continue
-        content = tool_envelope(block.name, outcome)
+        try:
+            content = tool_envelope(block.name, outcome)
+        except _SERIALISATION_ERRORS as exc:   # sanitize_result already validated it; never fall back to str()
+            log.warning("Assistant tool %s result could not be serialised (%s).", block.name, type(exc).__name__)
+            results.append(_error(block, TOOL_INTERNAL_ERROR))
+            continue
         if budget.chars + len(content) > MAX_RESULT_CHARS_PER_QUESTION:
             budget.chars = MAX_RESULT_CHARS_PER_QUESTION
             results.append(_error(block, f"Tool result budget for this question is exhausted (about "

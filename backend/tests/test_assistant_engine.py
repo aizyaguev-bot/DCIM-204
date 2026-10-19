@@ -1021,3 +1021,107 @@ async def test_demo_answers_do_not_mix_english_templates_into_hebrew_sentences()
     assert any(t.startswith("opt207: השרת אינו עונה ל-ping") and t.endswith("פירוט טכני: ICMP timeout.")
                for t in facts), facts
     assert any("השקע 4 כבוי (OFF)" in t for t in facts), facts
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Central redaction and strict serialisation (Codex review R2, security note I2).
+# ---------------------------------------------------------------------------------------------------------------
+LEAKS = ("hunter2", "s3cret", "someone@example.com", "abc123", "zzz-token-value", "qq-secret")
+
+
+def assert_clean(text):
+    for leak in LEAKS:
+        assert leak not in text, leak
+
+
+async def leaky_tool(ctx):
+    return ToolResult(
+        {"ports": [{"number": 1, "label": "OPT11 password=hunter2"}],
+         "url": "http://admin:s3cret@192.0.2.5/status",
+         "owner": "contact someone@example.com",
+         "nested": {"api_key=abc123": {"deep": ["token: zzz-token-value"]}}},
+        [Source(id="leak:1", name="pdu password=hunter2", ref="http://admin:s3cret@192.0.2.5",
+                note="token=zzz-token-value")],
+        ["secret: qq-secret"])
+
+
+class Opaque:
+    def __str__(self):
+        return "OPAQUE-SECRET-STR"
+
+    __repr__ = __str__
+
+
+async def opaque_tool(ctx):
+    return ToolResult({"value": Opaque()}, [src("opaque:1")], [])
+
+
+async def nan_tool(ctx):
+    return ToolResult({"value": float("nan")}, [src("nan:1")], [])
+
+
+async def test_credentials_in_tool_results_never_reach_the_model_the_ledger_or_the_answer(fake_llm, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = fake_llm([message([tool_use("t1", "leaky_tool", {})], "tool_use"),
+                       message([text(answer_json(facts=[{"text": "fact", "source_ids": ["leak:1"]}]))], "end_turn")])
+    result = await ask("x", tools=TOOLS + [spec("leaky_tool", leaky_tool)])
+    envelope = client.calls[1]["messages"][-1]["content"][0]["content"]
+    assert_clean(envelope)
+    payload = json.loads(envelope)
+    assert payload["untrusted_data"] is True and "[redacted" in envelope
+    assert payload["result"]["data"]["ports"][0]["label"].startswith("OPT11 ")   # the rest of the label survives
+    assert_clean(json.dumps([s.to_dict() for s in result["ledger"]], ensure_ascii=False))
+    assert {s.id for s in result["ledger"]} == {"leak:1"}
+    assert_clean(json.dumps(result["answer"], ensure_ascii=False))
+    assert_clean(caplog.text)
+
+
+async def test_credentials_in_tool_results_never_reach_the_demo_answer():
+    async def leaky_problems(ctx, limit=50):
+        base = await list_current_problems(ctx, limit)
+        data = copy.deepcopy(base.data)
+        data["problems"][0]["detail"] = "login failed for http://root:s3cret@192.0.2.9 password=hunter2"
+        data["problems"][0]["entity"]["label"] = "opt207 someone@example.com"
+        data["problems"][1]["detail"] = "api_key=abc123"
+        return ToolResult(data, base.sources + [Source(id="leak:2", name="n", ref="r", status="stale",
+                                                       note="token=zzz-token-value")],
+                          base.caveats + ["secret: qq-secret"])
+
+    tools = [dataclasses.replace(t, func=leaky_problems) if t.name == "list_current_problems" else t for t in TOOLS]
+    result = await ask("מה נפל במעבדה?", ctx=make_ctx(assistant_anthropic_api_key=None), tools=tools)
+    assert result["answer"]["facts"]   # still a data-grounded answer
+    assert_clean(json.dumps(result["answer"], ensure_ascii=False))
+    assert_clean(json.dumps([s.to_dict() for s in result["ledger"]], ensure_ascii=False))
+
+
+@pytest.mark.parametrize("tool", [opaque_tool, nan_tool])
+async def test_non_json_tool_result_becomes_a_generic_error(fake_llm, caplog, tool):
+    client = fake_llm([message([tool_use("t1", "odd_tool", {})], "tool_use"),
+                       message([text(answer_json(facts=[]))], "end_turn")])
+    result = await ask("x", tools=TOOLS + [spec("odd_tool", tool)])
+    block = client.calls[1]["messages"][-1]["content"][0]
+    assert block == {"type": "tool_result", "tool_use_id": "t1", "content": "tool failed (internal error)",
+                     "is_error": True}
+    assert not ({"opaque:1", "nan:1"} & {s.id for s in result["ledger"]})
+    assert "OPAQUE-SECRET-STR" not in caplog.text
+    assert "OPAQUE-SECRET-STR" not in json.dumps(result["answer"], ensure_ascii=False)
+
+
+async def test_demo_turns_a_non_json_tool_result_into_missing_data():
+    tools = [dataclasses.replace(t, func=lambda ctx, limit=50: opaque_tool(ctx))
+             if t.name == "list_current_problems" else t for t in TOOLS]
+    result = await ask("מה נפל במעבדה?", ctx=make_ctx(assistant_anthropic_api_key=None), tools=tools)
+    text = json.dumps(result["answer"], ensure_ascii=False)
+    assert "OPAQUE-SECRET-STR" not in text and "tool failed (internal error)" in text
+
+
+def test_strict_serialisation_never_uses_str():
+    with pytest.raises(TypeError) as error:
+        engine.tool_envelope("t", ToolResult({"value": Opaque()}, [], []))
+    assert "OPAQUE" not in str(error.value)
+    with pytest.raises(ValueError):
+        engine.tool_envelope("t", ToolResult({"value": float("inf")}, [], []))
+    with pytest.raises(TypeError):
+        engine.sanitize_result(ToolResult({"value": {1, 2}}, [], []))
+    clean = engine.sanitize_result(ToolResult({"k": ("password=hunter2",)}, [src("s")], []))
+    assert clean.data == {"k": ["[redacted credential]"]} and clean.sources[0].id == "s"
