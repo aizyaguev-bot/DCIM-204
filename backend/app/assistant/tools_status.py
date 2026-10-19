@@ -14,7 +14,6 @@ import json
 import math
 from pathlib import Path
 import re
-import sys
 import unicodedata
 from zoneinfo import ZoneInfo
 
@@ -242,17 +241,15 @@ async def _rows(ctx, ev, model, *, where=(), order=(), limit=None):
 
 
 def _file_path(ctx, name):
-    relative, constant = _FILES[name]
-    if ctx.project_root is not None:
-        return Path(ctx.project_root) / relative
-    # Do not import main: importing it can initialize the application. When it
-    # is already loaded, honor its configured/monkeypatched runtime paths.
-    main = sys.modules.get("app.main")
-    if constant and main is not None and hasattr(main, constant):
-        return Path(getattr(main, constant))
+    """Use the same configured JSON stores as tools_layout and the application.
+
+    project_root locates repository documentation, not runtime stores. Importing
+    main does not run its lifespan or contact equipment.
+    """
     if name == "rack_items":
         return Path(inventory_store.ITEMS_FILE)
-    return Path(__file__).resolve().parents[3] / relative
+    from .. import main
+    return Path(getattr(main, _FILES[name][1]))
 
 
 def _valid_file(name, data):

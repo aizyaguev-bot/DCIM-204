@@ -25,6 +25,16 @@ from app.models import (
 
 NOW = dt.datetime(2026, 10, 18, 10, tzinfo=dt.timezone.utc).timestamp()
 DAY = 24 * 60 * 60
+RUNTIME_STORES = {
+    "rack_items": (None, "backend/rack_items.json", "rack_items"),
+    "rack_positions": ("_RACK_POSITIONS_FILE", "backend/rack_positions.json", "rack_positions"),
+    "rack_slots": ("_RACK_SLOTS_FILE", "backend/rack_slots.json", "rack_slots"),
+    "switch_assignments": ("_SWITCH_ASSIGN_FILE", "backend/switch_assignments.json", "switch_assignments"),
+    "rack_overrides": ("_RACK_OVERRIDES_FILE", "backend/rack_overrides.json", "rack_overrides"),
+    "opt_owners": ("_OPT_OWNERS_FILE", "backend/opt_owners.json", "owners"),
+    "chillers": ("_CHILLERS_FILE", "backend/chillers.json", "chillers"),
+    "twin": ("_TWIN_DATA_FILE", "lab-twin/lab-data.json", "twin"),
+}
 
 
 def write_json(ctx, name, value):
@@ -58,8 +68,11 @@ async def status_lab(db_session, tmp_path, monkeypatch):
         encoding="utf-8",
     )
     # Legacy owner_map and inventory readers must also remain inside this fixture.
-    from app import engineers, inventory_store
+    from app import engineers, inventory_store, main
     monkeypatch.setattr(inventory_store, "ITEMS_FILE", tmp_path / "backend" / "rack_items.json")
+    for constant, relative, _ in RUNTIME_STORES.values():
+        if constant:
+            monkeypatch.setattr(main, constant, tmp_path / relative)
     monkeypatch.setattr(
         engineers, "legacy_owners",
         lambda: json.loads((tmp_path / "backend" / "opt_owners.json").read_text(encoding="utf-8")),
@@ -951,3 +964,69 @@ async def test_nested_list_clipping_sets_root_truncation_even_with_one_record(st
     assert len(result.data["maintenance"][0]["outlets_off"]) == 200
     assert result.data["truncated"] is True
     assert_json_safe(result)
+
+
+@pytest.mark.parametrize("store", RUNTIME_STORES)
+@pytest.mark.parametrize("content,expected", [(None, "missing"), ("{invalid-json", "unavailable")])
+async def test_configured_runtime_store_failure_wins_over_valid_project_root_decoy(status_lab, store, content, expected):
+    ctx, _ = status_lab
+    from app import inventory_store
+    from app.assistant import tools_layout
+
+    _, relative, layout_name = RUNTIME_STORES[store]
+    configured = ctx.project_root / relative
+    decoy_root = ctx.project_root / "different-project"
+    decoy = decoy_root / relative
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text(json.dumps({"units": []} if store == "chillers" else {}), encoding="utf-8")
+    if content is None:
+        configured.unlink()
+    else:
+        configured.write_text(content, encoding="utf-8")
+    ctx.project_root = decoy_root
+
+    layout_path = Path(inventory_store.ITEMS_FILE) if store == "rack_items" else tools_layout._path(layout_name)
+    assert tools_status._file_path(ctx, store) == layout_path == configured
+    result = await tools_status.lab_status_overview(ctx)
+    assert result.data["data_files"][configured.name] == expected
+    assert any(source.id == "file:" + configured.name and source.status == expected for source in result.sources)
+
+
+@pytest.mark.parametrize("store,configured_data,marker", [
+    ("rack_items", {"Configured Inventory Rack": [{
+        "id": "item-84", "type": "computer", "name": "Opt84", "tracking_history": [{
+            "at": iso(NOW - 10), "action": "move", "note": "Configured inventory move",
+            "from": {"rack": "Rack-A"}, "to": {"rack": "Configured Inventory Rack"},
+        }],
+    }]}, "Configured Inventory Rack"),
+    ("rack_overrides", {"opt84": "Configured Override Rack"}, "Configured Override Rack"),
+    ("switch_assignments", {"opt84": {"switch": "Configured Switch", "port": "5"}}, "Configured Switch"),
+    ("opt_owners", {"opt84": "Configured Owner"}, "Configured Owner"),
+    ("twin", {
+        "setups": [{"id": "setup-test", "dcimRack": "Configured Twin Rack", "dcimMappingConfidence": "low"}],
+        "items": [{"id": "twin-84", "type": "opt", "name": "Opt84", "setup": "setup-test"}],
+    }, "Configured Twin Rack"),
+])
+async def test_server_and_history_read_configured_store_contents_instead_of_project_root_decoys(
+    status_lab, store, configured_data, marker,
+):
+    ctx, db = status_lab
+    db.add(target())
+    await db.commit()
+    _, relative, _ = RUNTIME_STORES[store]
+    configured = ctx.project_root / relative
+    configured.write_text(json.dumps(configured_data), encoding="utf-8")
+    decoy_root = ctx.project_root / "different-project"
+    decoy = decoy_root / relative
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text(json.dumps(configured_data).replace("Configured", "Decoy"), encoding="utf-8")
+    ctx.project_root = decoy_root
+
+    result = await tools_status.get_server_status(ctx, server="opt84")
+    serialised = json.dumps(result.to_dict())
+    assert result.data["status"] == "found"
+    assert marker in serialised and "Decoy" not in serialised
+    if store == "rack_items":
+        history = await tools_status.get_history(ctx, server="opt84")
+        assert any(row["kind"] == "rack_item_move" and row["detail"] == "Configured inventory move"
+                   for row in history.data["items"])
