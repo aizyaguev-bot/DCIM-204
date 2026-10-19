@@ -45,7 +45,9 @@ DEMO_LABEL = "מצב הדגמה — ללא מודל שפה"
 UNVERIFIED = "לא אומת: "
 SOURCE_DOWN = "מקור הנתונים חסר או לא זמין: "
 BAD_SOURCE_STATUSES = ("missing", "unavailable", "disabled")
-CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Stripped from every text the router cleans (questions and model output): control characters except tab/newline/CR,
+# C1 controls, LRM/RLM and the bidi embeddings, overrides and isolates (SEC-AI-17, phase 2 D4).
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 # Answer size caps (the engine output is shown in the panel and stored; SEC-AI-15).
 SUMMARY_CHARS = 4000
@@ -59,8 +61,8 @@ STEP_CHARS, MAX_STEPS = 500, 20
 MAX_REFS, REF_ID_CHARS, REF_LABEL_CHARS = 20, 120, 200
 WORK_ITEM_FIELDS = tuple(WORK_ITEM_DRAFT_SCHEMA["properties"])
 # Rejected in work items: control characters (newline/tab allowed in multi-line fields) and bidi overrides/isolates.
-BAD_SINGLE_LINE = re.compile(r"[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]")
-BAD_MULTI_LINE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+BAD_SINGLE_LINE = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+BAD_MULTI_LINE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 
 # Hebrew messages shown in the assistant panel. Fixed strings: no internals, no settings values, no echoed input.
 MSG_DISABLED = "סוכן ה-AI כבוי בהגדרות השרת."
@@ -101,7 +103,8 @@ DEMO_REASONS = {
 }
 DEMO_REASON_FALLBACK = "מודל השפה לא היה זמין לשאלה זו, ולכן התשובה נבנתה במצב הדגמה."
 EGRESS_NOTE = ("במצב מודל שפה, השאלה ונתוני המעבדה ששימשו לתשובה (שמות ציוד, כתובות IP לניהול, תוויות, שמות בעלים, "
-               "סיבות תחזוקה, מספרים סידוריים, נושאי התראות וקטעי תיעוד) נשלחים לעיבוד בשירות Anthropic. "
+               "סיבות תחזוקה, שמות משתמשים שביצעו פעולות תחזוקה, הערות חופשיות על ציוד, מספרים סידוריים, "
+               "נושאי התראות וקטעי תיעוד) נשלחים לעיבוד בשירות Anthropic. "
                "סיסמאות, מפתחות וכתובות דוא\"ל אינם נשלחים, וגם זהות המשתמש השואל אינה נשלחת.")
 
 
@@ -268,10 +271,26 @@ def _guard_write(request: Request, settings):
         raise _fail(415, MSG_NEED_JSON)
 
 
+async def _read_bounded(request: Request) -> bytes:
+    """The request body, never more than MAX_BODY_BYTES (phase 2 D3): a declared Content-Length above the limit is
+    refused before reading, and a chunked body is read only until it passes the limit."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        if not declared.strip().isdigit():
+            raise _fail(400, MSG_BAD_BODY)
+        if int(declared) > MAX_BODY_BYTES:
+            raise _fail(413, MSG_TOO_BIG)
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            raise _fail(413, MSG_TOO_BIG)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def _json_body(request: Request) -> dict:
-    raw = await request.body()
-    if len(raw) > MAX_BODY_BYTES:
-        raise _fail(413, MSG_TOO_BIG)
+    raw = await _read_bounded(request)
     try:
         body = json.loads(raw)
     except ValueError:
@@ -786,12 +805,14 @@ def _operator(request: Request, settings):
 
 @router.get("/work-items")
 async def work_items(request: Request, status: str | None = None):
+    """{"items": [...open items first, then the rest, newest change first...], "truncated": bool} (at most 200)."""
     settings = _enabled_settings()
     principal_for(request, settings)
     if status is not None and status not in storage.WORK_ITEM_STATUSES:
         raise _fail(400, MSG_BAD_BODY)
     async with _session() as db:
-        return await storage.list_work_items(db, status)
+        items, truncated = await storage.list_work_items(db, status)
+    return {"items": items, "truncated": truncated}
 
 
 @router.post("/work-items", status_code=201)

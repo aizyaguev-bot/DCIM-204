@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 
-from sqlalchemy import Float, ForeignKey, Integer, String, delete, func, select, update
+from sqlalchemy import Float, ForeignKey, Integer, String, case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -240,12 +240,16 @@ def work_item_dto(row: AssistantWorkItem) -> dict:
             "updated_by": row.updated_by, "conversation_id": row.conversation_id}
 
 
-async def list_work_items(db: AsyncSession, status: str | None = None) -> list[dict]:
+async def list_work_items(db: AsyncSession, status: str | None = None) -> tuple[list[dict], bool]:
+    """Open ("saved") items first, then the rest, each newest change first; at most WORK_ITEM_LIST_LIMIT.
+    Returns (items, truncated) where truncated means more items exist than were returned."""
     query = select(AssistantWorkItem)
     if status:
         query = query.where(AssistantWorkItem.status == status)
-    rows = (await db.scalars(query.order_by(AssistantWorkItem.updated_at.desc()).limit(WORK_ITEM_LIST_LIMIT))).all()
-    return [work_item_dto(row) for row in rows]
+    open_first = case((AssistantWorkItem.status == "saved", 0), else_=1)
+    rows = (await db.scalars(query.order_by(open_first, AssistantWorkItem.updated_at.desc(), AssistantWorkItem.id)
+                             .limit(WORK_ITEM_LIST_LIMIT + 1))).all()
+    return [work_item_dto(row) for row in rows[:WORK_ITEM_LIST_LIMIT]], len(rows) > WORK_ITEM_LIST_LIMIT
 
 
 async def create_work_item(db: AsyncSession, *, draft: dict, owner: str, username: str,

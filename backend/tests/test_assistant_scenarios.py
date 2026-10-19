@@ -825,7 +825,7 @@ async def test_draft_from_demo_answer_is_saved_only_with_operator_confirmation(l
         item = saved.json()
         assert item["status"] == "saved" and item["title"] == draft["title"] and item["steps"] == draft["steps"]
         assert item["created_by"] == "operator" and item["conversation_id"] == data["conversation_id"]
-        listed = (await viewer.get("/api/assistant/work-items")).json()
+        listed = (await viewer.get("/api/assistant/work-items")).json()["items"]
         assert [w["id"] for w in listed] == [item["id"]]
 
 
