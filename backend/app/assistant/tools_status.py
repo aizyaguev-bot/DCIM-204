@@ -27,7 +27,7 @@ from ..models import (
     PingMonitorState, PingSample, PingTarget, PingTargetName,
 )
 from ..ping_monitor import interval_minutes, next_slot, server_identity
-from .contracts import Source, ToolContext, ToolError, ToolResult, ToolSpec, age, iso
+from .contracts import Source, ToolContext, ToolError, ToolResult, ToolSpec, age, iso, redact_text
 
 
 _CAVEATS = [
@@ -86,11 +86,10 @@ _BIDI = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\
 
 def _text(value):
     value = "".join(c for c in str(value) if c not in _BIDI and not unicodedata.category(c).startswith("C"))
+    value = redact_text(value[:4000])  # shared rule: URL userinfo before e-mail, so no username survives
     value = _EMAIL.sub("[redacted email]", value)
     value = _SECRET.sub("[redacted credential]", value)
     value = re.sub(r"\bBearer\s+\S+", "[redacted token]", value, flags=re.IGNORECASE)
-    value = re.sub(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{10,}", "[redacted key]", value)
-    value = re.sub(r"(https?://)[^/\s]+@", r"\1[redacted]@", value, flags=re.IGNORECASE)
     return value[:300]
 
 
