@@ -88,7 +88,7 @@ class ToolError(Exception):
 # detected secret value is always removed whole, whatever its length or the spacing around its separator.
 _SCHEME = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,30}://")
 _CREDENTIAL_KEY = re.compile(r"(?i)password|passwd|pwd|username|api[_ -]?key|token|session[_ -]?hash|secret")
-_EMAIL_RE = re.compile(r"[\w.!#$%&'*+/=?^`{|}~-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){0,8}\.[A-Za-z]{2,24}\b")
+_EMAIL_LOCAL = frozenset(".!#$%&'*+=?^`{|}~-_")
 _SIMPLE = (
     (re.compile(r"(?i)\b(?:Basic|Bearer)\s+\S+"), "[redacted credential]"),
     (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{10,}"), "[redacted key]"),
@@ -107,7 +107,7 @@ def _redact_userinfo(value: str) -> str:
             continue
         start = m.end()
         end = start
-        while end < len(value) and not value[end].isspace() and value[end] not in "/?#":
+        while end < len(value) and not value[end].isspace() and value[end] != "/":  # a password may hold '?' or '#'
             end += 1
         at = value.rfind("@", start, end)
         if at > start:
@@ -133,13 +133,13 @@ def _redact_credentials(value: str) -> str:
             j += 1
         if j < n and value[j] in "\"'":
             j += 1
-        while j < n and value[j] in " \t":
+        while j < n and value[j].isspace():
             j += 1
         if j >= n or value[j] not in ":=":
             skip = j  # this word has no separator: later keywords inside it are not rescanned
             continue
         j += 1
-        while j < n and value[j] in " \t":
+        while j < n and value[j].isspace():
             j += 1
         if j < n and value[j] in "\"'":
             close = value.find(value[j], j + 1)
@@ -149,9 +149,31 @@ def _redact_credentials(value: str) -> str:
             while end < n and not value[end].isspace() and value[end] not in ",;":
                 end += 1
         if end == j:
+            skip = j  # empty value: nothing to remove, and the word already walked over is not rescanned
             continue
         out += [value[pos:start], "[redacted credential]"]
         pos = end
+    out.append(value[pos:])
+    return "".join(out)
+
+
+def _redact_emails(value: str) -> str:
+    """local@domain -> [redacted email], the whole address: any number of labels, dotted or not (root@server1)."""
+    out, pos, n = [], 0, len(value)
+    at = value.find("@")
+    while at != -1:
+        start = at
+        while start > pos and (value[start - 1].isalnum() or value[start - 1] in _EMAIL_LOCAL):
+            start -= 1
+        end = at + 1
+        while end < n and (value[end].isalnum() or value[end] in "_.-"):
+            end += 1
+        while end > at + 1 and value[end - 1] in ".-":
+            end -= 1
+        if start < at and end > at + 1:
+            out += [value[pos:start], "[redacted email]"]
+            pos = end
+        at = value.find("@", max(at + 1, pos))
     out.append(value[pos:])
     return "".join(out)
 
@@ -161,7 +183,7 @@ def redact_text(value: str) -> str:
     API keys) from one untrusted string. The single shared rule for every tool result that reaches the model."""
     value = _redact_userinfo(value)
     value = _redact_credentials(value)
-    value = _EMAIL_RE.sub("[redacted email]", value)
+    value = _redact_emails(value)
     for pattern, replacement in _SIMPLE:
         value = pattern.sub(replacement, value)
     return value
