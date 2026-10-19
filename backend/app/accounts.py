@@ -125,6 +125,9 @@ class AccountAccess:
         scope.setdefault("state", {})["account"] = current
         if path in PUBLIC:
             return await self.app(scope, receive, send)
+        # The deployed version is public for plain GET only, so a release can be confirmed without signing in.
+        if scope["type"] == "http" and method == "GET" and path == "/api/version":
+            return await self.app(scope, receive, send)
         if not current: return await deny(401, "Sign in to continue")
         user = current["user"]
         if user["must_change_password"] and path not in ("/api/me", "/api/me/password", "/api/auth/logout"):

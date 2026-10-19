@@ -2,6 +2,41 @@
 
 ---
 
+## v2.38.0 — 2026-10-19 — Automatic VM updates and public version check
+
+### Added
+- The VM can install every new commit of `feat/lab-manager-v3-accounts` by
+  itself. After this release is installed, a one-time command on the VM,
+  `backend/.venv/bin/python scripts/vm-auto-update.py install`, adds a
+  crontab line that checks GitHub every 2 minutes. A new commit is installed
+  with the same installer as the manual runbook, keeping user accounts on when
+  they are on now, usually within about 5 minutes of a push. Every install
+  restarts the site once.
+- A failed update is retried after 30 minutes, at most 3 times, then skipped
+  until a newer commit appears. If a failed attempt leaves down a site that was
+  up before, it is started again. Nothing is installed in the first 5 minutes
+  after a boot or with less than 1 GiB free.
+- `vm-auto-update.py status` shows the installed and the newest commit, the
+  last result and the size of the installer backups; `remove` deletes only its
+  own crontab line. Logs and state are kept in `.monitor-backups/auto-update/`.
+  See section 9 of `docs/vm-runbook.md`.
+
+### Changed
+- `GET /api/version` no longer needs a sign-in when user accounts are on, so a
+  release can be confirmed without signing in. It shows only the installed
+  version (on the VM, the first 7 characters of the installed commit). Every
+  other page and API, and any other method on this address, still needs a
+  session.
+
+### Notes
+- Once automatic updates are on, anyone who can push to
+  `feat/lab-manager-v3-accounts` can run code on the VM within minutes. Turn
+  on GitHub branch protection for this branch (owner action).
+- Run `install` as the normal user, never as root, from a shell that exports
+  no application settings; they belong in `.env`.
+
+---
+
 ## v2.37.2 — 2026-10-14 — KVM console in browsers that opened it before
 
 ### Fixed

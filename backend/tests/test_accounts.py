@@ -207,6 +207,30 @@ async def test_websocket_role_and_origin_are_checked(setup):
             assert socket.receive_json()=={"ok":True}
 
 
+async def test_version_is_the_only_public_read_in_accounts_mode(setup, tmp_path, monkeypatch):
+    import app.main as main
+    version_file = tmp_path / "version.txt"
+    version_file.write_text("abc1234\n")
+    monkeypatch.setattr(main, "_VERSION_FILE", version_file)
+    monkeypatch.setattr(main, "get_settings", lambda: setup.settings)
+    async with AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test") as c:
+        r = await c.get("/api/version")
+        assert r.status_code == 200 and r.json() == {"version": "abc1234"}
+        # Only GET is public; HEAD and every write still need a session.
+        assert (await c.head("/api/version")).status_code == 401
+        for path in ("/api/rack-items", "/api/changelog", "/api/me", "/api/users"):
+            assert (await c.get(path)).status_code == 401, path
+        assert (await c.post("/api/version")).status_code == 401
+        assert (await c.put("/api/version", json={})).status_code == 401
+    async with client(setup) as c:
+        assert (await c.get("/api/version")).status_code == 200
+        assert (await c.get("/api/version/")).status_code == 200
+        assert (await c.head("/api/version")).status_code == 401
+        assert (await c.get("/api/versions")).status_code == 401
+        assert (await c.delete("/api/version")).status_code == 401
+        assert setup.app.state.actions == ["version", "version/"]
+
+
 async def test_kvm_proxy_writes_need_same_origin_not_csrf_header(setup):
     async with client(setup) as c:
         await sign_in(c,"operator")
