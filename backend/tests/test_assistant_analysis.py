@@ -804,3 +804,110 @@ async def test_real_data_tools_end_to_end_without_secrets_or_addresses(real_lab)
     assert first["entity"]["label"] == "Opt11" and first["severity"] == "high" and len(first["problems"]) == 2
     pdu_row = next(r for r in priority["ranked"] if r["entity"]["id"] == "pdu-a")
     assert pdu_row["affected_count"] == 1 and pdu_row["affected"] == ["opt12"]      # outlet 2 only
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Regression (R2 review, v2.39.0): credentials inside port labels / server keys must never leave an analysis tool
+# ----------------------------------------------------------------------------------------------------------------
+SECRET_LABELS = {"1": "opt31 password=hunter2", "2": "https://admin:hunter3@lab.example/opt32",
+                 "3": "owner.secret@example.org", "4": "Opt33 token=tok-marker-xyz"}
+SECRET_BITS = ("hunter2", "hunter3", "admin:", "owner.secret@example.org", "tok-marker-xyz")
+
+
+def assert_no_secret_bits(value, where=""):
+    text = json.dumps(value, ensure_ascii=False)
+    for bit in SECRET_BITS:
+        assert bit not in text, (where, bit)
+
+
+def test_prioritize_affected_path_redacts_credentials_in_topology_keys():
+    topology = analysis.build_topology(
+        index({label: [("pdu-s", port, "error")] for port, label in SECRET_LABELS.items()}),
+        [("opt31 password=hunter2", "Owner"), ("owner.secret@example.org", "Owner")])
+    problems = analysis.normalize_problems({"problems": [
+        problem("device_unreachable", "medium", "pdu", "pdu-s", "PDU S password=hunter2", "monitor_device_snapshots")]})
+    data = analysis.prioritize_problems_data(problems, topology, [analysis.TOPOLOGY_SOURCE_ID])
+    row = data["ranked"][0]
+    assert row["affected_count"] == 4 and len(row["affected"]) == 4      # the reviewed `affected` path ran
+    assert any("[redacted" in label for label in row["affected"])
+    assert row["score"] > analysis.PROBLEM_POINTS["medium"] + 15        # owners still matched after redaction
+    assert_no_secret_bits(data, "prioritize_problems_data")
+    impact = analysis.analyze_impact_data("pdu", "pdu-s", {"servers": [{"server_key": k, "label": k}
+                                                                       for k in SECRET_LABELS.values()]},
+                                          problems, topology)
+    assert impact["counts"]["affected"] == 4
+    assert_no_secret_bits(impact, "analyze_impact_data")
+
+
+async def test_every_wrapper_redacts_data_sources_and_caveats_from_data_tools(monkeypatch):
+    secret_note = "login https://admin:hunter3@lab.example failed; password=hunter2"
+    deps = {"entity": {"kind": "pdu", "id": "pdu-s"}, "found": True,
+            "servers": [{"server_key": k, "label": k, "port": p,
+                         "connection": {"kind": "pdu", "device_id": "pdu-s", "device_name": "PDU S token=tok-marker-xyz",
+                                        "server_key": k, "port": p, "state": "off"}}
+                        for p, k in SECRET_LABELS.items()],
+            "connections": [{"kind": "switch", "server_key": "opt31 password=hunter2",
+                             "switch": "sw owner.secret@example.org", "port": "1"}],
+            "pdus": [{"id": "pdu-s", "kind": "pdu"}]}
+    leaky = dict(sources=[Source(id="devices", name="Devices", note=secret_note, status="stale")],
+                 caveats=[secret_note, "token=tok-marker-xyz"])
+    FakeTools(monkeypatch, {
+        "get_dependencies": ToolResult(data=deps, **leaky),
+        "list_current_problems": ToolResult(data={"problems": [
+            problem("outlet_off", "medium", "pdu", "pdu-s", "PDU S", "monitor_device_snapshots", outlet="1",
+                    detail="password=hunter2")]}, **leaky),
+        "get_server_status": ToolResult(data={"status": "found", "icmp": {"status": "down"},
+                                              "owner_names": ["owner.secret@example.org"]}, **leaky),
+        "get_rack_layout": ToolResult(data={**LAYOUT, "free_shelves": ["password=hunter2"]}, **leaky),
+        "get_power_and_environment": ToolResult(data=power_data(
+            [power_entry("pdu-s", total=100.0, complete=True, inlets=[inlet(0.5, 208.0, 100.0)])],
+            chillers=[{"id": "c", "name": "Chiller token=tok-marker-xyz", "rack": "Rack-09"}]), **leaky),
+        "get_history": ToolResult(data={"items": [
+            history_item("e1", "pdu_maintenance", NOW - DAY, device_id="pdu-s", detail=secret_note,
+                         action="password=hunter2"),
+            history_item("e2", "ping_incident", NOW - DAY + 60, detail="owner.secret@example.org")]}, **leaky),
+        "topology": analysis.build_topology(index({k: [("pdu-s", p, "on")] for p, k in SECRET_LABELS.items()})),
+    })
+    ctx = viewer_ctx()
+    outputs = {
+        "impact": await analysis.analyze_impact(ctx, kind="pdu", id="pdu-s"),
+        "server": await analysis.analyze_impact(ctx, kind="server", id="opt31 password=hunter2"),
+        "capacity": await analysis.plan_capacity(ctx, rack="Rack-09", power_w=50),
+        "history": await analysis.correlate_events(ctx, device_id="pdu-s"),
+        "priority": await analysis.prioritize_problems(ctx),
+    }
+    for name, out in outputs.items():
+        assert_no_secret_bits(out.to_dict(), name)
+        assert any("[redacted" in c for c in out.caveats), name
+    assert outputs["impact"].data["counts"]["affected"] == 4
+    assert outputs["priority"].data["ranked"][0]["affected_count"] == 1        # outlet 1 only, label redacted
+    assert "[redacted" in outputs["priority"].data["ranked"][0]["affected"][0]
+
+
+async def test_real_data_tools_never_return_credentials_from_port_labels(real_lab):
+    from app.models import Device, MonitorDeviceSnapshot, PduMaintenanceLog
+
+    ctx = real_lab
+    async with ctx.session_factory() as session:
+        session.add_all([
+            Device(id="pdu-s", name="PDU S", kind="pdu", ip="198.51.100.90", rack="Rack-09",
+                   labels_json=json.dumps(SECRET_LABELS)),
+            MonitorDeviceSnapshot(device_id="pdu-s", kind="pdu", ip="198.51.100.90", checked_at=ctx.now - 10,
+                                  reachable=False, ports_json="[]"),
+            PduMaintenanceLog(id=2, at=ctx.now - 200, device_id="pdu-s", action="shutdown", by="operator",
+                              reason="see https://admin:hunter3@lab.example/ops password=hunter2"),
+        ])
+        await session.commit()
+    outputs = {
+        "priority": await analysis.prioritize_problems(ctx),
+        "impact": await analysis.analyze_impact(ctx, kind="pdu", id="pdu-s"),
+        "rack": await analysis.analyze_impact(ctx, kind="rack", id="Rack-09"),
+        "server": await analysis.analyze_impact(ctx, kind="server", id="opt31 password=hunter2"),
+        "capacity": await analysis.plan_capacity(ctx, rack="Rack-09", power_w=100),
+        "history": await analysis.correlate_events(ctx, device_id="pdu-s", since_hours=24),
+    }
+    for name, out in outputs.items():
+        assert_no_secret_bits(out.to_dict(), name)
+    row = next(r for r in outputs["priority"].data["ranked"] if r["entity"]["id"] == "pdu-s")
+    assert row["affected_count"] == 4 and len(row["affected"]) == 4      # through the reviewed `affected` path
+    assert outputs["impact"].data["counts"]["affected"] == 4

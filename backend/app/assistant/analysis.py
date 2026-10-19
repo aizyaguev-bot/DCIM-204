@@ -42,7 +42,7 @@ import math
 import re
 from typing import Any
 
-from .contracts import Source, ToolContext, ToolError, ToolResult, ToolSpec, age, iso
+from .contracts import Source, ToolContext, ToolError, ToolResult, ToolSpec, age, iso, redact_text, redact_tree
 
 log = logging.getLogger(__name__)
 
@@ -139,8 +139,9 @@ _UP = frozenset({"up", "ok", "online", "reachable", "alive"})
 _DOWN = frozenset({"down", "offline", "unreachable", "failed"})
 _SOURCE_RANK = {"ok": 0, "disabled": 1, "stale": 2, "missing": 3, "unavailable": 4}
 
-_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-_EMAIL = re.compile(r"[\w.!#$%&'*+/=?^`{|}~-]+@[\w-]+(?:\.[\w-]+)+")
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f‎‏‪-‮⁦-⁩]")   # control + bidi overrides
+# URL userinfo left behind when an upstream tool redacted "pass@host" as an e-mail first: "https://admin:[redacted…]"
+_USERINFO_REMNANT = re.compile(r"(?i)(https?://)[^\s/@]*\[redacted[^\]]*\]")
 _OPT = re.compile(r"(optn?\d+)(?:\s*\([^)]*\))?", re.I)
 _DEFAULT_PORT_LABEL = re.compile(r"(?:outlet|port)?\s*\d*", re.I)
 
@@ -149,12 +150,12 @@ _DEFAULT_PORT_LABEL = re.compile(r"(?:outlet|port)?\s*\d*", re.I)
 # Small helpers
 # --------------------------------------------------------------------------------------------------------------
 def _text(value: Any, cap: int = TEXT_CAP) -> str:
-    """Untrusted text from data: control characters removed, e-mail addresses redacted, length capped."""
+    """Untrusted text from data: control/bidi characters removed, credentials, URL userinfo and e-mail addresses
+    redacted with the shared contracts.redact_text rule (before capping, so a cut can never expose a secret)."""
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return ""
-    text = _CTRL.sub(" ", str(value)).strip()
-    text = _EMAIL.sub("[email]", text)
-    return text[:cap]
+    text = redact_text(_CTRL.sub(" ", str(value)).strip())
+    return _USERINFO_REMNANT.sub(r"\1[redacted]@", text)[:cap]
 
 
 def _num(value: Any) -> float | None:
@@ -1587,7 +1588,12 @@ class _Evidence:
             self.caveat("Further data tool failures were omitted.")
 
     def result(self, data: dict) -> ToolResult:
-        return ToolResult(data=data, sources=list(self.sources.values()), caveats=list(self.caveats))
+        """The only exit of every analysis tool: data, sources and caveats all pass the shared redaction."""
+        sources = [Source(id=_text(s.id, 200), name=_text(s.name, 120), ref=_text(s.ref, 200), as_of=_iso_of(s.as_of),
+                          age_s=_num(s.age_s), status=s.status if s.status in _SOURCE_RANK else "unavailable",
+                          note=_text(s.note)) for s in self.sources.values()]
+        caveats = [_text(c, 500) for c in self.caveats]
+        return ToolResult(data=redact_tree(data), sources=sources, caveats=list(dict.fromkeys(c for c in caveats if c)))
 
 
 def _find_tool(ctx: ToolContext, name: str):
