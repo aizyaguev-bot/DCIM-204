@@ -84,20 +84,85 @@ class ToolError(Exception):
     user, so it must be plain English without secrets, internal addresses or stack traces."""
 
 
-_REDACTIONS = (
-    (re.compile(r"(?i)(https?://)[^\s/@:]{1,256}(?::[^\s/@]{0,256})?@"), r"\1[redacted]@"),
-    (re.compile(r"\b[\w.!#$%&'*+/=?^`{|}~-]{1,64}@[\w.-]{1,253}\.[A-Za-z]{2,24}\b"), "[redacted email]"),
-    (re.compile(r"(?i)(?<!\w)[\"']?[A-Za-z0-9_-]{0,64}(?:password|passwd|pwd|username|api[_ -]?key|token|session[_ -]?hash|secret)"
-                r"[A-Za-z0-9_-]{0,64}[\"']?\s{0,8}[:=]\s{0,8}(?:\"[^\"]{0,512}\"|'[^']{0,512}'|[^\s,;]{1,512})"), "[redacted credential]"),
+# Every rule below runs in linear time on any input length (no nested unbounded quantifiers, no rescanning), and a
+# detected secret value is always removed whole, whatever its length or the spacing around its separator.
+_SCHEME = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,30}://")
+_CREDENTIAL_KEY = re.compile(r"(?i)password|passwd|pwd|username|api[_ -]?key|token|session[_ -]?hash|secret")
+_EMAIL_RE = re.compile(r"[\w.!#$%&'*+/=?^`{|}~-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){0,8}\.[A-Za-z]{2,24}\b")
+_SIMPLE = (
     (re.compile(r"(?i)\b(?:Basic|Bearer)\s+\S+"), "[redacted credential]"),
     (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{10,}"), "[redacted key]"),
 )
 
 
+def _is_word(ch: str) -> bool:
+    return ch.isalnum() or ch in "_-"
+
+
+def _redact_userinfo(value: str) -> str:
+    """scheme://user[:pass]@host -> scheme://[redacted]@host, for any userinfo length."""
+    out, pos = [], 0
+    for m in _SCHEME.finditer(value):
+        if m.start() < pos:
+            continue
+        start = m.end()
+        end = start
+        while end < len(value) and not value[end].isspace() and value[end] not in "/?#":
+            end += 1
+        at = value.rfind("@", start, end)
+        if at > start:
+            out += [value[pos:start], "[redacted]"]
+            pos = at
+    out.append(value[pos:])
+    return "".join(out)
+
+
+def _redact_credentials(value: str) -> str:
+    """<...key...>[quote] [spaces] (= or :) [spaces] <value> -> [redacted credential], the whole value removed."""
+    out, pos, skip, n = [], 0, 0, len(value)
+    for m in _CREDENTIAL_KEY.finditer(value):
+        if m.start() < max(pos, skip):
+            continue
+        start = m.start()
+        while start > pos and _is_word(value[start - 1]):
+            start -= 1
+        if start > pos and value[start - 1] in "\"'":
+            start -= 1
+        j = m.end()
+        while j < n and _is_word(value[j]):
+            j += 1
+        if j < n and value[j] in "\"'":
+            j += 1
+        while j < n and value[j] in " \t":
+            j += 1
+        if j >= n or value[j] not in ":=":
+            skip = j  # this word has no separator: later keywords inside it are not rescanned
+            continue
+        j += 1
+        while j < n and value[j] in " \t":
+            j += 1
+        if j < n and value[j] in "\"'":
+            close = value.find(value[j], j + 1)
+            end = n if close == -1 else close + 1
+        else:
+            end = j
+            while end < n and not value[end].isspace() and value[end] not in ",;":
+                end += 1
+        if end == j:
+            continue
+        out += [value[pos:start], "[redacted credential]"]
+        pos = end
+    out.append(value[pos:])
+    return "".join(out)
+
+
 def redact_text(value: str) -> str:
     """Remove credential-looking fragments (key=value secrets, URL userinfo, e-mail addresses, Basic/Bearer tokens,
     API keys) from one untrusted string. The single shared rule for every tool result that reaches the model."""
-    for pattern, replacement in _REDACTIONS:
+    value = _redact_userinfo(value)
+    value = _redact_credentials(value)
+    value = _EMAIL_RE.sub("[redacted email]", value)
+    for pattern, replacement in _SIMPLE:
         value = pattern.sub(replacement, value)
     return value
 

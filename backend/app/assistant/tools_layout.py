@@ -20,7 +20,7 @@ from .. import inventory_store
 from ..alerts import UNITS, power_rules
 from ..models import AssetOwner, Device, Engineer, MonitorDeviceSnapshot, PingTarget
 from ..ping_monitor import next_slot, server_identity
-from .contracts import Source, ToolContext, ToolError, ToolResult, ToolSpec, age, iso
+from .contracts import Source, ToolContext, ToolError, ToolResult, ToolSpec, age, iso, redact_text
 
 
 _DOCS = (
@@ -84,13 +84,7 @@ def _read_text(path):
 
 
 def _redact(value):
-    value = re.sub(r"(?i)(https?://)[^\s/@]+(?::[^\s/@]+)?@", r"\1[redacted]@", value)
-    value = re.sub(r"\b[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[redacted email]", value)
-    value = re.sub(r"(?i)(?<!\w)[\"']?[A-Za-z0-9_-]*(?:password|passwd|username|token|api[_ -]?key|secret)"
-                   r"[A-Za-z0-9_-]*[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
-                   "[redacted credential]", value)
-    value = re.sub(r"(?i)\b(?:Basic|Bearer)\s+\S+", "[redacted credential]", value)
-    return value
+    return redact_text(value)  # the shared linear-time rule in contracts
 
 
 def _text(value, limit=300):

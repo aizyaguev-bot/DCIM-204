@@ -140,8 +140,6 @@ _DOWN = frozenset({"down", "offline", "unreachable", "failed"})
 _SOURCE_RANK = {"ok": 0, "disabled": 1, "stale": 2, "missing": 3, "unavailable": 4}
 
 _CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f‎‏‪-‮⁦-⁩]")   # control + bidi overrides
-# URL userinfo left behind when an upstream tool redacted "pass@host" as an e-mail first: "https://admin:[redacted…]"
-_USERINFO_REMNANT = re.compile(r"(?i)(https?://)[^\s/@]*\[redacted[^\]]*\]")
 _OPT = re.compile(r"(optn?\d+)(?:\s*\([^)]*\))?", re.I)
 _DEFAULT_PORT_LABEL = re.compile(r"(?:outlet|port)?\s*\d*", re.I)
 
@@ -154,8 +152,7 @@ def _text(value: Any, cap: int = TEXT_CAP) -> str:
     redacted with the shared contracts.redact_text rule (before capping, so a cut can never expose a secret)."""
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return ""
-    text = redact_text(_CTRL.sub(" ", str(value)).strip())
-    return _USERINFO_REMNANT.sub(r"\1[redacted]@", text)[:cap]
+    return redact_text(_CTRL.sub(" ", str(value)).strip())[:cap]
 
 
 def _num(value: Any) -> float | None:

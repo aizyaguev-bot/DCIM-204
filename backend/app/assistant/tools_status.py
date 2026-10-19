@@ -73,11 +73,6 @@ _TIMES = {
     MonitorDeviceError: "checked_at", PduMaintenance: "started_at", PduMaintenanceLog: "at",
     AlertCondition: "checked_at", AlertEmail: "created_at",
 }
-_EMAIL = re.compile(r"[\w.!#$%&'*+/=?^`{|}~+-]+@[\w.-]+", re.UNICODE)
-_SECRET = re.compile(
-    r"(?<!\w)[\"']?[A-Za-z0-9_-]*(?:password|passwd|pwd|username|api[_ -]?key|token|session[_ -]?hash|secret)"
-    r"[A-Za-z0-9_-]*[\"']?\s*[=:]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", re.IGNORECASE,
-)
 _PRIVATE_KEY = re.compile(r"(?:.*(?:password|passwd|token|api[_ -]?key|secret|session[_ -]?hash).*|username_enc|email|recipient|body)", re.IGNORECASE)
 _MAX_LIST = 200
 _MAX_ARGUMENT = 120
@@ -86,11 +81,7 @@ _BIDI = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\
 
 def _text(value):
     value = "".join(c for c in str(value) if c not in _BIDI and not unicodedata.category(c).startswith("C"))
-    value = redact_text(value[:4000])  # shared rule: URL userinfo before e-mail, so no username survives
-    value = _EMAIL.sub("[redacted email]", value)
-    value = _SECRET.sub("[redacted credential]", value)
-    value = re.sub(r"\bBearer\s+\S+", "[redacted token]", value, flags=re.IGNORECASE)
-    return value[:300]
+    return redact_text(value)[:300]  # shared linear-time rule: userinfo, credentials, e-mail, Basic/Bearer, keys
 
 
 def _safe(value):
