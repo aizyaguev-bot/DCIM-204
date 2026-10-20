@@ -12,7 +12,7 @@ from sqlalchemy.orm.util import identity_key
 
 from ...models import Device, PduMaintenance
 from ... import power_protection
-from .contracts import KIND_SPECS, PduResult, Target, TargetResult
+from .contracts import ActionError, KIND_SPECS, PduResult, Target, TargetResult
 from .models import AssistantActionEvent, AssistantActionProposal
 
 BATCH_LOCK = asyncio.Lock()
@@ -117,6 +117,23 @@ def _clear_pending(result, outcome):
                                 if (item["pdu_id"], item["outlet"]) != (outcome.pdu_id, outcome.outlet)]
 
 
+def _pending_targets(row, result):
+    pending = result.get("pending_on")
+    if not isinstance(pending, list):
+        return []
+    wanted = {(item["pdu_id"], item["outlet"]) for item in pending
+              if isinstance(item, dict) and isinstance(item.get("pdu_id"), str)
+              and type(item.get("outlet")) is int}
+    impact = json.loads(row.impact_json or "{}")
+    return [Target(**item) for item in impact.get("targets", [])
+            if item.get("state") == "on" and (item.get("pdu_id"), item.get("outlet")) in wanted]
+
+
+def _pins_refused(outcome):
+    # ACT-2 returns this fixed failure class, also inside an aborted cycle error.
+    return not outcome.ok and "PDU changed since the proposal" in outcome.error
+
+
 async def _finish(session_factory, proposal_id, by, status, result):
     from . import store
 
@@ -189,7 +206,7 @@ async def _maintenance_one_locked(session_factory, proposal_id, by, pdu_id, name
         if not down and (current is None or (
                 "maintenance_started_at" in impact.get("pins", {}).get(pdu_id, {}) and
                 expected_started_at != impact["pins"][pdu_id]["maintenance_started_at"])):
-            return PduResult(pdu_id, name, False, error="PDU maintenance session changed")
+            raise _AbortJob("drift", PduResult(pdu_id, name, False, error="PDU maintenance session changed"))
         batch = proposal
         batches = [proposal] if down else []
         if not down and proposal.restore_of:
@@ -214,7 +231,7 @@ async def _maintenance_one_locked(session_factory, proposal_id, by, pdu_id, name
             if (batch is None or batch.kind not in ("rack_shutdown", "lab_shutdown") or current is None
                     or not any(entry["pdu_id"] == pdu_id and entry["started_at"] == current.started_at
                                for entry in entries)):
-                return PduResult(pdu_id, name, False, error="PDU is not in the shutdown batch")
+                raise _AbortJob("drift", PduResult(pdu_id, name, False, error="PDU is not in the shutdown batch"))
         if batch is None:
             raise ValueError("Missing shutdown proposal")
         # A fresh session per PDU keeps no transaction open during the stagger.
@@ -231,9 +248,11 @@ async def _maintenance_one_locked(session_factory, proposal_id, by, pdu_id, name
                         and item.get("outlet") is not None)
                     expected = frozenset(impact.get("pins", {}).get(pdu_id, {}).get("on", []))
                     payload = await maintenance.shutdown_pdu(db, pdu_id, by, request.get("reason", ""),
-                                                             exclude=exclude, expected_on=expected)
+                                                             exclude=exclude, expected_on=expected,
+                                                             expected_pins=impact.get("pins", {}).get(pdu_id, {}))
                 else:
-                    payload = await maintenance.restore_pdu(db, pdu_id, by)
+                    payload = await maintenance.restore_pdu(
+                        db, pdu_id, by, expected_pins=impact.get("pins", {}).get(pdu_id, {}))
             # Also honour the returned state (including injected implementations).
             # Failed/partial shutdowns still belong to this proposal's restore list.
             for item in batches:
@@ -257,7 +276,8 @@ async def _maintenance_one_locked(session_factory, proposal_id, by, pdu_id, name
             if isinstance(exc, _AbortJob):
                 raise
             if isinstance(exc, _GenerationChanged):
-                return PduResult(pdu_id, name, False, error="PDU maintenance session changed")
+                raise _AbortJob("drift", PduResult(pdu_id, name, False,
+                                                   error="PDU maintenance session changed")) from None
             errors = (("MaintenanceDrift", "PDU state changed"),
                       ("MaintenanceConflict", "PDU maintenance conflict"),
                       ("MaintenanceUnavailable", "PDU is unavailable"))
@@ -266,6 +286,8 @@ async def _maintenance_one_locked(session_factory, proposal_id, by, pdu_id, name
                 if error_type is not None and isinstance(exc, error_type):
                     if class_name == "MaintenanceUnavailable":
                         raise _AbortJob("unreachable", PduResult(pdu_id, name, False, error=message)) from None
+                    if class_name == "MaintenanceDrift":
+                        raise _AbortJob("drift", PduResult(pdu_id, name, False, error=message)) from None
                     return PduResult(pdu_id, name, False, error=message)
             raise
 
@@ -330,23 +352,41 @@ async def execute(proposal_id: str, by: str, *, session_factory, settings, sleep
                 result["targets"].append(data)
                 if spec.switch == "cycle":
                     _clear_pending(result, outcome)
+                    if outcome.error == "PDU changed since the proposal":
+                        # ACT-2's exact error is a preflight refusal before any
+                        # off. Errors after an attempted off carry an abort prefix.
+                        result["pending_on"] = []
                 detail = {key: data[key] for key in ("pdu_id", "outlet", "ok", "state_after")}
                 await _record(session_factory, proposal_id, by, "target", detail, len(seen), total, result)
+                if _pins_refused(outcome):
+                    raise _AbortJob("drift", PduResult(outcome.pdu_id, names.get(outcome.pdu_id, outcome.pdu_id),
+                                                       False, error="PDU state changed"))
 
-            if spec.switch == "cycle":
-                outcomes = await power.cycle(session_factory, targets, by,
-                                             off_seconds=getattr(settings, "assistant_action_cycle_off_seconds", 5.0),
-                                             sleep=sleep, on_result=on_result)
-            else:
-                outcomes = await power.switch(session_factory, targets, spec.switch, by, on_result=on_result)
-            # Callbacks give live progress; the return list must not count twice.
-            for outcome in outcomes:
-                await on_result(outcome)
-            for target in targets:
-                if (target.pdu_id, target.outlet) not in seen:
-                    await on_result(TargetResult(target.pdu_id, target.outlet, False, "unknown",
-                                                 "Outlet state could not be verified"))
-            if spec.switch == "cycle" and request.get("then_console") and _status(result["targets"], []) == "succeeded":
+            try:
+                if spec.switch == "cycle":
+                    outcomes = await power.cycle(session_factory, targets, by,
+                                                 off_seconds=getattr(settings, "assistant_action_cycle_off_seconds", 5.0),
+                                                 sleep=sleep, on_result=on_result, pins=impact.get("pins", {}))
+                else:
+                    outcomes = await power.switch(session_factory, targets, spec.switch, by, on_result=on_result,
+                                                  pins=impact.get("pins", {}))
+                # Callbacks give live progress; the return list must not count twice.
+                for outcome in outcomes:
+                    await on_result(outcome)
+                for target in targets:
+                    if (target.pdu_id, target.outlet) not in seen:
+                        await on_result(TargetResult(target.pdu_id, target.outlet, False, "unknown",
+                                                     "Outlet state could not be verified"))
+            except _AbortJob as exc:
+                await _abort(session_factory, proposal_id, by, result, "drift",
+                             exc.outcome.pdu_id, exc.outcome.pdu_name)
+            except ActionError as exc:
+                if exc.code != "drift":
+                    raise
+                target = next((item for item in targets if (item.pdu_id, item.outlet) not in seen), targets[0])
+                await _abort(session_factory, proposal_id, by, result, "drift", target.pdu_id, target.pdu_name)
+            if (spec.switch == "cycle" and request.get("then_console") and not result.get("aborted")
+                    and _status(result["targets"], []) == "succeeded"):
                 from . import resolve
 
                 servers = impact.get("servers", []) or [t.server for t in targets if t.server]
@@ -418,7 +458,7 @@ async def recover_interrupted(session_factory) -> int:
 
     async with session_factory() as db:
         candidates = (await db.scalars(select(AssistantActionProposal).where(
-            AssistantActionProposal.status.in_(("executing", "interrupted"))))).all()
+            AssistantActionProposal.status.in_(("executing", "interrupted", "failed", "partial"))))).all()
     rows = []
     for row in candidates:
         if row.status == "executing":
@@ -427,7 +467,7 @@ async def recover_interrupted(session_factory) -> int:
             try:
                 journal = json.loads(row.result_json or "{}")
                 started_at = journal.get("pending_on_at", row.confirmed_at)
-                if (journal.get("pending_on") and type(started_at) in (int, float)
+                if (_pending_targets(row, journal) and type(started_at) in (int, float)
                         and math.isfinite(started_at) and 0 <= time.time() - started_at < 600):
                     rows.append(row)
             except (ValueError, TypeError, AttributeError):
@@ -444,10 +484,7 @@ async def recover_interrupted(session_factory) -> int:
                       and 0 <= time.time() - started_at < 600)
             if row.kind in ("server_cycle", "outlet_cycle") and result.get("pending_on") and recent:
                 impact = json.loads(row.impact_json or "{}")
-                wanted = {(item.get("pdu_id"), item.get("outlet")) for item in result["pending_on"]
-                          if isinstance(item, dict)}
-                targets = [Target(**item) for item in impact.get("targets", [])
-                           if item.get("state") == "on" and (item.get("pdu_id"), item.get("outlet")) in wanted]
+                targets = _pending_targets(row, result)
                 wanted = {(target.pdu_id, target.outlet) for target in targets}
                 result["pending_on"] = [target.to_dict() for target in targets]
                 result["recovery_targets"] = []
@@ -464,14 +501,21 @@ async def recover_interrupted(session_factory) -> int:
                                   {"pdu_id": outcome.pdu_id, "outlet": outcome.outlet,
                                    "ok": outcome.ok, "state_after": outcome.state_after, "recovery": True},
                                   row.progress_done, row.progress_total, result)
+                    if _pins_refused(outcome):
+                        name = next(target.pdu_name for target in targets if target.pdu_id == outcome.pdu_id)
+                        await _abort(session_factory, row.id, "system", result, "drift", outcome.pdu_id, name)
+                        raise _AbortJob("drift", PduResult(outcome.pdu_id, name, False, error="PDU state changed"))
 
                 if targets:
                     async with session_factory() as db:
                         await _ensure_executing_event(db, row.id, "system")
                         await db.commit()
-                    outcomes = await power.switch(session_factory, targets, "on", "system", on_result=on_result)
+                    outcomes = await power.switch(session_factory, targets, "on", "system", on_result=on_result,
+                                                  pins=impact.get("pins", {}))
                     for outcome in outcomes:
                         await on_result(outcome)
+        except _AbortJob:
+            pass
         except (Exception, asyncio.CancelledError):
             if not isinstance(result, dict):
                 result = {"targets": [], "pdus": [], "consoles": []}

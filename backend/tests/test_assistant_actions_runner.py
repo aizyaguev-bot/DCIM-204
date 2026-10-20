@@ -17,6 +17,7 @@ from app.assistant.actions.models import AssistantActionEvent, AssistantActionPr
 from app.models import Device, PduMaintenance, PduMaintenanceLog
 from app.routers import pdu_maintenance
 from app import power_protection
+from app import inventory_store
 
 SECRET = "synthetic-private-error-value"
 
@@ -44,10 +45,12 @@ def fake(monkeypatch):
         real_store = importlib.import_module("app.assistant.actions.store")
     except ModuleNotFoundError:
         real_store = None
-    state = SimpleNamespace(calls=[], progress=[], sleeps=[], observed_batches=[], payloads={}, errors={},
+    real_power = importlib.import_module("app.assistant.actions.power")
+    state = SimpleNamespace(calls=[], progress=[], sleeps=[], observed_batches=[], payloads={}, errors={}, pins=[],
                             power_results=None, callbacks=True, duplicates=False, power_error=None,
                             after_commit_error=None, before_commit_error=None, console_servers=[],
                             real_store=real_store,
+                            real_power=real_power,
                             real_protection_load=power_protection.load,
                             real_shutdown=getattr(pdu_maintenance, "shutdown_pdu", None),
                             real_restore=getattr(pdu_maintenance, "restore_pdu", None))
@@ -87,12 +90,14 @@ def fake(monkeypatch):
             raise state.power_error
         return results
 
-    async def switch(session_factory, targets, action, by, on_result=None):
+    async def switch(session_factory, targets, action, by, on_result=None, *, pins=None):
         state.calls.append(("switch", action, by, targets))
+        state.pins.append(("switch", pins))
         return await power_run(targets, action, on_result)
 
-    async def cycle(session_factory, targets, by, *, off_seconds, sleep, on_result=None):
+    async def cycle(session_factory, targets, by, *, off_seconds, sleep, on_result=None, pins=None):
         state.calls.append(("cycle", off_seconds, by, targets))
+        state.pins.append(("cycle", pins))
         await sleep(off_seconds)
         return await power_run(targets, "cycle", on_result)
 
@@ -114,8 +119,9 @@ def fake(monkeypatch):
         rows = (await db.scalars(select(AssistantActionProposal))).all()
         state.observed_batches.append({row.id: json.loads(row.batch_down_json) for row in rows})
 
-    async def shutdown_pdu(db, device_id, by, reason, *, exclude, expected_on):
+    async def shutdown_pdu(db, device_id, by, reason, *, exclude, expected_on, expected_pins=None):
         state.calls.append(("shutdown", device_id, by, reason, exclude, expected_on))
+        state.pins.append(("shutdown", device_id, expected_pins))
         if device_id in state.errors:
             raise state.errors[device_id]
         if await db.get(PduMaintenance, device_id):
@@ -136,8 +142,9 @@ def fake(monkeypatch):
             raise state.after_commit_error
         return payload
 
-    async def restore_pdu(db, device_id, by):
+    async def restore_pdu(db, device_id, by, *, expected_pins=None):
         state.calls.append(("restore", device_id, by))
+        state.pins.append(("restore", device_id, expected_pins))
         if device_id in state.errors:
             raise state.errors[device_id]
         row = await db.get(PduMaintenance, device_id)
@@ -332,7 +339,7 @@ async def test_partial_shutdown_is_restorable(success, sessions, proposal, setti
     assert batch_ids(row.batch_down_json) == ["pdu-one"]
 
 
-@pytest.mark.parametrize("error_type", [MaintenanceConflict, MaintenanceDrift])
+@pytest.mark.parametrize("error_type", [MaintenanceConflict])
 async def test_expected_maintenance_failures_continue(error_type, sessions, proposal, settings, fake):
     fake.errors["pdu-one"] = error_type(SECRET)
     pid = await proposal("lab_shutdown")
@@ -398,13 +405,13 @@ async def test_concurrent_single_restores_preserve_batch_updates(monkeypatch, se
     entered, second_entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     restore = pdu_maintenance.restore_pdu
 
-    async def slow_restore(db, pdu_id, by):
+    async def slow_restore(db, pdu_id, by, **kwargs):
         if pdu_id == "pdu-one":
             entered.set()
             await release.wait()
         else:
             second_entered.set()
-        return await restore(db, pdu_id, by)
+        return await restore(db, pdu_id, by, **kwargs)
 
     monkeypatch.setattr(pdu_maintenance, "restore_pdu", slow_restore)
     first_task = asyncio.create_task(runner._maintenance_one(
@@ -582,6 +589,8 @@ async def test_real_store_and_maintenance_with_fake_driver(
         db.add(Device(id="pdu-one", name="PDU-ONE", kind="pdu", ip="pdu.example.invalid", port_count=3))
         await db.commit()
     snapshot = impact(("pdu-one",))
+    snapshot["pins"]["pdu-one"].update(ip="pdu.example.invalid", enabled=True,
+                                       labels_rev=inventory_store.revision({}))
     snapshot["excluded"] = [{"pdu_id": "pdu-one", "pdu_name": "PDU-ONE", "outlet": 3,
                               "reason": "protected"}]
     original = await proposal("lab_shutdown", snapshot=snapshot)
@@ -825,7 +834,7 @@ async def test_restore_rechecks_generation_inside_maintenance_audit_flush(
     pid = await proposal("batch_restore", restore_of=original, snapshot=impact(("pdu-one",)))
     switched = []
 
-    async def replace_before_lock(db, device_id, by):
+    async def replace_before_lock(db, device_id, by, **kwargs):
         await db.execute(update(PduMaintenance).where(PduMaintenance.device_id == device_id)
                          .values(started_at=2.0).execution_options(synchronize_session=False))
         await db.commit()
@@ -972,7 +981,10 @@ async def test_real_maintenance_lost_verification_aborts_remaining_pdus(
         for pdu_id in ("pdu-one", "pdu-two"):
             db.add(Device(id=pdu_id, name=pdu_id.upper(), kind="pdu", ip="pdu.example.invalid", port_count=1))
         await db.commit()
-    pid = await proposal("lab_shutdown")
+    snapshot = impact()
+    for pin in snapshot["pins"].values():
+        pin.update(ip="pdu.example.invalid", enabled=True, labels_rev=inventory_store.revision({}))
+    pid = await proposal("lab_shutdown", snapshot=snapshot)
     result = await run(pid, sessions, settings, fake)
     assert result["aborted"] == {"reason": "unreachable", "pdu_id": "pdu-one", "pdu_name": "PDU-ONE"}
     assert driver.calls == [(1, "off")]
@@ -981,3 +993,155 @@ async def test_real_maintenance_lost_verification_aborts_remaining_pdus(
         assert await db.get(PduMaintenance, "pdu-two") is None
     assert batch_ids((await read(sessions, pid))[0].batch_down_json) == ["pdu-one"]
     pdu_locks._locks.clear()
+
+
+@pytest.mark.parametrize("kind", ["server_off", "server_cycle"])
+async def test_power_receives_full_stored_pin_mapping(kind, sessions, proposal, settings, fake):
+    snapshot = impact()
+    pid = await proposal(kind, snapshot=snapshot)
+    await run(pid, sessions, settings, fake)
+    assert fake.pins == [("cycle" if kind == "server_cycle" else "switch", snapshot["pins"])]
+
+
+@pytest.mark.parametrize("kind", ["lab_shutdown", "pdu_restore", "batch_restore"])
+async def test_maintenance_receives_each_pdus_pins(kind, sessions, proposal, settings, fake):
+    snapshot = impact()
+    original = None
+    if kind != "lab_shutdown":
+        await seed_maintenance(sessions, "pdu-one", "pdu-two")
+        if kind == "batch_restore":
+            original = await proposal("lab_shutdown", status="succeeded", down=("pdu-one", "pdu-two"))
+    pid = await proposal(kind, snapshot=snapshot, restore_of=original)
+    await run(pid, sessions, settings, fake)
+    verb = "shutdown" if kind == "lab_shutdown" else "restore"
+    assert fake.pins == [(verb, "pdu-one", snapshot["pins"]["pdu-one"]),
+                         (verb, "pdu-two", snapshot["pins"]["pdu-two"])]
+
+
+@pytest.mark.parametrize("kind", ["lab_shutdown", "batch_restore"])
+@pytest.mark.parametrize("failed_index", [0, 1])
+async def test_maintenance_drift_aborts_before_remaining_pdus(
+        kind, failed_index, sessions, proposal, settings, fake):
+    ids = ("pdu-one", "pdu-two", "pdu-three")
+    original = None
+    if kind == "batch_restore":
+        original = await proposal("lab_shutdown", status="partial", down=ids)
+        await seed_maintenance(sessions, *ids)
+    fake.errors[ids[failed_index]] = MaintenanceDrift(SECRET)
+    pid = await proposal(kind, snapshot=impact(ids), restore_of=original)
+    result = await run(pid, sessions, settings, fake)
+    row, events = await read(sessions, pid)
+    assert row.status == ("failed" if failed_index == 0 else "partial")
+    assert [call[1] for call in fake.calls] == list(ids[:failed_index + 1])
+    assert result["aborted"] == {"reason": "drift", "pdu_id": ids[failed_index],
+                                 "pdu_name": ids[failed_index].upper()}
+    assert [event.event for event in events].count("aborted") == 1
+    assert SECRET not in row.result_json + "".join(event.detail_json for event in events)
+
+
+@pytest.mark.parametrize("kind", ["server_off", "server_cycle"])
+@pytest.mark.parametrize("failed_index", [0, 1])
+async def test_power_pins_refusal_aborts_from_callback(
+        kind, failed_index, sessions, proposal, settings, fake):
+    ids = ("pdu-one", "pdu-two", "pdu-three")
+    fake.power_results = [TargetResult(pdu_id, index + 1, index != failed_index,
+                                       "unknown" if index == failed_index else "on",
+                                       "PDU changed since the proposal" if index == failed_index else "")
+                          for index, pdu_id in enumerate(ids)]
+    pid = await proposal(kind, snapshot=impact(ids), request={"then_console": True})
+    result = await run(pid, sessions, settings, fake)
+    row, events = await read(sessions, pid)
+    assert row.status == ("failed" if failed_index == 0 else "partial")
+    assert len(result["targets"]) == failed_index + 1 and row.progress_done == failed_index + 1
+    assert result["aborted"]["reason"] == "drift" and result["aborted"]["pdu_id"] == ids[failed_index]
+    assert not fake.console_servers and [event.event for event in events].count("aborted") == 1
+
+
+@pytest.mark.parametrize("status", ["failed", "partial"])
+async def test_recent_terminal_cycle_with_pending_is_recovered(status, sessions, proposal, fake):
+    snapshot = impact(("pdu-one",))
+    pid = await proposal("server_cycle", status=status, snapshot=snapshot)
+    await save_journal(sessions, pid, {"pending_on_at": time.time(), "pending_on": snapshot["targets"]})
+    assert await runner.recover_interrupted(sessions) == 1
+    row, events = await read(sessions, pid)
+    assert row.status == "interrupted" and json.loads(row.result_json)["pending_on"] == []
+    assert fake.calls[0][:3] == ("switch", "on", "system")
+    assert fake.pins == [("switch", snapshot["pins"])]
+    assert any(event.event == "target" and json.loads(event.detail_json).get("recovery") for event in events)
+    assert await runner.recover_interrupted(sessions) == 0
+
+
+@pytest.mark.parametrize("status", ["failed", "partial"])
+@pytest.mark.parametrize("journal", [
+    {"pending_on_at": 400.0, "pending_on": [{"pdu_id": "pdu-one", "outlet": 1}]},
+    {"pending_on_at": 999.0, "pending_on": []},
+    {"pending_on_at": 999.0, "pending_on": [{"pdu_id": "foreign", "outlet": 99}]},
+    {"pending_on_at": 999.0, "pending_on": "invalid"},
+])
+async def test_terminal_cycle_without_valid_recent_pending_is_untouched(
+        status, journal, monkeypatch, sessions, proposal, fake):
+    monkeypatch.setattr(runner, "time", SimpleNamespace(time=lambda: 1000.0))
+    pid = await proposal("server_cycle", status=status, snapshot=impact(("pdu-one",)))
+    await save_journal(sessions, pid, journal)
+    assert await runner.recover_interrupted(sessions) == 0
+    row, events = await read(sessions, pid)
+    assert row.status == status and json.loads(row.result_json) == journal
+    assert not fake.calls and not events
+
+
+async def test_recovery_pins_refusal_aborts_remaining_targets(sessions, proposal, fake):
+    pid = await proposal("server_cycle", status="failed")
+    await save_journal(sessions, pid, {"pending_on_at": time.time(), "pending_on": impact()["targets"]})
+    fake.power_results = [TargetResult("pdu-one", 1, False, "unknown", "PDU changed since the proposal"),
+                          TargetResult("pdu-two", 2, True, "on")]
+    await runner.recover_interrupted(sessions)
+    row, events = await read(sessions, pid)
+    result = json.loads(row.result_json)
+    assert result["aborted"]["reason"] == "drift"
+    assert [item["pdu_id"] for item in result["pending_on"]] == ["pdu-one", "pdu-two"]
+    assert len(result["recovery_targets"]) == 1
+    assert [event.event for event in events].count("aborted") == 1
+
+
+@pytest.mark.parametrize("kind", ["server_off", "server_cycle"])
+async def test_real_power_pins_drift_stops_before_driver_creation(
+        kind, monkeypatch, sessions, proposal, settings, fake):
+    from app import pdu_locks
+    from app.routers import pdus
+    from tests.test_pdu_maintenance import FakePdu
+
+    monkeypatch.setattr(actions, "power", fake.real_power)
+    monkeypatch.setitem(sys.modules, "app.assistant.actions.power", fake.real_power)
+    monkeypatch.setattr(fake.real_power, "get_settings", lambda: settings)
+    driver = FakePdu({1: "on", 2: "on"})
+    monkeypatch.setattr(pdus, "RaritanPduDriver", driver)
+    monkeypatch.setattr(pdus, "get_creds", lambda dev: ("fake-user", "fake-password"))
+    pdu_locks._locks.clear()
+    async with sessions() as db:
+        for pdu_id in ("pdu-one", "pdu-two"):
+            db.add(Device(id=pdu_id, name=pdu_id.upper(), kind="pdu", ip="new-pdu.example.invalid", port_count=2))
+        await db.commit()
+    snapshot = impact()
+    for pdu_id, pin in snapshot["pins"].items():
+        address = "new-pdu.example.invalid" if kind == "server_cycle" and pdu_id == "pdu-one" else "old-pdu.example.invalid"
+        pin.update(ip=address, enabled=True, labels_rev=inventory_store.revision({}))
+    pid = await proposal(kind, snapshot=snapshot)
+    result = await run(pid, sessions, settings, fake)
+    refused = "pdu-two" if kind == "server_cycle" else "pdu-one"
+    assert result["aborted"] == {"reason": "drift", "pdu_id": refused, "pdu_name": refused.upper()}
+    assert (await read(sessions, pid))[0].status == "failed"
+    assert driver.calls == [] and driver.created == 0
+    if kind == "server_cycle":
+        assert result["pending_on"] == []
+        assert await runner.recover_interrupted(sessions) == 0
+        assert driver.calls == [] and driver.created == 0
+    pdu_locks._locks.clear()
+
+
+async def test_cycle_keeps_pending_after_attempted_off_pins_failure(sessions, proposal, settings, fake):
+    fake.power_results = [TargetResult("pdu-one", 1, False, "unknown",
+                                       "Power cycle aborted; power could not be restored: PDU changed since the proposal")]
+    pid = await proposal("server_cycle", snapshot=impact(("pdu-one",)))
+    result = await run(pid, sessions, settings, fake)
+    assert result["aborted"]["reason"] == "drift"
+    assert [item["pdu_id"] for item in result["pending_on"]] == ["pdu-one"]
