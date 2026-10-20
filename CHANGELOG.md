@@ -2,6 +2,23 @@
 
 ---
 
+## v2.39.2 — 2026-10-20 — QR codes on location labels
+
+### Added
+- **QR codes on printed location labels.** Every shelf, whole-rack and
+  main-storage label from Scan & Track → Print location labels now carries a
+  square QR code next to the existing barcode. Both hold exactly the same value,
+  so a 2D scanner reading the QR and a 1D scanner reading the barcode type the
+  same text into the scan field and go through the same checks.
+
+### Notes
+- An A4 page now holds 8 labels instead of 12, because the barcode keeps its
+  full width below the QR.
+- Reading the QR needs a 2D imager scanner; 1D laser scanners keep using the
+  barcode.
+
+---
+
 ## v2.39.1 — 2026-10-20 — Port label edits change only that port
 
 ### Fixed

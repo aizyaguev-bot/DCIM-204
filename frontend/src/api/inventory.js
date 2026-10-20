@@ -64,6 +64,12 @@ export function locationCode(rack, u, position = "") {
   return `LOC:${encodeURIComponent(rack)}:${u}:${encodeURIComponent(position)}`;
 }
 
+// The one value a printed location label carries. Its barcode and its QR code both encode exactly this text,
+// so a scan of either goes through parseLocationCode below.
+export function labelCode(label) {
+  return label.rack === MAIN_STORAGE ? mainStorageCode : label.u === 0 ? rackCode(label.rack) : locationCode(label.rack, label.u, label.position);
+}
+
 export function parseLocationCode(code) {
   if (/^STORE:/i.test(code)) {
     if (code.toUpperCase() !== mainStorageCode) throw new Error("Unknown storage label. Use the Main storage label.");

@@ -1,6 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { locationCode, parseLocationCode, rackCode, mainStorageCode, MAIN_STORAGE, loadRackItems, saveRackItems } from "../api/inventory.js";
+import { locationCode, parseLocationCode, rackCode, mainStorageCode, MAIN_STORAGE, labelCode, loadRackItems, saveRackItems } from "../api/inventory.js";
+
+test("every printed label value (shared by its barcode and QR code) scans back to the same location", () => {
+  const shelf = { rack: "Rack:01 / בדיקה", u: 4, position: "Left: front / A" };
+  assert.equal(labelCode(shelf), locationCode(shelf.rack, shelf.u, shelf.position));
+  assert.equal(labelCode({ rack: "Rack-07", u: 0, position: "" }), rackCode("Rack-07"));
+  assert.equal(labelCode({ rack: MAIN_STORAGE, u: 0, position: "" }), mainStorageCode);
+  for (const label of [shelf, { rack: "Rack-01", u: 1, position: "" }, { rack: "Rack-01", u: 42, position: "" }, { rack: "Rack-07", u: 0, position: "" }, { rack: MAIN_STORAGE, u: 0, position: "" }]) {
+    assert.deepEqual(parseLocationCode(labelCode(label)), label);
+    // A scanner may end its keystrokes with Enter or Tab; the Scan page trims before parsing.
+    assert.deepEqual(parseLocationCode(`${labelCode(label)}\r\n`.trim()), label);
+  }
+});
 
 test("shelf labels round-trip rack and precise position, including punctuation and Hebrew", () => {
   const expected = { rack: "Rack:01 / בדיקה", u: 4, position: "Left: front / A" };
