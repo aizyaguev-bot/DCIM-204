@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  actionErrorInfo, actionTone, clientWarnings, confirmState, countdownLabel, executeProposal, impactSentence, isWide,
-  normalizeProposal, passwordLabelHe, remainingSeconds, verbLabel, formatCountdown, NOTHING_DONE,
+  actionErrorInfo, actionTone, clientWarnings, confirmState, countdownLabel, dataWarnings, executeProposal, generationGuard,
+  impactSentence, isDataKind, isWide, normalizeProposal, passwordLabelHe, remainingSeconds, verbLabel, formatCountdown, NOTHING_DONE,
 } from "../../api/assistantActions.js";
 import { Bidi } from "./AnswerView.jsx";
 import ActionImpact from "./ActionImpact.jsx";
@@ -13,14 +13,19 @@ import ActionImpact from "./ActionImpact.jsx";
 // handles Escape and the Tab trap, so the assistant panel underneath never sees them. The destructive button is
 // never focused by default and stays aria-disabled (still focusable) until everything is filled in.
 //
+// Location changes (server_swap / server_move / server_clear) need no password and no phrase: the dialog lists the
+// same before -> after changes, Enter confirms (outside other buttons, never on a key repeat) and Escape cancels.
+// Focus starts on the heading, not on the action button.
+//
 // props: proposal (normalized), passwordMode ("account" | "shared" | ...), blockedText ("" or why actions cannot run),
-//   onClose(), onExecuted(proposal) after a 2xx, onRefresh() -> Promise<proposal | null> (re-reads the proposal and
-//   updates the card; resolves null when it could not be read).
+//   onClose(), onExecuted(proposal, epoch) after a 2xx, onRefresh() -> Promise<proposal | null> (re-reads the proposal
+//   and updates the card; resolves null when it could not be read), getEpoch() -> the panel's session generation
+//   (an answer that arrives after a sign-out or a user change is dropped, never published).
 
 const FOCUSABLE = "button, input, textarea, select, [href], [tabindex]:not([tabindex='-1'])";
 const TERMINAL = ["expired", "not_found", "drift", "not_pending", "disabled", "password_mode", "forbidden", "protected", "protected_unset"];
 
-export default function ActionConfirmDialog({ proposal, passwordMode, blockedText = "", onClose, onExecuted, onRefresh }) {
+export default function ActionConfirmDialog({ proposal, passwordMode, blockedText = "", onClose, onExecuted, onRefresh, getEpoch }) {
   const baseId = useId();
   const ids = { heading: `${baseId}-h`, summary: `${baseId}-s`, error: `${baseId}-e`, hint: `${baseId}-hint`, phrase: `${baseId}-ph`, password: `${baseId}-pw`, live: `${baseId}-live` };
   const [phraseValue, setPhraseValue] = useState("");
@@ -33,6 +38,7 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
   const [announce, setAnnounce] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const panelRef = useRef(null);
+  const headingRef = useRef(null);
   const phraseRef = useRef(null);
   const passwordRef = useRef(null);
   const closeRef = useRef(null);
@@ -43,6 +49,8 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
   const keyHandler = useRef(null);
 
   const wide = isWide(proposal);
+  const dataKind = isDataKind(proposal);
+  const needsPassword = proposal.needs_password !== false;
   const tone = actionTone(proposal);
   const remaining = remainingSeconds(proposal, now);
   const expired = remaining !== null && remaining <= 0;
@@ -51,7 +59,8 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
   const state = confirmState(proposal, { phraseValue, passwordFilled });
   const blocked = !!blockedText || terminal || expired || throttleLeft > 0 || !!error?.unknown || !proposal.can_execute;
   const ready = state.ready && !blocked;
-  const warnings = [...proposal.impact.warnings_he.map(text => ({ text, server: true })), ...clientWarnings(proposal).map(text => ({ text }))];
+  const warnings = dataKind ? dataWarnings(proposal).map(text => ({ text, server: true }))
+    : [...proposal.impact.warnings_he.map(text => ({ text, server: true })), ...clientWarnings(proposal).map(text => ({ text }))];
 
   function clearPassword() {
     if (passwordRef.current) passwordRef.current.value = "";
@@ -90,6 +99,17 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
       close();   // inert while the request is in flight
       return;
     }
+    // Location changes: Enter confirms unless a button, link or field has the focus (they keep their own Enter).
+    if (e.key === "Enter" && dataKind && !e.repeat && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const t = e.target;
+      const inPanel = !!panelRef.current && (t === document.body || panelRef.current.contains(t));
+      if (inPanel && !(t instanceof Element && t.closest("button, a, input, textarea, select, summary, [role='button']"))) {
+        e.preventDefault();
+        e.stopPropagation();
+        submit();
+      }
+      return;
+    }
     if (e.key !== "Tab" || !panelRef.current) return;
     const focusable = [...panelRef.current.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.offsetParent !== null);
     if (!focusable.length) return;
@@ -104,8 +124,9 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
     mounted.current = true;
     const listener = e => keyHandler.current(e);
     document.addEventListener("keydown", listener, true);
-    // Initial focus: the phrase, else the password; never the action button.
-    const first = blockedText || !proposal.can_execute ? closeRef.current : proposal.phrase ? phraseRef.current : passwordRef.current;
+    // Initial focus: the phrase, else the password, else (location changes) the heading; never the action button.
+    const first = blockedText || !proposal.can_execute ? closeRef.current
+      : proposal.phrase ? phraseRef.current : proposal.needs_password !== false ? passwordRef.current : headingRef.current;
     requestAnimationFrame(() => (first || closeRef.current)?.focus());
     return () => {
       mounted.current = false;
@@ -143,23 +164,33 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
     // An aria-disabled submit button does not stop implicit submission, so every guard lives here.
     if (busyRef.current) return;
     if (!ready) { focusFirstMissing(); return; }
-    const password = passwordRef.current?.value || "";
-    clearPassword();
-    if (!password) { passwordRef.current?.focus(); return; }
+    // Kinds without a password (location changes) send exactly {}: no password key at all.
+    let password;
+    if (needsPassword) {
+      password = passwordRef.current?.value || "";
+      clearPassword();
+      if (!password) { passwordRef.current?.focus(); return; }
+    }
     busyRef.current = true;
     setBusy(true);
     setError(null);
+    // Only the session that sent the request may publish its answer (sign-out / another user drops it).
+    const session = generationGuard(getEpoch);
     try {
-      const res = await executeProposal(proposal.id, { password, phrase: proposal.phrase ? phraseValue : undefined });
-      const next = normalizeProposal(res);
+      const body = {};
+      if (needsPassword) body.password = password;
+      if (proposal.phrase) body.phrase = phraseValue;
+      const res = await executeProposal(proposal.id, body);
       busyRef.current = false;
-      if (next) onExecuted?.(next);
+      if (!session.isCurrent()) return;
+      const next = normalizeProposal(res);
+      if (next) onExecuted?.(next, session.epoch);
       else await onRefresh?.();
       if (mounted.current) onClose?.();
       return;
     } catch (err) {
       busyRef.current = false;
-      if (!mounted.current) return;
+      if (!mounted.current || !session.isCurrent()) return;
       const info = actionErrorInfo(err, { proposal, phase: "execute" });
       if (info.code === "not_pending") {
         // Already confirmed elsewhere (or a lost response of our own): show the real status in the card.
@@ -178,10 +209,12 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
     }
   }
 
-  const headerTone = tone === "safe" ? "border-t-4 border-nv-400 bg-zinc-900" : wide ? "border-t-4 border-rose-600 bg-rose-950/60" : "border-t-4 border-amber-600 bg-amber-950/30";
-  const titleTone = tone === "safe" ? "text-nv-300" : wide ? "text-rose-200" : "text-amber-200";
+  const headerTone = tone === "data" ? "border-t-4 border-sky-600 bg-zinc-900"
+    : tone === "safe" ? "border-t-4 border-nv-400 bg-zinc-900" : wide ? "border-t-4 border-rose-600 bg-rose-950/60" : "border-t-4 border-amber-600 bg-amber-950/30";
+  const titleTone = tone === "data" ? "text-sky-200" : tone === "safe" ? "text-nv-300" : wide ? "text-rose-200" : "text-amber-200";
   const actionClass = !ready || busy
     ? "bg-zinc-800 text-zinc-400 cursor-not-allowed"
+    : tone === "data" ? "bg-sky-700 text-white hover:bg-sky-600"
     : tone === "safe" ? "bg-nv-400 text-zinc-950 hover:bg-nv-300" : "bg-rose-700 text-white hover:bg-rose-600";
   const hintShown = !ready && !busy && !blocked && !!state.hint;
   const describedBy = error ? ids.error : hintShown ? ids.hint : undefined;
@@ -192,7 +225,8 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
       <div ref={panelRef} role="alertdialog" aria-modal="true" aria-labelledby={ids.heading} aria-describedby={ids.summary} dir="rtl" lang="he"
         className="flex max-h-[calc(100dvh-24px)] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 text-zinc-200 text-right max-[580px]:h-[100dvh] max-[580px]:max-h-none max-[580px]:rounded-none max-[580px]:border-0">
         <header className={`flex items-start gap-2 border-b border-zinc-800 px-4 py-3 ${headerTone}`}>
-          <h2 id={ids.heading} className={`min-w-0 flex-1 text-sm font-bold ${titleTone}`}>
+          <h2 id={ids.heading} ref={headingRef} tabIndex={-1}
+            className={`min-w-0 flex-1 text-sm font-bold focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 ${titleTone}`}>
             {wide && tone !== "safe" && <span aria-hidden="true">⚠ </span>}אישור: <Bidi text={proposal.title_he} />
           </h2>
           {countdown && (
@@ -214,6 +248,7 @@ export default function ActionConfirmDialog({ proposal, passwordMode, blockedTex
                 {warnings.map((w, i) => <li key={i} className={w.server ? "text-amber-200" : "text-zinc-300"}><Bidi text={w.text} /></li>)}
               </ul>
             )}
+            {dataKind && <p className="text-xs text-zinc-400">שינוי בתוויות ובמיקומים בלבד, ולכן לא נדרשת סיסמה. Enter מאשר, Escape סוגר בלי לשנות.</p>}
             {proposal.background && <p className="text-xs text-zinc-400">הפעולה רצה ברקע, PDU אחרי PDU. אי אפשר לעצור באמצע; בסיום אפשר להחזיר חשמל לאותם שקעים.</p>}
 
             {blockedText && <p role="alert" className="rounded border border-amber-800 bg-amber-950/30 p-2 text-xs text-amber-200">{blockedText}</p>}

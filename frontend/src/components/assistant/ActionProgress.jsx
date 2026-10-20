@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useId, useRef, useState } from "react";
 import { useAccounts } from "../../accounts.jsx";
 import { bidiSegments } from "../../api/assistant.js";
-import { actionErrorInfo, getProposal, normalizeProposal } from "../../api/assistantActions.js";
+import { actionErrorInfo, dataResultView, getProposal, isDataKind, normalizeProposal } from "../../api/assistantActions.js";
+import { DataChangeList } from "./ActionImpact.jsx";
 import {
   acceptUpdate, actionPoller, proposalSignature, CONSOLE_AFTER_CYCLE_NOTE, CONSOLE_INVALID_NOTE, CONSOLE_UNKNOWN_NOTE, consoleTargets, currentPdu, executingLine,
   executingNote, isFinalStatus, kindSwitch, OFFLINE_ALERT_MS, pollNotice, progressInfo, proposalId, proposalStatus, RESTORE_BUTTON,
@@ -43,6 +44,37 @@ function Summary({ summary, showMain }) {
         <ul className="space-y-0.5 text-amber-200">{summary.lines.map((line, i) => <li key={i}><Bidi text={line} /></li>)}</ul>
       )}
     </>
+  );
+}
+
+// Location changes (server_swap / server_move / server_clear, ACT-13): "בוצע: N שינויים" with the applied
+// before -> after list, or why nothing changed (drift: "המיקומים השתנו מאז ההצעה"; the card offers "הצע שוב").
+function DataProgress({ id, status, data, notice, showSummary }) {
+  if (!data) return null;
+  const main = showSummary ? <p className={`font-medium ${TONE_TEXT[data.tone] || TONE_TEXT.info}`}><Bidi text={data.text} /></p> : null;
+  const lines = data.lines.length > 0 && (
+    <ul className={`space-y-0.5 ${data.tone === "ok" ? "text-zinc-300" : "text-amber-200"}`}>{data.lines.map((line, i) => <li key={i}><Bidi text={line} /></li>)}</ul>
+  );
+  return (
+    <div className="space-y-2 text-xs" data-action-progress={status}>
+      <div role={showSummary ? (data.alert ? "alert" : "status") : undefined} className="space-y-1">{main}{lines}</div>
+      {data.applied && data.applied.count > 0 && (
+        <div className="space-y-1 rounded border border-zinc-800 p-2">
+          <p className="text-[11px] font-semibold text-zinc-400">מה שונה</p>
+          <DataChangeList changes={data.applied.changes} positions={data.applied.positions} unplaced={data.applied.unplaced} past scroll />
+        </div>
+      )}
+      {notice && (
+        <div role={notice.alert ? "alert" : "status"} className={`flex flex-wrap items-center gap-2 rounded border px-2 py-1.5 ${NOTICE_TONE[notice.tone] || NOTICE_TONE.warn}`}>
+          <span className="min-w-0 flex-1">{notice.text}</span>
+          {notice.action && (
+            <button type="button" onClick={() => actionPoller.refresh(id)} className={`${SMALL_BUTTON} border-zinc-600 bg-zinc-900 text-zinc-100 hover:bg-zinc-800`}>
+              {notice.action === "retry" ? "נסה עכשיו" : "בדוק מצב"}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -103,6 +135,9 @@ export default function ActionProgress({ proposal, onUpdate, onRestore, onOpenCo
   const view = state?.proposal && proposalId(state.proposal) === id ? state.proposal : proposal;
   const status = proposalStatus(view);
   if (!id || status === "pending" || status === "ready") return null;
+  if (isDataKind(view?.kind)) {
+    return <DataProgress id={id} status={status} data={dataResultView(view)} notice={pollNotice(state, Date.now())} showSummary={showSummary} />;
+  }
 
   const running = status === "executing";
   const final = isFinalStatus(status);

@@ -32,10 +32,38 @@ export const KINDS = {
   lab_shutdown: { scope: "lab", sw: "maintenance_off" },
   batch_restore: { scope: "batch", sw: "maintenance_on" },
   open_console: { scope: "server", sw: "none" },
+  // Location changes (contracts.DATA_KINDS): PDU/KVM port labels and rack positions change, never power.
+  server_swap: { scope: "server", sw: "data" },
+  server_move: { scope: "server", sw: "data" },
+  server_clear: { scope: "server", sw: "data" },
 };
+export const DATA_KINDS = ["server_swap", "server_move", "server_clear"];
 const SCOPES = ["outlet", "server", "pdu", "rack", "lab", "batch"];
 const ROLES = ["Viewer", "Operator", "Admin"];
-const REQUEST_KEYS = ["kind", "server", "pdu", "outlet", "rack", "restore_of", "then_console"];
+const REQUEST_KEYS = ["kind", "server", "pdu", "outlet", "rack", "restore_of", "then_console",
+  "target_server", "target_ports", "target_rack", "target_slot"];
+const MAX_TARGET_PORTS = 8;
+
+// A location change (server_swap / server_move / server_clear): a proposal, a raw public JSON or a kind string.
+export function isDataKind(proposalOrKind) {
+  const kind = typeof proposalOrKind === "string" ? proposalOrKind : proposalOrKind?.kind;
+  return DATA_KINDS.includes(kind);
+}
+
+// ProposalRequest.target_ports: [{device, port}] with a device id/name and a port number as text (<= 8 entries).
+export function cleanTargetPorts(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const item of list) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const device = typeof item.device === "string" ? item.device.trim() : "";
+    const port = Number.isInteger(item.port) ? String(item.port) : typeof item.port === "string" ? item.port.trim() : "";
+    if (!device || device.length > 100 || !/^\d{1,4}$/.test(port) || Number(port) < 1) continue;
+    out.push({ device, port });
+    if (out.length >= MAX_TARGET_PORTS) break;
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Requests
@@ -115,7 +143,8 @@ export function cleanRequest(request) {
   for (const key of REQUEST_KEYS) {
     const v = r[key];
     if (key === "then_console") { if (v === true) out[key] = true; continue; }
-    if (key === "outlet") { if (Number.isInteger(v)) out[key] = v; continue; }
+    if (key === "outlet" || key === "target_slot") { if (Number.isInteger(v)) out[key] = v; continue; }
+    if (key === "target_ports") { const ports = cleanTargetPorts(v); if (ports.length) out[key] = ports; continue; }
     if (typeof v === "string" && v.trim()) out[key] = v.trim();
   }
   return out;
@@ -138,9 +167,11 @@ export function listProposals(limit = 20, options) {
   return req("GET", `/proposals?limit=${n}`, undefined, options);
 }
 
-// The body is exactly {password, phrase?}: targets and parameters come only from the stored proposal.
+// The body is exactly {password?, phrase?}: targets and parameters come only from the stored proposal. Kinds
+// without a password (location changes) send `{}`; the server still checks role, owner, CSRF and drift.
 export async function executeProposal(id, { password, phrase } = {}, { signal, timeoutMs = EXECUTE_TIMEOUT_MS } = {}) {
-  const body = { password: typeof password === "string" ? password : "" };
+  const body = {};
+  if (typeof password === "string") body.password = password;
   if (typeof phrase === "string") body.phrase = phrase;
   return req("POST", `/proposals/${idPath(id)}/execute`, body, { signal, timeoutMs });
 }
@@ -165,6 +196,28 @@ function normalizeConsole(c) {
   return { kvm_id: str(c.kvm_id), kvm_name: str(c.kvm_name), port: int(c.port), label: str(c.label), console_url: str(c.console_url) };
 }
 
+// Location changes (move-server dry run): [{device_id, device_name, kind, port, before, after}]. Labels are text only.
+function normalizeChanges(list) {
+  return objList(list).map(c => ({
+    device_id: str(c.device_id), device_name: str(c.device_name) || str(c.device_id), kind: str(c.kind),
+    port: str(c.port).trim(), before: str(c.before), after: str(c.after),
+  })).filter(c => c.device_name && c.port);
+}
+
+function normalizeSpot(spot) {
+  if (!spot || typeof spot !== "object" || Array.isArray(spot)) return null;
+  const rack = str(spot.rack).trim();
+  const n = int(spot.slot);
+  const slot = n !== null && n >= 1 ? n : null;
+  return rack || slot !== null ? { rack, slot } : null;
+}
+
+// [{server, before: {rack, slot} | null, after: {rack, slot} | null}]; null = no position.
+function normalizePositions(list) {
+  return objList(list).map(p => ({ server: str(p.server), before: normalizeSpot(p.before), after: normalizeSpot(p.after) }))
+    .filter(p => p.server.trim());
+}
+
 export function normalizeImpact(raw) {
   const i = raw && typeof raw === "object" ? raw : {};
   const targets = objList(i.targets).map(t => ({
@@ -182,6 +235,9 @@ export function normalizeImpact(raw) {
     targets, excluded, pdus, servers,
     consoles: objList(i.consoles).map(normalizeConsole),
     warnings_he: strList(i.warnings_he),
+    changes: normalizeChanges(i.changes),
+    positions: normalizePositions(i.positions),
+    unplaced: strList(i.unplaced),
     counts: {
       outlets: count(c.outlets, targets.length), pdus: count(c.pdus, pdus.length),
       servers: count(c.servers, servers.length), excluded: count(c.excluded, excluded.length),
@@ -206,6 +262,10 @@ function normalizeResult(raw) {
     summary_he: str(raw.summary_he),
     // D7: why a batch stopped early (passed through unchanged for ActionProgress).
     ...(raw.aborted !== undefined ? { aborted: raw.aborted } : {}),
+    // Location changes: what was applied (only when the server sent it).
+    ...(Array.isArray(raw.changes) ? { changes: normalizeChanges(raw.changes) } : {}),
+    ...(Array.isArray(raw.positions) ? { positions: normalizePositions(raw.positions) } : {}),
+    ...(Array.isArray(raw.unplaced) ? { unplaced: strList(raw.unplaced) } : {}),
   };
 }
 
@@ -224,7 +284,12 @@ export function normalizeProposal(raw, now = Date.now()) {
     ? { done: count(p.progress.done, 0), total: count(p.progress.total, 0) } : null;
   const request = {};
   if (p.request && typeof p.request === "object") {
-    for (const key of REQUEST_KEYS) if (p.request[key] !== undefined && p.request[key] !== null) request[key] = p.request[key];
+    for (const key of REQUEST_KEYS) {
+      const v = p.request[key];
+      if (v === undefined || v === null) continue;
+      if (key === "target_ports") { const ports = cleanTargetPorts(v); if (ports.length) request[key] = ports; continue; }
+      request[key] = v;
+    }
   }
   return {
     id: p.id, kind, scope: SCOPES.includes(p.scope) ? p.scope : spec.scope, sw: spec.sw,
@@ -353,12 +418,14 @@ export const RISK_LABELS = {
   high: "סיכון גבוה — ארון שלם",
   batch: "סיכון גבוה — כמה PDU",
   critical: "סיכון קריטי — כל המעבדה",
+  data: "שינוי נתונים (ללא חשמל)",
 };
 
-// info | medium | high | batch | critical. rack/lab (and their restore) are the red, wide-scope cards.
+// info | data | medium | high | batch | critical. rack/lab (and their restore) are the red, wide-scope cards.
 export function riskOf(proposal) {
   if (!proposal) return "medium";
   if (proposal.sw === "none") return "info";
+  if (proposal.sw === "data" || isDataKind(proposal)) return "data";
   if (proposal.scope === "lab") return "critical";
   if (proposal.scope === "rack") return "high";
   if (proposal.scope === "batch") return /^LAB\b/.test(proposal.phrase || "") ? "critical" : "batch";
@@ -464,6 +531,7 @@ export function impactSentence(proposal) {
   if (!proposal) return "";
   const { counts, excluded } = proposal.impact;
   if (proposal.sw === "none") return "פתיחת קונסול KVM בלבד. החשמל לא ישתנה.";
+  if (isDataKind(proposal)) return dataImpactSentence(proposal);
   const outlets = outletsText(counts.outlets), pdus = pdusText(counts.pdus);
   const servers = counts.servers > 0 ? ` (${serversText(counts.servers)})` : "";
   let text;
@@ -483,6 +551,7 @@ export function impactSentence(proposal) {
 // Label of the dialog's action button: the verb and the object, never a bare "אשר".
 export function verbLabel(proposal) {
   if (!proposal) return "בצע";
+  if (isDataKind(proposal)) return DATA_CONFIRM_LABEL;
   const r = proposal.request || {};
   const server = str(r.server) || proposal.impact.servers[0] || "";
   const pdu = proposal.impact.targets[0]?.pdu_name || str(r.pdu);
@@ -506,14 +575,15 @@ export function verbLabel(proposal) {
   }
 }
 
-// "danger" (rose) for anything that removes power, "safe" (nv) for power back on.
+// "danger" (rose) for anything that removes power, "safe" (nv) for power back on, "data" (sky) for location changes.
 export function actionTone(proposal) {
+  if (proposal?.sw === "data" || isDataKind(proposal)) return "data";
   return ["on", "maintenance_on"].includes(proposal?.sw) ? "safe" : "danger";
 }
 
 // Warnings the client adds from the server's own impact (never from model text).
 export function clientWarnings(proposal) {
-  if (!proposal || proposal.sw === "none") return [];
+  if (!proposal || proposal.sw === "none" || isDataKind(proposal)) return [];
   const out = [];
   if (proposal.scope === "server") {
     for (const { server, outlets } of groupByServer(proposal.impact.targets)) {
@@ -552,8 +622,12 @@ export function phraseMatches(value, phrase) {
 }
 
 // {ready, missing: ["phrase" | "password"], hint}
+// A location change can be confirmed only when the server's before -> after list is on screen ("changes").
 export function confirmState(proposal, { phraseValue = "", passwordFilled = false } = {}) {
   const missing = [];
+  if (isDataKind(proposal) && !dataChangeCount(proposal?.impact?.changes, proposal?.impact?.positions)) {
+    return { ready: false, missing: ["changes"], hint: "אין רשימת שינויים מהשרת, ולכן אי אפשר לאשר. בקש הצעה חדשה." };
+  }
   if (proposal?.phrase && !phraseMatches(phraseValue, proposal.phrase)) missing.push("phrase");
   if (proposal?.needs_password !== false && !passwordFilled) missing.push("password");
   let hint = "";
@@ -599,11 +673,23 @@ function minutesText(seconds) {
 // a lost or failed execute response never does (the action may already be running).
 export function actionErrorInfo(err, { proposal = null, phase = "execute" } = {}) {
   const code = errorCode(err);
-  const details = Array.isArray(err?.details) ? err.details.filter(d => typeof d === "string" && d.trim()) : [];
+  let details = Array.isArray(err?.details) ? err.details.filter(d => typeof d === "string" && d.trim()) : [];
   const phrase = proposal?.phrase || "";
   const role = proposal?.required_role || "Operator";
+  const data = isDataKind(proposal);
+  // A location change proposed again can be refused by the planner (a port now used by another server, an occupied
+  // slot): its fixed, secret-free English reason is the only useful explanation, so it is shown as a detail.
+  if (data && phase === "create" && !details.length && typeof err?.detail === "string" && err.detail.trim() && err.status && err.status < 500) {
+    details = [err.detail.trim().slice(0, 300)];
+  }
   const out = (text, extra = {}) => ({ text, details, code, outcomeUnknown: false, retryAfter: undefined, ...extra });
   const unknownExecute = phase === "execute";
+  if (data && code === "drift") {
+    // check_drift's own reason ("המיקומים השתנו מאז ההצעה") is the headline; it is not repeated as a detail.
+    details = details.filter(d => d.trim() !== DATA_DRIFT_TEXT);
+    return out(`${DATA_DRIFT_TEXT}. ${NOTHING_DONE} אפשר להציע שוב ולקבל רשימה מעודכנת.`);
+  }
+  if (data && code === "no_targets") return out(`אין מה לשנות: התוויות והמיקומים כבר כמו שביקשת. ${NOTHING_DONE}`);
   switch (code) {
     case "aborted": return out("הבקשה בוטלה.", { outcomeUnknown: unknownExecute });
     case "network":
@@ -657,6 +743,17 @@ export function actionErrorText(err, options) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Session generation: a response may only be published by the session (sign-in, user) that sent the request.
+// getGeneration is the panel's action epoch (bumped on sign-out, another user, unmount). Capture it when a request
+// starts; when the answer arrives, drop it if isCurrent() is false, else hand `epoch` on with the proposal.
+// ---------------------------------------------------------------------------------------------------------------
+export function generationGuard(getGeneration) {
+  if (typeof getGeneration !== "function") return { epoch: undefined, isCurrent: () => true };
+  const epoch = getGeneration();
+  return { epoch, isCurrent: () => getGeneration() === epoch };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // KVM consoles (SEC-ACT-18): only "/api/kvms/{id}/autologin?port=N" for a KVM the site knows, matching the entry.
 // ---------------------------------------------------------------------------------------------------------------
 export function consoleTarget(entry, devices) {
@@ -681,4 +778,159 @@ export const AFTER_CYCLE_NOTE = "השרת עולה מחדש; ייתכן שהמס
 export function proposalConsoles(proposal) {
   if (!proposal || proposal.kind !== "open_console") return [];
   return proposal.impact.consoles;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Location changes (server_swap / server_move / server_clear): no power, no password, one confirmation click.
+// The card and the dialog show the server's move-server dry run (impact.changes / positions / unplaced) as a
+// before -> after list; every name and label is text (rendered in <bdi>), never markup.
+// ---------------------------------------------------------------------------------------------------------------
+export const DATA_CONFIRM_LABEL = "אשר שינוי";
+export const DATA_DRIFT_TEXT = "המיקומים השתנו מאז ההצעה";
+export const DATA_CHANGED_EVENT = "dcim-assistant-data-changed";
+export const EMPTY_LABEL = "(ריק)";
+export const NO_POSITION = "בלי מיקום";
+// router._admit's generic text for a refused proposal; the data headline already says it.
+const GENERIC_REFUSED = ["המצב השתנה; יש לבקש הצעה חדשה."];
+const hasHebrewText = text => typeof text === "string" && /[֐-׿]/.test(text);
+
+export const changesText = n => (n === 1 ? "שינוי אחד" : `${n} שינויים`);
+
+export function portWord(kind) {
+  const k = typeof kind === "string" ? kind.toLowerCase() : "";
+  return k === "kvm" ? "פורט" : k === "pdu" ? "שקע" : "יציאה";
+}
+
+const labelOrEmpty = v => (typeof v === "string" && v.trim() ? v.trim() : EMPTY_LABEL);
+
+// "Rack-05 U3", "U7" without a rack, or "בלי מיקום".
+export function spotText(spot) {
+  if (!spot || typeof spot !== "object") return NO_POSITION;
+  const parts = [];
+  if (typeof spot.rack === "string" && spot.rack.trim()) parts.push(spot.rack.trim());
+  if (Number.isInteger(spot.slot) && spot.slot >= 1) parts.push(`U${spot.slot}`);
+  return parts.length ? parts.join(" ") : NO_POSITION;
+}
+
+// Port label changes by device (natural order) and port number:
+// [{key, device, word, port, before, after, text}], text = "PDU-05 · שקע 7: optn44 → optn45".
+export function changeRows(changes) {
+  return (Array.isArray(changes) ? changes : [])
+    .filter(c => c && typeof c === "object")
+    .map((c, i) => {
+      const device = str(c.device_name) || str(c.device_id);
+      const port = str(c.port).trim();
+      const word = portWord(c.kind);
+      const before = labelOrEmpty(c.before), after = labelOrEmpty(c.after);
+      return { key: `${str(c.device_id) || device}:${port}:${i}`, device, word, port, before, after,
+        text: `${device} · ${word} ${port}: ${before} → ${after}` };
+    })
+    .filter(r => r.device && r.port)
+    .sort((a, b) => natural(a.device, b.device) || natural(a.port, b.port));
+}
+
+// The planner lists every server involved, also those whose rack position stays the same: only real moves count.
+export function movedPositions(positions) {
+  return (Array.isArray(positions) ? positions : [])
+    .filter(p => p && typeof p === "object" && str(p.server).trim() && spotText(p.before) !== spotText(p.after));
+}
+
+// Rack positions that change: [{key, server, before, after, text}], text = "optn45: Rack-05 U3 → Rack-02 U7".
+export function positionRows(positions) {
+  return movedPositions(positions).map((p, i) => {
+    const server = str(p.server).trim();
+    const before = spotText(p.before), after = spotText(p.after);
+    return { key: `${server}:${i}`, server, before, after, text: `${server}: ${before} → ${after}` };
+  });
+}
+
+// "optn44 יישאר בלי מיקום" before it runs, "optn44 נשאר בלי מיקום" after.
+export function unplacedSuffix(past = false) {
+  return `${past ? "נשאר" : "יישאר"} ${NO_POSITION}`;
+}
+export function unplacedText(name, past = false) {
+  return `${name} ${unplacedSuffix(past)}`;
+}
+
+// Label changes plus rack positions that really move.
+export function dataChangeCount(changes, positions) {
+  return (Array.isArray(changes) ? changes.length : 0) + movedPositions(positions).length;
+}
+
+const unplacedWarning = (warnings, name) =>
+  (Array.isArray(warnings) ? warnings : []).find(w => typeof w === "string" && w.includes(name) && w.includes(NO_POSITION));
+
+// The amber line for each server left without a location: the server's own warning when it has one
+// ("optn44 יישאר בלי מיקום: בלי שקעי PDU, …"), else "optn44 יישאר בלי מיקום". [{name, text}]
+export function unplacedLines(unplaced, warnings = [], past = false) {
+  return (Array.isArray(unplaced) ? unplaced : []).filter(n => typeof n === "string" && n.trim())
+    .map(name => ({ name, text: (!past && unplacedWarning(warnings, name)) || unplacedText(name, past) }));
+}
+
+// Server warnings, minus those that only repeat an unplaced server (the impact list shows those itself, in amber).
+export function dataWarnings(proposal) {
+  const impact = proposal?.impact;
+  if (!impact) return [];
+  const unplaced = Array.isArray(impact.unplaced) ? impact.unplaced : [];
+  return (Array.isArray(impact.warnings_he) ? impact.warnings_he : [])
+    .filter(w => !unplaced.some(name => w.includes(name) && w.includes(NO_POSITION)));
+}
+
+// The dialog's one-line summary for a location change.
+function dataImpactSentence(proposal) {
+  const { changes, positions } = proposal.impact;
+  const labels = changes.length, spots = movedPositions(positions).length;
+  const labelsText = labels === 1 ? "תווית אחת" : `${labels} תוויות`;
+  let text;
+  if (!labels && !spots) text = "אין שינויים להחיל.";
+  else if (proposal.kind === "server_clear") {
+    text = `${labels === 1 ? "תווית אחת תחזור" : `${labels} תוויות יחזרו`} לשם ברירת המחדל (Outlet N / Port N). המיקום בארון לא ישתנה.`;
+  } else {
+    const spotsText = spots === 1 ? "מיקום אחד בארון" : `${spots} מיקומים בארון`;
+    text = `הפעולה תשנה ${labels ? `${labelsText} ב-PDU וב-KVM` : ""}${labels && spots ? " ו־" : ""}${spots ? spotsText : ""}.`;
+  }
+  return `${text} החשמל לא ישתנה.`;
+}
+
+// What ActionProgress shows for a location change (raw or normalized proposal):
+// {text, tone, alert, lines, applied: {changes, positions, unplaced, count} | null}; null while pending/ready.
+export function dataResultView(proposal) {
+  const p = normalizeProposal(proposal);
+  if (!p || !isDataKind(p)) return null;
+  const r = p.result;
+  const summary = hasHebrewText(r?.summary_he) ? r.summary_he.trim() : "";
+  const view = (text, tone, extra = {}) => ({ text, tone, alert: false, lines: [], applied: null, ...extra });
+  switch (p.status) {
+    case "executing": return view("מחיל את השינויים…", "running");
+    case "succeeded":
+    case "partial": {
+      // An older server may not echo the list: the proposal's own (re-checked) list is what was applied.
+      const changes = r?.changes ?? p.impact.changes;
+      const positions = r?.positions ?? p.impact.positions;
+      const unplaced = r?.unplaced ?? p.impact.unplaced;
+      const n = dataChangeCount(changes, positions);
+      const text = p.status === "succeeded" ? (n ? `בוצע: ${changesText(n)}` : "בוצע. לא היה מה לשנות.") : `בוצע חלקית: ${changesText(n)}`;
+      return view(text, p.status === "succeeded" ? "ok" : "warn", {
+        alert: p.status === "partial",
+        lines: summary && summary !== text ? [summary] : [],
+        applied: { changes, positions, unplaced, count: n },
+      });
+    }
+    case "failed": return view(summary || "השינוי נכשל. בדוק את המיקומים לפני שתנסה שוב.", "error", { alert: true });
+    case "refused": {
+      // The headline already says the locations changed; only a different server reason is added.
+      const lines = summary && !GENERIC_REFUSED.includes(summary) && !summary.startsWith(DATA_DRIFT_TEXT) ? [summary] : [];
+      return view(`${DATA_DRIFT_TEXT}, ולכן שום דבר לא שונה. אפשר להציע שוב ולקבל רשימה מעודכנת.`, "warn", { lines });
+    }
+    case "interrupted": return view("השרת הופעל מחדש באמצע השינוי. בדוק את המיקומים לפני שתנסה שוב.", "warn", { alert: true });
+    case "expired": return view("ההצעה פגה ולא בוצעה.", "muted");
+    case "cancelled": return view("ההצעה בוטלה. לא בוצע שום שינוי.", "muted");
+    default: return null;
+  }
+}
+
+// A location change this browser watched has finished (pending/executing -> a final status that may have written):
+// the device tables reload once.
+export function dataChangeFinished(prevStatus, nextStatus) {
+  return ["pending", "executing"].includes(prevStatus) && ["succeeded", "partial", "failed"].includes(nextStatus);
 }

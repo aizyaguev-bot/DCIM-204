@@ -63,8 +63,9 @@ function ChatIcon() {
 const subtle = "rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 disabled:opacity-40";
 
 // onOpenConsole(deviceId, port) is App's openKvmConsole: it must run inside a click handler and returns
-// "popup" | "inline" | "denied".
-export default function AssistantPanel({ context, navigate, openDetail, devices = [], onOpenConsole }) {
+// "popup" | "inline" | "denied". onDataChanged() (optional) reloads the site's device tables after an assistant
+// location change (server_swap / server_move / server_clear) finished.
+export default function AssistantPanel({ context, navigate, openDetail, devices = [], onOpenConsole, onDataChanged }) {
   const { mode: accountMode, user, canOperate, canAdmin } = useAccounts();
   // The stored conversation id is keyed by username (SEC-AI-18); another account on this browser never loads it.
   const userKey = accountMode === "accounts" ? `user:${user?.username ?? ""}` : "legacy";
@@ -353,10 +354,17 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   const updateRef = useRef(updateProposal);
   updateRef.current = updateProposal;
 
-  // After execute answered 200 (final) or 202 (running): the shared poller follows it from here.
-  function onActionExecuted(p) {
-    const next = updateProposal(p);
-    if (next) actionPoller?.update?.(next);
+  // The session generation cards capture when a request starts (bumped by resetActions and on unmount).
+  const getActionsEpoch = () => actionsEpoch.current;
+
+  // After execute answered 200 (final) or 202 (running): the shared poller follows it from here. `epoch` is the
+  // session generation captured when the request started (generationGuard): an answer that arrives after a
+  // sign-out or a user change is dropped and never reaches the shared poller.
+  function onActionExecuted(p, epoch = actionsEpoch.current) {
+    if (epoch !== actionsEpoch.current) return;
+    const next = updateProposal(p, epoch);
+    if (!next) return;
+    actionPoller?.update?.(next);
     setActionsVersion(v => v + 1);
   }
 
@@ -428,6 +436,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   const actionProps = {
     config: actionConfig, canOperate, canAdmin, onUpdate: updateProposal, onExecuted: onActionExecuted,
     onRestore: restoreAction, onRepropose: reproposeAction, onOpenConsole: openConsoleEntry,
+    getEpoch: getActionsEpoch, onDataChanged,
   };
 
   function startNew() {

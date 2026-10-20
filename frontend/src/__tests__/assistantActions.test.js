@@ -6,7 +6,10 @@ import {
   displayStatus, riskOf, roleChipText, statusLabel, excludedGroups, keptCount, groupTargets, groupByServer,
   impactSentence, verbLabel, actionTone, clientWarnings, passwordLabelHe, configBlockText, phraseMatches, confirmState,
   errorCode, actionErrorInfo, actionErrorText, consoleTarget, proposalConsoles, NOTHING_DONE, ACCOUNTS_ONLY_TEXT,
-  EXECUTE_TIMEOUT_MS, insertAfterId, proposalRefs,
+  EXECUTE_TIMEOUT_MS, insertAfterId, proposalRefs, RISK_LABELS,
+  DATA_KINDS, DATA_CONFIRM_LABEL, DATA_DRIFT_TEXT, EMPTY_LABEL, NO_POSITION, isDataKind, cleanTargetPorts, changeRows, positionRows,
+  spotText, portWord, unplacedText, dataChangeCount, changesText, dataWarnings, dataResultView, dataChangeFinished, generationGuard,
+  movedPositions, unplacedLines,
 } from "../api/assistantActions.js";
 
 const realFetch = globalThis.fetch;
@@ -330,4 +333,225 @@ test("result passes the abort reason and not-included outlets through unchanged"
   assert.deepEqual(p.result.pdus[0].not_included, [5]);
   assert.equal("not_included" in p.result.pdus[1], false);
   assert.deepEqual(normalizeProposal(p), p);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Location changes (ACT-13): server_swap / server_move / server_clear
+// ---------------------------------------------------------------------------------------------------------------
+function swapRaw(overrides = {}) {
+  return raw({
+    kind: "server_swap", scope: "server", title_he: "החלפת מיקום בין optn45 ל-optn44", required_role: "Operator",
+    needs_password: false, phrase: null, background: false,
+    request: { kind: "server_swap", server: "optn45", target_server: "optn44", target_ports: null, target_rack: null, target_slot: null,
+      pdu: null, outlet: null, rack: null, restore_of: null, then_console: false },
+    impact: {
+      targets: [], excluded: [], pdus: [], servers: ["optn45", "optn44"], consoles: [], warnings_he: [],
+      changes: [
+        { device_id: "kvm2", device_name: "KVM-2", kind: "kvm", port: "12", before: "optn45", after: "optn44" },
+        { device_id: "pdu5", device_name: "PDU-05", kind: "pdu", port: "7", before: "optn44", after: "optn45" },
+        { device_id: "pdu5", device_name: "PDU-05", kind: "pdu", port: 10, before: "OPTN44 (PSU2)", after: "optn45 (PSU2)" },
+        { device_id: "", device_name: "", kind: "pdu", port: "3", before: "x", after: "y" },
+      ],
+      positions: [{ server: "optn45", before: { rack: "Rack-05", slot: 3 }, after: { rack: "Rack-02", slot: 7 } },
+        { server: "optn44", before: { rack: "Rack-02", slot: 7 }, after: { rack: "Rack-05", slot: 3 } }],
+      unplaced: [],
+      counts: { outlets: 0, pdus: 0, servers: 2, excluded: 0 },
+    },
+    ...overrides,
+  });
+}
+
+test("data kinds: normalization keeps the before -> after list and the request targets (idempotent)", () => {
+  const p = normalizeProposal(swapRaw(), 5);
+  assert.equal(p.sw, "data");
+  assert.equal(isDataKind(p), true);
+  assert.equal(isDataKind("server_clear"), true);
+  assert.equal(isDataKind(normalizeProposal(raw())), false);
+  assert.deepEqual(DATA_KINDS, ["server_swap", "server_move", "server_clear"]);
+  assert.equal(p.needs_password, false);
+  assert.equal(p.impact.changes.length, 3, "an entry without a device is dropped");
+  assert.deepEqual(p.impact.changes[2], { device_id: "pdu5", device_name: "PDU-05", kind: "pdu", port: "10", before: "OPTN44 (PSU2)", after: "optn45 (PSU2)" });
+  assert.deepEqual(p.impact.positions[0], { server: "optn45", before: { rack: "Rack-05", slot: 3 }, after: { rack: "Rack-02", slot: 7 } });
+  assert.deepEqual(p.request, { kind: "server_swap", server: "optn45", target_server: "optn44", then_console: false });
+  assert.deepEqual(normalizeProposal(p), p);
+  const move = normalizeProposal(swapRaw({ kind: "server_move", request: { kind: "server_move", server: "optn45",
+    target_ports: [{ device: "PDU-05", port: 7 }, { device: "KVM-2", port: "12" }, { device: "", port: "1" }, { device: "x", port: "0" }, "junk"],
+    target_rack: "Rack-02", target_slot: 7 } }));
+  assert.deepEqual(move.request.target_ports, [{ device: "PDU-05", port: "7" }, { device: "KVM-2", port: "12" }]);
+  assert.equal(move.request.target_slot, 7);
+  // Missing or junk impact lists become empty lists; a position without a server is dropped.
+  const bare = normalizeImpact({ changes: "x", positions: [{ before: { rack: "R" } }, { server: "a", before: { slot: 0 }, after: null }], unplaced: [1, "", "optn44"] });
+  assert.deepEqual(bare.changes, []);
+  assert.deepEqual(bare.positions, [{ server: "a", before: null, after: null }]);
+  assert.deepEqual(bare.unplaced, ["1", "optn44"]);
+  const done = normalizeProposal(swapRaw({ status: "succeeded", result: { changes: swapRaw().impact.changes.slice(0, 1), positions: [], unplaced: ["optn44"], summary_he: "בוצע" } }));
+  assert.equal(done.result.changes.length, 1);
+  assert.deepEqual(done.result.unplaced, ["optn44"]);
+  assert.equal("changes" in normalizeProposal(raw({ status: "succeeded", result: { targets: [], pdus: [] } })).result, false);
+});
+
+test("data kinds: execute sends exactly {} (no password key); proposing again keeps the targets", async t => {
+  const calls = stubFetch(t, [
+    { body: swapRaw({ status: "succeeded" }) },
+    { body: raw({ status: "succeeded" }) },
+    { status: 201, body: swapRaw() },
+  ]);
+  await executeProposal(ID, {});
+  await executeProposal(ID);
+  await createProposal(normalizeProposal(swapRaw({ kind: "server_move", request: { kind: "server_move", server: "optn45",
+    target_ports: [{ device: "PDU-05", port: "7" }], target_rack: " Rack-02 ", target_slot: 7, target_server: null } })).request);
+  assert.deepEqual(calls[0].body, {});
+  assert.equal(calls[0].init.body, "{}");
+  assert.deepEqual(calls[1].body, {});
+  assert.deepEqual(calls[2].body, { kind: "server_move", server: "optn45", target_ports: [{ device: "PDU-05", port: "7" }], target_rack: "Rack-02", target_slot: 7 });
+  assert.deepEqual(cleanRequest({ kind: "server_swap", server: "a", target_server: "b", target_slot: "3", target_ports: [] }),
+    { kind: "server_swap", server: "a", target_server: "b" });
+  assert.equal(cleanTargetPorts(Array.from({ length: 12 }, (_, i) => ({ device: "PDU-05", port: i + 1 }))).length, 8);
+});
+
+test("data kinds: rows read 'PDU-05 · שקע 7: optn44 → optn45' and 'optn45: Rack-05 U3 → Rack-02 U7'", () => {
+  const p = normalizeProposal(swapRaw());
+  const rows = changeRows(p.impact.changes);
+  assert.deepEqual(rows.map(r => r.text), [
+    "KVM-2 · פורט 12: optn45 → optn44",
+    "PDU-05 · שקע 7: optn44 → optn45",
+    "PDU-05 · שקע 10: OPTN44 (PSU2) → optn45 (PSU2)",
+  ]);
+  assert.equal(changeRows([{ device_name: "PDU-05", kind: "pdu", port: "7", before: "optn12", after: "" }])[0].after, EMPTY_LABEL);
+  assert.equal(portWord("KVM"), "פורט");
+  assert.equal(portWord("pdu"), "שקע");
+  assert.deepEqual(positionRows(p.impact.positions).map(r => r.text), ["optn45: Rack-05 U3 → Rack-02 U7", "optn44: Rack-02 U7 → Rack-05 U3"]);
+  assert.equal(spotText(null), NO_POSITION);
+  assert.equal(spotText({ rack: "", slot: 4 }), "U4");
+  assert.equal(spotText({ rack: "Rack-02", slot: null }), "Rack-02");
+  assert.equal(unplacedText("optn44"), "optn44 יישאר בלי מיקום");
+  assert.equal(unplacedText("optn44", true), "optn44 נשאר בלי מיקום");
+  assert.equal(dataChangeCount(p.impact.changes, p.impact.positions), 5);
+  assert.equal(changesText(1), "שינוי אחד");
+  assert.equal(changesText(5), "5 שינויים");
+});
+
+test("data kinds: risk, role chip, verb, tone, sentence and readiness without a password", () => {
+  const p = normalizeProposal(swapRaw());
+  assert.equal(riskOf(p), "data");
+  assert.equal(RISK_LABELS[riskOf(p)], "שינוי נתונים (ללא חשמל)");
+  assert.equal(roleChipText(p), "Operator (ללא סיסמה)");
+  assert.equal(verbLabel(p), DATA_CONFIRM_LABEL);
+  assert.equal(DATA_CONFIRM_LABEL, "אשר שינוי");
+  assert.equal(actionTone(p), "data");
+  assert.deepEqual(clientWarnings(p), []);
+  assert.equal(impactSentence(p), "הפעולה תשנה 3 תוויות ב-PDU וב-KVM ו־2 מיקומים בארון. החשמל לא ישתנה.");
+  const clear = normalizeProposal(swapRaw({ kind: "server_clear", impact: { ...swapRaw().impact, positions: [], changes: swapRaw().impact.changes.slice(1, 2) } }));
+  assert.equal(impactSentence(clear), "תווית אחת תחזור לשם ברירת המחדל (Outlet N / Port N). המיקום בארון לא ישתנה. החשמל לא ישתנה.");
+  assert.deepEqual(confirmState(p, {}), { ready: true, missing: [], hint: "" });
+  const empty = normalizeProposal(swapRaw({ impact: { ...swapRaw().impact, changes: [], positions: [] } }));
+  assert.equal(confirmState(empty, {}).ready, false);
+  assert.deepEqual(confirmState(empty, {}).missing, ["changes"]);
+});
+
+test("data kinds: unplaced warnings are not repeated; drift and no_targets have their own Hebrew text", () => {
+  const p = normalizeProposal(swapRaw({ kind: "server_move", impact: { ...swapRaw().impact, unplaced: ["optn44"],
+    warnings_he: ["optn44 יישאר בלי מיקום", "התווית של PDU-05 שונתה ידנית"] } }));
+  assert.deepEqual(dataWarnings(p), ["התווית של PDU-05 שונתה ידנית"]);
+  const e = (status, code, extra = {}) => Object.assign(new Error("x"), { status, code, ...extra });
+  const drift = actionErrorInfo(e(409, "drift", { details: [DATA_DRIFT_TEXT, "PDU-05 · שקע 7"] }), { proposal: p });
+  assert.equal(drift.text, `המיקומים השתנו מאז ההצעה. ${NOTHING_DONE} אפשר להציע שוב ולקבל רשימה מעודכנת.`);
+  assert.deepEqual(drift.details, ["PDU-05 · שקע 7"]);
+  assert.match(actionErrorText(e(409, "no_targets"), { proposal: p }), /^אין מה לשנות/);
+  // Proposing again: the planner's English refusal is the only explanation, shown as a detail (create phase only).
+  const occupied = actionErrorInfo(e(409, "invalid", { detail: "Port 7 is used by optn46; choose it as target_server to swap" }), { proposal: p, phase: "create" });
+  assert.deepEqual(occupied.details, ["Port 7 is used by optn46; choose it as target_server to swap"]);
+  assert.deepEqual(actionErrorInfo(e(409, "invalid", { detail: "x" }), { proposal: p, phase: "execute" }).details, []);
+  assert.deepEqual(actionErrorInfo(e(409, "invalid", { detail: "x" }), { proposal: normalizeProposal(raw()), phase: "create" }).details, []);
+});
+
+test("data kinds: the result says 'בוצע: N שינויים' with the applied list, or why nothing changed", () => {
+  const changes = swapRaw().impact.changes.slice(0, 3);
+  const done = dataResultView(swapRaw({ status: "succeeded", result: { changes, positions: swapRaw().impact.positions, unplaced: [], summary_he: "השינויים הוחלו." } }));
+  assert.equal(done.text, "בוצע: 5 שינויים");
+  assert.equal(done.tone, "ok");
+  assert.equal(done.alert, false);
+  assert.deepEqual(done.lines, ["השינויים הוחלו."]);
+  assert.equal(done.applied.count, 5);
+  assert.equal(changeRows(done.applied.changes)[1].text, "PDU-05 · שקע 7: optn44 → optn45");
+  // An older server without a list in the result: the proposal's own list is what was applied.
+  assert.equal(dataResultView(swapRaw({ status: "succeeded", result: { summary_he: "" } })).text, "בוצע: 5 שינויים");
+  const refused = dataResultView(swapRaw({ status: "refused", result: { summary_he: "המצב השתנה; יש לבקש הצעה חדשה." } }));
+  assert.match(refused.text, /^המיקומים השתנו מאז ההצעה/);
+  assert.deepEqual(refused.lines, []);
+  assert.equal(refused.applied, null);
+  assert.equal(dataResultView(swapRaw({ status: "failed", result: null })).alert, true);
+  assert.equal(dataResultView(swapRaw({ status: "partial", result: { changes: changes.slice(0, 1) } })).text, "בוצע חלקית: 3 שינויים");
+  assert.equal(dataResultView(swapRaw({ status: "executing" })).tone, "running");
+  assert.equal(dataResultView(swapRaw({ status: "pending" })), null);
+  assert.equal(dataResultView(raw({ status: "succeeded" })), null, "power kinds keep ACT-9's result view");
+});
+
+test("data kinds follow ACT-12's planner output: unchanged positions, null labels, its own unplaced and refused texts", () => {
+  // The planner lists every involved server, also one whose position stays; cleared labels are null.
+  const p = normalizeProposal(swapRaw({ kind: "server_move", impact: { ...swapRaw().impact,
+    changes: [{ device_id: "pdu5", device_name: "PDU-05", kind: "pdu", port: 8, before: "optn45 (PSU2)", after: null }],
+    positions: [{ server: "optn45", before: { rack: "Rack-05", slot: 3 }, after: { rack: "Rack-02", slot: 7 } },
+      { server: "optn46", before: { rack: "Rack-02", slot: 9 }, after: { rack: "Rack-02", slot: 9 } },
+      { server: "optn44", before: { rack: "Rack-02", slot: 7 }, after: { rack: null, slot: null } }],
+    unplaced: ["optn44"],
+    warnings_he: ["optn44 יישאר בלי מיקום: בלי שקעי PDU, בלי יציאות KVM ובלי מקום בארון."] } }));
+  assert.deepEqual(movedPositions(p.impact.positions).map(x => x.server), ["optn45", "optn44"]);
+  assert.deepEqual(positionRows(p.impact.positions).map(r => r.text), ["optn45: Rack-05 U3 → Rack-02 U7", "optn44: Rack-02 U7 → בלי מיקום"]);
+  assert.equal(dataChangeCount(p.impact.changes, p.impact.positions), 3);
+  assert.equal(changeRows(p.impact.changes)[0].text, "PDU-05 · שקע 8: optn45 (PSU2) → (ריק)");
+  assert.equal(impactSentence(p), "הפעולה תשנה תווית אחת ב-PDU וב-KVM ו־2 מיקומים בארון. החשמל לא ישתנה.");
+  assert.deepEqual(unplacedLines(p.impact.unplaced, p.impact.warnings_he),
+    [{ name: "optn44", text: "optn44 יישאר בלי מיקום: בלי שקעי PDU, בלי יציאות KVM ובלי מקום בארון." }]);
+  assert.deepEqual(unplacedLines(["optn44"], [], true), [{ name: "optn44", text: "optn44 נשאר בלי מיקום" }]);
+  assert.deepEqual(dataWarnings(p), []);
+  // Only unchanged positions and no label: nothing to confirm.
+  const still = normalizeProposal(swapRaw({ impact: { ...swapRaw().impact, changes: [], positions: [p.impact.positions[1]] } }));
+  assert.equal(confirmState(still, {}).ready, false);
+  // runner refused summary starts with the same headline: not repeated as a line.
+  const refused = dataResultView(swapRaw({ status: "refused",
+    result: { changes: [], positions: [], unplaced: [], summary_he: "המיקומים השתנו מאז ההצעה, ולכן לא בוצע שום שינוי. יש לבקש הצעה חדשה." } }));
+  assert.deepEqual(refused.lines, []);
+  const failed = dataResultView(swapRaw({ status: "failed",
+    result: { changes: [], positions: [], unplaced: [], summary_he: "השינוי לא נשמר ולא בוצע שום שינוי. אפשר לנסות שוב." } }));
+  assert.equal(failed.text, "השינוי לא נשמר ולא בוצע שום שינוי. אפשר לנסות שוב.");
+  const done = dataResultView(swapRaw({ status: "succeeded", result: { changes: p.impact.changes, positions: p.impact.positions, unplaced: ["optn44"],
+    summary_he: "השינוי נשמר: 1 שינויי תוויות ו-2 שינויי מיקום בארון. נשארו בלי מיקום: optn44. לא בוצע שום שינוי חשמל." } }));
+  assert.equal(done.text, "בוצע: 3 שינויים");
+  assert.equal(done.lines.length, 1);
+});
+
+test("data kinds: the device tables reload once when a watched change finished", () => {
+  assert.equal(dataChangeFinished("pending", "succeeded"), true);
+  assert.equal(dataChangeFinished("executing", "failed"), true);
+  assert.equal(dataChangeFinished("pending", "refused"), false, "drift: nothing changed");
+  assert.equal(dataChangeFinished("pending", "cancelled"), false);
+  assert.equal(dataChangeFinished("succeeded", "succeeded"), false, "a card mounted on a finished proposal does not reload");
+  assert.equal(dataChangeFinished(undefined, "succeeded"), false);
+});
+
+test("generationGuard: an answer that arrives after a sign-out or user change is dropped", async () => {
+  let epoch = 4;
+  const published = [];
+  const publish = (p, e) => { if (e === epoch) published.push(p); };   // AssistantPanel.onActionExecuted's rule
+  async function execute(answer) {
+    const session = generationGuard(() => epoch);
+    const res = await answer;
+    if (!session.isCurrent()) return "dropped";
+    publish(res, session.epoch);
+    return "published";
+  }
+  assert.equal(await execute(Promise.resolve("first")), "published");
+  let release;
+  const late = execute(new Promise(resolve => { release = resolve; }));
+  epoch += 1;                                   // resetActions(): sign-out / another user
+  release("late");
+  assert.equal(await late, "dropped");
+  assert.deepEqual(published, ["first"]);
+  const g = generationGuard(() => epoch);
+  assert.equal(g.epoch, 5);
+  assert.equal(g.isCurrent(), true);
+  const none = generationGuard(undefined);       // a card outside the panel: nothing to compare
+  assert.equal(none.epoch, undefined);
+  assert.equal(none.isCurrent(), true);
 });

@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import {
-  CONSOLE_NOTES, STATUS_LINES, actionErrorInfo, cancelProposal, clientWarnings, configBlockText,
-  countdownLabel, displayStatus, getProposal, normalizeProposal, outletsText, proposalConsoles, remainingSeconds, riskOf, RISK_LABELS,
-  roleChipText, statusLabel,
+  CONSOLE_NOTES, STATUS_LINES, actionErrorInfo, cancelProposal, changesText, clientWarnings, configBlockText,
+  countdownLabel, dataChangeCount, dataChangeFinished, dataWarnings, displayStatus, generationGuard, getProposal, isDataKind,
+  normalizeProposal, outletsText, proposalConsoles, remainingSeconds, riskOf, RISK_LABELS, roleChipText, statusLabel,
 } from "../../api/assistantActions.js";
 import { formatAsOf } from "../../api/assistant.js";
 import { Bidi } from "./AnswerView.jsx";
@@ -18,11 +18,17 @@ import ActionProgress from "./ActionProgress.jsx";
 // "cancel" and creating a new proposal; executing happens only in ActionConfirmDialog after the password.
 //
 // props: proposal (normalized), devices, config (GET /config or null), canOperate, canAdmin,
-//   onUpdate(proposal), onExecuted(proposal), onRestore(proposal) -> Promise, onRepropose(proposal) -> Promise,
-//   onOpenConsole(entry) -> "popup" | "inline" | "denied" | "invalid"   (synchronous)
+//   onUpdate(proposal, epoch?), onExecuted(proposal, epoch?), onRestore(proposal) -> Promise,
+//   onRepropose(proposal) -> Promise, onOpenConsole(entry) -> "popup" | "inline" | "denied" | "invalid" (synchronous),
+//   getEpoch() -> the panel's session generation (answers that arrive after a sign-out / user change are dropped),
+//   onDataChanged(proposal) -> called once when a location change finished, so the device tables reload.
+
+// Location changes already reported (a proposal can be on screen twice: in the chat and in the actions tab).
+const dataChangesReported = new Set();
 
 const CARD_TONE = {
   info: "border-zinc-700",
+  data: "border-sky-800 border-s-4",
   medium: "border-amber-700/70 border-s-4",
   high: "border-rose-800 border-s-4",
   batch: "border-rose-800 border-s-4",
@@ -30,6 +36,7 @@ const CARD_TONE = {
 };
 const RISK_TONE = {
   info: "border-zinc-600 text-zinc-300",
+  data: "border-sky-800 bg-sky-950/30 text-sky-200",
   medium: "border-amber-700 bg-amber-950/40 text-amber-200",
   high: "border-rose-800 bg-rose-950/50 text-rose-200",
   batch: "border-rose-800 bg-rose-950/50 text-rose-200",
@@ -71,7 +78,7 @@ function ErrorBox({ error }) {
 
 export default function ActionProposalCard({
   proposal, devices, config, canOperate = false, canAdmin = false,
-  onUpdate, onExecuted, onRestore, onRepropose, onOpenConsole,
+  onUpdate, onExecuted, onRestore, onRepropose, onOpenConsole, getEpoch, onDataChanged,
 }) {
   const baseId = useId();
   const titleId = `${baseId}-title`, summaryId = `${baseId}-summary`;
@@ -85,6 +92,21 @@ export default function ActionProposalCard({
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
 
+  // A location change this card watched has finished: reload the device tables once (labels and racks changed).
+  const lastSeen = useRef({ id: proposal?.id, status: proposal?.status });
+  const onDataChangedRef = useRef(onDataChanged);
+  onDataChangedRef.current = onDataChanged;
+  useEffect(() => {
+    const prev = lastSeen.current;
+    lastSeen.current = { id: proposal?.id, status: proposal?.status };
+    if (!proposal || prev.id !== proposal.id || !isDataKind(proposal) || !dataChangeFinished(prev.status, proposal.status)) return;
+    if (dataChangesReported.has(proposal.id)) return;
+    dataChangesReported.add(proposal.id);
+    // The page reports its own reload failures; nothing here may break the card.
+    try { Promise.resolve(onDataChangedRef.current?.(proposal)).catch(() => {}); } catch { /* ignored */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proposal?.id, proposal?.status]);
+
   const now = useTick(proposal?.status === "pending");
   if (!proposal) return null;
   const status = missing ? "not_found" : displayStatus(proposal, now);
@@ -94,9 +116,13 @@ export default function ActionProposalCard({
   const blockedText = configBlockText(config);
   const pending = status === "pending";
   const isConsole = proposal.kind === "open_console";
-  // Client-side reminders (labels, several feeds) matter only before the confirmation.
-  const warnings = [...proposal.impact.warnings_he.map(text => ({ text, server: true })),
-    ...(proposal.status === "pending" ? clientWarnings(proposal) : []).map(text => ({ text }))];
+  const dataKind = isDataKind(proposal);
+  const dataCount = dataKind ? dataChangeCount(proposal.impact.changes, proposal.impact.positions) : 0;
+  // Client-side reminders (labels, several feeds) matter only before the confirmation. Location changes show the
+  // server's warnings except the "left without a location" ones, which the change list shows itself.
+  const warnings = dataKind ? dataWarnings(proposal).map(text => ({ text, server: true }))
+    : [...proposal.impact.warnings_he.map(text => ({ text, server: true })),
+      ...(proposal.status === "pending" ? clientWarnings(proposal) : []).map(text => ({ text }))];
   const showProgress = !missing && proposal.status !== "pending" && proposal.status !== "ready";
   const asOf = formatAsOf(proposal.created_at);
 
@@ -108,13 +134,16 @@ export default function ActionProposalCard({
     else roleNote = "רק מי שביקש את ההצעה יכול לאשר אותה.";
   }
 
+  // Every answer is published only if the session that asked is still the current one (generationGuard).
   async function refresh() {
+    const session = generationGuard(getEpoch);
     try {
       const fresh = normalizeProposal(await getProposal(proposal.id));
-      if (fresh) { setMissing(false); onUpdate?.(fresh); }
+      if (!session.isCurrent()) return null;
+      if (fresh) { if (mounted.current) setMissing(false); onUpdate?.(fresh, session.epoch); }
       return fresh;
     } catch (err) {
-      if (err?.status === 404 && mounted.current) setMissing(true);
+      if (err?.status === 404 && mounted.current && session.isCurrent()) setMissing(true);
       return null;
     }
   }
@@ -137,13 +166,14 @@ export default function ActionProposalCard({
   }
 
   const cancel = () => run("cancel", async () => {
+    const session = generationGuard(getEpoch);
     const next = normalizeProposal(await cancelProposal(proposal.id));
-    if (next) onUpdate?.(next);
+    if (next && session.isCurrent()) onUpdate?.(next, session.epoch);
   });
   const repropose = () => run("repropose", () => onRepropose?.(proposal));
 
   function openDialog() {
-    if (!proposal.can_execute || blockedText) return;
+    if (!proposal.can_execute || blockedText || (dataKind && !dataCount)) return;
     setError(null);
     setDialogOpen(true);
   }
@@ -203,7 +233,9 @@ export default function ActionProposalCard({
 
       {pending || isConsole || missing ? <ActionImpact proposal={proposal} compact /> : (
         <details className="rounded border border-zinc-800 px-2 py-1">
-          <summary className="cursor-pointer text-xs text-zinc-300">מה ההצעה כללה ({outletsText(proposal.impact.counts.outlets)})</summary>
+          <summary className="cursor-pointer text-xs text-zinc-300">
+            מה ההצעה כללה ({dataKind ? changesText(dataCount) : outletsText(proposal.impact.counts.outlets)})
+          </summary>
           <div className="mt-2"><ActionImpact proposal={proposal} compact /></div>
         </details>
       )}
@@ -213,8 +245,13 @@ export default function ActionProposalCard({
           {warnings.map((w, i) => <li key={i} className={w.server ? "text-amber-200" : "text-zinc-400"}><Bidi text={w.text} /></li>)}
         </ul>
       )}
-      {asOf !== "—" && pending && !isConsole && (
+      {asOf !== "—" && pending && !isConsole && (dataKind ? (
+        <p className="text-[11px] text-zinc-400">השינויים חושבו בשרת לפי התוויות והמיקומים השמורים ב־<bdi className="font-mono">{asOf}</bdi>. הם ייבדקו שוב רגע לפני הביצוע.</p>
+      ) : (
         <p className="text-[11px] text-zinc-400">ההשפעה חושבה בשרת לפי מצב ה-PDU ב־<bdi className="font-mono">{asOf}</bdi>. היא תיבדק שוב רגע לפני הביצוע.</p>
+      ))}
+      {pending && dataKind && !dataCount && (
+        <p className="text-xs text-amber-200">אין רשימת שינויים מהשרת, ולכן אי אפשר לאשר את ההצעה. בקש מהעוזר הצעה חדשה.</p>
       )}
 
       <p id={summaryId} role="status" className="text-xs text-zinc-300">{cardLine}</p>
@@ -231,7 +268,7 @@ export default function ActionProposalCard({
       {pending && !isConsole && blockedText && <p className="text-xs text-amber-200">{blockedText}</p>}
       {roleNote && <p className="text-xs text-zinc-400">{roleNote}</p>}
 
-      {pending && !isConsole && proposal.can_execute && !blockedText && (
+      {pending && !isConsole && proposal.can_execute && !blockedText && (!dataKind || dataCount > 0) && (
         <div className="flex flex-wrap gap-2">
           <button ref={executeRef} type="button" onClick={openDialog} disabled={dialogOpen || !!busy} aria-haspopup="dialog"
             aria-label={`בצע: ${proposal.title_he || "פעולה מוצעת"}`}
@@ -259,8 +296,8 @@ export default function ActionProposalCard({
 
       {dialogOpen && (
         <ActionConfirmDialog proposal={proposal} passwordMode={config?.password_mode} blockedText={blockedText}
-          onClose={closeDialog} onRefresh={refresh}
-          onExecuted={next => { onExecuted ? onExecuted(next) : onUpdate?.(next); }} />
+          onClose={closeDialog} onRefresh={refresh} getEpoch={getEpoch}
+          onExecuted={(next, epoch) => { onExecuted ? onExecuted(next, epoch) : onUpdate?.(next, epoch); }} />
       )}
     </section>
   );

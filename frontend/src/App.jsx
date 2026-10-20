@@ -520,7 +520,7 @@ export default function App() {
       )}
 
       <WhatsNew version={version} onOpenChangelog={() => navigate("changelog")} />
-      <AssistantPanel context={{tab: mainTab, rack: new URLSearchParams(location.search).get("rack"), detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={navigate} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} />
+      <AssistantPanel context={{tab: mainTab, rack: new URLSearchParams(location.search).get("rack"), detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={navigate} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />
       <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>
     </div>
   );
