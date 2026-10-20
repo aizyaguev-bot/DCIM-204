@@ -137,8 +137,10 @@ async def test_rename_cascade_renames_rack_override_keys_and_invalidates_stale_p
     r = await client.put("/api/rack-overrides", json={"opt11": "Rack-02", "opt12": "Rack-03"}, headers={"If-Match": stale})
     assert r.status_code == 409
 
+    # Editing one port label is not a rename: rack positions stay with the server they belong to (v2.39.1).
     r = await client.patch("/api/devices/pdu1/labels", json={"1": "OPT20"})
     assert r.status_code == 200, r.text
-    assert json.loads((folder / "rack_overrides.json").read_text()) == {"opt20": "Rack-02", "opt12": "Rack-03"}
-    assert json.loads((folder / "rack_slots.json").read_text()) == {"Rack-02": {"opt20": 4}}
+    assert r.json()["synced"] == []
+    assert json.loads((folder / "rack_overrides.json").read_text()) == {"opt19": "Rack-02", "opt12": "Rack-03"}
+    assert json.loads((folder / "rack_slots.json").read_text()) == {"Rack-02": {"opt19": 4}}
     assert not list(folder.glob("*.tmp"))

@@ -2,6 +2,23 @@
 
 ---
 
+## v2.39.1 — 2026-10-20 — Port label edits change only that port
+
+### Fixed
+- **Editing a port label no longer renames the server everywhere.** Writing a
+  new name on a PDU outlet or KVM port (Power and Consoles pages) used to be
+  treated as a rename: the old name was replaced on every other PDU and KVM,
+  in the rack positions, and in the monitor and owner records. Moving a server
+  to another port therefore renamed the server that used to be there. Now only
+  the edited port changes. Renaming a server on purpose still works by editing
+  its name in the Racks view (edit mode).
+
+### Notes
+- To repair labels changed by the old behaviour, use Admin → PDU–KVM mapping:
+  each edit there changes only that outlet and its KVM port.
+
+---
+
 ## v2.39.0 — 2026-10-20 — AI lab assistant and remote PXE install (off by default)
 
 ### Added

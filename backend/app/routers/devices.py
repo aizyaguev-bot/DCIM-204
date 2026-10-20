@@ -196,38 +196,11 @@ async def update_labels(
         raise HTTPException(422, "Port keys must be numbers")
     new_labels = {str(k): v for k, v in labels.items() if v}
 
-    # Detect renames: same port key, different non-empty value
-    renames = {
-        old_labels[port]: new_labels[port]
-        for port in old_labels
-        if port in new_labels
-        and new_labels[port] != old_labels[port]
-        and old_labels[port]
-    }
-
-    for old_name, new_name in renames.items():
-        await _rename_monitor_and_owner(db, old_name, new_name)
+    # A changed port label means "a different server is on this port now", so only this device changes. Renaming a
+    # server everywhere (other PDUs/KVMs, monitor, owner, rack position files) is the explicit POST /rename-opt.
     dev.labels_json = json.dumps(new_labels)
-
-    if renames:
-        # Case-insensitive lookup so "opt207" matches rename of "Opt207"
-        renames_ci = {old.lower(): new for old, new in renames.items()}
-
-        # Cascade label renames to all other PDUs and KVMs
-        result = await db.execute(select(Device).where(Device.id != device_id))
-        for other in result.scalars().all():
-            other_labels = json.loads(other.labels_json) if other.labels_json else {}
-            updated = {p: renames_ci.get(v.lower(), v) for p, v in other_labels.items()}
-            if updated != other_labels:
-                other.labels_json = json.dumps(updated)
-
-        # Also rename server IDs in DCIM runtime JSON files so rack positions/slots stay intact
-        id_renames = {old.lower(): new.lower() for old, new in renames.items()}
-        for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json", "rack_overrides.json"):
-            _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames)
-
     await db.commit()
-    return {"ok": True, "synced": list(renames.keys()), "labels_revision": inventory_store.revision(new_labels)}
+    return {"ok": True, "synced": [], "labels_revision": inventory_store.revision(new_labels)}
 
 
 @router.get("/sync-map")
