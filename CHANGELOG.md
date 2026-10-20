@@ -2,6 +2,22 @@
 
 ---
 
+## v2.39.3 — 2026-10-20 — Clear a mapping on the PDU–KVM page
+
+### Added
+- **Clear button in Admin → PDU–KVM mapping.** Every outlet assigned to a
+  server has a Clear button next to Edit. After a confirmation that names the
+  exact ports, it removes the server from that PDU outlet and from its linked
+  KVM port, and changes nothing else.
+
+### Fixed
+- A cleared port keeps its default name ("Outlet 7" / "Port 7"), so a name
+  stored on the PDU or KVM itself cannot reappear after clearing.
+- The Assigned / Empty counts and filters on that page treat default names as
+  empty.
+
+---
+
 ## v2.39.2 — 2026-10-20 — QR codes on location labels
 
 ### Added

@@ -236,6 +236,9 @@ async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db), _writ
     labels = json.loads(dev.labels_json) if dev.labels_json else {}
     if label:
         labels[port] = label
+    elif port.isascii() and port.isdigit():
+        # Clearing stores the default name, so a name saved on the PDU/KVM itself cannot come back.
+        labels[port] = f"Outlet {port}" if dev.kind == "pdu" else f"Port {port}"
     else:
         labels.pop(port, None)
     dev.labels_json = json.dumps(labels)

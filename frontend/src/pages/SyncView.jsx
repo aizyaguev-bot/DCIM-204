@@ -2,6 +2,9 @@ import { useState, useMemo } from "react";
 import { api, errorMessage } from "../api/client";
 import {useAccounts} from "../accounts";
 
+// A real assignment, not the PDU/KVM default name ("Outlet 7" / "Port 7").
+const isRealLabel = label => !!label && !/^(outlet|port)\s*\d+$/i.test(String(label).trim());
+
 function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, onCancel }) {
   const [label,       setLabel]       = useState(row.label);
   const [kvmDeviceId, setKvmDeviceId] = useState(row.kvm?.device_id || "");
@@ -126,8 +129,8 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
 
   const filtered = useMemo(() => {
     let result = allRows;
-    if (filter === "assigned") result = result.filter(r => r.noStatus || r.label);
-    if (filter === "empty")    result = result.filter(r => r.noStatus || !r.label);
+    if (filter === "assigned") result = result.filter(r => r.noStatus || isRealLabel(r.label));
+    if (filter === "empty")    result = result.filter(r => r.noStatus || !isRealLabel(r.label));
     if (search.trim()) {
       const s = search.toLowerCase();
       result = result.filter(r =>
@@ -140,8 +143,8 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
     return result;
   }, [allRows, search, filter]);
 
-  const totalAssigned = allRows.filter(r => !r.noStatus && r.label).length;
-  const totalEmpty    = allRows.filter(r => !r.noStatus && !r.label).length;
+  const totalAssigned = allRows.filter(r => !r.noStatus && isRealLabel(r.label)).length;
+  const totalEmpty    = allRows.filter(r => !r.noStatus && !isRealLabel(r.label)).length;
 
   const editKey = (pdu_id, outlet_number) => `${pdu_id}:${outlet_number}`;
 
@@ -177,6 +180,22 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
       onChanged?.();
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleClear(row) {
+    const parts = [`${row.pdu_name} outlet ${row.outlet_number}`];
+    if (row.kvm) parts.push(`${row.kvm.device_name} port ${row.kvm.port}`);
+    if (!window.confirm(`Clear ${row.label} from ${parts.join(" and ")}?\nOnly these ports change.`)) return;
+    setSaving(true);
+    try {
+      await api.setDirectLabel(row.pdu_id, String(row.outlet_number), "");
+      if (row.kvm) await api.setDirectLabel(row.kvm.device_id, row.kvm.port, "");
+    } catch (e) {
+      alert(`Clear failed: ${errorMessage(e)}`);
+    } finally {
+      setSaving(false);
+      await onChanged?.();
     }
   }
 
@@ -293,12 +312,19 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
                     </td>
                     <td className="px-3 py-2.5 text-zinc-400 text-sm">{row.kvm?.device_name || <span className="text-zinc-700">—</span>}</td>
                     <td className="px-3 py-2.5 text-zinc-400 font-mono text-sm">{row.kvm ? `#${row.kvm.port}` : <span className="text-zinc-700">—</span>}</td>
-                    <td className="px-3 py-2.5 text-right">
+                    <td className="px-3 py-2.5 text-right whitespace-nowrap">
                       <button disabled={!canOperate} onClick={() => setEditing(key)}
                         aria-label={`Edit ${row.pdu_name} outlet ${row.outlet_number}${row.label ? ` (${row.label})` : ""}`}
                         className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded transition">
                         Edit
                       </button>
+                      {isRealLabel(row.label) && (
+                        <button disabled={!canOperate || saving} onClick={() => handleClear(row)}
+                          aria-label={`Clear ${row.label} from ${row.pdu_name} outlet ${row.outlet_number}`}
+                          className="ml-2 px-3 py-1 text-xs bg-red-950/60 hover:bg-red-900/60 border border-red-800/60 text-red-200 rounded transition disabled:opacity-50">
+                          Clear
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
