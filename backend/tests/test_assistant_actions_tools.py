@@ -424,27 +424,117 @@ async def test_latest_restore_without_a_candidate_bad_ids_and_operators_are_refu
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# Engine: an LLM failure falls back to demo with the same ctx and forgets the failed answer's proposals
+# Engine: an LLM failure falls back to demo with the same ctx; the failed answer's proposals are cancelled first
 # ---------------------------------------------------------------------------------------------------------------
-async def test_llm_failure_clears_proposals_before_the_demo_fallback(monkeypatch):
+class _LlmStream:
+    def __init__(self, item):
+        self.item = item
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get_final_message(self):
+        if isinstance(self.item, BaseException):
+            raise self.item
+        return self.item
+
+
+class FakeLLM:
+    """AsyncAnthropic-like client: plays `script` in order (an exception item is raised by that request)."""
+
+    def __init__(self, script):
+        self.script, self.calls = list(script), []
+        self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self.stream))
+
+    def stream(self, **params):
+        self.calls.append(params)
+        return _LlmStream(self.script.pop(0))
+
+
+ENGINE_ON = SimpleNamespace(assistant_actions_enabled=True, accounts_enabled=True, assistant_timeout_seconds=30)
+
+
+def llm_proposes_then_fails(monkeypatch, args):
+    """A fake LLM that calls propose_action in round 1, then fails on the next request."""
+    use = SimpleNamespace(type="tool_use", id="toolu_1", name="propose_action", input=args)
+    client = FakeLLM([SimpleNamespace(content=[use], stop_reason="tool_use", model="claude-opus-5-5", usage=None),
+                      RuntimeError("stream broke at 10.1.2.3 password=hunter2")])
+    monkeypatch.setattr(engine, "llm_status", lambda settings: ("llm", None))
+    monkeypatch.setattr(engine, "load_sdk", lambda: SimpleNamespace())
+    monkeypatch.setattr(engine, "client_factory", lambda settings, sdk: client)
+    return client
+
+
+async def test_llm_failure_cancels_its_proposal_before_the_demo_fallback(store, monkeypatch):
+    from app.assistant.actions import store as store_module   # engine imports it lazily
+    monkeypatch.setattr(store_module, "cancel", store.cancel)
+    client = llm_proposes_then_fails(monkeypatch, {"kind": "server_off", "server": "OPT11"})
     seen = {}
 
-    async def failing_llm(*, ctx, **_):
-        ctx.proposals.append(INJECTED_ID)
-        raise RuntimeError("stream broke")
-
-    async def fake_demo(*, ctx, **_):
-        seen["proposals"] = list(ctx.proposals)
+    async def fallback(*, ctx, tools, **_):   # the demo responder proposes again with the same ctx
+        seen["at_start"] = list(ctx.proposals)
+        seen["outcome"] = await engine.run_tool(tools[0], "propose_action", {"kind": "server_off", "server": "OPT11"},
+                                                ctx)
         return {"mode": "demo", "answer": empty_answer("מצב הדגמה"), "ledger": [], "usage": None,
                 "demo_reason": "llm_error"}
 
-    monkeypatch.setattr(engine, "llm_status", lambda settings: ("llm", None))
-    monkeypatch.setattr(engine, "load_sdk", lambda: SimpleNamespace())
-    monkeypatch.setattr(engine, "_answer_llm", failing_llm)
-    monkeypatch.setattr(demo, "answer", fake_demo)
-    ctx = make_ctx(settings=SimpleNamespace(assistant_timeout_seconds=30))
-    result = await engine.answer_question(question="כבה את OPT11", history=[], context={}, ctx=ctx, tools=[])
-    assert result["mode"] == "demo" and seen["proposals"] == [] and ctx.proposals == []
+    monkeypatch.setattr(demo, "answer", fallback)
+    ctx = make_ctx("כבה את OPT11", settings=ENGINE_ON)
+    result = await engine.answer_question(question="כבה את OPT11", history=[], context={}, ctx=ctx, tools=[SPEC])
+    assert result["mode"] == "demo" and len(client.calls) == 2
+    llm_id, demo_id = list(store.rows)          # the LLM's proposal, then the fallback's
+    assert len(store.calls) == 2
+    assert store.cancelled == [llm_id] and store.rows[llm_id].status == "cancelled"
+    assert seen["at_start"] == [] and isinstance(seen["outcome"], ToolResult)
+    assert ctx.proposals == [demo_id] and store.rows[demo_id].status == "pending"   # exactly one pending
+
+
+async def test_cancel_failure_during_the_fallback_is_logged_by_class_only(store, monkeypatch, caplog):
+    from app.assistant.actions import store as store_module
+
+    async def broken_cancel(db, principal, proposal_id, now):
+        raise RuntimeError("database at 10.9.9.9 password=hunter2")
+
+    monkeypatch.setattr(store_module, "cancel", broken_cancel)
+    llm_proposes_then_fails(monkeypatch, {"kind": "server_off", "server": "OPT11"})
+    seen = {}
+
+    async def fallback(*, ctx, **_):
+        seen["at_start"] = list(ctx.proposals)
+        return {"mode": "demo", "answer": empty_answer("מצב הדגמה"), "ledger": [], "usage": None,
+                "demo_reason": "llm_error"}
+
+    monkeypatch.setattr(demo, "answer", fallback)
+    ctx = make_ctx("כבה את OPT11", settings=ENGINE_ON)
+    result = await engine.answer_question(question="כבה את OPT11", history=[], context={}, ctx=ctx, tools=[SPEC])
+    assert result["mode"] == "demo" and seen["at_start"] == [] and ctx.proposals == []
+    assert len(store.calls) == 1
+    assert "could not cancel an abandoned action proposal (RuntimeError)" in caplog.text
+    for secret in ("hunter2", "10.9.9.9", "10.1.2.3"):
+        assert secret not in caplog.text
+
+
+async def test_withdraw_is_bounded_in_time_and_skips_an_empty_ledger(store, monkeypatch, caplog):
+    from app.assistant.actions import store as store_module
+    calls = []
+
+    async def slow_cancel(db, principal, proposal_id, now):
+        calls.append(proposal_id)
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(store_module, "cancel", slow_cancel)
+    monkeypatch.setattr(engine, "WITHDRAW_SECONDS", 0.05)
+    ctx = make_ctx(settings=ENGINE_ON)
+    await engine.withdraw_proposals(ctx)   # nothing to withdraw: no session is opened
+    assert calls == []
+    ctx.proposals.extend([INJECTED_ID, INJECTED_ID, 7])
+    started = time.monotonic()
+    await engine.withdraw_proposals(ctx)
+    assert time.monotonic() - started < 2 and calls == [INJECTED_ID] and ctx.proposals == []
+    assert "could not withdraw abandoned action proposals (TimeoutError)" in caplog.text
 
 
 # ---------------------------------------------------------------------------------------------------------------

@@ -26,6 +26,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import time
 from typing import Any, Callable
 
 from . import prompts
@@ -48,6 +49,7 @@ HISTORY_CHARS = 4_000
 API_BASE_URL = "https://api.anthropic.com"   # explicit: an ANTHROPIC_BASE_URL in the environment is not honoured
 SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 TOOL_INTERNAL_ERROR = "tool failed (internal error)"
+WITHDRAW_SECONDS = 2.0             # cap for cancelling a failed LLM answer's action proposals before the demo fallback
 # Fine-grained (eager) tool-input streaming stays off: tool inputs here are tiny, we do not render the stream,
 # and keeping it off keeps the server-side strict-schema validation of tool inputs.
 EAGER_INPUT_STREAMING = False
@@ -771,6 +773,37 @@ def _failure_reason(sdk, exc: Exception) -> str:
     return "llm_error"
 
 
+async def _cancel_proposals(ctx: ToolContext, ids: list[str]) -> None:
+    from .actions import store  # noqa: PLC0415 - lazy: the engine works without the actions package
+
+    async with ctx.session_factory() as db:
+        for proposal_id in ids:
+            try:
+                await store.cancel(db, ctx.principal, proposal_id, time.time())
+            except Exception as exc:  # noqa: BLE001 - e.g. no longer pending; never echo the message
+                log.warning("Assistant could not cancel an abandoned action proposal (%s).", type(exc).__name__)
+
+
+async def withdraw_proposals(ctx: ToolContext) -> None:
+    """An LLM answer that failed is discarded and the demo responder answers with the same ctx. The action proposals
+    the failed answer's tool calls prepared would stay pending and unseen next to the fallback's own proposal, so
+    they are cancelled (store.cancel, own short session, at most WITHDRAW_SECONDS) and ctx.proposals is cleared.
+    Best effort: failures are logged by exception class only."""
+    proposals = getattr(ctx, "proposals", None)
+    if not isinstance(proposals, list) or not proposals:
+        return
+    ids = [value for value in dict.fromkeys(proposals) if isinstance(value, str) and value]
+    proposals.clear()
+    if not ids:
+        return
+    try:
+        await asyncio.wait_for(_cancel_proposals(ctx, ids), timeout=WITHDRAW_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - includes the timeout
+        log.warning("Assistant could not withdraw abandoned action proposals (%s).", type(exc).__name__)
+
+
 def allowed_tools(tools: list[ToolSpec], ctx: ToolContext) -> list[ToolSpec]:
     """Defense in depth: only valid specs the principal's role allows, first declaration of each name."""
     result, seen = [], set()
@@ -820,13 +853,10 @@ async def answer_question(*, question: str, history: list[dict], context: dict, 
                     f", HTTP {status}" if isinstance(status, int) else "",
                     f", request_id {request_id}" if isinstance(request_id, str) and request_id.isprintable()
                     and len(request_id) <= 64 else "")
+    await withdraw_proposals(ctx)
     remaining = budget - (loop.time() - started)
     if remaining <= 0.5:
         raise asyncio.TimeoutError()
-    # The failed LLM answer is discarded, so action proposals its tool calls prepared are not returned with the demo
-    # answer (ACT-6; they stay pending until they expire); the demo responder may prepare its own with the same ctx.
-    if isinstance(getattr(ctx, "proposals", None), list):
-        ctx.proposals.clear()
     return await asyncio.wait_for(
         demo.answer(question=question, history=history, context=context, ctx=ctx, tools=tools, reason=reason),
         timeout=remaining)
