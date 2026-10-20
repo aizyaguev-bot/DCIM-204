@@ -88,7 +88,7 @@ class ToolError(Exception):
 # detected secret value is always removed whole, whatever its length or the spacing around its separator.
 _SCHEME = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,30}://")
 _CREDENTIAL_KEY = re.compile(r"(?i)password|passwd|pwd|username|api[_ -]?key|token|session[_ -]?hash|secret")
-_EMAIL_LOCAL = frozenset(".!#$%&'*+=?^`{|}~-_")
+_EMAIL_LOCAL = frozenset(".!#$%&'*+/=?^`{|}~-_")
 _SIMPLE = (
     (re.compile(r"(?i)\b(?:Basic|Bearer)\s+\S+"), "[redacted credential]"),
     (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{10,}"), "[redacted key]"),

@@ -30,6 +30,7 @@ from app.assistant.contracts import redact_text, redact_tree
     ("x@" + ".".join("s%d" % i for i in range(10)) + ".example.com", "example.com"),  # many labels: whole address
     ("login root@server1 now", "root@"),                         # dotless addresses too
     ("login root@server1 now", "server1"),
+    ("mail a/b@example.com", "a/"),                              # Codex R2d: '/' is part of the local part
 ], ids=lambda v: "%d" % len(v) if isinstance(v, str) else None)
 def test_secret_is_removed(text, secret):
     assert secret not in redact_text(text)
