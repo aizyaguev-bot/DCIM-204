@@ -3,15 +3,18 @@ import StatusDot from "../components/StatusDot";
 import {useAccounts} from "../accounts";
 import { formatMaintenanceTime } from "../components/MaintenanceColumn";
 import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
+import { labelChanges, labelEditState, labelMoveHints, labelPatchBody } from "../api/locations";
 
 const MAINTENANCE_BLOCKED = "PDU is in maintenance mode; restore it from the Maintenance column first";
 const OFFLINE_BLOCKED = "PDU is unreachable; outlet power actions are unavailable";
 
-export default function PduDetail({ device, status, maintenance, maintenanceMode, onMaintenance, onBack, from, onOutletAction, onTurnOnAll, onDelete, onLabelsSave }) {
+export default function PduDetail({ device, status, maintenance, maintenanceMode, onMaintenance, onBack, from, onOutletAction, onTurnOnAll, onDelete, onLabelsSave, devices }) {
   const {canOperate,canAdmin} = useAccounts();
   const [editMode, setEditMode] = useState(false);
   const [draftLabels, setDraftLabels] = useState({});
   const [draftRevision, setDraftRevision] = useState(undefined);
+  const [draftOriginal, setDraftOriginal] = useState({});
+  const [draftBase, setDraftBase] = useState({});   // saved labels when editing started
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
   if (!device) return null;
@@ -21,24 +24,29 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
   const inMaintenance = !!maintenance;
   const turnOnBlocked = inMaintenance ? MAINTENANCE_BLOCKED : state === "offline" ? OFFLINE_BLOCKED : state !== "online" ? "Outlet states are not available" : undefined;
   const maintenanceReady = canOperate && maintenanceMode != null && maintenanceMode !== "unavailable";
+  const moveHints = editMode ? labelMoveHints(device, draftLabels, draftOriginal, devices) : {};
   const maintenanceHint = maintenanceMode === "unavailable" ? "Maintenance actions require a configured password"
     : maintenanceMode == null ? "Maintenance state is not loaded yet" : undefined;
 
   function startEdit() {
-    // Saved labels win over the status reading so the map matches the revision sent with it.
-    const current = {};
-    outlets.forEach(o => { current[o.number] = device.labels?.[String(o.number)] ?? o.label ?? ""; });
-    setDraftLabels(current);
+    // The PATCH replaces the whole map: never start from an empty list. Saved labels win over the status reading
+    // so the map matches the revision sent with it; saved ports the status does not list are kept as they are.
+    if (!outlets.length) return;
+    const { draft, original, base } = labelEditState(device.labels, outlets);
+    setDraftLabels(draft);
+    setDraftOriginal(original);
+    setDraftBase(base);
     setDraftRevision(device.labels_revision);
     setSaveError("");
     setEditMode(true);
   }
 
   async function saveLabels() {
+    if (labelChanges(draftLabels, draftOriginal).length === 0) { setEditMode(false); return; }
     setSaving(true);
     setSaveError("");
     try {
-      await onLabelsSave(draftLabels, draftRevision);
+      await onLabelsSave(labelPatchBody(draftBase, draftLabels, draftOriginal), draftRevision);
       setEditMode(false);
     } catch (e) {
       setSaveError(errorMessage(e));
@@ -86,8 +94,9 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-zinc-500">Outlets</div>
               {!editMode ? (
-                <button disabled={!canOperate} onClick={startEdit}
-                  className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition">
+                <button disabled={!canOperate || outlets.length === 0} onClick={startEdit}
+                  title={canOperate && outlets.length === 0 ? "Labels can be edited once the outlet list has loaded" : undefined}
+                  className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-zinc-400">
                   <PencilIcon /> Edit Labels
                 </button>
               ) : (
@@ -104,6 +113,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
               )}
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
+            {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these outlet labels on {device.name}. To move a server with its PDU outlets, KVM port and rack position, use Admin → Locations → Move.</p>}
             {outlets.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
                 {state === "offline" ? `Cannot reach device: ${status.error}` : state === "unavailable" ? `Status unavailable: ${status.error}` : "Loading…"}
@@ -126,8 +136,11 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
                           value={draftLabels[o.number] ?? ""}
                           onChange={e => setDraftLabels(d => ({ ...d, [o.number]: e.target.value }))}
                           placeholder={`Outlet ${o.number}`}
+                          aria-label={`Label for outlet ${o.number}`}
+                          aria-describedby={moveHints[o.number] ? `move-hint-pdu-${o.number}` : undefined}
                           className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200 focus:outline-none focus:border-nv-400 w-full"
                         />
+                        {moveHints[o.number] && <MoveHint id={`move-hint-pdu-${o.number}`} hint={moveHints[o.number]} noun="outlet" />}
                       </div>
                     );
                   }
@@ -206,6 +219,15 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
         </aside>
       </div>
     </main>
+  );
+}
+
+// A label edit never moves a server; when the new name already sits on other ports, point to Locations.
+function MoveHint({ id, hint, noun }) {
+  return (
+    <p id={id} className="text-[11px] leading-snug text-amber-300">
+      {hint.name} is already on {hint.where.join(", ")}. Saving changes only this {noun}. To move a server use Locations → Move.
+    </p>
   );
 }
 

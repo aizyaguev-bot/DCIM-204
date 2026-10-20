@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import { api, deviceState, errorMessage } from "./api/client";
-import Header from "./components/Header";
+import Header, { useTabStripCue } from "./components/Header";
 import StatsBar from "./components/StatsBar";
 import PduCard from "./components/PduCard";
 import KvmCard from "./components/KvmCard";
@@ -10,6 +10,7 @@ import PduDetail from "./pages/PduDetail";
 import KvmDetail from "./pages/KvmDetail";
 import DcimView from "./pages/DcimView";
 import SyncView from "./pages/SyncView";
+import LocationsView from "./pages/LocationsView";
 import ScanView from "./pages/ScanView";
 import MonitoringView from "./pages/MonitoringView";
 import AddDeviceModal from "./components/AddDeviceModal";
@@ -31,7 +32,7 @@ export default function App() {
   const [view, setView] = useState({ kind: "dashboard" });
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "dcim" ? "racks" : tab === "sync" ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account"].includes(tab) ? tab : preferences.start_page;
+    return tab === "dcim" ? "racks" : tab === "sync" || tab === "locations" ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account"].includes(tab) ? tab : preferences.start_page;
   });
   const [pxeConfig, setPxeConfig] = useState(undefined);   // undefined: loading, null: unavailable
   const [pxeConfigError, setPxeConfigError] = useState("");
@@ -50,7 +51,7 @@ export default function App() {
   const [maintenanceError, setMaintenanceError] = useState("");
   const [maintenanceDialog, setMaintenanceDialog] = useState(null);   // { mode: "shutdown" | "restore", pduId }
   const maintenanceSeq = useRef(0);
-  const [adminSection, setAdminSection] = useState(new URLSearchParams(location.search).get("tab") === "sync" ? "mapping" : "devices");
+  const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations" })[new URLSearchParams(location.search).get("tab")] || "devices");
   function navigate(tab, rack) {
     const url = new URL(window.location.href);
     url.searchParams.set("tab", tab);
@@ -75,6 +76,10 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  // The Admin sub-tabs scroll on a phone: same fade cue and active-tab-in-view as the main tab strip.
+  // `loading` is a dependency because the nav first renders after the device list has loaded.
+  const subnavRef = useRef(null);
+  useTabStripCue(subnavRef, [loading, mainTab, view.kind, adminSection, accountMode, canAdmin]);
 
   function openKvmConsole(deviceId, portNumber) {
     setKvmOpenError("");
@@ -363,7 +368,7 @@ export default function App() {
         onAccount={() => navigate("account")} onUsers={() => {navigate("admin");setAdminSection("users");}} remoteInstall={pxeConfig?.enabled === true} />
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
       {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
-      {mainTab === "admin" && view.kind === "dashboard" && <nav className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>setAdminSection(id)}>{label}</button>)}</nav>}
+      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>setAdminSection(id)}>{label}</button>)}</nav>}
       {view.kind === "dashboard" && pageInfo && <div className="page-intro"><h1>{pageInfo[0]}</h1><p>{pageInfo[1]} {updatedText}</p></div>}
       {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
       {view.kind === "dashboard" && ["racks", "inventory", "power", "changelog"].includes(mainTab) && (
@@ -409,6 +414,10 @@ export default function App() {
           kvmStatuses={kvmStatuses}
           onChanged={async () => { await loadDevices(); await refreshAllStatuses(); }}
         />
+      )}
+
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "locations" && (
+        <LocationsView devices={devices} onChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />
       )}
 
       {view.kind === "dashboard" && ["dashboard", "power", "consoles"].includes(mainTab) && (
@@ -486,6 +495,7 @@ export default function App() {
           onTurnOnAll={numbers => handleTurnOnAll(pdus.find(p => p.id === view.id), numbers)}
           onDelete={async () => { if (await handleDeleteDevice(view.id)) history.back(); }}
           onLabelsSave={(labels, revision) => saveLabels(view.id, labels, revision)}
+          devices={devices}
         />
       )}
 
@@ -499,6 +509,7 @@ export default function App() {
           onDelete={async () => { if (await handleDeleteDevice(view.id)) history.back(); }}
           onMarkFree={() => handleMarkKvmFree(view.id)}
           onLabelsSave={(labels, revision) => saveLabels(view.id, labels, revision)}
+          devices={devices}
         />
       )}
 

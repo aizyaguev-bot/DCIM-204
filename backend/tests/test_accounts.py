@@ -87,6 +87,8 @@ async def test_role_protects_writes_and_console_gets(setup, username, expected):
         assert (await c.post("/api/devices/",json={})).status_code == (200 if username=="admin" else 403)
         assert (await c.get("/api/users")).status_code == (200 if username=="admin" else 403)
         assert (await c.patch("/api/devices/k1/labels",json={})).status_code == expected
+        assert (await c.post("/api/devices/move-server",json={})).status_code == expected
+        assert (await c.get("/api/devices/locations")).status_code == 200
 
 
 CONV = "/api/assistant/conversations/" + "0123456789abcdef" * 2

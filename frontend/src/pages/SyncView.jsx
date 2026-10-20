@@ -1,12 +1,10 @@
 import { useState, useMemo } from "react";
 import { api, errorMessage } from "../api/client";
 import {useAccounts} from "../accounts";
-
-// A real assignment, not the PDU/KVM default name ("Outlet 7" / "Port 7").
-const isRealLabel = label => !!label && !/^(outlet|port)\s*\d+$/i.test(String(label).trim());
+import { syncClearPlan, clearPorts, clearFailureText, serverIdentity } from "../api/locations";
 
 function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, onCancel }) {
-  const [label,       setLabel]       = useState(row.label);
+  const [label,       setLabel]       = useState(row.assigned ? row.label : "");
   const [kvmDeviceId, setKvmDeviceId] = useState(row.kvm?.device_id || "");
   const [kvmPort,     setKvmPort]     = useState(row.kvm?.port       || "");
 
@@ -72,6 +70,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
   const {canOperate} = useAccounts();
   const [editing, setEditing] = useState(null); // { pdu_id, outlet_number }
   const [saving,  setSaving]  = useState(false);
+  const [clearing, setClearing] = useState(null); // editKey of the row being cleared
   const [search,  setSearch]  = useState("");
   const [filter,  setFilter]  = useState("all"); // "all" | "assigned" | "empty"
 
@@ -85,7 +84,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
       const status = kvmStatuses[kvm.id];
       if (!status?.ports) return;
       status.ports.forEach(p => {
-        if (p.label) map[p.label.toLowerCase()] = { device_id: kvm.id, device_name: kvm.name, port: String(p.number) };
+        if (serverIdentity(p.label)) map[p.label.toLowerCase()] = { device_id: kvm.id, device_name: kvm.name, port: String(p.number), label: p.label };
       });
     });
     return map;
@@ -119,7 +118,9 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
           outlet_state:  outlet.state,
           outlet_watts:  outlet.watts ?? null,
           label,
-          kvm: label ? (kvmByLabel[label.toLowerCase()] || null) : null,
+          // A default "Outlet N" (or blank) label means no server is assigned.
+          assigned:      !!serverIdentity(label),
+          kvm: serverIdentity(label) ? (kvmByLabel[label.toLowerCase()] || null) : null,
           noStatus:      false,
         });
       });
@@ -129,8 +130,8 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
 
   const filtered = useMemo(() => {
     let result = allRows;
-    if (filter === "assigned") result = result.filter(r => r.noStatus || isRealLabel(r.label));
-    if (filter === "empty")    result = result.filter(r => r.noStatus || !isRealLabel(r.label));
+    if (filter === "assigned") result = result.filter(r => r.noStatus || r.assigned);
+    if (filter === "empty")    result = result.filter(r => r.noStatus || !r.assigned);
     if (search.trim()) {
       const s = search.toLowerCase();
       result = result.filter(r =>
@@ -143,18 +144,23 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
     return result;
   }, [allRows, search, filter]);
 
-  const totalAssigned = allRows.filter(r => !r.noStatus && isRealLabel(r.label)).length;
-  const totalEmpty    = allRows.filter(r => !r.noStatus && !isRealLabel(r.label)).length;
+  const totalAssigned = allRows.filter(r => !r.noStatus && r.assigned).length;
+  const totalEmpty    = allRows.filter(r => !r.noStatus && !r.assigned).length;
 
   const editKey = (pdu_id, outlet_number) => `${pdu_id}:${outlet_number}`;
 
   async function handleSave(row, draft) {
+    const oldLabel = row.assigned ? row.label : "";
+    const newLabel = draft.label;
+    const labelChanged = oldLabel !== newLabel;
+    const kvmChanged = row.kvm?.device_id !== draft.kvmDeviceId || row.kvm?.port !== draft.kvmPort;
+    // Linking a KVM port writes the server name to it; without a name it would wipe whatever that port holds.
+    if (kvmChanged && draft.kvmDeviceId && draft.kvmPort && !(newLabel || oldLabel)) {
+      alert("Enter the server name for this outlet before linking a KVM port.");
+      return;
+    }
     setSaving(true);
     try {
-      const oldLabel = row.label;
-      const newLabel = draft.label;
-      const labelChanged = oldLabel !== newLabel;
-
       // Update PDU outlet label (no cascade)
       if (labelChanged) {
         await api.setDirectLabel(row.pdu_id, String(row.outlet_number), newLabel);
@@ -162,7 +168,6 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
 
       // Update KVM assignment
       const origKvm   = row.kvm;
-      const kvmChanged = origKvm?.device_id !== draft.kvmDeviceId || origKvm?.port !== draft.kvmPort;
       if (kvmChanged) {
         if (origKvm) await api.setDirectLabel(origKvm.device_id, origKvm.port, "");
         if (draft.kvmDeviceId && draft.kvmPort) {
@@ -183,19 +188,17 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
     }
   }
 
+  // Removes this outlet's label and its linked KVM port label only (no cascade); confirm names every port first.
   async function handleClear(row) {
-    const parts = [`${row.pdu_name} outlet ${row.outlet_number}`];
-    if (row.kvm) parts.push(`${row.kvm.device_name} port ${row.kvm.port}`);
-    if (!window.confirm(`Clear ${row.label} from ${parts.join(" and ")}?\nOnly these ports change.`)) return;
-    setSaving(true);
+    const plan = syncClearPlan(row);
+    if (!plan || !canOperate || clearing || !confirm(plan.message)) return;
+    setClearing(editKey(row.pdu_id, row.outlet_number));
     try {
-      await api.setDirectLabel(row.pdu_id, String(row.outlet_number), "");
-      if (row.kvm) await api.setDirectLabel(row.kvm.device_id, row.kvm.port, "");
-    } catch (e) {
-      alert(`Clear failed: ${errorMessage(e)}`);
+      const { failed } = await clearPorts(plan.ports, api.setDirectLabel);
+      if (failed.length) alert(`Clear failed for ${clearFailureText(failed)}. The other ports were cleared.`);
     } finally {
-      setSaving(false);
-      await onChanged?.();
+      try { await onChanged?.(); } catch {}
+      setClearing(null);
     }
   }
 
@@ -254,7 +257,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
               <th className="text-left px-3 py-2.5 text-xs font-medium text-zinc-400 uppercase tracking-wider">OPT</th>
               <th className="text-left px-3 py-2.5 text-xs font-medium text-zinc-400 uppercase tracking-wider">KVM</th>
               <th className="text-left px-3 py-2.5 text-xs font-medium text-zinc-400 uppercase tracking-wider w-16">Port</th>
-              <th className="w-20" />
+              <th className="w-32"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-800/40">
@@ -299,7 +302,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
                 }
 
                 elements.push(
-                  <tr key={key} className={`hover:bg-zinc-800/20 transition-colors ${!row.label ? "opacity-40 hover:opacity-70" : ""}`}>
+                  <tr key={key} className={`hover:bg-zinc-800/20 transition-colors ${!row.assigned ? "opacity-40 hover:opacity-70" : ""}`}>
                     <td className="px-3 py-2.5 text-zinc-400 font-mono text-sm">#{row.outlet_number}</td>
                     <td className="px-1 py-2.5">
                       <div className={`w-1.5 h-1.5 rounded-full ${row.outlet_state === "on" ? "bg-emerald-400" : "bg-zinc-700"}`} />
@@ -308,23 +311,25 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
                       {row.outlet_watts != null ? `${row.outlet_watts.toFixed(0)}W` : "\u2014"}
                     </td>
                     <td className="px-3 py-2.5 font-mono text-sm text-zinc-100">
-                      {row.label || <span className="text-zinc-700 text-xs">—</span>}
+                      {row.assigned ? row.label : <span className="text-zinc-600 text-xs">{row.label || "—"}</span>}
                     </td>
                     <td className="px-3 py-2.5 text-zinc-400 text-sm">{row.kvm?.device_name || <span className="text-zinc-700">—</span>}</td>
                     <td className="px-3 py-2.5 text-zinc-400 font-mono text-sm">{row.kvm ? `#${row.kvm.port}` : <span className="text-zinc-700">—</span>}</td>
-                    <td className="px-3 py-2.5 text-right whitespace-nowrap">
-                      <button disabled={!canOperate} onClick={() => setEditing(key)}
-                        aria-label={`Edit ${row.pdu_name} outlet ${row.outlet_number}${row.label ? ` (${row.label})` : ""}`}
-                        className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded transition">
-                        Edit
-                      </button>
-                      {isRealLabel(row.label) && (
-                        <button disabled={!canOperate || saving} onClick={() => handleClear(row)}
-                          aria-label={`Clear ${row.label} from ${row.pdu_name} outlet ${row.outlet_number}`}
-                          className="ml-2 px-3 py-1 text-xs bg-red-950/60 hover:bg-red-900/60 border border-red-800/60 text-red-200 rounded transition disabled:opacity-50">
-                          Clear
+                    <td className="px-3 py-2.5 text-right">
+                      <div className="flex gap-2 justify-end">
+                        {syncClearPlan(row) && (
+                          <button disabled={!canOperate || !!clearing} onClick={() => handleClear(row)}
+                            aria-label={`Clear ${row.label} from ${row.pdu_name} outlet ${row.outlet_number}${row.kvm ? ` and ${row.kvm.device_name} port ${row.kvm.port}` : ""}`}
+                            className="px-3 py-1 text-xs bg-zinc-800 hover:bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded transition disabled:opacity-50">
+                            {clearing === key ? "Clearing…" : "Clear"}
+                          </button>
+                        )}
+                        <button disabled={!canOperate || clearing === key} onClick={() => setEditing(key)}
+                          aria-label={`Edit ${row.pdu_name} outlet ${row.outlet_number}${row.assigned ? ` (${row.label})` : ""}`}
+                          className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded transition">
+                          Edit
                         </button>
-                      )}
+                      </div>
                     </td>
                   </tr>
                 );

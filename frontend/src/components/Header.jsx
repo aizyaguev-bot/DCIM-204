@@ -14,12 +14,8 @@ const tabs = [
   ["admin", "Admin", "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"],
   ["changelog", "Changelog", "M12 20h9M16 3l5 5-12 12-6 1 1-6z"],
 ];
-export default function Header({ activeTab, onNavigate, summary, editMode, onEditChange, onHome, onAccount, onUsers, remoteInstall = false }) {
-  const {canOperate} = useAccounts();
-  const visibleTabs = tabs.filter(([, , , gate]) => gate !== "operate" || (canOperate && remoteInstall));
-  const navRef = useRef(null);
-
-  // Keeps the current tab in view; data-overflow-* marks edges that hide tabs (styled as a fade).
+// Keeps the current tab of a scrolling tab strip in view; data-overflow-* marks edges that hide tabs (styled as a fade).
+export function useTabStripCue(navRef, deps) {
   useEffect(() => {
     const navEl = navRef.current;
     if (!navEl) return;
@@ -44,7 +40,14 @@ export default function Header({ activeTab, onNavigate, summary, editMode, onEdi
     navEl.addEventListener("scroll", mark, { passive: true });
     navEl.addEventListener("wheel", wheel, { passive: false });
     return () => { resize.disconnect(); navEl.removeEventListener("scroll", mark); navEl.removeEventListener("wheel", wheel); };
-  }, [activeTab, visibleTabs.length]);
+  }, deps);
+}
+
+export default function Header({ activeTab, onNavigate, summary, editMode, onEditChange, onHome, onAccount, onUsers, remoteInstall = false }) {
+  const {canOperate} = useAccounts();
+  const visibleTabs = tabs.filter(([, , , gate]) => gate !== "operate" || (canOperate && remoteInstall));
+  const navRef = useRef(null);
+  useTabStripCue(navRef, [activeTab, visibleTabs.length]);
 
   return <header className="app-header">
     <button className="app-brand" onClick={onHome} title={summary || "Open Dashboard"}>

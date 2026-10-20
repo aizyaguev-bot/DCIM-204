@@ -32,7 +32,12 @@ export const api = {
   renameOpt:   (oldName, newName) => req("POST", "/api/devices/rename-opt", { old_name: oldName, new_name: newName }),
   deleteDevice: (id)          => req("DELETE", `/api/devices/${id}`),
   getSyncMap:   ()             => req("GET",    "/api/devices/sync-map"),
-  setDirectLabel: (deviceId, port, label) => req("PATCH", "/api/devices/direct-label", { device_id: deviceId, port: String(port), label }),
+  // expected: the label the page showed; the server refuses (409) if the port changed since. Omit for old callers.
+  setDirectLabel: (deviceId, port, label, expected) => req("PATCH", "/api/devices/direct-label", { device_id: deviceId, port: String(port), label, ...(expected !== undefined ? { expected } : {}) }),
+  // Server-centric view: each server with its rack/slot and PDU/KVM ports, plus empty ports.
+  getLocations: ()             => req("GET",    "/api/devices/locations"),
+  // body: { server, target_server | target_ports, target_rack, target_slot, swap, dry_run }; dry_run previews only.
+  moveServer:   (body)         => req("POST",   "/api/devices/move-server", body),
 
   // PDU
   getPduStatus: (id)          => req("GET",    `/api/pdus/${id}/status`),
