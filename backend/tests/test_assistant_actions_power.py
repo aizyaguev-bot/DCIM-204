@@ -1,19 +1,21 @@
 """Confirmed power actions use fake hardware and the real shared PDU lock/read-back."""
 import asyncio
 import json
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app import crypto, pdu_locks
+from app import crypto, inventory_store, pdu_locks
 from app.assistant.actions import power
 from app.assistant.actions.contracts import Target
 from app.models import Device, PduMaintenance, PduMaintenanceLog
 from app.routers import pdus as pdus_module
+from app.routers import pdu_maintenance as maintenance_module
 from drivers.raritan_pdu import RaritanPduDriver
 from tests.test_pdu_maintenance import FakePdu, SECRET
 
@@ -92,6 +94,13 @@ async def maintenance(sessions, device_id):
     async with sessions() as db:
         db.add(PduMaintenance(device_id=device_id, started_at=1, started_by=BY, reason="Testing"))
         await db.commit()
+
+
+async def approved_pins(sessions):
+    async with sessions() as db:
+        devices = (await db.scalars(select(Device).where(Device.kind == "pdu"))).all()
+        return {dev.id: {"ip": dev.ip, "enabled": dev.enabled,
+                         "labels_rev": inventory_store.revision(dev.labels)} for dev in devices}
 
 
 def no_secrets(results):
@@ -443,13 +452,47 @@ async def test_cycle_on_failure_reports_verified_partial_result(sessions, fleet)
     assert results[1].ok and results[1].state_after == "on"
 
 
-async def test_maintenance_started_during_cycle_wait_prevents_on(sessions, fleet):
-    async def sleep(seconds):
-        await maintenance(sessions, "pdu1")
+@pytest.mark.parametrize("device_id", ["pdu1", "pdu2"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_maintenance_waits_for_cycle_and_retains_its_restore_path(sessions, fleet, device_id, cancel):
+    sleep_started, release_sleep, maintenance_waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    result = (await power.cycle(sessions, [target()], BY, off_seconds=5, sleep=sleep))[0]
-    assert not result.ok and result.error == "PDU is in maintenance mode"
-    assert fleet.calls == [("pdu1", 1, "off")]
+    async def sleep(seconds):
+        sleep_started.set()
+        await release_sleep.wait()
+
+    async def shutdown():
+        async with sessions() as db:
+            maintenance_waiting.set()
+            return await maintenance_module.shutdown_pdu(db, device_id, BY, "Queued maintenance")
+
+    cycling = asyncio.create_task(power.cycle(sessions, [target("pdu2"), target()], BY,
+                                               off_seconds=5, sleep=sleep))
+    queued = None
+    try:
+        await asyncio.wait_for(sleep_started.wait(), 5)
+        queued = asyncio.create_task(shutdown())
+        await asyncio.wait_for(maintenance_waiting.wait(), 5)
+        await asyncio.sleep(0)
+        assert not queued.done()
+        assert all(pdu_locks.maintenance_lock(pdu_id).locked() for pdu_id in fleet.drivers)
+        assert all(driver.states[1] == "off" for driver in fleet.drivers.values())
+    finally:
+        if cancel:
+            cycling.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cycling
+        else:
+            release_sleep.set()
+            results = await cycling
+            assert all(result.ok and result.state_after == "on" for result in results)
+        shutdown_result = await queued if queued is not None else None
+    assert shutdown_result is not None and 1 in shutdown_result["state"]["outlets_off"]
+    assert fleet.calls[:4] == [("pdu2", 1, "off"), ("pdu1", 1, "off"),
+                              ("pdu2", 1, "on"), ("pdu1", 1, "on")]
+    async with sessions() as db:
+        restored = await maintenance_module.restore_pdu(db, device_id, BY)
+    assert restored["state"] is None and fleet.drivers[device_id].states[1] == "on"
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -640,3 +683,208 @@ async def test_cycle_cancellation_during_callback_finishes_all_reporting(session
         with pytest.raises(asyncio.CancelledError):
             await cycling
     assert len(reported) == 2 and all(r.ok and r.state_after == "on" for r in reported)
+
+
+@pytest.mark.parametrize("action", ["on", "off", "cycle"])
+async def test_matching_approved_pins_allow_power_action(sessions, fleet, action):
+    pins = await approved_pins(sessions)
+    if action == "cycle":
+        results = await power.cycle(sessions, [target()], BY, off_seconds=0, pins=pins)
+    else:
+        results = await power.switch(sessions, [target()], action, BY, pins=pins)
+    assert results[0].ok and results[0].state_after == ("on" if action == "cycle" else action)
+
+
+@pytest.mark.parametrize("action", ["on", "off"])
+@pytest.mark.parametrize("change", [{"ip": "pdu2.example.invalid"}, {"enabled": False},
+                                    {"labels_json": '{"1":"OPT99"}'}])
+async def test_switch_rechecks_pins_after_waiting_for_lock(sessions, fleet, monkeypatch, action, change):
+    pins = await approved_pins(sessions)
+    waiting = asyncio.Event()
+    get_pdu = pdus_module._get_pdu_or_404
+    reported = []
+
+    async def signal_checked(*args):
+        dev = await get_pdu(*args)
+        waiting.set()
+        return dev
+
+    async def on_result(result):
+        reported.append(result)
+
+    monkeypatch.setattr(pdus_module, "_get_pdu_or_404", signal_checked)
+    async with pdu_locks.maintenance_lock("pdu1"):
+        switching = asyncio.create_task(power.switch(sessions, [target()], action, BY,
+                                                      on_result=on_result, pins=pins))
+        await asyncio.wait_for(waiting.wait(), 5)
+        async with sessions() as db:
+            await db.execute(update(Device).where(Device.id == "pdu1").values(**change))
+            await db.commit()
+    results = await switching
+    assert reported == results
+    assert not results[0].ok and results[0].error == "PDU changed since the proposal"
+    assert fleet.calls == [] and fleet.credentials == []
+    assert fleet.drivers["pdu2"].states[1] == "on"
+
+
+@pytest.mark.parametrize("change", [{"ip": "pdu1.example.invalid"}, {"enabled": False},
+                                    {"labels_json": '{"1":"OPT99"}'}])
+async def test_cycle_checks_pins_after_all_locks_acquired(sessions, fleet, monkeypatch, change):
+    pins = await approved_pins(sessions)
+    waiting = asyncio.Event()
+
+    @asynccontextmanager
+    async def tracked_lock(device_id):
+        if device_id == "pdu2":
+            waiting.set()
+        async with pdu_locks.maintenance_lock(device_id):
+            yield
+
+    monkeypatch.setattr(power, "maintenance_lock", tracked_lock)
+    async with pdu_locks.maintenance_lock("pdu2"):
+        cycling = asyncio.create_task(power.cycle(sessions, [target("pdu2"), target()], BY,
+                                                   off_seconds=0, pins=pins))
+        await asyncio.wait_for(waiting.wait(), 5)
+        assert pdu_locks.maintenance_lock("pdu1").locked()
+        async with sessions() as db:
+            await db.execute(update(Device).where(Device.id == "pdu2").values(**change))
+            await db.commit()
+    results = await cycling
+    assert all(not result.ok for result in results)
+    assert results[0].error == "PDU changed since the proposal"
+    assert fleet.calls == [] and fleet.credentials == []
+    assert all(not pdu_locks.maintenance_lock(pdu_id).locked() for pdu_id in fleet.drivers)
+
+
+@pytest.mark.parametrize("action", ["off", "cycle"])
+@pytest.mark.parametrize("pins", [{}, {"pdu1": {}}, {"pdu1": {"ip": "pdu1.example.invalid"}}])
+async def test_missing_supplied_pins_fail_closed(sessions, fleet, action, pins):
+    if action == "cycle":
+        results = await power.cycle(sessions, [target()], BY, off_seconds=0, pins=pins)
+    else:
+        results = await power.switch(sessions, [target()], action, BY, pins=pins)
+    assert not results[0].ok and results[0].error == "PDU changed since the proposal"
+    assert fleet.calls == [] and fleet.credentials == []
+
+
+async def test_switch_checks_pins_again_before_each_pdu(sessions, fleet):
+    pins = await approved_pins(sessions)
+
+    async def on_result(result):
+        if result.pdu_id == "pdu1":
+            async with sessions() as db:
+                await db.execute(update(Device).where(Device.id == "pdu2").values(ip="pdu1.example.invalid"))
+                await db.commit()
+
+    results = await power.switch(sessions, [target(), target("pdu2")], "off", BY,
+                                  on_result=on_result, pins=pins)
+    assert results[0].ok and not results[1].ok
+    assert results[1].error == "PDU changed since the proposal"
+    assert fleet.calls == [("pdu1", 1, "off")]
+
+
+async def test_cycle_acquires_sorted_unique_locks_without_internal_relocking(sessions, fleet, monkeypatch):
+    acquisitions = []
+    readback = pdus_module._fetch_status
+
+    @asynccontextmanager
+    async def tracked_lock(device_id):
+        acquisitions.append(device_id)
+        async with pdu_locks.maintenance_lock(device_id):
+            yield
+
+    @asynccontextmanager
+    async def forbidden_relock(*args):
+        raise AssertionError("Cycle helpers must not re-lock")
+        yield
+
+    async def locked_readback(*args):
+        assert all(pdu_locks.maintenance_lock(pdu_id).locked() for pdu_id in fleet.drivers)
+        return await readback(*args)
+
+    async def sleep(seconds):
+        assert acquisitions == ["pdu1", "pdu2"]
+        assert all(pdu_locks.maintenance_lock(pdu_id).locked() for pdu_id in fleet.drivers)
+
+    async def on_result(result):
+        assert all(not pdu_locks.maintenance_lock(pdu_id).locked() for pdu_id in fleet.drivers)
+        async with AsyncExitStack() as stack:
+            for pdu_id in sorted(fleet.drivers):
+                await stack.enter_async_context(pdu_locks.maintenance_lock(pdu_id))
+
+    monkeypatch.setattr(power, "maintenance_lock", tracked_lock)
+    monkeypatch.setattr(pdus_module, "locked_pdu", forbidden_relock)
+    monkeypatch.setattr(pdus_module, "_fetch_status", locked_readback)
+    results = await asyncio.wait_for(power.cycle(sessions, [target("pdu2"), target(), target("pdu2", 3)],
+                                                 BY, off_seconds=0, sleep=sleep, on_result=on_result), 5)
+    assert all(result.ok for result in results) and acquisitions == ["pdu1", "pdu2"]
+
+
+async def test_cycle_cancelled_while_acquiring_locks_releases_earlier_locks(sessions, fleet, monkeypatch):
+    waiting = asyncio.Event()
+
+    @asynccontextmanager
+    async def tracked_lock(device_id):
+        if device_id == "pdu2":
+            waiting.set()
+        async with pdu_locks.maintenance_lock(device_id):
+            yield
+
+    monkeypatch.setattr(power, "maintenance_lock", tracked_lock)
+    async with pdu_locks.maintenance_lock("pdu2"):
+        cycling = asyncio.create_task(power.cycle(sessions, [target("pdu2"), target()], BY, off_seconds=0))
+        await asyncio.wait_for(waiting.wait(), 5)
+        assert pdu_locks.maintenance_lock("pdu1").locked()
+        cycling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cycling
+        assert not pdu_locks.maintenance_lock("pdu1").locked()
+        assert pdu_locks.maintenance_lock("pdu2").locked()
+    assert fleet.calls == [] and fleet.credentials == []
+
+
+async def test_reversed_overlapping_cycles_complete_without_deadlock(sessions, fleet):
+    async def sleep(seconds):
+        await asyncio.sleep(0)
+
+    results = await asyncio.wait_for(asyncio.gather(
+        power.cycle(sessions, [target("pdu2"), target()], BY, off_seconds=0, sleep=sleep),
+        power.cycle(sessions, [target(), target("pdu2")], BY, off_seconds=0, sleep=sleep),
+    ), 5)
+    assert all(result.ok for cycle_results in results for result in cycle_results)
+    assert all(driver.states[1] == "on" for driver in fleet.drivers.values())
+    assert all(not pdu_locks.maintenance_lock(pdu_id).locked() for pdu_id in fleet.drivers)
+
+
+async def test_label_edit_during_cycle_cannot_prevent_attempted_feed_recovery(sessions, fleet):
+    pins = await approved_pins(sessions)
+
+    async def sleep(seconds):
+        # Label editing currently has no PDU lock. Recovery must use the endpoint
+        # snapshot approved before off, rather than abandon the feed after editing.
+        async with sessions() as db:
+            await db.execute(update(Device).where(Device.id == "pdu1").values(labels_json='{"1":"OPT99"}'))
+            await db.commit()
+
+    results = await power.cycle(sessions, [target()], BY, off_seconds=0, sleep=sleep, pins=pins)
+    assert results[0].ok and results[0].state_after == "on"
+    assert fleet.calls == [("pdu1", 1, "off"), ("pdu1", 1, "on")]
+
+
+@pytest.mark.parametrize("change", ["delete", "rename"])
+async def test_unrelated_protection_drift_cannot_prevent_cycle_recovery(sessions, fleet, settings, change):
+    settings.power_protected_outlets = "PDU2:1"
+    pins = await approved_pins(sessions)
+
+    async def sleep(seconds):
+        async with sessions() as db:
+            if change == "delete":
+                await db.execute(delete(Device).where(Device.id == "pdu2"))
+            else:
+                await db.execute(update(Device).where(Device.id == "pdu2").values(name="Renamed PDU"))
+            await db.commit()
+
+    results = await power.cycle(sessions, [target()], BY, off_seconds=0, sleep=sleep, pins=pins)
+    assert results[0].ok and results[0].state_after == "on"
+    assert fleet.calls == [("pdu1", 1, "off"), ("pdu1", 1, "on")]
+    assert fleet.drivers["pdu1"].states[1] == "on"

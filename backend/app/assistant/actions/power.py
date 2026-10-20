@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import math
+from contextlib import AsyncExitStack
 
 from fastapi import HTTPException
 
-from ... import power_protection
+from ... import inventory_store, power_protection
 from ...config import get_settings
 from ...models import PduMaintenance
+from ...pdu_locks import maintenance_lock
 from ...routers import pdus
 from drivers.raritan_pdu import safe_error
 from .contracts import Target, TargetResult
@@ -38,15 +40,15 @@ def _valid_outlet(target: Target, port_count: int) -> bool:
             and (port_count <= 0 or target.outlet <= port_count))
 
 
-async def _target_errors(db, dev, targets: list[Target]) -> dict[int, str]:
-    protection = await power_protection.load(db, get_settings())
+async def _target_errors(db, dev, targets: list[Target], *, protection_checked=False) -> dict[int, str]:
+    protection = None if protection_checked else await power_protection.load(db, get_settings())
     errors = {}
     for target in targets:
         if not _valid_outlet(target, dev.port_count):
             errors[target.outlet] = "Outlet is out of range"
-        elif protection.errors:
+        elif protection is not None and protection.errors:
             errors[target.outlet] = "Protected outlets configuration is invalid"
-        elif protection.is_protected(dev.id, target.outlet):
+        elif protection is not None and protection.is_protected(dev.id, target.outlet):
             errors[target.outlet] = "Outlet is protected"
     return errors
 
@@ -61,63 +63,78 @@ async def _readback(device_id, dev):
         return {}, safe_error(exc)
 
 
-async def _switch_pdu(session_factory, targets: list[Target], action: str) -> list[TargetResult]:
-    device_id = targets[0].pdu_id
+def _pins_changed(dev, pins) -> bool:
+    if pins is None:
+        return False
+    pin = pins.get(dev.id)
+    return (not isinstance(pin, dict) or pin.get("ip") != dev.ip
+            or pin.get("enabled") != dev.enabled
+            or pin.get("labels_rev") != inventory_store.revision(dev.labels))
+
+
+async def _switch_locked(db, dev, targets: list[Target], action: str, pins=None, *,
+                         protection_checked=False) -> list[TargetResult]:
+    """Switch using a device verified under the caller's lock; never acquire a lock."""
+    device_id = dev.id
+    if _pins_changed(dev, pins):
+        return _failed(targets, "PDU changed since the proposal")
+    refusal = await _refusal(db, dev, action)
+    if refusal:
+        return _failed(targets, refusal)
+    errors = await _target_errors(db, dev, targets, protection_checked=protection_checked)
+    valid = [t for t in targets if t.outlet not in errors]
+    if not valid:
+        return [TargetResult(device_id, t.outlet, False, "unknown", errors[t.outlet]) for t in targets]
+
+    # Use the router's decryption and driver seams, including in the live re-read.
+    try:
+        username, password = pdus.get_creds(dev)
+    except Exception:
+        return _failed(targets, "PDU credentials could not be decrypted")
+    driver = pdus.RaritanPduDriver(dev.ip, username, password)
+    attempted = False
+    try:
+        if dev.port_count <= 0:
+            known = {o["number"] for o in await driver.get_outlets()}
+            for target in valid:
+                if target.outlet not in known:
+                    errors[target.outlet] = "Outlet is out of range"
+        for target in valid:
+            if target.outlet in errors:
+                continue
+            attempted = True
+            try:
+                if not await driver.set_outlet_state(target.outlet, action):
+                    errors[target.outlet] = "PDU did not confirm the power command"
+            except Exception as exc:
+                errors[target.outlet] = safe_error(exc)
+    finally:
+        pdus._cache.pop(device_id, None)
+        try:
+            await driver.close()
+        except Exception:
+            # A close failure says nothing about whether the outlet changed.
+            pass
+
+    if not attempted:
+        return _failed(targets, "Outlet is out of range")
+    states, read_error = await _readback(device_id, dev)
+    results = []
+    for target in targets:
+        state = states.get(target.outlet, "unknown")
+        valid_outlet = target in valid and errors.get(target.outlet) != "Outlet is out of range"
+        ok = valid_outlet and state == action
+        error = "" if ok else errors.get(target.outlet) or (
+            read_error if state == "unknown" else "Outlet did not reach the requested state")
+        results.append(TargetResult(device_id, target.outlet, ok, state, error))
+    return results
+
+
+async def _switch_pdu(session_factory, targets: list[Target], action: str, pins=None) -> list[TargetResult]:
     try:
         async with session_factory() as db:
-            async with pdus.locked_pdu(device_id, db) as dev:
-                refusal = await _refusal(db, dev, action)
-                if refusal:
-                    return _failed(targets, refusal)
-                errors = await _target_errors(db, dev, targets)
-                valid = [t for t in targets if t.outlet not in errors]
-                if not valid:
-                    return [TargetResult(device_id, t.outlet, False, "unknown", errors[t.outlet])
-                            for t in targets]
-
-                # Use the router's decryption and driver seams, including in the live re-read.
-                try:
-                    username, password = pdus.get_creds(dev)
-                except Exception:
-                    return _failed(targets, "PDU credentials could not be decrypted")
-                driver = pdus.RaritanPduDriver(dev.ip, username, password)
-                attempted = False
-                try:
-                    if dev.port_count <= 0:
-                        known = {o["number"] for o in await driver.get_outlets()}
-                        for target in valid:
-                            if target.outlet not in known:
-                                errors[target.outlet] = "Outlet is out of range"
-                    for target in valid:
-                        if target.outlet in errors:
-                            continue
-                        attempted = True
-                        try:
-                            if not await driver.set_outlet_state(target.outlet, action):
-                                errors[target.outlet] = "PDU did not confirm the power command"
-                        except Exception as exc:
-                            errors[target.outlet] = safe_error(exc)
-                finally:
-                    pdus._cache.pop(device_id, None)
-                    try:
-                        await driver.close()
-                    except Exception:
-                        # A close failure says nothing about whether the outlet changed.
-                        pass
-
-                if not attempted:
-                    return _failed(targets, "Outlet is out of range")
-                states, read_error = await _readback(device_id, dev)
-
-                results = []
-                for target in targets:
-                    state = states.get(target.outlet, "unknown")
-                    valid_outlet = target in valid and errors.get(target.outlet) != "Outlet is out of range"
-                    ok = valid_outlet and state == action
-                    error = "" if ok else errors.get(target.outlet) or (
-                        read_error if state == "unknown" else "Outlet did not reach the requested state")
-                    results.append(TargetResult(device_id, target.outlet, ok, state, error))
-                return results
+            async with pdus.locked_pdu(targets[0].pdu_id, db) as dev:
+                return await _switch_locked(db, dev, targets, action, pins)
     except HTTPException:
         return _failed(targets, "PDU not found")
     except Exception as exc:
@@ -132,52 +149,66 @@ async def _report(results: list[TargetResult], on_result) -> list[TargetResult]:
 
 
 async def switch(session_factory, targets: list[Target], action: str, by: str,
-                 on_result=None) -> list[TargetResult]:
+                 on_result=None, *, pins=None) -> list[TargetResult]:
     """Switch each PDU under its maintenance lock; the caller owns auditing as ``by``."""
     if action not in ("on", "off"):
         return await _report(_failed(targets, "Unknown action; use on or off"), on_result)
     results = []
     for group in _groups(targets).values():
-        group_results = await _switch_pdu(session_factory, group, action)
+        group_results = await _switch_pdu(session_factory, group, action, pins)
         results.extend(await _report(group_results, on_result))
     return results
 
 
-async def _cycle_preflight(session_factory, targets: list[Target]) -> dict[tuple[str, int], str]:
-    """Check all feeds before the first off, as RaritanPower.cycle does."""
+async def _cycle_preflight_locked(session_factory, targets: list[Target], pins):
+    """Read and pin snapshots after ALL cycle locks are held; close every session."""
     errors = {}
+    devices = {}
     for group in _groups(targets).values():
         try:
             async with session_factory() as db:
-                async with pdus.locked_pdu(group[0].pdu_id, db) as dev:
-                    refusal = await _refusal(db, dev, "on")
-                    target_errors = await _target_errors(db, dev, group)
-                    for target in group:
-                        error = refusal or target_errors.get(target.outlet, "")
-                        if error:
-                            errors[target.pdu_id, target.outlet] = error
+                dev = await pdus._get_pdu_or_404(group[0].pdu_id, db)
+                devices[dev.id] = dev
+                refusal = ("PDU changed since the proposal" if _pins_changed(dev, pins)
+                           else await _refusal(db, dev, "on"))
+                target_errors = await _target_errors(db, dev, group)
+                for target in group:
+                    error = refusal or target_errors.get(target.outlet, "")
+                    if error:
+                        errors[target.pdu_id, target.outlet] = error
         except HTTPException:
             errors.update({(t.pdu_id, t.outlet): "PDU not found" for t in group})
         except Exception as exc:
             errors.update({(t.pdu_id, t.outlet): safe_error(exc) for t in group})
-    return errors
+    return devices, errors
 
 
-async def _verify_targets(session_factory, targets: list[Target], expected: str) -> list[TargetResult]:
+async def _cycle_switch_locked(session_factory, devices, targets: list[Target], action: str, pins):
     results = []
     for device_id, group in _groups(targets).items():
         try:
             async with session_factory() as db:
-                async with pdus.locked_pdu(device_id, db) as dev:
-                    states, read_error = await _readback(device_id, dev)
-                    pdus._cache.pop(device_id, None)
-                    for target in group:
-                        state = states.get(target.outlet, "unknown")
-                        error = "" if state == expected else (read_error if state == "unknown"
-                                                               else "Outlet did not remain in the expected state")
-                        results.append(TargetResult(device_id, target.outlet, state == expected, state, error))
-        except HTTPException:
-            results.extend(_failed(group, "PDU not found"))
+                # Every cycle target passed protection under all locks before off.
+                # Unrelated inventory edits must not invalidate that approval and
+                # strand a feed during finally recovery.
+                results.extend(await _switch_locked(db, devices[device_id], group, action, pins,
+                                                      protection_checked=True))
+        except Exception as exc:
+            results.extend(_failed(group, safe_error(exc)))
+    return results
+
+
+async def _verify_targets_locked(session_factory, devices, targets: list[Target], expected: str):
+    results = []
+    for device_id, group in _groups(targets).items():
+        try:
+            states, read_error = await _readback(device_id, devices[device_id])
+            pdus._cache.pop(device_id, None)
+            for target in group:
+                state = states.get(target.outlet, "unknown")
+                error = "" if state == expected else (read_error if state == "unknown"
+                                                       else "Outlet did not remain in the expected state")
+                results.append(TargetResult(device_id, target.outlet, state == expected, state, error))
         except Exception as exc:
             results.extend(_failed(group, safe_error(exc)))
     return results
@@ -196,18 +227,8 @@ async def _shielded(operation):
             cancelled = True
 
 
-async def cycle(session_factory, targets: list[Target], by: str, *, off_seconds: float,
-                sleep=asyncio.sleep, on_result=None) -> list[TargetResult]:
-    """Cycle feeds that were on; always restore every attempted feed in ``finally``.
-
-    Callbacks describe final cycle outcomes once per target, so audit/progress never
-    mistake an intermediate off for a completed cycle.
-    """
-    if not targets:
-        return []
-    if type(off_seconds) not in (int, float) or not math.isfinite(off_seconds) or off_seconds < 0:
-        return await _report(_failed(targets, "Invalid power cycle delay"), on_result)
-    errors = await _cycle_preflight(session_factory, targets)
+async def _cycle_locked(session_factory, targets, *, off_seconds, sleep, pins):
+    devices, errors = await _cycle_preflight_locked(session_factory, targets, pins)
     for target in targets:
         if target.state not in ("on", "off"):
             errors[target.pdu_id, target.outlet] = "Outlet state is not known"
@@ -215,16 +236,16 @@ async def cycle(session_factory, targets: list[Target], by: str, *, off_seconds:
         results = [TargetResult(t.pdu_id, t.outlet, False, "unknown",
                                 errors.get((t.pdu_id, t.outlet), "Power cycle was not started"))
                    for t in targets]
-        return await _report(results, on_result)
+        return results, False
 
     active = [t for t in targets if t.state == "on"]
     stays_off = [t for t in targets if t.state == "off"]
     if not active:
-        results = await _verify_targets(session_factory, stays_off, "off")
+        results = await _verify_targets_locked(session_factory, devices, stays_off, "off")
         for result in results:
             result.ok = False
             result.error = "All target outlets are already off"
-        return await _report(results, on_result)
+        return results, False
 
     attempted = []
     failure = ""
@@ -232,7 +253,7 @@ async def cycle(session_factory, targets: list[Target], by: str, *, off_seconds:
     try:
         for target in active:
             attempted.append(target)
-            result = (await switch(session_factory, [target], "off", by))[0]
+            result = (await _cycle_switch_locked(session_factory, devices, [target], "off", pins))[0]
             if not result.ok:
                 failure = result.error
                 break
@@ -247,7 +268,11 @@ async def cycle(session_factory, targets: list[Target], by: str, *, off_seconds:
         # The failed off may have acted even when its response or live read was lost.
         # Never add outlets outside the attempted list, and never abandon recovery
         # because the caller is cancelled (including cancellation during on).
-        restore_results, restore_cancelled = await _shielded(switch(session_factory, attempted, "on", by))
+        # Reuse the snapshots verified after acquiring every lock. Address/enabled
+        # edits are blocked by those locks; an unlocked label edit must not prevent
+        # restoring the same approved endpoints after they have been turned off.
+        restore_results, restore_cancelled = await _shielded(
+            _cycle_switch_locked(session_factory, devices, attempted, "on", pins))
         cancelled = cancelled or restore_cancelled
     if cancelled and not failure:
         failure = "Power cycle was cancelled"
@@ -255,10 +280,10 @@ async def cycle(session_factory, targets: list[Target], by: str, *, off_seconds:
     async def finish_results():
         restored = {(r.pdu_id, r.outlet): r for r in restore_results}
         restored.update({(r.pdu_id, r.outlet): r
-                         for r in await _verify_targets(session_factory, stays_off, "off")})
+                         for r in await _verify_targets_locked(session_factory, devices, stays_off, "off")})
         unattempted = [t for t in active if t not in attempted]
         restored.update({(r.pdu_id, r.outlet): r
-                         for r in await _verify_targets(session_factory, unattempted, "on")})
+                         for r in await _verify_targets_locked(session_factory, devices, unattempted, "on")})
         results = []
         for target in targets:
             key = target.pdu_id, target.outlet
@@ -272,9 +297,29 @@ async def cycle(session_factory, targets: list[Target], by: str, *, off_seconds:
             else:
                 error = "Power cycle aborted: " + failure
             results.append(TargetResult(target.pdu_id, target.outlet, False, state, error))
-        return await _report(results, on_result)
+        return results
 
     results, final_cancelled = await _shielded(finish_results())
-    if cancelled or final_cancelled:
+    return results, cancelled or final_cancelled
+
+
+async def cycle(session_factory, targets: list[Target], by: str, *, off_seconds: float,
+                sleep=asyncio.sleep, on_result=None, pins=None) -> list[TargetResult]:
+    """Hold all involved PDU locks across off/wait/on and shield attempted-feed recovery.
+
+    The fixed lock order also applies to feeds that stay off. Internal helpers do
+    not re-lock. Final callbacks run once per target after releasing every lock.
+    """
+    if not targets:
+        return []
+    if type(off_seconds) not in (int, float) or not math.isfinite(off_seconds) or off_seconds < 0:
+        return await _report(_failed(targets, "Invalid power cycle delay"), on_result)
+    async with AsyncExitStack() as locks:
+        for device_id in sorted(_groups(targets)):
+            await locks.enter_async_context(maintenance_lock(device_id))
+        results, cancelled = await _cycle_locked(session_factory, targets, off_seconds=off_seconds,
+                                                sleep=sleep, pins=pins)
+    _, report_cancelled = await _shielded(_report(results, on_result))
+    if cancelled or report_cancelled:
         raise asyncio.CancelledError
     return results
