@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     assistant_concurrency: int = Field(default=4, ge=1, le=64)
     assistant_daily_limit: int = Field(default=300, ge=1, le=100000)   # language-model questions per day, all users
     assistant_allow_open_llm: bool = False   # allow the LLM on a site with no accounts and no shared password
+    # Assistant actions: the assistant proposes, the user confirms with a password, the server runs. Off by default.
+    assistant_actions_enabled: bool = False
+    # Outlets rack-wide and lab-wide actions always keep on (the VM host, network switches, KVMs):
+    # "<PDU id or name>:<outlet>[,...]". "none" = nothing to protect. Empty = rack/lab-wide actions are refused.
+    power_protected_outlets: str = ""
+    assistant_action_ttl_seconds: int = Field(default=300, ge=30, le=3600)
+    assistant_action_cycle_off_seconds: float = Field(default=5.0, ge=1, le=60)
+    assistant_action_restore_stagger_seconds: float = Field(default=3.0, ge=0, le=60)
     database_url: str = f"sqlite+aiosqlite:///{pathlib.Path(__file__).parent.parent / 'lab_manager.db'}"
 
     model_config = SettingsConfigDict(

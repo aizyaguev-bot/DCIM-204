@@ -64,6 +64,10 @@ class ToolContext:
     settings: Any = field(repr=False)    # holds plain-text device passwords: never repr/log/dump it; read attributes by name
     now: float = 0.0
     project_root: Any = field(default=None, repr=False)   # pathlib.Path of the repository root (read-only files)
+    conversation_id: str | None = None
+    # Ids of action proposals created by tools in this request (actions/tools.py appends; the chat router returns
+    # their public JSON as `action_proposals`). Only server code writes it; the model never supplies an id here.
+    proposals: list[str] = field(default_factory=list, repr=False)
 
 
 ToolFunc = Callable[..., Awaitable[ToolResult]]   # async def tool(ctx: ToolContext, **args) -> ToolResult
