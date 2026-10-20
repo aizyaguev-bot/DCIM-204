@@ -4,11 +4,11 @@ import json
 import time
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app import confirm, pdu_locks
-from app.models import PduMaintenance, PduMaintenanceLog
+from app import confirm, inventory_store, pdu_locks
+from app.models import Device, PduMaintenance, PduMaintenanceLog
 from app.routers import pdu_maintenance as pm, pdus as pdus_module
 from tests.test_pdu_maintenance import (
     clear_maintenance_state, fake, mclient, pdu_id, restore, settings, shutdown,
@@ -132,6 +132,121 @@ async def test_unavailable_live_state_raises_without_writing(db_session, pdu_id,
     assert fake.calls == []
     assert await db_session.get(PduMaintenance, pdu_id) is None
     assert await db_session.scalar(select(func.count()).select_from(PduMaintenanceLog)) == 0
+
+
+def _proposal_pins(dev):
+    return {"ip": dev.ip, "enabled": bool(dev.enabled), "labels_rev": inventory_store.revision(dev.labels),
+            "maintenance": False, "on": [1, 3, 4], "known": [1, 2, 3, 4]}
+
+
+@pytest.mark.parametrize("operation", ["shutdown", "restore"])
+async def test_matching_pins_use_canonical_labels_revision_and_accept_other_pin_fields(
+    db_session, pdu_id, fake, operation,
+):
+    if operation == "restore":
+        await pm.shutdown_pdu(db_session, pdu_id, "operator", "Rack rewiring")
+        fake.calls.clear()
+    dev = await db_session.get(Device, pdu_id)
+    dev.labels_json = '{"1":"OPT11","3":"OPT13"}'
+    await db_session.commit()
+    pins = _proposal_pins(dev)
+    # JSON formatting/order may change while the canonical labels and their revision stay the same.
+    await db_session.execute(update(Device).where(Device.id == pdu_id)
+                             .values(labels_json='{ "3": "OPT13", "1": "OPT11" }')
+                             .execution_options(synchronize_session=False))
+    await db_session.commit()
+
+    if operation == "shutdown":
+        result = await pm.shutdown_pdu(db_session, pdu_id, "operator", "Rack rewiring", expected_pins=pins)
+        assert fake.calls == [(1, "off"), (3, "off"), (4, "off")]
+        assert result["state"]["outlets_off"] == [1, 3, 4] and result["state"]["failed"] == []
+    else:
+        result = await pm.restore_pdu(db_session, pdu_id, "operator", expected_pins=pins)
+        assert fake.calls == [(1, "on"), (3, "on"), (4, "on")] and result["state"] is None
+
+
+@pytest.mark.parametrize("change", [
+    {"ip": "moved.example.invalid"},
+    {"enabled": False},
+    {"labels_json": '{"1":"CHANGED-LABEL"}'},
+])
+@pytest.mark.parametrize("operation", ["shutdown", "restore"])
+async def test_changed_pins_refuse_before_device_contact_or_maintenance_write(
+    db_session, pdu_id, fake, change, operation,
+):
+    state_before = None
+    if operation == "restore":
+        state_before = (await pm.shutdown_pdu(db_session, pdu_id, "operator", "Rack rewiring"))["state"]
+        fake.calls, fake.created, fake.reads = [], 0, 0
+    pins = _proposal_pins(await db_session.get(Device, pdu_id))
+    await db_session.execute(update(Device).where(Device.id == pdu_id).values(**change)
+                             .execution_options(synchronize_session=False))
+    await db_session.commit()
+
+    with pytest.raises(pm.MaintenanceDrift) as error:
+        if operation == "shutdown":
+            await pm.shutdown_pdu(db_session, pdu_id, "operator", "Rack rewiring", expected_pins=pins)
+        else:
+            await pm.restore_pdu(db_session, pdu_id, "operator", expected_pins=pins)
+    assert str(error.value) == "PDU configuration changed since the proposal"
+    assert fake.created == 0 and fake.reads == 0 and fake.calls == []
+    row = await db_session.get(PduMaintenance, pdu_id)
+    assert (pm._state(row) if row else None) == state_before
+    assert await db_session.scalar(select(func.count()).select_from(PduMaintenanceLog)) == (1 if state_before else 0)
+    assert not db_session.new and not db_session.dirty
+    assert not pdu_locks.maintenance_lock(pdu_id).locked()
+
+
+async def test_empty_expected_pins_refuse_before_device_contact_or_write(db_session, pdu_id, fake):
+    with pytest.raises(pm.MaintenanceDrift, match="PDU configuration changed since the proposal"):
+        await pm.shutdown_pdu(db_session, pdu_id, "operator", "Rack rewiring", expected_pins={})
+    assert fake.created == 0 and fake.calls == []
+    assert await db_session.get(PduMaintenance, pdu_id) is None
+    assert await db_session.scalar(select(func.count()).select_from(PduMaintenanceLog)) == 0
+
+
+@pytest.mark.parametrize("operation", ["shutdown", "restore"])
+async def test_address_change_while_waiting_for_lock_refuses_before_contact_or_write(
+    db_session, pdu_id, fake, monkeypatch, operation,
+):
+    state_before = None
+    if operation == "restore":
+        state_before = (await pm.shutdown_pdu(db_session, pdu_id, "operator", "Rack rewiring"))["state"]
+        fake.calls, fake.created, fake.reads = [], 0, 0
+    pins = _proposal_pins(await db_session.get(Device, pdu_id))
+    looked_up = asyncio.Event()
+    lookup = pdus_module._get_pdu_or_404
+
+    async def record_lookup(device_id, db):
+        dev = await lookup(device_id, db)
+        looked_up.set()
+        return dev
+
+    monkeypatch.setattr(pdus_module, "_get_pdu_or_404", record_lookup)
+    task = None
+    try:
+        async with pdu_locks.maintenance_lock(pdu_id):
+            call = (pm.shutdown_pdu(db_session, pdu_id, "operator", "Rack rewiring", expected_pins=pins)
+                    if operation == "shutdown" else pm.restore_pdu(db_session, pdu_id, "operator", expected_pins=pins))
+            task = asyncio.create_task(call)
+            await asyncio.wait_for(looked_up.wait(), 10)
+            assert not task.done() and fake.created == 0
+            # Bypass the identity map, as an address update committed by another request would.
+            await db_session.execute(update(Device).where(Device.id == pdu_id).values(ip="moved.example.invalid")
+                                     .execution_options(synchronize_session=False))
+            await db_session.commit()
+        with pytest.raises(pm.MaintenanceDrift, match="PDU configuration changed since the proposal"):
+            await asyncio.wait_for(task, 10)
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert fake.created == 0 and fake.reads == 0 and fake.calls == []
+    row = await db_session.get(PduMaintenance, pdu_id)
+    assert (pm._state(row) if row else None) == state_before
+    assert await db_session.scalar(select(func.count()).select_from(PduMaintenanceLog)) == (1 if state_before else 0)
+    assert not pdu_locks.maintenance_lock(pdu_id).locked()
 
 
 async def test_partial_restore_keeps_only_unverified_targets_for_retry(db_session, pdu_id, fake):

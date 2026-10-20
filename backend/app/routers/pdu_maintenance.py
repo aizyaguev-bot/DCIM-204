@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import confirm, power_protection
+from .. import confirm, inventory_store, power_protection
 from ..config import get_settings
 from ..database import get_db
 from ..models import PduMaintenance, PduMaintenanceLog
@@ -35,7 +35,15 @@ class MaintenanceUnavailable(Exception):
 
 
 class MaintenanceDrift(Exception):
-    """Compatibility exception; shutdown now leaves outlets outside the confirmed impact on."""
+    """The PDU configuration changed after the maintenance proposal was reviewed."""
+
+
+def _check_pins(dev, expected_pins: dict | None) -> None:
+    if expected_pins is None: return
+    current = {"ip": dev.ip, "enabled": bool(dev.enabled),
+               "labels_rev": inventory_store.revision(dev.labels)}
+    if any(value != expected_pins.get(key) for key, value in current.items()):
+        raise MaintenanceDrift("PDU configuration changed since the proposal")
 
 
 def password_mode() -> str:
@@ -111,9 +119,11 @@ async def maintenance_list(db: AsyncSession = Depends(get_db)):
 
 
 async def shutdown_pdu(db: AsyncSession, device_id: str, by: str, reason: str, *,
-                       exclude: frozenset[int] = frozenset(), expected_on: frozenset[int] | None = None) -> dict:
-    """Enter maintenance after confirmation, switching only approved live-on outlets and keeping exclusions on."""
+                       exclude: frozenset[int] = frozenset(), expected_on: frozenset[int] | None = None,
+                       expected_pins: dict | None = None) -> dict:
+    """Check proposal pins under the PDU lock, then switch only approved live-on outlets."""
     async with pdus.locked_pdu(device_id, db) as dev:
+        _check_pins(dev, expected_pins)
         return await _shutdown_locked(db, device_id, dev, by, reason, exclude=exclude, expected_on=expected_on)
 
 
@@ -153,9 +163,10 @@ async def _shutdown_locked(db: AsyncSession, device_id: str, dev, by: str, reaso
             "not_included": sorted(not_included), "protected": sorted(exclude)}
 
 
-async def restore_pdu(db: AsyncSession, device_id: str, by: str) -> dict:
+async def restore_pdu(db: AsyncSession, device_id: str, by: str, *, expected_pins: dict | None = None) -> dict:
     """Restore exactly the saved outlets after the caller confirms, retaining failures for retry."""
     async with pdus.locked_pdu(device_id, db) as dev:
+        _check_pins(dev, expected_pins)
         return await _restore_locked(db, device_id, dev, by)
 
 
