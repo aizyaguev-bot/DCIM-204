@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
+import ExportCsvButton from "../components/ExportCsvButton";
 import {
   applyBody, buildMoveRequest, clearAsResult, clearFailureText, clearPorts, filterServers, formatLocation, groupByDevice, kindNoun,
   locationClearPlan, moveErrorText, moveResultIsEmpty, normalizeLocations, normalizeMoveResult, parsePortInUse, portKey, portOptions,
@@ -20,6 +21,7 @@ export default function LocationsView({ devices, onChanged }) {
   const [moving, setMoving] = useState(null);       // { key, snapshot }: the dialog stays on this server until closed
   const [clearing, setClearing] = useState(null);   // server key being cleared
   const [notice, setNotice] = useState(null);       // { title, result, error } after a move or clear
+  const [exportError, setExportError] = useState("");
   const seq = useRef(0);
 
   // Only the newest request may update the table; an older reply arriving late is ignored.
@@ -78,14 +80,25 @@ export default function LocationsView({ devices, onChanged }) {
 
   return (
     <main className="max-w-[1400px] mx-auto w-full px-4 sm:px-6 py-5">
-      <div className="mb-4">
-        <h1 className="text-lg font-semibold text-zinc-100">Server locations</h1>
-        <p className="text-xs text-zinc-400 mt-1 max-w-3xl">
-          Each server with its rack slot, PDU outlets and KVM port. Move relocates a server's PDU outlets, KVM port and rack position together;
-          landing on another server swaps the two unless you turn swap off. Ping monitors and owners stay with the server.
-        </p>
-        {!canOperate && <p className="text-xs text-amber-300 mt-2">Read only. Moving servers requires the Operator or Admin role.</p>}
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold text-zinc-100">Server locations</h1>
+          <p className="text-xs text-zinc-400 mt-1 max-w-3xl">
+            Each server with its rack slot, PDU outlets and KVM port. Move relocates a server's PDU outlets, KVM port and rack position together;
+            landing on another server swaps the two unless you turn swap off. Ping monitors and owners stay with the server.
+          </p>
+          {!canOperate && <p className="text-xs text-amber-300 mt-2">Read only. Moving servers and Export CSV require the Operator or Admin role.</p>}
+        </div>
+        {/* Same file as Admin > Connections: every server with rack, U slot, IP, PDU outlets and KVM ports. */}
+        <ExportCsvButton onError={e => setExportError(!e ? "" : e.status === 403 ? "Operator role needed to export." : errorMessage(e))} />
       </div>
+
+      {exportError && (
+        <div role="alert" className="mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">
+          CSV export failed: {exportError}{" "}
+          <button type="button" className="underline" onClick={() => setExportError("")}>Dismiss</button>
+        </div>
+      )}
 
       {notice && (
         <div role={notice.error ? "alert" : "status"} className={`mb-4 rounded-lg border p-3 text-sm ${notice.error ? "border-amber-500/40 bg-amber-500/10" : "border-nv-400/30 bg-nv-400/5"}`}>

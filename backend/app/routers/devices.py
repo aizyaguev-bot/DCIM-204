@@ -636,6 +636,12 @@ async def _port_devices(db):
 @router.get("/locations")
 async def get_locations(db: AsyncSession = Depends(get_db)):
     """Server-centric view: each server's rack, U slot, PDU outlets and KVM ports, plus the empty ports."""
+    return await server_locations(db)
+
+
+async def server_locations(db) -> dict:
+    """GET /locations' body. Read-only (saved labels, status caches, rack layout files; never a device); the
+    connections export reuses it so its Rack / U slot columns and server list match the Locations page."""
     all_devices = (await db.execute(select(Device))).scalars().all()
     devices = sorted((d for d in all_devices if d.kind in _PORT_KINDS), key=_device_order)
     # As the pages show them: saved labels, else the name the PDU/KVM reports (status cache, no device contact).

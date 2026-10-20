@@ -32,6 +32,18 @@ export const api = {
   renameOpt:   (oldName, newName) => req("POST", "/api/devices/rename-opt", { old_name: oldName, new_name: newName }),
   deleteDevice: (id)          => req("DELETE", `/api/devices/${id}`),
   getSyncMap:   ()             => req("GET",    "/api/devices/sync-map"),
+  getConnections: ()          => req("GET",    "/api/devices/connections"),
+  downloadConnectionsCsv: async () => {
+    const response = await fetch(`${BASE}/api/devices/connections.csv`);
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const error = new Error(typeof data.detail === "string" ? data.detail : `CSV download failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    const filename = /filename="?(lab-connections-\d{4}-\d{2}-\d{2}\.csv)"?/i.exec(response.headers.get("Content-Disposition") || "")?.[1] || "lab-connections.csv";
+    return { blob: await response.blob(), filename };
+  },
   // expected: the label the page showed; the server refuses (409) if the port changed since. Omit for old callers.
   setDirectLabel: (deviceId, port, label, expected) => req("PATCH", "/api/devices/direct-label", { device_id: deviceId, port: String(port), label, ...(expected !== undefined ? { expected } : {}) }),
   // Server-centric view: each server with its rack/slot and PDU/KVM ports, plus empty ports.
