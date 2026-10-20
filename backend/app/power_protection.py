@@ -42,6 +42,7 @@ def parse(raw: str | None, pdus) -> Protection:
     outlets, errors = set(), []
     for index, entry in enumerate(part.strip() for part in text.split(",")):
         if not entry:
+            errors.append(f"Entry {index + 1} is empty")   # ",," must never read as an empty (= unprotected) list
             continue
         ref, sep, number = entry.rpartition(":")
         if not sep or not ref.strip() or not number.strip().isdigit():
