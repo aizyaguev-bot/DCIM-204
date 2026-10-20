@@ -30,7 +30,8 @@ from typing import Any, Literal
 # Kinds
 # ---------------------------------------------------------------------------------------------------------------
 Scope = Literal["outlet", "server", "pdu", "rack", "lab", "batch"]
-Switch = Literal["off", "on", "cycle", "maintenance_off", "maintenance_on", "none"]
+Switch = Literal["off", "on", "cycle", "maintenance_off", "maintenance_on", "none", "data"]
+# "data": no power change — PDU/KVM port labels and rack positions change (devices move-server / clear).
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,23 @@ KIND_SPECS: dict[str, KindSpec] = {s.kind: s for s in (
     # No hardware change: a list of KVM console entries for a server; the user clicks to open one.
     KindSpec("open_console", "server", "none", "Operator", False, False, True, False, False,
              "פתיחת KVM לשרת {server}"),
+    # Location changes (v2.40.0, owner 2026-10-20: "explain the changes in words and the assistant handles them").
+    # Same planner as Admin -> Locations (devices.py move-server, dry run for the preview). No power change, so a
+    # confirmation click is enough (no password); the card always shows every label/position change first.
+    KindSpec("server_swap", "server", "data", "Operator", False, False, True, False, False,
+             "החלפת מיקום בין {server} ל-{target_server}"),
+    KindSpec("server_move", "server", "data", "Operator", False, False, True, False, False,
+             "העברת {server} למיקום חדש"),
+    KindSpec("server_clear", "server", "data", "Operator", False, False, True, False, False,
+             "ניקוי השיוך של {server} (PDU ו-KVM)"),
 )}
+
+DATA_KINDS = ("server_swap", "server_move", "server_clear")
+# server_swap   target_server required; both servers exchange PDU/KVM ports and rack positions (move-server swap=true).
+# server_move   either target_server (the mover takes the target's location, the target becomes unplaced: swap=false)
+#               or target_ports (+ optional target_rack/target_slot; an occupied slot is refused, never swapped).
+# server_clear  every PDU outlet / KVM port of the server gets its default name ("Outlet N" / "Port N"); the rack
+#               position is kept. Equivalent to Locations -> Clear location.
 
 # server_cycle / outlet_cycle with then_console=True return the server's console entries after success
 # ("reset then open KVM"); the UI shows an "open KVM" button for a user click.
@@ -111,6 +128,11 @@ class ProposalRequest:
     restore_of: str | None = None   # proposal id of an executed rack/lab shutdown (batch_restore)
     then_console: bool = False      # server_cycle / outlet_cycle: offer the console after success
     reason: str = ""                # the user's words, <= 200 chars, no control characters (audit only)
+    # Data kinds only (see DATA_KINDS).
+    target_server: str | None = None
+    target_ports: list | None = None   # [{"device": "<PDU/KVM id or exact name>", "port": "<n>"}], <= 8 entries
+    target_rack: str | None = None
+    target_slot: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -169,6 +191,10 @@ class Impact:
     servers: list[str] = field(default_factory=list)    # canonical server names whose power changes
     consoles: list[Console] = field(default_factory=list)
     warnings_he: list[str] = field(default_factory=list)
+    # Data kinds: the move-server dry-run result shown to the user and re-checked at execution (drift = any difference).
+    changes: list[dict] = field(default_factory=list)     # [{device_id, device_name, kind, port, before, after}]
+    positions: list[dict] = field(default_factory=list)   # [{server, before: {rack, slot}, after: {rack, slot}}]
+    unplaced: list[str] = field(default_factory=list)
     # Server-only pins for drift checks; NEVER sent to the browser or the model (store.to_public drops them).
     # {pdu_id: {"labels_rev": str, "ip": str, "enabled": bool, "maintenance": bool, "on": [int], "known": [int]}}
     pins: dict[str, Any] = field(default_factory=dict)
@@ -177,6 +203,8 @@ class Impact:
         data = {"targets": [t.to_dict() for t in self.targets], "excluded": [e.to_dict() for e in self.excluded],
                 "pdus": list(self.pdus), "servers": list(self.servers),
                 "consoles": [c.to_dict() for c in self.consoles], "warnings_he": list(self.warnings_he),
+                "changes": [dict(c) for c in self.changes], "positions": [dict(p) for p in self.positions],
+                "unplaced": list(self.unplaced),
                 "counts": {"outlets": len(self.targets), "pdus": len(self.pdus), "servers": len(self.servers),
                            "excluded": len(self.excluded)}}
         if with_pins:
