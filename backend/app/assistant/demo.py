@@ -1,8 +1,9 @@
 """Demo responder: deterministic Hebrew answers built from REAL tool results, without a language model.
 
 Used when the LLM is disabled, no API key is configured or the SDK is missing, and as the answer when an LLM
-call fails. The question is classified with keyword rules (Hebrew + English), mapped to the same read-only tools
-the model would use, and the tool data is rendered into the standard answer object. Every fact cites the source
+call fails. The question is classified with keyword rules (Hebrew + English), mapped to the same tools the model
+would use, and the tool data is rendered into the standard answer object. Actions only create proposals for the
+user to confirm in the card; this responder never executes them. Every fact cites the source
 ids the tools really returned; hypotheses come only from explicit rules (for example "server down + its PDU
 outlet reported OFF"); missing data comes from the tools' caveats and non-ok sources. Every summary starts with
 DEMO_PREFIX so the mode is never hidden.
@@ -313,6 +314,169 @@ class _Answer:
 # ---------------------------------------------------------------------------------------------------------------
 def _tokens(question: str) -> list[str]:
     return [t.rstrip(".,:;!?/-") for t in _TOKEN.findall(str(question))]
+
+
+# Action commands deliberately use their own parser: _target chooses the first match and may use the viewed
+# equipment, which is useful for read-only questions but would guess the scope of a power action.
+_ACTION_WORDS = {
+    "off": r"כבה|תכבה|כבו|תוריד\s+(?:את\s+)?(?:החשמל|חשמל|מתח)|נתק\s+(?:את\s+)?(?:החשמל|חשמל|מתח)|turn\s+off|switch\s+off|power\s+off|shut\s*down",
+    "on": r"הדלק|תדליק|הדליקו|turn\s+on|switch\s+on|power\s+on",
+    "cycle": r"אתחל|תאתחל|ריסט|(?:תעשה|עשה|תבצע|בצע)\s+(?:ריסט|אתחול)|reset|reboot|restart",
+    "console": r"פתח|תפתח|open|launch",
+    "restore": r"החזר|תחזיר|restore",
+    "maintenance": r"הכנס|תכניס|put|enter",
+}
+_ACTION_PATTERNS = {kind: re.compile(r"(?<!\w)(?:ו)?(?:" + words + r")(?!\w)", re.IGNORECASE)
+                    for kind, words in _ACTION_WORDS.items()}
+_ACTION_START = re.compile(r"^(?:(?:please|בבקשה|אנא)\s+)+", re.IGNORECASE)
+_ACTION_OPT = re.compile(r"(?<![A-Za-z0-9_.-])opt\s*(\d+)(?![A-Za-z0-9_-]|\.[A-Za-z0-9_])", re.IGNORECASE)
+_ACTION_CONSOLE = re.compile(r"(?<!\w)(?:kvm|console|קונסול)(?!\w)", re.IGNORECASE)
+_ACTION_LAB = re.compile(r"(?<!\w)(?:לכל\s+)?(?:המעבדה|המעבדות|מעבדה|למעבדה|lab|laboratory)(?!\w)", re.IGNORECASE)
+_ACTION_LAB_WIDE = ("כל המעבדה", "כל המעבדות", "lab-wide", "whole lab", "entire lab", "all the lab")
+_ACTION_QUALIFIER = re.compile(
+    r"(?<!\w)(?:אל|לא|בלי|ללא|אם|אולי|או|חוץ|פרט|מלבד|חלק|don't|dont|not|do\s+not|never|without|except|if|unless|or|some)(?!\w)",
+    re.IGNORECASE)
+_ACTION_FILLER = frozenset(("turn switch power off on shut down shutdown reset reboot restart open launch "
+                            "restore put enter lab laboratory rack pdu server servers kvm console maintenance "
+                            "the a an all whole entire to for of into in at and then it me my please now").split())
+_ACTION_HE_FILLER = frozenset(("את לי של לשרת השרת שרת ארון הארון לכל כל המעבדה המעבדות מעבדה "
+                               "חשמל החשמל מתח לתחזוקה תחזוקה קונסול הקונסול קונסולת עבור ל ו ב").split())
+_ACTION_CLARIFY = "איזו פעולה לבצע ועל איזה יעד בדיוק? ציין שרת אחד, PDU אחד, ארון אחד או את כל המעבדה."
+_ACTION_GUIDANCE = ("פעולת חשמל עשויה להשפיע על כל הזנות החשמל של היעד; רשימת השקעים וההחרגות המדויקת תוצג "
+                    "בכרטיס לפני אישור. כדי לפעול, כתוב פקודה מפורשת, למשל: 'כבה את OPT11' או 'כבה חשמל לכל המעבדה'.")
+
+
+def _action_request(question: str) -> tuple[dict | None, str | None]:
+    """(request, clarification), or (None, None) for the existing read-only responder.
+
+    Only direct commands are proposals. Multiple targets, conflicting verbs and partial/negated scopes require
+    clarification. Resolution, permissions and impact remain the responsibility of propose_action.
+    """
+    text = _ACTION_OPT.sub(lambda m: "OPT" + m.group(1), str(question).strip())
+    text = _ACTION_START.sub("", text).strip()
+    matches = {kind: list(pattern.finditer(text)) for kind, pattern in _ACTION_PATTERNS.items()}
+    kinds = {kind for kind, found in matches.items() if found}
+    lab_off = re.match(r"^(?:(?:whole|entire)\s+lab|lab-wide|lab|laboratory)\s+(?:power\s+off|shutdown)(?!\w)",
+                       text, re.IGNORECASE)
+    starts_command = any(found and found[0].start() == 0 for found in matches.values()) or lab_off
+    if not starts_command:
+        if kinds or re.search(r"אכבה|נכבה|לכבות|כיבוי|מה יקרה|what\s+if", text, re.IGNORECASE):
+            return None, "נדרשת פקודה מפורשת בתחילת ההודעה כדי להכין הצעה."
+        return None, None
+    if any(mark in text for mark in ("?", "؟", "？")) or _ACTION_QUALIFIER.search(text):
+        return None, _ACTION_CLARIFY
+    if not kinds or any(len(found) > 1 for found in matches.values()):
+        return None, _ACTION_CLARIFY
+    if len(kinds) > 1 and kinds != {"cycle", "console"}:
+        return None, _ACTION_CLARIFY
+    if kinds != {"cycle", "console"} and re.search(r"(?<!\w)(?:and|גם|וגם|ואת)(?!\w)", text, re.IGNORECASE):
+        return None, _ACTION_CLARIFY
+    if kinds == {"cycle", "console"} and matches["console"][0].start() < matches["cycle"][0].start():
+        return None, _ACTION_CLARIFY
+
+    # Include bare ASCII names too, so a second target such as "open KVM for odin" cannot be ignored just
+    # because it contains no digit. Unknown extra words conservatively make the command ambiguous.
+    scan_text = re.sub(r"\blab-wide\b", "lab", text, flags=re.IGNORECASE)
+    words = re.findall(r"(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*", scan_text)
+    tokens = _tokens(scan_text) + [word.rstrip(".") for word in words if word.casefold() not in _ACTION_FILLER]
+    # Preserve names as typed except for the explicitly supported opt 11 -> OPT11 normalization.
+    originals = {t.casefold(): t for t in tokens}
+    names = list(originals)
+    remaining = text
+    for pattern in _ACTION_PATTERNS.values():
+        remaining = pattern.sub(" ", remaining)
+    for token in originals.values():
+        remaining = re.sub(re.escape(token), " ", remaining, flags=re.IGNORECASE)
+    # Unknown Hebrew words can be an extra target or a condition. Do not silently discard them, or standalone
+    # numbers (e.g. a second server abbreviated as "12"). Names already removed above are resolved by the tool.
+    if (any(word not in _ACTION_HE_FILLER for word in re.findall(r"[א-ת]+", remaining))
+            or re.search(r"\d", remaining)):
+        return None, _ACTION_CLARIFY
+    lab = bool(_ACTION_LAB.search(text))
+    rack = bool(re.search(r"(?<!\w)(?:ארון|rack)(?!\w)", text, re.IGNORECASE))
+    pdu = bool(re.search(r"(?<!\w)pdu(?:\b|[-_])", text, re.IGNORECASE))
+    if len(names) > 1 or (lab and (names or rack or pdu)):
+        return None, _ACTION_CLARIFY
+    if lab and re.search(r"(?<!\w)(?:ה?שרת|לשרת|servers?)(?!\w)", text, re.IGNORECASE):
+        return None, _ACTION_CLARIFY
+    name = originals[names[0]] if names else None
+    rack = rack or bool(name and _RACK.fullmatch(name))
+    if rack and re.search(r"(?<!\w)(?:ה?שרת|לשרת|servers?)(?!\w)", text, re.IGNORECASE):
+        return None, _ACTION_CLARIFY
+
+    if kinds == {"restore"}:
+        if names or rack or pdu or not (lab or re.search(r"חשמל|מתח|power", text, re.IGNORECASE)):
+            return None, "לאיזו פעולת כיבוי להחזיר חשמל? כדי להחזיר את הכיבוי האחרון שלך, בקש 'תחזיר חשמל'."
+        return {"kind": "batch_restore", "restore_of": "latest"}, None
+    if kinds == {"maintenance"}:
+        if not name or not pdu or not re.search(r"תחזוק|maintenance", text, re.IGNORECASE):
+            return None, "איזה PDU להכניס לתחזוקה? ציין את השם המלא שלו."
+        return {"kind": "pdu_shutdown", "pdu": name}, None
+    if kinds == {"off"} and lab:
+        if not any(phrase in text.casefold() for phrase in _ACTION_LAB_WIDE):
+            return None, "האם הכוונה לכל המעבדה? ציין במפורש את היקף הכיבוי."
+        return {"kind": "lab_shutdown"}, None
+    if kinds == {"off"} and rack and name and not pdu:
+        return {"kind": "rack_shutdown", "rack": name}, None
+    if not name or lab or rack or pdu:
+        return None, _ACTION_CLARIFY
+    if "console" in kinds and not _ACTION_CONSOLE.search(text):
+        return None, "האם לפתוח קונסולת KVM? ציין את שם השרת המלא."
+    if kinds == {"console"}:
+        return {"kind": "open_console", "server": name}, None
+    if "cycle" in kinds:
+        request = {"kind": "server_cycle", "server": name}
+        if "console" in kinds:
+            request["then_console"] = True
+        return request, None
+    return {"kind": "server_" + next(iter(kinds)), "server": name}, None
+
+
+async def _propose_action(run: _Run, out: _Answer, request: dict) -> None:
+    if (getattr(run.ctx.settings, "accounts_enabled", False) is not True or run.ctx.principal.legacy):
+        out.summary = "פעולות העוזר זמינות רק במצב חשבונות משתמשים, עם הרשאת Operator לפחות."
+        return
+    if (getattr(run.ctx.settings, "assistant_actions_enabled", False) is not True
+            or not run.has("propose_action") or not run.ctx.principal.allows("Operator")):
+        out.summary = "פעולות העוזר כבויות בשרת או שאינן זמינות לך; יצירת הצעה דורשת הרשאת Operator לפחות."
+        return
+    result = await run.call("propose_action", **request)
+    if result is None:
+        out.summary = ("לא ניתן היה להכין הצעת פעולה. מהו השם המלא והייחודי של היעד המבוקש? "
+                       "בדוק גם את ההרשאות ואת זמינות הפעולות.")
+        return
+    data = result.data
+    error = _dict(data.get("error")) or data
+    if error.get("code") == "ambiguous" or error.get("status") == "ambiguous":
+        out.summary = "נמצאו כמה יעדים אפשריים. מהו השם המלא והייחודי של היעד המבוקש?"
+        return
+    proposal = _dict(data.get("proposal")) or data
+    if not proposal.get("id") or proposal.get("status") not in ("pending", "ready"):
+        out.summary = "לא התקבלה הצעה זמינה לאישור. בדוק את פרטי הבקשה ונסה שוב."
+        return
+    impact = _dict(proposal.get("impact"))
+    counts = _dict(impact.get("counts"))
+    parts = []
+    for key, label in (("servers", "שרתים"), ("pdus", "PDU"), ("outlets", "שקעים"), ("excluded", "החרגות")):
+        count = counts.get(key)
+        if count is None and isinstance(impact.get(key if key != "outlets" else "targets"), list):
+            count = len(impact[key if key != "outlets" else "targets"])
+        if type(count) is int and count >= 0:
+            parts.append(f"{count} {label}")
+    if request["kind"] == "open_console":
+        out.summary = "הוכנה הצעה לפתיחת KVM. פתח את הקונסול בלחיצה על הכפתור בכרטיס."
+    else:
+        out.summary = "הוכנה הצעת פעולה. כדי לבצע אותה, בדוק את ההשפעה ואשר בכרטיס באמצעות הסיסמה."
+        if proposal.get("phrase"):
+            out.summary += " יש להקליד גם את צירוף האישור שמוצג בכרטיס."
+        if request.get("then_console"):
+            out.summary += " לאחר אישור וביצוע הריסט, אפשר יהיה לפתוח KVM בלחיצה בכרטיס."
+    if parts:
+        scope = "היקף ההצעה: " + ", ".join(parts) + "."
+        out.summary += " " + scope
+        out.fact(scope, _ids(result))
+    else:
+        out.missing("ספירת ההשפעה חסרה בתוצאת הכלי; בדוק את רשימת היעדים בכרטיס לפני האישור.")
 
 
 def _target(question: str, context: dict) -> dict:
@@ -1370,11 +1534,17 @@ async def answer(*, question: str, history: list[dict] | None, context: dict | N
     context = clean_context(context)
     intent = classify(question)
     target = _target(question, context)
-    if not tools:
+    action, clarification = _action_request(question)
+    if clarification:
+        out.summary = clarification + " " + _ACTION_GUIDANCE
+    elif not tools and action is None:
         out.summary = "אין כרגע כלים זמינים לקריאת נתוני המעבדה, ולכן אין תשובה מבוססת נתונים."
     else:
         try:
-            await _HANDLERS[intent](run, out, question, target, context)
+            if action is not None:
+                await _propose_action(run, out, action)
+            else:
+                await _HANDLERS[intent](run, out, question, target, context)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - unexpected tool data shape: keep what was already verified
