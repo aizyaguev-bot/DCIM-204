@@ -15,7 +15,7 @@ from ... import inventory_store, monitor_links, power_protection
 from ...models import Device, MonitorDeviceSnapshot, PduMaintenance, PingTarget, PingTargetName, PxeJob
 from ...ping_monitor import server_identity
 from ...routers import kvms, pdus
-from .contracts import ActionError, Console, Excluded, Impact, KIND_SPECS, ProposalRequest, Target
+from .contracts import DATA_KINDS, ActionError, Console, Excluded, Impact, KIND_SPECS, ProposalRequest, Target
 from .models import AssistantActionProposal
 
 
@@ -230,6 +230,10 @@ async def build_impact(db, req: ProposalRequest, settings, now: float) -> Impact
     spec = KIND_SPECS.get(req.kind)
     if spec is None:
         raise ActionError(400, "invalid", "Unknown action kind")
+    if req.kind in DATA_KINDS:
+        # Location changes switch no power: no PDU is read and protected outlets do not apply.
+        from . import locations
+        return await locations.build_impact(db, req)
     devices = await _devices(db)
     by_id = {dev.id: dev for dev in devices}
     labels = await _labels(db, devices)
@@ -411,6 +415,9 @@ async def check_drift(db, kind: str, impact: dict, settings) -> list[str]:
     """Return fixed, secret-free Hebrew reasons; no switching and no cached status reads."""
     if kind == "open_console":
         return []
+    if kind in DATA_KINDS:
+        from . import locations
+        return await locations.check_drift(db, kind, impact)
     pins = impact.get("pins")
     if not isinstance(pins, dict) or not pins or set(impact.get("pdus", [])) != set(pins):
         return ["חסרה תמונת מצב פרטית של יעדי הפעולה; יש ליצור הצעה חדשה."]

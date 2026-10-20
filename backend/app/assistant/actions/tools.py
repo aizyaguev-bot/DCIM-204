@@ -22,13 +22,21 @@ import time
 from ... import confirm
 from ..contracts import Source, ToolContext, ToolError, ToolResult, ToolSpec, iso
 from . import store
-from .contracts import KIND_SPECS, ActionError, ProposalRequest
+from .contracts import DATA_KINDS, KIND_SPECS, ActionError, ProposalRequest
 
 log = logging.getLogger(__name__)
 
 MAX_PROPOSALS_PER_REQUEST = 1   # ORCA-SEC-ACTIONS D2 / SEC-ACT-14: one proposal per question
 # D2: a lab-wide shutdown is proposed only when this turn's user message contains one of these (case-insensitive).
 LAB_WIDE_PHRASES = ("כל המעבדה", "כל המעבדות", "lab-wide", "whole lab", "entire lab", "all the lab")
+# A whole-PDU maintenance action (pdu_shutdown / pdu_restore) needs explicit whole-PDU or maintenance wording, and is
+# refused when the message names an outlet number (an outlet request never widens to its whole PDU). Matched after
+# casefold, with "-" and spaces between "ה" and "pdu" ignored ("כל ה-PDU" == "כל הPDU" == "כל ה PDU").
+WHOLE_PDU_PHRASES = ("תחזוק", "maintenance", "כל הpdu", "whole pdu", "entire pdu", "all of the pdu", "every outlet",
+                     "all outlets", "all the outlets", "כל השקעים")
+_OUTLET_NUMBER = re.compile(
+    r"(?<![0-9a-z\u05d0-\u05ea])(?:[ובלה]{0,3}(?:שקע|שקעים|יציאה|יציאות|פורט)|outlets?|sockets?|ports?)"
+    r"\s*(?:(?:מס(?:פר|'|\u05f3)?|no\.?|number|#)\s*)?[0-9]+", re.IGNORECASE)
 LATEST = "latest"
 RESTORABLE_KINDS = ("rack_shutdown", "lab_shutdown")
 TEXT_CHARS = 100
@@ -46,6 +54,12 @@ _FEED_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")   # "OPT11 (PSU2)" names the serv
 # In-flight reservations on the ToolContext: the engine runs the tool calls of one turn concurrently, so the
 # per-request cap is reserved synchronously (before the first await) instead of counted after the fact.
 _SLOTS_ATTR = "_action_proposal_slots"
+
+DATA_NEXT_STEP = ("Nothing was changed yet. The proposal card under your answer lists every PDU outlet / KVM port label "
+                  "and rack position that will change. Tell the user in Hebrew what will change (including any server "
+                  "left without a location and the warnings), and that nothing changes until they confirm in the card "
+                  "with a click (no password and no phrase are needed for a location change). Never say the change "
+                  "was made.")
 
 NEXT_STEP = ("Nothing was executed. The proposal card is shown to the user under your answer. Tell the user in "
              "Hebrew what the proposal will do (the impact counts, servers, excluded outlets and warnings), that "
@@ -147,15 +161,61 @@ def lab_wide(message) -> bool:
     return any(phrase in text for phrase in LAB_WIDE_PHRASES)
 
 
+def whole_pdu(message) -> bool:
+    text = message.casefold() if isinstance(message, str) else ""
+    text = re.sub(r"\s+", " ", re.sub(r"(?<=ה)[\s-]+(?=pdu)", "", text))
+    return any(phrase in text for phrase in WHOLE_PDU_PHRASES)
+
+
+def names_outlet(message) -> bool:
+    """The message names an outlet / port by number ("שקע 3", "לשקע 3", "outlet 3", "port #3")."""
+    return isinstance(message, str) and bool(_OUTLET_NUMBER.search(message))
+
+
+def _number_in(message, number) -> bool:
+    return isinstance(message, str) and bool(re.search(rf"(?<![0-9]){int(number)}(?![0-9])", message))
+
+
 def _not_requested(what: str, hebrew: str) -> ToolError:
     return ToolError(f"No proposal was prepared (not_requested): {what} Ask the user to write the exact target in "
                      f"their own request. Details: {hebrew}")
 
 
+def _check_data_anchor(message: str, request: ProposalRequest) -> None:
+    """Location changes: every server, device, port number, rack and slot must be written in this turn's message
+    itself (the viewed page never names a location change)."""
+    if not any(mentions(message, name) for name in _server_names(request.server)):
+        raise _not_requested("the server is not named in the user's own message of this turn.",
+                             "שם השרת לא מופיע בבקשה שלך. כתוב במפורש את שם השרת המלא.")
+    if request.target_server is not None and not any(mentions(message, name)
+                                                     for name in _server_names(request.target_server)):
+        raise _not_requested("the target server is not named in the user's own message of this turn.",
+                             "שם השרת השני לא מופיע בבקשה שלך. כתוב במפורש את שמו המלא.")
+    for port in request.target_ports or []:
+        device = port.get("device") if isinstance(port, dict) else None
+        number = port.get("port") if isinstance(port, dict) else None
+        if not isinstance(device, str) or not mentions(message, device):
+            raise _not_requested("a target PDU or KVM is not named in the user's own message of this turn.",
+                                 "שם ה-PDU או ה-KVM של היעד לא מופיע בבקשה שלך. כתוב אותו במפורש.")
+        if not (isinstance(number, (int, str)) and str(number).strip().isdigit() and _number_in(message, number)):
+            raise _not_requested("a target outlet or port number is not written in the user's own message.",
+                                 "מספר השקע או היציאה של היעד לא מופיע בבקשה שלך. כתוב אותו במפורש.")
+    if request.target_rack is not None and not mentions(message, request.target_rack):
+        raise _not_requested("the target rack is not named in the user's own message of this turn.",
+                             "שם הארון של היעד לא מופיע בבקשה שלך. כתוב אותו במפורש.")
+    if type(request.target_slot) is int and not _number_in(message, request.target_slot):
+        raise _not_requested("the target slot number is not written in the user's own message of this turn.",
+                             "מספר היחידה (U) של היעד לא מופיע בבקשה שלך. כתוב אותו במפורש.")
+
+
 def check_anchor(ctx: ToolContext, request: ProposalRequest) -> None:
-    """Before anything is resolved: the request's target must be what the user wrote in this turn (or the page)."""
+    """Before anything is resolved: the request's target must be what the user wrote in this turn (or the page), and
+    the kind must match the scope the user asked for (an outlet request never becomes a whole-PDU action)."""
     scope = KIND_SPECS[request.kind].scope
-    if scope == "server":
+    message = getattr(ctx, "user_message", "") or ""
+    if request.kind in DATA_KINDS:
+        _check_data_anchor(message, request)
+    elif scope == "server":
         if not any(_anchored(ctx, ("server",), name) for name in _server_names(request.server)):
             raise _not_requested("the server is not named in the user's own message of this turn.",
                                  "שם השרת לא מופיע בבקשה שלך. כתוב במפורש את שם השרת המלא.")
@@ -163,12 +223,19 @@ def check_anchor(ctx: ToolContext, request: ProposalRequest) -> None:
         if not _anchored(ctx, ("pdu",), request.pdu):
             raise _not_requested("the PDU is not named in the user's own message of this turn.",
                                  "שם ה-PDU לא מופיע בבקשה שלך. כתוב במפורש את שם ה-PDU.")
-        message = getattr(ctx, "user_message", "") or ""
         # A missing outlet number is left to the store's request validation (400 invalid, nothing read).
         if (scope == "outlet" and type(request.outlet) is int
                 and not re.search(rf"(?<![0-9]){request.outlet}(?![0-9])", message)):
             raise _not_requested("the outlet number is not written in the user's own message of this turn.",
                                  "מספר השקע לא מופיע בבקשה שלך. כתוב במפורש את מספר השקע.")
+        if scope == "pdu" and names_outlet(message):
+            raise _not_requested("the user asked about a single outlet; a whole-PDU action would widen the scope. "
+                                 "Use outlet_off / outlet_on / outlet_cycle with that outlet number.",
+                                 "ביקשת פעולה על שקע מסוים, ולכן לא תוכן פעולה על כל ה-PDU.")
+        if scope == "pdu" and not whole_pdu(message):
+            raise _not_requested("putting a whole PDU into maintenance (or restoring it) needs explicit "
+                                 "maintenance or whole-PDU wording in the user's own message.",
+                                 "פעולה על כל ה-PDU דורשת בקשה מפורשת, למשל: הכנס את PDU-1 לתחזוקה.")
     elif scope == "rack":
         if not _anchored(ctx, ("rack",), request.rack):
             raise _not_requested("the rack is not named in the user's own message of this turn.",
@@ -187,6 +254,18 @@ def check_resolved(ctx: ToolContext, kind: str, public: dict) -> None:
         return
     impact = public.get("impact") if isinstance(public.get("impact"), dict) else {}
     servers = [name for name in impact.get("servers") or [] if isinstance(name, str) and name]
+    if kind in DATA_KINDS:
+        request = public.get("request") if isinstance(public.get("request"), dict) else {}
+        allowed = 2 if request.get("target_server") else 1
+        message = getattr(ctx, "user_message", "") or ""
+        if len(servers) > allowed:
+            raise _not_requested("the location change involves more servers than the user named.",
+                                 "השינוי נוגע ביותר שרתים ממה שכתבת. כתוב במפורש את השרתים.")
+        for name in servers:
+            if not mentions(message, name):
+                raise _not_requested(f"the change involves server {name}, which the user did not write.",
+                                     f"השינוי נוגע בשרת {name}. כדי לשנות אותו, כתוב את שמו במפורש.")
+        return
     if len(servers) > 1:
         raise _not_requested("the server name resolved to more than one server.",
                              "שם השרת מתאים ליותר משרת אחד. כתוב שם שרת מדויק.")
@@ -229,6 +308,24 @@ def model_view(public: dict) -> dict:
     skipped_pdus = sorted({str(item.get("pdu_name") or item.get("pdu_id") or "") for item in excluded
                            if item.get("outlet") is None} - {""})
     counts = impact.get("counts") if isinstance(impact.get("counts"), dict) else {}
+    view_impact = {
+        "counts": {**{key: value for key, value in counts.items() if type(value) is int},
+                   "consoles": len(impact.get("consoles") or [])},
+        "servers": [str(name) for name in (impact.get("servers") or [])[:LIST_CAP]],
+        "excluded": {"total": len(excluded), "by_reason": by_reason, "skipped_pdus": skipped_pdus[:LIST_CAP]},
+        "warnings_he": [str(text) for text in (impact.get("warnings_he") or [])[:LIST_CAP]],
+    }
+    if public.get("kind") in DATA_KINDS:
+        # The model must be able to say exactly what changes: labels and positions (no ids, no owner).
+        changes = [item for item in impact.get("changes") or [] if isinstance(item, dict)]
+        positions = [item for item in impact.get("positions") or [] if isinstance(item, dict)]
+        view_impact["counts"].update(changes=len(changes),
+                                     positions=sum(1 for p in positions if p.get("before") != p.get("after")))
+        view_impact["changes"] = [{key: item.get(key) for key in ("device_name", "kind", "port", "before", "after")}
+                                  for item in changes[:LIST_CAP]]
+        view_impact["positions"] = [{key: item.get(key) for key in ("server", "before", "after")}
+                                    for item in positions[:LIST_CAP]]
+        view_impact["unplaced"] = [str(name) for name in (impact.get("unplaced") or [])[:LIST_CAP]]
     return {
         "id": public.get("id"),
         "kind": public.get("kind"),
@@ -239,19 +336,15 @@ def model_view(public: dict) -> dict:
         "needs_password": public.get("needs_password"),
         "phrase": public.get("phrase"),
         "can_execute": public.get("can_execute"),
-        "impact": {
-            "counts": {**{key: value for key, value in counts.items() if type(value) is int},
-                       "consoles": len(impact.get("consoles") or [])},
-            "servers": [str(name) for name in (impact.get("servers") or [])[:LIST_CAP]],
-            "excluded": {"total": len(excluded), "by_reason": by_reason, "skipped_pdus": skipped_pdus[:LIST_CAP]},
-            "warnings_he": [str(text) for text in (impact.get("warnings_he") or [])[:LIST_CAP]],
-        },
+        "impact": view_impact,
     }
 
 
 async def propose_action(ctx: ToolContext, kind: str, server: str | None = None, pdu: str | None = None,
                          outlet: int | None = None, rack: str | None = None, restore_of: str | None = None,
-                         then_console: bool = False, reason: str = "") -> ToolResult:
+                         then_console: bool = False, reason: str = "", target_server: str | None = None,
+                         target_ports: list | None = None, target_rack: str | None = None,
+                         target_slot: int | None = None) -> ToolResult:
     if not actions_enabled(ctx.settings) or ctx.principal.legacy:
         raise ToolError("Assistant actions are turned off on this server or need accounts mode; no proposal was "
                         "prepared.")
@@ -280,8 +373,13 @@ async def propose_action(ctx: ToolContext, kind: str, server: str | None = None,
                                 "returned by this tool.")
         else:
             wanted = None   # restore_of belongs to batch_restore only
+        ports = target_ports
+        if isinstance(target_ports, list):
+            ports = [dict(item) if isinstance(item, dict) else item for item in target_ports]
         request = ProposalRequest(kind=kind, server=_text(server), pdu=_text(pdu), outlet=outlet, rack=_text(rack),
-                                  restore_of=wanted, then_console=then_console is True, reason=_reason(reason))
+                                  restore_of=wanted, then_console=then_console is True, reason=_reason(reason),
+                                  target_server=_text(target_server), target_ports=ports,
+                                  target_rack=_text(target_rack), target_slot=target_slot)
         check_anchor(ctx, request)
         public = await store.propose(ctx.session_factory, ctx.principal, request, ctx.settings, ctx.now,
                                      ctx.conversation_id)
@@ -301,7 +399,8 @@ async def propose_action(ctx: ToolContext, kind: str, server: str | None = None,
         ctx.proposals.append(proposal_id)
     source = Source(id=f"action_proposal:{proposal_id}", name="Action proposal (targets and PDU states read live)",
                     ref=proposal_id, as_of=iso(time.time()), age_s=0.0)
-    return ToolResult(data={"proposal": model_view(public), "executed": False, "next_step": NEXT_STEP},
+    return ToolResult(data={"proposal": model_view(public), "executed": False,
+                            "next_step": DATA_NEXT_STEP if kind in DATA_KINDS else NEXT_STEP},
                       sources=[source])
 
 
@@ -309,7 +408,11 @@ _KIND_HELP = ("server_off / server_on / server_cycle / open_console need `server
               "outlet_cycle need `pdu` and `outlet`; pdu_shutdown / pdu_restore (maintenance) need `pdu`; "
               "rack_shutdown needs `rack`; lab_shutdown needs nothing else but only when the user explicitly asked "
               "for the whole lab; batch_restore powers back exactly what an executed rack/lab shutdown turned off "
-              "and takes `restore_of`.")
+              "and takes `restore_of`. Location changes (no power): server_swap needs `server` and `target_server` "
+              "(the two exchange PDU outlets, KVM ports and rack positions); server_move needs `server` and either "
+              "`target_server` (the server takes that server's place, which is left without a location; only when "
+              "the user said not to swap) or `target_ports` (+ optional `target_rack` / `target_slot`); "
+              "server_clear needs `server` (its outlets and ports get their default names, rack position kept).")
 
 INPUT_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["kind"],
@@ -333,6 +436,22 @@ INPUT_SCHEMA = {
                                         "successful reset (\"reset and open KVM\")."},
         "reason": {"type": "string", "maxLength": REASON_CHARS,
                    "description": "The user's request in their own words, for the audit trail."},
+        "target_server": {"type": "string", "minLength": 1, "maxLength": TEXT_CHARS,
+                          "description": "server_swap / server_move only: the other server, exactly as the user "
+                                         "wrote it (the server whose place is swapped or taken)."},
+        "target_ports": {"type": "array", "minItems": 1, "maxItems": 8,
+                         "description": "server_move only: the new PDU outlets / KVM ports, exactly as the user "
+                                        "wrote them. Never invent a port.",
+                         "items": {"type": "object", "additionalProperties": False, "required": ["device", "port"],
+                                   "properties": {
+                                       "device": {"type": "string", "minLength": 1, "maxLength": TEXT_CHARS,
+                                                  "description": "PDU or KVM id or exact name (e.g. PDU-05)."},
+                                       "port": {"type": "string", "minLength": 1, "maxLength": 3,
+                                                "description": "Outlet / port number as written, e.g. \"7\"."}}}},
+        "target_rack": {"type": "string", "minLength": 1, "maxLength": TEXT_CHARS,
+                        "description": "server_move with target_ports only: the new rack, as the user wrote it."},
+        "target_slot": {"type": "integer", "minimum": 1, "maximum": 999,
+                        "description": "server_move with target_ports only: the new U slot, as the user wrote it."},
     },
 }
 
@@ -340,7 +459,10 @@ DESCRIPTION = (
     "Prepare a PROPOSAL for a power or console action: switch a server's outlets off, on or power-cycle them "
     "(all feeds), switch one PDU outlet, put a PDU into maintenance or restore it, shut down a whole rack or the "
     "whole lab (protected outlets stay on), restore what an executed rack/lab shutdown turned off, or list a "
-    "server's KVM consoles. This tool NEVER executes anything and never switches power: it resolves the targets, "
+    "server's KVM consoles. It also prepares location changes (no power): swap two servers' locations, move a "
+    "server to another server's place or to free PDU outlets / KVM ports, or clear a server's outlets and ports; "
+    "for those the card lists every label and rack-position change and the user confirms with a click (no "
+    "password). This tool NEVER executes anything and never switches power: it resolves the targets, "
     "reads the involved PDUs and stores a short-lived proposal. The signed-in user reviews the exact impact in a "
     "card under your answer and confirms there with their own password (rack, lab and restore actions also need "
     "an exact typed phrase); you never see or ask for passwords. Call it at most once per question. Only targets "

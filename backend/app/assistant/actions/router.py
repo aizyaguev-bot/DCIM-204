@@ -213,6 +213,17 @@ async def execute(proposal_id: str, request: Request, db=Depends(get_db)):
         raise ActionError(403, "password_mode", "Actions require a configured password") from None
     _guard_write(request, settings)
     await _body_limit(request)
+    if not spec.needs_password:
+        # Location changes (no power): a confirmation click. `{}` (or an empty body) is enough; the allowlist stays
+        # {password, phrase}, both ignored, and confirm.verify is never called. Claim, drift and role still apply.
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw.strip() else {}
+        except (ValueError, UnicodeError):
+            raise ActionError(400, "invalid", "Invalid request body") from None
+        if not isinstance(body, dict) or set(body) - {"password", "phrase"}:
+            raise ActionError(400, "invalid", "Invalid execution request")
+        return await _admit(db, principal, row, settings, principal.username)
     try:
         body = await request.json()
     except ValueError:

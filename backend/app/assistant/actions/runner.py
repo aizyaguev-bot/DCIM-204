@@ -422,6 +422,12 @@ async def execute(proposal_id: str, by: str, *, session_factory, settings, sleep
                 await _record(session_factory, proposal_id, by, "pdu", detail, index + 1, total, result)
         elif spec.switch == "none":
             result["consoles"] = impact.get("consoles", [])
+        elif spec.switch == "data":
+            # Location changes (DATA_KINDS): labels and rack positions through the Locations planner, inline, never
+            # power. locations.execute applies the pinned plan only if unchanged and records "finished" itself.
+            from . import locations
+
+            return await locations.execute(proposal_id, by, session_factory=session_factory, settings=settings)
 
         status = "succeeded" if spec.switch == "none" else _status(result["targets"], result["pdus"])
         if result.get("aborted"):

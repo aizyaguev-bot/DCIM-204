@@ -432,6 +432,100 @@ def _action_request(question: str) -> tuple[dict | None, str | None]:
     return {"kind": "server_" + next(iter(kinds)), "server": name}, None
 
 
+# Location changes (actions.contracts.DATA_KINDS). Same conservative rules as the power commands: an explicit command
+# (or the user's own statement "I moved X ...", "X moved to ...") that names exactly the servers and ports involved,
+# no question, condition or negation (except the explicit "without swapping"), otherwise a clarifying question. A
+# move into another server's place is a swap unless the user says not to swap (owner decision, 2026-10-20).
+LOCATION_KINDS = ("server_swap", "server_move", "server_clear")
+_LOC_NAME = r"[A-Za-z0-9](?:[A-Za-z0-9_:]|[.-](?=[A-Za-z0-9]))*"
+_LOC_SERVER = r"(?:(?:[לו]?ה?)שרת\s+|server\s+)?"
+_LOC_SWAP = r"(?:תחליף|החלף|תחליפי|תחליפו|החליפו|החלפתי|החלפנו|swap|swapped|i\s+swapped)"
+_LOC_MOVE = r"(?:העבר|תעביר|תעבירי|העבירו|תעבירו|העברתי|העברנו|הזז|תזיז|הזזתי|הזזנו|move|moved|i\s+moved)"
+_LOC_MOVED = r"(?:עבר|הועבר|זז|הוזז|moved|was\s+moved|has\s+moved)"
+_LOC_CLEAR = r"(?:נקה|תנקה|תנקי|נקו|תנקו|ניקיתי|clear|i\s+cleared)"
+_LOC_START = re.compile(rf"^(?:{_LOC_SWAP}|{_LOC_MOVE}|{_LOC_CLEAR})(?!\w)|"
+                        rf"^{_LOC_SERVER}{_LOC_NAME}\s+{_LOC_MOVED}\s+(?:ל|אל|to|into)", re.IGNORECASE)
+_LOC_NO_SWAP = r"(?P<noswap>\s*,?\s*(?:(?:בלי|ללא)\s+(?:ה)?(?:החלפה|להחליף)|without\s+(?:a\s+)?swap(?:ping)?|no\s+swap))?"
+_LOC_PLACE = (r"(?:(?:ל|אל\s+)ה?(?:מקום|מיקום|מקומו|מיקומו)\s+(?:של\s+)?" + _LOC_SERVER + r"-?(?P<b>" + _LOC_NAME +
+              r")|(?:to|into)\s+(?:(?P<b2>" + _LOC_NAME + r")['\u2019]s\s+(?:place|location|spot|position)|"
+              r"the\s+(?:place|location|spot|position)\s+of\s+(?:server\s+)?(?P<b3>" + _LOC_NAME + r")))")
+_LOC_SUBJECT = r"(?:(?:" + _LOC_MOVE + r")\s+(?:את\s+)?" + _LOC_SERVER + r"(?P<a>" + _LOC_NAME + r")|" + \
+    _LOC_SERVER + r"(?P<a2>" + _LOC_NAME + r")\s+" + _LOC_MOVED + r")"
+_LOC_FORMS = (
+    ("swap", re.compile(
+        rf"{_LOC_SWAP}\s+(?:את\s+)?(?:(?:ה)?(?:מיקומים|מיקום|מקומות|מקום)\s+(?:של\s+)?)?(?:בין\s+)?"
+        rf"(?:the\s+)?(?:(?:locations?|places?|positions?)\s+of\s+)?{_LOC_SERVER}(?P<a>{_LOC_NAME})"
+        rf"(?:\s+(?:לבין|עם|את|and|with)\s+|\s+[לו]-?\s*|\s*,\s*|\s+)"
+        rf"{_LOC_SERVER}(?P<b>{_LOC_NAME})(?:\s+(?:locations?|places?|positions?))?", re.IGNORECASE)),
+    ("place", re.compile(rf"{_LOC_SUBJECT}\s+{_LOC_PLACE}{_LOC_NO_SWAP}", re.IGNORECASE)),
+    ("ports", re.compile(rf"{_LOC_SUBJECT}\s+(?:to\s+)?(?P<ports>.+)", re.IGNORECASE)),
+    ("clear", re.compile(
+        rf"{_LOC_CLEAR}\s+(?:את\s+)?(?:the\s+)?(?:ה?(?:שיוך|מיקום|מיקומים|שקעים|חיבורים)\s+(?:של\s+)?)?"
+        rf"(?:(?:location|locations|ports|assignment|mapping)\s+(?:of|for)\s+)?{_LOC_SERVER}(?P<a>{_LOC_NAME})",
+        re.IGNORECASE)),
+)
+_LOC_PORT = re.compile(
+    r"\s*(?:(?:,|and)\s*)?(?:ו)?(?:ל|אל\s+|to\s+)?ה?(?:שקע|יציאה|פורט|outlet|port|socket)\s*"
+    r"(?:(?:מס(?:פר|'|\u05f3)?|#|no\.?|number)\s*)?(?P<n>[0-9]{1,3})\s*(?:(?:ב|של|on|in|at|of)\s*)?-?\s*(?:the\s+)?"
+    r"(?P<d>" + _LOC_NAME + r")", re.IGNORECASE)
+_LOC_OPT = re.compile(r"(?<![A-Za-z0-9_.])(optn?)\s+([0-9]+)(?![A-Za-z0-9_])", re.IGNORECASE)
+_LOC_NOT_NAMES = frozenset("the a an server servers to into and with of on in at for place location".split())
+_LOCATION_CLARIFY = ("איזה שינוי מיקום לבצע בדיוק? ציין במפורש את השרתים, ובהעברה לשקעים פנויים גם את מספרי השקעים "
+                     "והיציאות ואת שמות ה-PDU וה-KVM.")
+_LOCATION_GUIDANCE = ("שינוי מיקום מתבצע רק אחרי שתאשר בכרטיס את רשימת השינויים. כדי לפעול, כתוב פקודה מפורשת, למשל: "
+                      "'תחליף בין optn3 ל-optn8', 'העבר את optn45 למקום של optn44' (כדי לא להחליף ביניהם הוסף "
+                      "'בלי החלפה'), 'optn45 עבר לשקע 7 ב-PDU-05 ויציאה 12 ב-KVM-2' או 'תנקה את optn12'.")
+
+
+def _location_ports(text: str) -> list[dict] | None:
+    ports, position = [], 0
+    while position < len(text):
+        match = _LOC_PORT.match(text, position)
+        if match is None or match.end() == position:
+            return None
+        entry = {"device": match["d"], "port": str(int(match["n"]))}
+        if entry not in ports:
+            ports.append(entry)
+        position = match.end()
+    return ports if 1 <= len(ports) <= 8 else None
+
+
+def _location_request(question: str) -> tuple[dict | None, str | None]:
+    """(request, clarification) for a location change, or (None, None) when the message is not one."""
+    # "opt 3" / "optn 3" (also after "ל-") is the server optn3; the case is kept, names resolve case-insensitively.
+    text = _LOC_OPT.sub(lambda m: m[1] + m[2], str(question).strip())
+    text = _ACTION_START.sub("", text).strip()
+    text = re.sub(r"\s+", " ", text).rstrip(" .!")
+    if not _LOC_START.search(text):
+        return None, None
+    if any(mark in text for mark in ("?", "؟", "？")):
+        return None, _LOCATION_CLARIFY
+    for form, pattern in _LOC_FORMS:
+        match = pattern.fullmatch(text)
+        if match is None:
+            continue
+        values = match.groupdict()
+        server = values.get("a") or values.get("a2")
+        target = values.get("b") or values.get("b2") or values.get("b3")
+        names = [name for name in (server, target) if name]
+        if not server or any(name.casefold() in _LOC_NOT_NAMES for name in names):
+            return None, _LOCATION_CLARIFY
+        if target and target.casefold() == server.casefold():
+            return None, _LOCATION_CLARIFY
+        if form == "swap":
+            return {"kind": "server_swap", "server": server, "target_server": target}, None
+        if form == "place":
+            kind = "server_move" if values.get("noswap") else "server_swap"
+            return {"kind": kind, "server": server, "target_server": target}, None
+        if form == "ports":
+            ports = _location_ports(values["ports"])
+            if ports is None or any(port["device"].casefold() in _LOC_NOT_NAMES for port in ports):
+                return None, _LOCATION_CLARIFY
+            return {"kind": "server_move", "server": server, "target_ports": ports}, None
+        return {"kind": "server_clear", "server": server}, None
+    return None, _LOCATION_CLARIFY
+
+
 async def _propose_action(run: _Run, out: _Answer, request: dict) -> None:
     if (getattr(run.ctx.settings, "accounts_enabled", False) is not True or run.ctx.principal.legacy):
         out.summary = "פעולות העוזר זמינות רק במצב חשבונות משתמשים, עם הרשאת Operator לפחות."
@@ -456,6 +550,24 @@ async def _propose_action(run: _Run, out: _Answer, request: dict) -> None:
         return
     impact = _dict(proposal.get("impact"))
     counts = _dict(impact.get("counts"))
+    if request["kind"] in LOCATION_KINDS:
+        out.summary = ("הוכנה הצעה לשינוי מיקום (ללא שינוי חשמל). בדוק בכרטיס את רשימת השינויים ואשר בלחיצה; "
+                       "לא נדרשת סיסמה. שום דבר לא ישתנה לפני האישור.")
+        changes = counts.get("changes")
+        if type(changes) is not int and isinstance(impact.get("changes"), list):
+            changes = len(impact["changes"])
+        if type(changes) is int and changes >= 0:
+            scope = f"היקף ההצעה: {changes} שינויי תוויות של שקעים ויציאות"
+            positions = counts.get("positions")
+            scope += f" ו-{positions} שינויי מיקום בארון." if type(positions) is int and positions > 0 else "."
+            out.summary += " " + scope
+            out.fact(scope, _ids(result))
+        else:
+            out.missing("ספירת השינויים חסרה בתוצאת הכלי; בדוק את רשימת השינויים בכרטיס לפני האישור.")
+        unplaced = [_text(name, 60) for name in _list(impact.get("unplaced")) if isinstance(name, str) and name]
+        if unplaced:
+            out.summary += " שים לב: " + ", ".join(unplaced) + " יישאר בלי מיקום."
+        return
     parts = []
     for key, label in (("servers", "שרתים"), ("pdus", "PDU"), ("outlets", "שקעים"), ("excluded", "החרגות")):
         count = counts.get(key)
@@ -1534,9 +1646,13 @@ async def answer(*, question: str, history: list[dict] | None, context: dict | N
     context = clean_context(context)
     intent = classify(question)
     target = _target(question, context)
-    action, clarification = _action_request(question)
+    action, clarification = _location_request(question)
+    guidance = _LOCATION_GUIDANCE
+    if action is None and clarification is None:
+        action, clarification = _action_request(question)
+        guidance = _ACTION_GUIDANCE
     if clarification:
-        out.summary = clarification + " " + _ACTION_GUIDANCE
+        out.summary = clarification + " " + guidance
     elif not tools and action is None:
         out.summary = "אין כרגע כלים זמינים לקריאת נתוני המעבדה, ולכן אין תשובה מבוססת נתונים."
     else:

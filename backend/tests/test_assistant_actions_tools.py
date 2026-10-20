@@ -196,7 +196,7 @@ def test_schema_is_strict_closed_and_lists_every_kind():
     assert "execute" not in SPEC.name and "confirm" not in SPEC.name
     assert schema["type"] == "object" and schema["additionalProperties"] is False and schema["required"] == ["kind"]
     assert set(schema["properties"]) == {"kind", "server", "pdu", "outlet", "rack", "restore_of", "then_console",
-                                         "reason"}
+                                         "reason", "target_server", "target_ports", "target_rack", "target_slot"}
     assert schema["properties"]["kind"]["enum"] == list(KIND_SPECS)
     assert "NEVER executes" in SPEC.description and "at most once per question" in SPEC.description
     (definition,) = engine.tool_definitions([SPEC])

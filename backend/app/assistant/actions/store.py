@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, func, select, update
 
 from ... import confirm
-from .contracts import (EVENTS, FINAL_STATUSES, KIND_SPECS, PHRASES, ActionError, Impact, ProposalRequest)
+from .contracts import (DATA_KINDS, EVENTS, FINAL_STATUSES, KIND_SPECS, PHRASES, ActionError, Impact,
+                        ProposalRequest)
 from .models import AssistantActionEvent, AssistantActionProposal
 
 # Lead security decision D8 supersedes the initial count-only retention contract.
@@ -21,6 +22,11 @@ EVENT_RETENTION_SECONDS = 365 * 86400
 _proposal_lock = asyncio.Lock()
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
 _REQUEST_FIELDS = frozenset(f.name for f in fields(ProposalRequest))
+_TEXT_FIELDS = ("server", "pdu", "rack", "restore_of", "reason", "target_server", "target_rack")
+_DATA_FIELDS = ("target_server", "target_ports", "target_rack", "target_slot")
+MAX_TARGET_PORTS = 8
+_PORT_NUMBER = re.compile(r"[0-9]{1,3}")
+_TITLE_FIELDS = ("server", "pdu", "outlet", "rack", "target_server")
 
 
 def _dump(value) -> str:
@@ -34,6 +40,51 @@ def _load(value, default):
         return default
 
 
+def _target_ports(value) -> list[dict]:
+    """[{"device": PDU/KVM id or exact name, "port": "<n>"}], 1..8 entries; the port number is normalised to text."""
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_TARGET_PORTS:
+        raise ActionError(400, "invalid", "Target ports must be a list of 1 to 8 ports")
+    ports = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"device", "port"}:
+            raise ActionError(400, "invalid", "Each target port needs a device and a port")
+        device, port = item["device"], item["port"]
+        if not isinstance(device, str) or not device.strip() or len(device) > 100 or CONTROL.search(device):
+            raise ActionError(400, "invalid", "Invalid target port device")
+        if type(port) is int:
+            port = str(port)
+        if not isinstance(port, str) or not _PORT_NUMBER.fullmatch(port.strip()) or int(port) < 1:
+            raise ActionError(400, "invalid", "A target port must be a number from 1 to 999")
+        entry = {"device": device.strip(), "port": str(int(port))}
+        if entry not in ports:
+            ports.append(entry)
+    return ports
+
+
+def _check_data_fields(kind: str, data: dict) -> None:
+    """Location fields belong to the location kinds, in exactly the combinations contracts.DATA_KINDS describes."""
+    if kind not in DATA_KINDS:
+        if any(data.get(name) is not None for name in _DATA_FIELDS):
+            raise ActionError(400, "invalid", "Location fields belong to location changes only")
+        return
+    if any(data.get(name) not in (None, "") for name in ("pdu", "outlet", "rack", "restore_of")):
+        raise ActionError(400, "invalid", "A location change takes a server and its new location only")
+    target = data.get("target_server") is not None
+    ports = data.get("target_ports") is not None
+    placement = data.get("target_rack") is not None or data.get("target_slot") is not None
+    if kind == "server_swap":
+        valid = target and not ports and not placement
+    elif kind == "server_move":
+        valid = target != ports and not (target and placement)
+    else:   # server_clear
+        valid = not (target or ports or placement)
+    if not valid:
+        raise ActionError(400, "invalid", {
+            "server_swap": "A swap needs target_server only",
+            "server_move": "A move needs either target_server or target_ports (rack and slot only with ports)",
+            "server_clear": "Clearing a server takes no target"}[kind])
+
+
 def validate_request(value) -> ProposalRequest:
     """Parse manually so rejected input, including accidental credentials, is never echoed."""
     if isinstance(value, ProposalRequest):
@@ -44,16 +95,23 @@ def validate_request(value) -> ProposalRequest:
     if not isinstance(kind, str) or kind not in KIND_SPECS:
         raise ActionError(400, "invalid", "Invalid action kind")
     data = dict(value)
-    for name in ("server", "pdu", "rack", "restore_of", "reason"):
+    for name in _TEXT_FIELDS:
         text = data.get(name, "" if name == "reason" else None)
         if text is None and name != "reason":
             continue
         if not isinstance(text, str) or len(text) > (200 if name == "reason" else 100) or CONTROL.search(text):
             raise ActionError(400, "invalid", "Invalid proposal text")
         data[name] = text.strip()
+        if name in ("target_server", "target_rack") and not data[name]:
+            data[name] = None
     outlet = data.get("outlet")
     if outlet is not None and (type(outlet) is not int or not 1 <= outlet <= 64):
         raise ActionError(400, "invalid", "Outlet must be an integer from 1 to 64")
+    slot = data.get("target_slot")
+    if slot is not None and (type(slot) is not int or not 1 <= slot <= 999):
+        raise ActionError(400, "invalid", "Target slot must be an integer from 1 to 999")
+    if data.get("target_ports") is not None:
+        data["target_ports"] = _target_ports(data["target_ports"])
     if "then_console" in data and type(data["then_console"]) is not bool:
         raise ActionError(400, "invalid", "Invalid console option")
     if data.get("then_console") and kind not in ("server_cycle", "outlet_cycle"):
@@ -63,6 +121,7 @@ def validate_request(value) -> ProposalRequest:
                 "rack": ("rack",), "batch": ("restore_of",)}.get(scope, ())
     if any(not data.get(name) for name in required):
         raise ActionError(400, "invalid", "The action target is required")
+    _check_data_fields(kind, data)
     return ProposalRequest(**data)
 
 
@@ -72,11 +131,21 @@ def owner_key(principal) -> str:
     return "shared:" + principal.username
 
 
+class _Blank(dict):
+    def __missing__(self, key):
+        return ""
+
+
 def _title(kind: str, request: dict) -> str:
-    values = {name: request.get(name) or "" for name in ("server", "pdu", "outlet", "rack")}
-    source_kind = "rack_shutdown" if values["rack"] else "lab_shutdown"
-    values["title"] = KIND_SPECS[source_kind].title_he.format(**values)
-    return KIND_SPECS[kind].title_he.format(**values)
+    """The Hebrew title from the KIND_SPECS template. Every placeholder always has a value (a missing field is
+    blank), so an old or partial row can never break listing the history."""
+    request = request if isinstance(request, dict) else {}
+    values = _Blank({name: "" if request.get(name) is None else str(request.get(name)) for name in _TITLE_FIELDS})
+    try:
+        values["title"] = KIND_SPECS["rack_shutdown" if values["rack"] else "lab_shutdown"].title_he.format_map(values)
+        return KIND_SPECS[kind].title_he.format_map(values)
+    except (KeyError, IndexError, ValueError, AttributeError, TypeError):
+        return str(kind)
 
 
 async def add_event(db, proposal_id, actor, event, detail: dict) -> None:
@@ -124,7 +193,8 @@ async def create(db, principal, req, impact: Impact, settings, now, conversation
         owner_key=owner_key(principal), created_by=principal.username, conversation_id=conversation_id,
         kind=req.kind, request_json=_dump(req.to_dict()), impact_json=_dump(impact.to_dict(with_pins=True)),
         phrase=phrase, status="ready" if req.kind == "open_console" else "pending", restore_of=req.restore_of,
-        progress_done=0, progress_total=len(impact.pdus) if spec.background else len(impact.targets),
+        progress_done=0, progress_total=(len(impact.changes) if req.kind in DATA_KINDS else
+                                       len(impact.pdus) if spec.background else len(impact.targets)),
         result_json=_dump({"targets": [], "pdus": [], "consoles": [c.to_dict() for c in impact.consoles],
                            "summary_he": "הקונסולות מוכנות לפתיחה."}) if req.kind == "open_console" else "",
         finished_at=now if req.kind == "open_console" else None, batch_down_json="[]")
