@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import confirm
+from .. import confirm, power_protection
 from ..config import get_settings
 from ..database import get_db
 from ..models import PduMaintenance, PduMaintenanceLog
@@ -22,7 +22,20 @@ LOG_KEEP = 500
 FAILURE_LIMIT = confirm.FAILURE_LIMIT
 FAILURE_WINDOW = confirm.FAILURE_WINDOW
 
+# Compatibility alias for existing callers/tests; _confirm reads the shared lock at call time.
 _confirm_lock = confirm.confirm_lock
+
+
+class MaintenanceConflict(Exception):
+    """The PDU is already in maintenance, or there is no maintenance state to restore."""
+
+
+class MaintenanceUnavailable(Exception):
+    """The live PDU status is unreachable or contains no usable outlet states."""
+
+
+class MaintenanceDrift(Exception):
+    """Compatibility exception; shutdown now leaves outlets outside the confirmed impact on."""
 
 
 def password_mode() -> str:
@@ -62,7 +75,7 @@ async def _confirm(request: Request, db: AsyncSession, device_id: str, password:
     """Verifies the re-entered password and returns the audit name; denials are logged, never the password."""
     async def denied(by: str):
         await _log(db, device_id, "denied", by, attempted)
-    return await confirm.verify(request, db, password, get_settings(), _confirm_lock, denied)
+    return await confirm.verify(request, db, password, get_settings(), confirm.confirm_lock, denied)
 
 
 async def _switch(dev, numbers: list[int], action: str) -> list[tuple[int, bool]]:
@@ -97,42 +110,97 @@ async def maintenance_list(db: AsyncSession = Depends(get_db)):
             "log": [_entry(row) for row in log]}
 
 
+async def shutdown_pdu(db: AsyncSession, device_id: str, by: str, reason: str, *,
+                       exclude: frozenset[int] = frozenset(), expected_on: frozenset[int] | None = None) -> dict:
+    """Enter maintenance after confirmation, switching only approved live-on outlets and keeping exclusions on."""
+    async with pdus.locked_pdu(device_id, db) as dev:
+        return await _shutdown_locked(db, device_id, dev, by, reason, exclude=exclude, expected_on=expected_on)
+
+
+async def _shutdown_locked(db: AsyncSession, device_id: str, dev, by: str, reason: str, *,
+                           exclude: frozenset[int] = frozenset(), expected_on: frozenset[int] | None = None) -> dict:
+    if await db.get(PduMaintenance, device_id, populate_existing=True):
+        raise MaintenanceConflict("PDU is already in maintenance mode")
+    status = await pdus._fetch_status(device_id, dev)  # live read, not the status cache
+    if not status.reachable: raise MaintenanceUnavailable(status.error or "PDU is unreachable")
+    if not any(o.state in ("on", "off") for o in status.outlets):
+        raise MaintenanceUnavailable("Device API returned no usable outlet states")
+    powered = [o.number for o in status.outlets if o.state == "on" and o.number not in exclude]
+    not_included = set(powered) - set(expected_on) if expected_on is not None else set()
+    powered = [n for n in powered if n not in not_included]
+    # Cycling/unknown outlets may still carry power; they are reported as failed, not switched or restored.
+    unknown = [o.number for o in status.outlets if o.state not in ("on", "off") and o.number not in exclude]
+    row = PduMaintenance(device_id=device_id, started_at=time.time(), started_by=by, reason=reason,
+                         outlets_off_json=json.dumps(powered), failed_json=json.dumps(unknown))
+    try:
+        db.add(row)
+        entry = await _log(db, device_id, "shutdown", by, reason)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise MaintenanceConflict("PDU is already in maintenance mode")
+    await _switch(dev, powered, "off")
+    still_on = await _not_in_state(device_id, dev, "off", powered)
+    pdus._cache.pop(device_id, None)
+    # Only a live verification counts as success; every attempted outlet stays in the restore list.
+    if still_on is not None: failed = still_on - exclude - not_included
+    else: failed = set(powered) | set(unknown)
+    row.failed_json = json.dumps(sorted(failed))
+    entry.ok, entry.failed = len(set(powered) - failed), len(failed)
+    await db.commit()
+    results = [{"outlet": n, "ok": n not in failed} for n in sorted(set(powered) | failed)]
+    return {"state": _state(row), "results": results,
+            "not_included": sorted(not_included), "protected": sorted(exclude)}
+
+
+async def restore_pdu(db: AsyncSession, device_id: str, by: str) -> dict:
+    """Restore exactly the saved outlets after the caller confirms, retaining failures for retry."""
+    async with pdus.locked_pdu(device_id, db) as dev:
+        return await _restore_locked(db, device_id, dev, by)
+
+
+async def _restore_locked(db: AsyncSession, device_id: str, dev, by: str) -> dict:
+    row = await db.get(PduMaintenance, device_id, populate_existing=True)
+    if not row: raise MaintenanceConflict("PDU is not in maintenance mode")
+    entry = await _log(db, device_id, "restore", by, row.reason)
+    await db.commit()
+    targets = json.loads(row.outlets_off_json or "[]")
+    await _switch(dev, targets, "on")
+    still_off = await _not_in_state(device_id, dev, "on", targets) if targets else set()
+    pdus._cache.pop(device_id, None)
+    # Without a successful verification read no outlet counts as restored.
+    failed = set(targets) if still_off is None else still_off & set(targets)
+    entry.ok, entry.failed = len(targets) - len(failed), len(failed)
+    if failed:
+        # Only the outlets still off remain to restore on the next attempt.
+        row.outlets_off_json = row.failed_json = json.dumps(sorted(failed))
+        state = _state(row)
+    else:
+        await db.delete(row)
+        state = None
+    await db.commit()
+    return {"state": state, "results": [{"outlet": n, "ok": n not in failed} for n in targets]}
+
+
 @router.post("/{device_id}/maintenance/shutdown")
 async def maintenance_shutdown(device_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     await pdus._get_pdu_or_404(device_id, db)
     _require_password_mode()
     password, reason = await _read_body(request, need_reason=True)
-    async with pdus.locked_pdu(device_id, db) as dev:
-        if await db.get(PduMaintenance, device_id, populate_existing=True):
-            raise HTTPException(409, "PDU is already in maintenance mode")
-        by = await _confirm(request, db, device_id, password, "shutdown")
-        status = await pdus._fetch_status(device_id, dev)  # live read, not the status cache
-        if not status.reachable: raise HTTPException(502, status.error or "PDU is unreachable")
-        if not any(o.state in ("on", "off") for o in status.outlets):
-            raise HTTPException(502, "Device API returned no usable outlet states")
-        powered = [o.number for o in status.outlets if o.state == "on"]
-        # Cycling/unknown outlets may still carry power; they are reported as failed, not switched or restored.
-        unknown = [o.number for o in status.outlets if o.state not in ("on", "off")]
-        row = PduMaintenance(device_id=device_id, started_at=time.time(), started_by=by, reason=reason,
-                             outlets_off_json=json.dumps(powered), failed_json=json.dumps(unknown))
-        try:
-            db.add(row)
-            entry = await _log(db, device_id, "shutdown", by, reason)
-            await db.commit()
-        except IntegrityError:
-            await db.rollback()
-            raise HTTPException(409, "PDU is already in maintenance mode")
-        switched = await _switch(dev, powered, "off")
-        still_on = await _not_in_state(device_id, dev, "off", powered)
-        pdus._cache.pop(device_id, None)
-        # A lost response may still have switched the outlet, so every outlet that was on stays in the restore list.
-        if still_on is not None: failed = still_on
-        else: failed = {n for n, ok in switched if not ok} | set(unknown)
-        row.failed_json = json.dumps(sorted(failed))
-        entry.ok, entry.failed = len(set(powered) - failed), len(failed)
-        await db.commit()
-        results = [{"outlet": n, "ok": n not in failed} for n in sorted(set(powered) | failed)]
-        return {"state": _state(row), "results": results}
+    try:
+        async with pdus.locked_pdu(device_id, db) as dev:
+            # Keep the existing conflict-before-confirm order and hold the same lock through switching.
+            if await db.get(PduMaintenance, device_id, populate_existing=True):
+                raise MaintenanceConflict("PDU is already in maintenance mode")
+            by = await _confirm(request, db, device_id, password, "shutdown")
+            protection = await power_protection.load(db, get_settings())
+            if protection.errors:
+                raise MaintenanceConflict("Protected outlets configuration is invalid")
+            return await _shutdown_locked(db, device_id, dev, by, reason, exclude=protection.for_pdu(device_id))
+    except (MaintenanceConflict, MaintenanceDrift) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except MaintenanceUnavailable as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @router.post("/{device_id}/maintenance/restore")
@@ -140,25 +208,11 @@ async def maintenance_restore(device_id: str, request: Request, db: AsyncSession
     await pdus._get_pdu_or_404(device_id, db)
     _require_password_mode()
     password, _ = await _read_body(request, need_reason=False)
-    async with pdus.locked_pdu(device_id, db) as dev:
-        row = await db.get(PduMaintenance, device_id, populate_existing=True)
-        if not row: raise HTTPException(409, "PDU is not in maintenance mode")
-        by = await _confirm(request, db, device_id, password, "restore")
-        entry = await _log(db, device_id, "restore", by, row.reason)
-        await db.commit()
-        targets = json.loads(row.outlets_off_json or "[]")
-        await _switch(dev, targets, "on")
-        still_off = await _not_in_state(device_id, dev, "on", targets) if targets else set()
-        pdus._cache.pop(device_id, None)
-        # Without a successful verification read no outlet counts as restored.
-        failed = set(targets) if still_off is None else still_off & set(targets)
-        entry.ok, entry.failed = len(targets) - len(failed), len(failed)
-        if failed:
-            # Only the outlets still off remain to restore on the next attempt.
-            row.outlets_off_json = row.failed_json = json.dumps(sorted(failed))
-            state = _state(row)
-        else:
-            await db.delete(row)
-            state = None
-        await db.commit()
-        return {"state": state, "results": [{"outlet": n, "ok": n not in failed} for n in targets]}
+    try:
+        async with pdus.locked_pdu(device_id, db) as dev:
+            if not await db.get(PduMaintenance, device_id, populate_existing=True):
+                raise MaintenanceConflict("PDU is not in maintenance mode")
+            by = await _confirm(request, db, device_id, password, "restore")
+            return await _restore_locked(db, device_id, dev, by)
+    except MaintenanceConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
