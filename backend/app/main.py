@@ -17,6 +17,8 @@ from .ping_monitor import monitor_loop
 from .alerts import alert_loop
 from .accounts import AccountAccess, bootstrap_admin, router as accounts_router
 from .assistant.router import router as assistant_router
+from .assistant.actions import runner as action_runner
+from .assistant.actions.router import router as assistant_actions_router
 from . import confirm, inventory_store
 from .config import get_settings
 from sqlalchemy import select
@@ -56,6 +58,7 @@ async def lifespan(app: FastAPI):
     from .engineers import bootstrap_engineers
     await bootstrap_engineers()
     await bootstrap_admin()
+    await action_runner.recover_interrupted(AsyncSessionLocal)
     warmup = asyncio.create_task(_warm_cache())
     monitor = asyncio.create_task(monitor_loop())
     alerts = asyncio.create_task(alert_loop())
@@ -153,6 +156,7 @@ app.include_router(inventory.router)
 app.include_router(monitoring.router)
 app.include_router(pxe.router)
 app.include_router(assistant_router)
+app.include_router(assistant_actions_router)
 app.include_router(accounts_router)
 from . import engineers
 app.include_router(engineers.router)

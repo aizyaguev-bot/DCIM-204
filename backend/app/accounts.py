@@ -86,8 +86,11 @@ def required_role(path, method):
     if path == "/api/users" or path.startswith("/api/users/"): return "Admin"
     if path.startswith("/api/kvms/") and any(part in path for part in ("/proxy", "/autologin", "/console-url", "/viewer")):
         return "Operator"
+    # Action previews include impact lists, so their reads require Operator as well as their writes.
+    if method == "GET" and re.fullmatch(r"/api/assistant/actions/config", path): return "Viewer"
+    if re.fullmatch(r"/api/assistant/actions(?:/.*)?", path): return "Operator"
     # Lab assistant: asking and resetting one's own conversation are Viewer writes; every other assistant write
-    # (work items) keeps the Operator default below, and its reads are Viewer like any GET.
+    # (work items) keeps the Operator default below, and its other reads are Viewer like any GET.
     if method == "POST" and re.fullmatch(r"/api/assistant/chat", path): return "Viewer"
     if method == "DELETE" and re.fullmatch(r"/api/assistant/conversations/[0-9a-f]{32}", path): return "Viewer"
     if method in ("GET", "HEAD", "OPTIONS"): return "Viewer"
