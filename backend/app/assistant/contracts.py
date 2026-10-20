@@ -68,6 +68,10 @@ class ToolContext:
     # Ids of action proposals created by tools in this request (actions/tools.py appends; the chat router returns
     # their public JSON as `action_proposals`). Only server code writes it; the model never supplies an id here.
     proposals: list[str] = field(default_factory=list, repr=False)
+    # Intent anchor for action proposals (ORCA-SEC-ACTIONS D2): this turn's own user text and validated page context
+    # ({"detail": ..., "rack": ...}). Set by the chat router; never taken from tool data or model output.
+    user_message: str = field(default="", repr=False)
+    page_context: dict = field(default_factory=dict, repr=False)
 
 
 ToolFunc = Callable[..., Awaitable[ToolResult]]   # async def tool(ctx: ToolContext, **args) -> ToolResult

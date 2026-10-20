@@ -41,7 +41,7 @@ class KindSpec:
     required_role: str        # Viewer | Operator | Admin (checked in the router, not only by the middleware)
     needs_password: bool      # confirm.verify with the user's own password (accounts) or the shared password
     needs_phrase: bool        # the user must type the exact proposal phrase
-    accounts_only: bool       # refused unless confirm.password_mode(settings) == "account"
+    accounts_only: bool       # refused unless confirm.password_mode(settings) == "account" (True for every kind: D1)
     background: bool          # runner.execute runs as a background task; the UI polls progress
     needs_protected: bool     # refused until POWER_PROTECTED_OUTLETS is configured ("none" acknowledges)
     title_he: str             # Hebrew title template; placeholders {server} {pdu} {outlet} {rack}
@@ -49,19 +49,19 @@ class KindSpec:
 
 KIND_SPECS: dict[str, KindSpec] = {s.kind: s for s in (
     # One server = every PDU outlet whose label resolves to that server (all feeds, e.g. PSU1 + PSU2).
-    KindSpec("server_off", "server", "off", "Operator", True, False, False, False, False, "כיבוי חשמל לשרת {server}"),
-    KindSpec("server_on", "server", "on", "Operator", True, False, False, False, False, "הדלקת חשמל לשרת {server}"),
-    KindSpec("server_cycle", "server", "cycle", "Operator", True, False, False, False, False,
+    KindSpec("server_off", "server", "off", "Operator", True, False, True, False, False, "כיבוי חשמל לשרת {server}"),
+    KindSpec("server_on", "server", "on", "Operator", True, False, True, False, False, "הדלקת חשמל לשרת {server}"),
+    KindSpec("server_cycle", "server", "cycle", "Operator", True, False, True, False, False,
              "ריסט חשמל לשרת {server}"),
     # One outlet by PDU + outlet number.
-    KindSpec("outlet_off", "outlet", "off", "Operator", True, False, False, False, False, "כיבוי שקע {outlet} ב-{pdu}"),
-    KindSpec("outlet_on", "outlet", "on", "Operator", True, False, False, False, False, "הדלקת שקע {outlet} ב-{pdu}"),
-    KindSpec("outlet_cycle", "outlet", "cycle", "Operator", True, False, False, False, False,
+    KindSpec("outlet_off", "outlet", "off", "Operator", True, False, True, False, False, "כיבוי שקע {outlet} ב-{pdu}"),
+    KindSpec("outlet_on", "outlet", "on", "Operator", True, False, True, False, False, "הדלקת שקע {outlet} ב-{pdu}"),
+    KindSpec("outlet_cycle", "outlet", "cycle", "Operator", True, False, True, False, False,
              "ריסט לשקע {outlet} ב-{pdu}"),
     # One PDU into / out of maintenance (same semantics and restore list as the Maintenance column).
-    KindSpec("pdu_shutdown", "pdu", "maintenance_off", "Operator", True, False, False, False, True,
+    KindSpec("pdu_shutdown", "pdu", "maintenance_off", "Operator", True, False, True, False, True,
              "השבתת {pdu} לתחזוקה"),
-    KindSpec("pdu_restore", "pdu", "maintenance_on", "Operator", True, False, False, False, False,
+    KindSpec("pdu_restore", "pdu", "maintenance_on", "Operator", True, False, True, False, False,
              "החזרת {pdu} מתחזוקה"),
     # Many PDUs: Admin + password + typed phrase, accounts mode only, background job, protected outlets kept on.
     KindSpec("rack_shutdown", "rack", "maintenance_off", "Admin", True, True, True, True, True,
@@ -72,7 +72,7 @@ KIND_SPECS: dict[str, KindSpec] = {s.kind: s for s in (
     KindSpec("batch_restore", "batch", "maintenance_on", "Admin", True, True, True, True, False,
              "החזרת חשמל אחרי {title}"),
     # No hardware change: a list of KVM console entries for a server; the user clicks to open one.
-    KindSpec("open_console", "server", "none", "Operator", False, False, False, False, False,
+    KindSpec("open_console", "server", "none", "Operator", False, False, True, False, False,
              "פתיחת KVM לשרת {server}"),
 )}
 
@@ -94,8 +94,8 @@ STATUSES = ("pending", "executing", "succeeded", "partial", "failed", "cancelled
 #             already shut down stay in maintenance and remain restorable.
 FINAL_STATUSES = ("succeeded", "partial", "failed", "cancelled", "expired", "refused", "interrupted", "ready")
 
-EVENTS = ("proposed", "denied", "confirmed", "refused", "executing", "target", "pdu", "finished", "cancelled",
-          "expired", "interrupted")
+EVENTS = ("proposed", "denied", "throttled", "confirmed", "refused", "executing", "target", "pdu", "aborted",
+          "finished", "cancelled", "expired", "interrupted")
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -213,8 +213,9 @@ class PduResult:
 class ActionError(Exception):
     """A refusal with an HTTP status and a fixed English message (the UI maps `code` to Hebrew).
 
-    code: disabled | forbidden | password_mode | phrase | not_found | expired | not_pending | busy | drift |
-          not_resolved | ambiguous | protected_unset | invalid | no_targets
+    code: disabled | forbidden | password_mode | phrase | password | throttled | not_found | expired | not_pending |
+          busy | drift | not_resolved | ambiguous | protected | protected_unset | invalid | no_targets
+    confirm.verify's 403 "Password is incorrect" -> code "password"; its 429 -> code "throttled" (keep Retry-After).
     """
 
     def __init__(self, status: int, code: str, message: str, details: list[str] | None = None):
