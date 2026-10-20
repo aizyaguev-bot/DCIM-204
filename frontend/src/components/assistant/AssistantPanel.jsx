@@ -6,7 +6,14 @@ import {
   charCountText, formatAsOf, sourceStatusLabel, knownRacks, shouldReloadStatus, ANSWER_MODES, DEFAULT_MAX_CHARS,
 } from "../../api/assistant";
 import { answerToSpeech, mergeTranscript } from "../../api/speech";
+import {
+  getConfig as getActionConfig, createProposal, getProposal, normalizeProposal, mergeProposal, isFinal, consoleTarget,
+  configBlockText, insertAfterId, proposalRefs,
+} from "../../api/assistantActions";
+import { actionPoller } from "../../api/assistantActionProgress";
 import AnswerView from "./AnswerView";
+import ActionProposalCard from "./ActionProposalCard";
+import ActionHistory from "./ActionHistory";
 import VoiceControls from "./VoiceControls";
 import DraftEditor from "./DraftEditor";
 import WorkItemsList from "./WorkItemsList";
@@ -17,6 +24,8 @@ import WorkItemsList from "./WorkItemsList";
 const OPEN_KEY = "dcim-assistant-open";
 const CONVERSATION_KEY = "dcim-assistant-conversation";
 const TABS = [["chat", "שיחה"], ["history", "שיחות קודמות"], ["work", "משימות עבודה"]];
+const ACTIONS_TAB = ["actions", "פעולות"];
+
 const EXAMPLES = ["מה נפל במעבדה?", "מה לבדוק קודם?", "אילו רכיבים מושפעים מתקלה במתג?", "איפה אפשר להוסיף שרת חדש?"];
 
 function readOpen() {
@@ -53,8 +62,10 @@ function ChatIcon() {
 
 const subtle = "rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 disabled:opacity-40";
 
-export default function AssistantPanel({ context, navigate, openDetail, devices = [] }) {
-  const { mode: accountMode, user } = useAccounts();
+// onOpenConsole(deviceId, port) is App's openKvmConsole: it must run inside a click handler and returns
+// "popup" | "inline" | "denied".
+export default function AssistantPanel({ context, navigate, openDetail, devices = [], onOpenConsole }) {
+  const { mode: accountMode, user, canOperate, canAdmin } = useAccounts();
   // The stored conversation id is keyed by username (SEC-AI-18); another account on this browser never loads it.
   const userKey = accountMode === "accounts" ? `user:${user?.username ?? ""}` : "legacy";
   const baseId = useId();
@@ -83,6 +94,12 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   const [savedKeys, setSavedKeys] = useState({});
   const [notice, setNotice] = useState(null);                 // {text, work?: true}
   const [workVersion, setWorkVersion] = useState(0);
+  // Assistant actions: every proposal shown anywhere in the panel, by id, always the newest server state.
+  const [actions, setActions] = useState({});
+  const [actionConfig, setActionConfig] = useState(undefined);   // undefined: not loaded, null: unavailable
+  const [tabCards, setTabCards] = useState([]);                  // proposals opened from the "פעולות" tab
+  const [actionsVersion, setActionsVersion] = useState(0);       // refreshKey for ActionHistory
+  const [actionDone, setActionDone] = useState(false);           // an action finished while the panel was closed
 
   const epochRef = useRef(0);          // bumped on new/other conversation, sign-out: late answers are dropped
   const controllerRef = useRef(null);  // the question in flight (Stop / close abort it)
@@ -101,6 +118,11 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   const tabRefs = useRef({});
   const wasOpen = useRef(open);
   const userRef = useRef(userKey);
+  const actionsRef = useRef(actions);   // the map as last written (updates arrive from many places)
+  const actionsEpoch = useRef(0);       // bumped on sign-out / another user: late action responses are dropped
+  const openRef = useRef(open);
+  openRef.current = open;
+  const actionConfigSeq = useRef(0);
 
   const maxChars = Number.isInteger(status?.limits?.max_chars) && status.limits.max_chars > 0 ? status.limits.max_chars : DEFAULT_MAX_CHARS;
   const notInstalled = statusError?.status === 404;
@@ -114,6 +136,11 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   const mergedKey = contextKey(merged);
   const contextOn = !!merged && mergedKey !== dismissedKey;
   const chip = contextOn ? contextLabel(merged, devices) : null;
+
+  const actionsTab = actionConfig?.enabled === true;
+  const tabs = actionsTab ? [...TABS, ACTIONS_TAB] : TABS;
+  const anyExecuting = Object.values(actions).some(p => p.status === "executing");
+  const actionBlock = configBlockText(actionConfig);
 
   const lastAnswer = [...messages].reverse().find(m => m.role === "assistant");
   const speakText = lastAnswer ? answerToSpeech(lastAnswer.answer) : "";
@@ -137,6 +164,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   useEffect(() => {
     if (userRef.current === userKey) return;
     userRef.current = userKey;
+    resetActions();
     resetLocal();
     setConversationId(readConversation(userKey));
     setHistory({ loading: false, error: null, list: null });
@@ -154,6 +182,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
       statusAtRef.current = null;
       setOpen(false); setDraft(null); setPending(null); setFailed(null); setMessages([]); setConversationId(null);
       setLoadedId(null); setStatus(undefined); setStatusError(null); setHistory({ loading: false, error: null, list: null });
+      resetActionsRef.current();
     };
     window.addEventListener("dcim-session-expired", onExpired);
     return () => window.removeEventListener("dcim-session-expired", onExpired);
@@ -169,7 +198,20 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   useEffect(() => { setExtraContext(null); }, [appKey]);
 
   // ---- abort an in-flight question when the panel unmounts (sign-out, page change in tests) ----
-  useEffect(() => () => { epochRef.current += 1; controllerRef.current?.abort(); }, []);
+  useEffect(() => () => { epochRef.current += 1; controllerRef.current?.abort(); actionsEpoch.current += 1; actionPoller?.stopAll?.(); }, []);
+
+  // ---- actions: config once per user (Viewer may read it), updates from the shared poller (ACT-9) ----
+  useEffect(() => {
+    if (open && actionConfig === undefined) loadActionConfig();
+  }, [open, actionConfig]);
+  useEffect(() => {
+    if (!actionPoller?.onAny) return undefined;
+    // The listener gets {id, proposal, polling, stopReason, failures, offlineSince}; only the proposal is kept here.
+    const off = actionPoller.onAny(state => { if (state?.proposal) updateRef.current(state.proposal); });
+    return typeof off === "function" ? off : undefined;
+  }, []);
+  useEffect(() => { if (open) setActionDone(false); }, [open]);
+  useEffect(() => { if (tab === "actions" && !actionsTab) setTab("chat"); }, [tab, actionsTab]);
 
   // ---- status, stored conversation ----
   useEffect(() => {
@@ -248,7 +290,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
     try {
       const data = await getConversation(id, { signal: sessionRef.current?.signal });
       if (epoch !== epochRef.current) return;
-      setMessages(normalizeMessages(data));
+      setMessages(withStoredProposals(data));
     } catch (err) {
       if (epoch !== epochRef.current) return;
       if (err.code === "aborted") setLoadedId(null);   // closed while loading: loaded again on the next open
@@ -271,6 +313,122 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
       if (seq === historySeq.current) setHistory(h => ({ ...h, loading: false, error: err.code === "aborted" ? null : err }));
     }
   }
+
+  // ---- assistant actions ----------------------------------------------------------------------------------
+  function resetActions() {
+    actionsEpoch.current += 1;
+    actionConfigSeq.current += 1;
+    actionPoller?.stopAll?.();
+    actionsRef.current = {};
+    setActions({}); setTabCards([]); setActionConfig(undefined); setActionDone(false);
+  }
+  const resetActionsRef = useRef(resetActions);
+  resetActionsRef.current = resetActions;
+
+  async function loadActionConfig() {
+    const seq = ++actionConfigSeq.current;
+    try {
+      const data = await getActionConfig({ signal: sessionRef.current?.signal });
+      if (seq === actionConfigSeq.current) setActionConfig(data && typeof data === "object" ? data : null);
+    } catch (err) {
+      // Closed while loading: read again on the next open. Older server (404) or any failure: no actions UI.
+      if (seq === actionConfigSeq.current) setActionConfig(err.code === "aborted" ? undefined : null);
+    }
+  }
+
+  // Merges one proposal (public JSON or normalized) into the map; stale responses never win (mergeProposal).
+  function updateProposal(raw, epoch = actionsEpoch.current) {
+    if (epoch !== actionsEpoch.current) return null;
+    const p = normalizeProposal(raw);
+    if (!p) return null;
+    const prev = actionsRef.current[p.id];
+    const next = mergeProposal(prev, p);
+    if (next === prev) return prev;
+    actionsRef.current = { ...actionsRef.current, [p.id]: next };
+    setActions(actionsRef.current);
+    if (prev?.status === "executing" && next.status !== "executing" && !openRef.current) setActionDone(true);
+    if (prev && prev.status !== next.status) setActionsVersion(v => v + 1);
+    return next;
+  }
+  const updateRef = useRef(updateProposal);
+  updateRef.current = updateProposal;
+
+  // After execute answered 200 (final) or 202 (running): the shared poller follows it from here.
+  function onActionExecuted(p) {
+    const next = updateProposal(p);
+    if (next) actionPoller?.update?.(next);
+    setActionsVersion(v => v + 1);
+  }
+
+  // A new proposal made from a card (restore, or the same request again) appears right after that card.
+  async function createFrom(source, request) {
+    const epoch = actionsEpoch.current;
+    const p = normalizeProposal(await createProposal(request));
+    if (!p || epoch !== actionsEpoch.current) return p;
+    updateProposal(p, epoch);
+    setMessages(list => {
+      const at = list.findIndex(m => m.proposalIds?.includes(source.id));
+      if (at < 0) return list;
+      const copy = list.slice();
+      copy[at] = { ...copy[at], proposalIds: insertAfterId(copy[at].proposalIds, source.id, p.id) };
+      return copy;
+    });
+    // From the "פעולות" tab (or a card no message shows): the new card is shown in that tab.
+    const inMessages = messages.some(m => m.proposalIds?.includes(source.id));
+    setTabCards(ids => (ids.includes(source.id) || !inMessages ? insertAfterId(ids, source.id, p.id) : ids));
+    setActionsVersion(v => v + 1);
+    return p;
+  }
+  const restoreAction = source => createFrom(source, { kind: "batch_restore", restore_of: source.id });
+  const reproposeAction = source => createFrom(source, source.request);
+
+  // Synchronous (inside the click): only an autologin URL of a KVM the site knows, matching the entry (SEC-ACT-18).
+  function openConsoleEntry(entry) {
+    if (!canOperate) return "denied";
+    const target = consoleTarget(entry, devices);
+    if (!target || !onOpenConsole) return "invalid";
+    const outcome = onOpenConsole(target.deviceId, target.port);
+    return ["popup", "inline", "denied"].includes(outcome) ? outcome : "popup";
+  }
+
+  // A history row was opened. Its results show inside the row (ActionHistory); a proposal that still waits for a
+  // decision (pending, or an open_console one) also gets its full card on top, so it can be confirmed or cancelled
+  // even when the conversation that created it is no longer on screen.
+  function selectFromHistory(proposal) {
+    const p = updateProposal(proposal) || normalizeProposal(proposal);
+    if (!p || (p.status !== "pending" && p.status !== "ready")) return;
+    setTabCards([p.id]);
+    // Read once more so the card starts from the current server state.
+    if (!isFinal(p.status)) {
+      const epoch = actionsEpoch.current;
+      getProposal(p.id).then(fresh => updateProposal(fresh, epoch)).catch(() => {});
+    }
+    requestAnimationFrame(() => document.getElementById(`${baseId}-panel-actions`)?.scrollTo?.({ top: 0 }));
+  }
+
+  // Stored messages: the proposals they refer to (if the server keeps them) are shown again and read once.
+  function withStoredProposals(data) {
+    const list = Array.isArray(data) ? data : Array.isArray(data?.messages) ? data.messages : [];
+    const rawMessages = list.filter(m => m && typeof m === "object" && !Array.isArray(m) && (m.role === "user" || m.role === "assistant"));
+    const epoch = actionsEpoch.current;
+    return normalizeMessages(data).map((m, i) => {
+      if (m.role !== "assistant") return m;
+      const { ids, proposals } = proposalRefs(rawMessages[i]?.action_proposals);
+      if (!ids.length) return m;
+      proposals.forEach(p => updateProposal(p, epoch));
+      for (const id of ids) {
+        const known = proposals.find(p => p.id === id);
+        if (known && isFinal(known.status)) continue;
+        getProposal(id).then(fresh => updateProposal(fresh, epoch)).catch(() => {});
+      }
+      return { ...m, proposalIds: ids };
+    });
+  }
+
+  const actionProps = {
+    config: actionConfig, canOperate, canAdmin, onUpdate: updateProposal, onExecuted: onActionExecuted,
+    onRestore: restoreAction, onRepropose: reproposeAction, onOpenConsole: openConsoleEntry,
+  };
 
   function startNew() {
     resetLocal();
@@ -316,7 +474,10 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
       const cid = typeof res?.conversation_id === "string" && res.conversation_id ? res.conversation_id : conversationRef.current;
       conversationRef.current = cid;
       setConversationId(cid); setLoadedId(cid);
+      const proposals = proposalRefs(res?.action_proposals).proposals;
+      proposals.forEach(p => updateProposal(p));
       setMessages(list => [...list, {
+        proposalIds: proposals.map(p => p.id),
         id: res?.message_id ? String(res.message_id) : `local-a-${Date.now()}`, role: "assistant",
         answer: normalizeAnswer(res?.answer), sources: normalizeSources(res?.sources),
         mode: ANSWER_MODES.includes(res?.mode) ? res.mode : null,
@@ -371,7 +532,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   }
 
   function onTabKey(e) {
-    const order = TABS.map(([id]) => id);
+    const order = tabs.map(([id]) => id);
     const at = order.indexOf(tab);
     // RTL: the next tab is on the left.
     const next = { ArrowLeft: at + 1, ArrowRight: at - 1, Home: 0, End: order.length - 1 }[e.key];
@@ -400,6 +561,8 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
           <span className="text-nv-300"><ChatIcon /></span>
           עוזר המעבדה
           {pending && <span className="h-2 w-2 rounded-full bg-nv-400 motion-safe:animate-pulse" role="img" aria-label="תשובה בהכנה" />}
+          {anyExecuting && <span className="h-2 w-2 rounded-full bg-amber-400 motion-safe:animate-pulse" role="img" aria-label="פעולה בביצוע" />}
+          {!anyExecuting && actionDone && <span className="h-2 w-2 rounded-full bg-emerald-400" role="img" aria-label="פעולה הסתיימה" />}
         </button>
       )}
 
@@ -448,11 +611,12 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
           )}
 
           <div role="tablist" aria-label="תצוגות העוזר" onKeyDown={onTabKey} className="flex border-b border-zinc-800 px-2">
-            {TABS.map(([id, label]) => (
+            {tabs.map(([id, label]) => (
               <button key={id} ref={el => { tabRefs.current[id] = el; }} type="button" role="tab" id={`${baseId}-tab-${id}`}
                 aria-selected={tab === id} aria-controls={`${baseId}-panel-${id}`} tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)}
                 className={`-mb-px border-b-2 px-3 py-2 text-xs ${tab === id ? "border-nv-400 font-semibold text-nv-300" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
                 {label}
+                {id === "actions" && anyExecuting && <><span aria-hidden="true" className="ms-1 text-amber-300">•</span><span className="sr-only"> (פעולה בביצוע)</span></>}
               </button>
             ))}
           </div>
@@ -520,7 +684,8 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
                 ) : (
                   <article key={m.id} data-message="" data-role="assistant" aria-label="תשובת העוזר" className="rounded border border-zinc-800 bg-zinc-900/60 p-3">
                     <AnswerView answer={m.answer} sources={m.sources} mode={m.mode} demoReason={m.demo_reason} messageId={m.id} devices={devices}
-                      onOpenLink={openLink} onCreateDraft={(d, key) => setDraft({ draft: d, key })} savedKeys={savedKeys} />
+                      onOpenLink={openLink} onCreateDraft={(d, key) => setDraft({ draft: d, key })} savedKeys={savedKeys}
+                      proposals={(m.proposalIds || []).map(id => actions[id]).filter(Boolean)} actionProps={actionProps} />
                     {(m.created_at || m.elapsed_ms != null) && (
                       <p className="mt-3 text-[10px] text-zinc-600">
                         {m.created_at && <bdi className="font-mono">{formatAsOf(m.created_at)}</bdi>}
@@ -626,6 +791,24 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
           {tab === "work" && (
             <div role="tabpanel" id={`${baseId}-panel-work`} aria-labelledby={`${baseId}-tab-work`} className="min-h-0 flex-1 overflow-y-auto p-4">
               <WorkItemsList refreshKey={workVersion} />
+            </div>
+          )}
+
+          {tab === "actions" && actionsTab && (
+            <div role="tabpanel" id={`${baseId}-panel-actions`} aria-labelledby={`${baseId}-tab-actions`} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+              {actionBlock && <p role="note" className="rounded border border-amber-800 bg-amber-950/30 p-2 text-xs text-amber-200">{actionBlock}</p>}
+              {tabCards.some(id => actions[id]) && (
+                <section aria-label="הצעה נבחרת" className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold text-zinc-100">הצעה נבחרת</h3>
+                    <button type="button" className={subtle} onClick={() => setTabCards([])}>הסתר</button>
+                  </div>
+                  <ul className="space-y-2">
+                    {tabCards.map(id => actions[id] && <li key={id}><ActionProposalCard proposal={actions[id]} devices={devices} {...actionProps} /></li>)}
+                  </ul>
+                </section>
+              )}
+              <ActionHistory devices={devices} onSelect={selectFromHistory} onRestore={restoreAction} onOpenConsole={openConsoleEntry} refreshKey={actionsVersion} />
             </div>
           )}
         </aside>

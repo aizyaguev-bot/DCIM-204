@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import ActionProposalCard from "./ActionProposalCard.jsx";
 import {
   answerModeBadge, bidiSegments, draftFromRecommendation, entityLink, formatAge, formatAsOf, priorityLabel, sourceStatusLabel,
 } from "../../api/assistant";
@@ -117,7 +118,10 @@ function Recommendation({ rec, index, messageId, drafts, sourceIndex, devices, o
   );
 }
 
-export default function AnswerView({ answer, sources = [], mode, demoReason, messageId, devices, onOpenLink, onCreateDraft, savedKeys = {} }) {
+// proposals: action proposals created for this answer (public JSON after normalizeProposal, kept current by the
+// panel); actionProps: the handlers and context every ActionProposalCard gets (see ActionProposalCard).
+export default function AnswerView({ answer, sources = [], mode, demoReason, messageId, devices, onOpenLink, onCreateDraft, savedKeys = {},
+  proposals = [], actionProps = {} }) {
   const sourceIndex = { byId: new Map(sources.map((s, i) => [s.id, i])), list: sources };
   const recTitles = new Set(answer.recommendations.map(r => r.title.trim()).filter(Boolean));
   const extraDrafts = answer.work_item_drafts.map((d, i) => ({ d, i })).filter(({ d }) => !recTitles.has(d.title.trim()));
@@ -131,6 +135,14 @@ export default function AnswerView({ answer, sources = [], mode, demoReason, mes
       {badge?.tone === "llm" && <p data-answer-mode="llm" className="rounded border border-nv-400/40 bg-nv-400/10 px-2 py-0.5 text-[11px] text-nv-300">
         <Bidi text={badge.text} /></p>}
       {answer.summary && <p className="whitespace-pre-line text-zinc-100"><Bidi text={answer.summary} /></p>}
+
+      {proposals.length > 0 && <section aria-labelledby={`${sourceDomId(messageId, "acts")}-h`}>
+        <SectionTitle id={`${sourceDomId(messageId, "acts")}-h`}>פעולות מוצעות</SectionTitle>
+        <p className="mb-1.5 text-[11px] text-zinc-400">כל פעולה רצה רק אחרי אישור בכרטיס שלה. הכרטיס מציג את ההשפעה כפי שהשרת חישב אותה.</p>
+        <ul className="space-y-2">
+          {proposals.map(p => <li key={p.id}><ActionProposalCard proposal={p} devices={devices} {...actionProps} /></li>)}
+        </ul>
+      </section>}
 
       {answer.facts.length > 0 && <section>
         <SectionTitle>עובדות</SectionTitle>

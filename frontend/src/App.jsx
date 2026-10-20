@@ -76,11 +76,12 @@ export default function App() {
   const [addOpen, setAddOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Returns "popup" | "inline" | "denied" (the assistant's console button shows it); other callers ignore it.
   function openKvmConsole(deviceId, portNumber) {
     setKvmOpenError("");
     if (!canOperate) {
       setKvmOpenError("פתיחת KVM דורשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.");
-      return;
+      return "denied";
     }
     const base = `/api/kvms/${encodeURIComponent(deviceId)}`;
     const url = `${base}/autologin?port=${encodeURIComponent(portNumber)}`;
@@ -88,6 +89,8 @@ export default function App() {
     // A blocked popup must still open a console without discarding app state.
     let popup = null;
     try { popup = window.open(url, "_blank"); } catch {}
+    // The console page must not be able to navigate this tab (SEC-ACT-18).
+    if (popup) { try { popup.opener = null; } catch {} }
     if (!popup) {
       setInlineConsole({ deviceId, port: portNumber, url,
         name: devices.find(device => device.id === deviceId)?.name || "KVM" });
@@ -106,6 +109,7 @@ export default function App() {
       }, 2000);
       kvmTimers.current.add(t);
     }
+    return popup ? "popup" : "inline";
   }
 
   useEffect(() => () => { for (const timer of kvmTimers.current) clearInterval(timer); }, []);
@@ -516,7 +520,7 @@ export default function App() {
       )}
 
       <WhatsNew version={version} onOpenChangelog={() => navigate("changelog")} />
-      <AssistantPanel context={{tab: mainTab, rack: new URLSearchParams(location.search).get("rack"), detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={navigate} openDetail={openDetail} devices={devices} />
+      <AssistantPanel context={{tab: mainTab, rack: new URLSearchParams(location.search).get("rack"), detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={navigate} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} />
       <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>
     </div>
   );
