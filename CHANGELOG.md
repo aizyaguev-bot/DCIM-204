@@ -2,7 +2,7 @@
 
 ---
 
-## Unreleased — Remote PXE install
+## v2.39.0 — 2026-10-20 — AI lab assistant and remote PXE install (off by default)
 
 ### Added
 - **Remote install** for Operator and Admin accounts. Choose a computer from its
@@ -87,6 +87,9 @@
   closes their consoles.
 
 ### Notes
+- The lab assistant runs in demo mode until an Anthropic API key
+  (`ASSISTANT_ANTHROPIC_API_KEY`) is set in the server's `.env` and the service
+  is restarted.
 - Remote install stays off until `PXE_ENABLED` is set. The default driver is
   simulated and does not open a KVM, switch a PDU outlet, or reboot a computer.
 - The live KVM regression tests in `backend/tests/test_kvm_regression.py` run
