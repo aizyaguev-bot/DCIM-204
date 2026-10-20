@@ -1,7 +1,9 @@
 """/api/assistant: questions about the lab, the asker's own conversations, the assistant status and team work items.
 
 Nothing here touches equipment. The engine (LLM or the clearly labelled demo responder) reads lab data only through
-read-only tools; the router's own writes are limited to the assistant tables. The router decides the answer mode
+read-only tools; the router's own writes are limited to the assistant tables. With ASSISTANT_ACTIONS_ENABLED the
+Operator tool `propose_action` may also store action proposals; they run only after the user confirms them through
+/api/assistant/actions, and the chat response lists them as `action_proposals`. The router decides the answer mode
 (SEC-AI-3 open site, SEC-AI-9 daily cap) before the engine runs. Message text and answers are never logged at INFO,
 error bodies are fixed strings, and no setting other than the model name and the public limits is ever returned.
 """
@@ -650,7 +652,41 @@ def _load_engine():
 
 
 def _load_tools(principal) -> list:
-    return list(importlib.import_module(".registry", __package__).tools_for(principal))
+    """The principal's tools; the action tool only when ASSISTANT_ACTIONS_ENABLED (registry reads these settings)."""
+    return list(importlib.import_module(".registry", __package__).tools_for(principal, get_settings()))
+
+
+def _action_store():
+    """actions/store.py, imported lazily: the chat keeps working when that module cannot be imported."""
+    return importlib.import_module(".actions.store", __package__)
+
+
+def _actions_enabled(settings) -> bool:
+    """Same rule as the registry: ASSISTANT_ACTIONS_ENABLED in accounts mode (fail closed)."""
+    try:
+        return importlib.import_module(".registry", __package__).actions_enabled(settings) is True
+    except Exception:   # unreadable flag or registry: off
+        return False
+
+
+async def _public_proposals(principal, settings, proposal_ids) -> list[dict]:
+    """Public JSON of the proposals created by tools in this request (ctx.proposals, written only by server code),
+    each loaded again with the owner check (store.get_for). Ids the model writes in its answer are never read.
+    Best effort: the answer is already stored, so a failure here logs the class name and returns what loaded."""
+    ids = [value for value in dict.fromkeys(proposal_ids or ()) if isinstance(value, str) and value]
+    if not ids or not _actions_enabled(settings):
+        return []
+    out: list[dict] = []
+    try:
+        store = _action_store()
+        async with AsyncSessionLocal() as db:
+            for proposal_id in ids[:10]:
+                row = await store.get_for(db, principal, proposal_id)
+                if row is not None:
+                    out.append(store.to_public(row, principal))
+    except Exception as exc:   # noqa: BLE001 - never echo internals
+        log.warning("assistant: action proposals could not be loaded (%s)", type(exc).__name__)
+    return out
 
 
 async def _admit(client: str, settings) -> tuple[str, str | None]:
@@ -670,12 +706,14 @@ async def _admit(client: str, settings) -> tuple[str, str | None]:
 
 
 async def _ask(principal, settings, mode: str, reason: str | None, message: str, history: list,
-               context: dict) -> dict:
+               context: dict, conversation_id: str | None = None) -> dict:
     # A router-decided demo answer is forced twice: by the engine's mode/demo_reason arguments and by a settings
     # view in which the LLM is off and no key exists (defence in depth; an engine answering "llm" anyway is refused).
     engine_settings = settings if mode == "llm" else DemoOnlySettings(settings, reason)
+    # Intent anchor (ORCA-SEC-ACTIONS D2): this turn's own cleaned question and validated page context only.
     ctx = ToolContext(principal=principal, session_factory=AsyncSessionLocal, settings=engine_settings,
-                      now=time.time(), project_root=PROJECT_ROOT)
+                      now=time.time(), project_root=PROJECT_ROOT, conversation_id=conversation_id,
+                      user_message=message, page_context=dict(context or {}))
     try:
         answer_question = _load_engine()
         tools = _load_tools(principal)
@@ -704,7 +742,7 @@ async def _ask(principal, settings, mode: str, reason: str | None, message: str,
         if "מצב הדגמה" not in answer["summary"]:
             answer["summary"] = f"{DEMO_LABEL}. {answer['summary']}".strip()
     return {"mode": result_mode, "answer": answer, "sources": sources, "usage": _usage(_field(result, "usage")),
-            "demo_reason": demo_reason}
+            "demo_reason": demo_reason, "proposals": list(ctx.proposals)}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -738,7 +776,7 @@ async def chat(request: Request):
     try:
         async with ratelimit.gate.slot(client, settings.assistant_concurrency):
             mode, reason = await _admit(client, settings)
-            outcome = await _ask(principal, settings, mode, reason, message, history, context)
+            outcome = await _ask(principal, settings, mode, reason, message, history, context, conversation_id)
     except ratelimit.RateLimited as limited:
         raise _rate_error(limited) from None
 
@@ -750,12 +788,13 @@ async def chat(request: Request):
                                           now=time.time())
     if stored is None:   # deleted while the question was being answered
         raise _fail(404, MSG_NO_CONVERSATION)
+    action_proposals = await _public_proposals(principal, settings, outcome.get("proposals"))
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    log.info("assistant: answered mode=%s sources=%d elapsed_ms=%d", outcome["mode"], len(outcome["sources"]),
-             elapsed_ms)
+    log.info("assistant: answered mode=%s sources=%d proposals=%d elapsed_ms=%d", outcome["mode"],
+             len(outcome["sources"]), len(action_proposals), elapsed_ms)
     response = {"conversation_id": stored[0], "message_id": stored[1], "mode": outcome["mode"],
                 "answer": outcome["answer"], "sources": outcome["sources"], "elapsed_ms": elapsed_ms,
-                "demo_reason": outcome["demo_reason"]}
+                "demo_reason": outcome["demo_reason"], "action_proposals": action_proposals}
     if outcome["usage"]:
         response["usage"] = outcome["usage"]
     return response

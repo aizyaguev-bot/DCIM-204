@@ -823,6 +823,10 @@ async def answer_question(*, question: str, history: list[dict], context: dict, 
     remaining = budget - (loop.time() - started)
     if remaining <= 0.5:
         raise asyncio.TimeoutError()
+    # The failed LLM answer is discarded, so action proposals its tool calls prepared are not returned with the demo
+    # answer (ACT-6; they stay pending until they expire); the demo responder may prepare its own with the same ctx.
+    if isinstance(getattr(ctx, "proposals", None), list):
+        ctx.proposals.clear()
     return await asyncio.wait_for(
         demo.answer(question=question, history=history, context=context, ctx=ctx, tools=tools, reason=reason),
         timeout=remaining)

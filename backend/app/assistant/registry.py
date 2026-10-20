@@ -3,18 +3,36 @@
 The tool modules are imported lazily and independently. A module that is missing or fails to import (for
 example while it is still being written) is logged and skipped, so the assistant keeps working with the tools
 that are available. Invalid tool declarations are skipped too (fail closed).
+
+Action tools (actions/tools.py: `propose_action`, which only prepares a proposal for the user to confirm) are added
+only when the settings handed in say ASSISTANT_ACTIONS_ENABLED=true and the site runs in accounts mode, and only for
+a signed-in Operator or Admin; no settings, or an unreadable flag, means off.
 """
 from __future__ import annotations
 
 import importlib
 import logging
 
+from .. import confirm
 from .contracts import ROLE_ORDER, Principal, ToolSpec
 
 log = logging.getLogger(__name__)
 
 # Order matters only for duplicate names (the first declaration wins).
 TOOL_MODULES = ("tools_status", "tools_layout", "analysis")
+# Loaded after the read-only modules, and only when actions_enabled(settings) is true.
+ACTION_TOOL_MODULES = ("actions.tools",)
+
+
+def actions_enabled(settings) -> bool:
+    """ASSISTANT_ACTIONS_ENABLED in accounts mode (ORCA-SEC-ACTIONS D1), read with getattr. Fail closed: anything
+    but a real True flag with confirm.password_mode == "account" (None settings, missing attributes) is off."""
+    try:
+        return (getattr(settings, "assistant_actions_enabled", False) is True
+                and getattr(settings, "accounts_enabled", False) is True
+                and confirm.password_mode(settings) == "account")
+    except Exception:  # noqa: BLE001 - an unreadable settings object means "off"
+        return False
 
 
 def _load(module_name: str) -> list:
@@ -45,11 +63,13 @@ def _valid(spec) -> bool:
             and isinstance(schema, dict) and schema.get("type") == "object")
 
 
-def all_tools() -> list[ToolSpec]:
-    """tools_status.TOOLS + tools_layout.TOOLS + analysis.TOOLS, skipping missing modules and invalid specs."""
+def all_tools(settings=None) -> list[ToolSpec]:
+    """tools_status.TOOLS + tools_layout.TOOLS + analysis.TOOLS (+ actions.tools.TOOLS when the settings enable
+    assistant actions), skipping missing modules and invalid specs."""
     result: list[ToolSpec] = []
     seen: set[str] = set()
-    for module_name in TOOL_MODULES:
+    modules = tuple(TOOL_MODULES) + (tuple(ACTION_TOOL_MODULES) if actions_enabled(settings) else ())
+    for module_name in modules:
         for spec in _load(module_name):
             if not _valid(spec):
                 log.warning("Skipping an invalid tool declaration in %s.", module_name)
@@ -62,9 +82,13 @@ def all_tools() -> list[ToolSpec]:
     return result
 
 
-def tools_for(principal: Principal) -> list[ToolSpec]:
-    """The tools this principal's role may call (a Viewer never receives an Operator tool)."""
-    return [spec for spec in all_tools() if principal.allows(spec.required_role)]
+def tools_for(principal: Principal, settings=None) -> list[ToolSpec]:
+    """The tools this principal's role may call (a Viewer never receives an Operator tool). Action tools are
+    included only when `settings` enables assistant actions in accounts mode (the chat router passes its settings)
+    and only for a signed-in Operator or Admin (never a legacy shared-password principal)."""
+    if principal.legacy or not principal.allows("Operator"):
+        settings = None   # no action tools
+    return [spec for spec in all_tools(settings) if principal.allows(spec.required_role)]
 
 
 def tool_names(tools: list[ToolSpec]) -> list[str]:
