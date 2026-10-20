@@ -9,6 +9,8 @@ from ..models import Device, PduMaintenance
 from ..pdu_locks import maintenance_lock
 from ..schemas import PduStatus, OutletState, PowerAction
 from ..routers.devices import get_creds
+from .. import power_protection
+from ..config import get_settings
 from drivers.raritan_pdu import RaritanPduDriver, safe_error
 
 router = APIRouter(prefix="/api/pdus", tags=["pdus"])
@@ -126,11 +128,26 @@ async def outlet_power(
     body: PowerAction,
     db: AsyncSession = Depends(get_db),
 ):
+    # Validate before any device contact (an unknown action used to reach the PDU first).
+    if body.action not in ("on", "off", "cycle"):
+        raise HTTPException(status_code=400, detail="Unknown action; use on, off or cycle")
+    if outlet_number < 1:
+        raise HTTPException(status_code=400, detail="Outlet numbers start at 1")
     # The maintenance check and the switch share the shutdown lock, so an "on" cannot slip in after a shutdown.
     async with locked_pdu(device_id, db) as dev:
+        if not dev.enabled:
+            raise HTTPException(status_code=409, detail="This PDU is disabled; enable it in Admin -> Devices first")
         if body.action in ("on", "cycle") and await db.get(PduMaintenance, device_id, populate_existing=True):
             raise HTTPException(status_code=409, detail="PDU is in maintenance mode; restore it from the Maintenance column first")
-        username, password = get_creds(dev)
+        if body.action in ("off", "cycle"):
+            # Outlets that feed the site itself (POWER_PROTECTED_OUTLETS) are never switched off from the UI either.
+            protection = await power_protection.load(db, get_settings())
+            if protection.is_protected(device_id, outlet_number):
+                raise HTTPException(status_code=409, detail="This outlet is protected (POWER_PROTECTED_OUTLETS); it cannot be switched off here")
+        try:
+            username, password = get_creds(dev)
+        except Exception:
+            raise HTTPException(status_code=502, detail="Stored PDU credentials could not be read; re-enter them in Admin -> Devices")
         driver = RaritanPduDriver(dev.ip, username, password)
         try:
             success = await driver.set_outlet_state(outlet_number, body.action)
