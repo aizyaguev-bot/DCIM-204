@@ -2,6 +2,33 @@
 
 ---
 
+## v2.39.4 — 2026-10-21 — Locations (move and swap servers) and Export CSV
+
+### Added
+- **Admin → Locations.** One row per server: rack, U slot, PDU outlets and KVM
+  port. **Move…** sends a server to another server's location (the two swap by
+  default; untick "Swap" to leave the other server unplaced) or to empty
+  outlets and ports, with an optional rack and U. Every move shows the exact
+  list of changes first (each port before → after, positions, servers left
+  unplaced) and applies only what was previewed; if anything changed in the
+  meantime, it asks you to preview again. Monitors and owners stay with the
+  server. **Clear location** removes a server from all its PDU outlets and KVM
+  ports and keeps its rack position.
+- **Admin → Connections** and an **Export CSV** button (also on Locations): every
+  server with rack, U slot, server address, owner, ping state, PDU outlets and
+  KVM ports, ready to send. Operator role and up, because it lists addresses.
+
+### Fixed
+- Editing labels on a PDU or KVM page can no longer wipe the device's other
+  saved labels when the page had not finished loading.
+- A cleared port keeps its default name even when the name came only from the
+  device itself.
+- Moving a server to new ports keeps its rack and U unless you choose new ones.
+- A move that fails half way puts everything back, and says so honestly if it
+  could not.
+
+---
+
 ## v2.39.3 — 2026-10-20 — Clear a mapping on the PDU–KVM page
 
 ### Added
