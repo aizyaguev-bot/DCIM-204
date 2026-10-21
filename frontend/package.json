@@ -12,6 +12,7 @@
     "test:qr": "node --test src/__tests__/qr.test.js",
     "test:locations": "node --test src/__tests__/locations.test.js",
     "test:connections": "node --test src/__tests__/connections.test.js",
+    "test:rack-rows": "node --test src/__tests__/rack-rows.test.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
