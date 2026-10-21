@@ -103,12 +103,12 @@ def read_layout(path, default):
         return default
 
 
-def save_layout(path, payload, expected, default):
+def save_layout(path, payload, expected, default, ensure_ascii=True):
     """If-Match is optional, so old kiosk pages keep saving; a stale revision leaves the file untouched."""
     with locked_file(path, LAYOUT_SAVE_FAILED):
         if expected and expected != revision(read_layout(path, default)):
             raise HTTPException(409, LAYOUT_CONFLICT)
-        write_json(path, payload)
+        write_json(path, payload, ensure_ascii=ensure_ascii)
     return revision(payload)
 
 
@@ -161,3 +161,80 @@ def replace_items(payload, expected):
                     record(item, "moved", location(old_rack, old), location(rack, item), "Edited in DCIM or 3D Twin")
         write_items(incoming)
         return incoming
+
+
+# ─── several layout stores in one step (server moves from the Digital Twin) ───────────────────────────────────────
+LAYOUT_NOT_RESTORED = ("The rack layout was only partly saved and could not be fully restored ({files}). "
+                       "Reload and check the rack positions.")
+
+
+def _put_back(path, raw):
+    """Restore a file's exact previous bytes (None: the file did not exist)."""
+    if raw is None:
+        path.unlink(missing_ok=True)
+        return
+    filename = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp", delete=False) as out:
+            filename = out.name
+            out.write(raw)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(filename, path)
+    finally:
+        if filename and os.path.exists(filename):
+            os.unlink(filename)
+
+
+def _holds_bytes(path, raw):
+    try:
+        return path.read_bytes() == raw
+    except FileNotFoundError:
+        return raw is None
+    except OSError:
+        return False
+
+
+def save_layouts(entries):
+    """Write several layout stores together or not at all. `entries`: [(name, path, payload, expected, default)].
+
+    Every file lock is taken first, always in one order (by path). Every If-Match revision is then checked before
+    anything is written: one stale or missing revision means nothing is written (409 / 428). If a write fails, each
+    file already written is put back to its exact previous bytes while the locks are still held, so no other writer
+    can see or save the half-written layout. Synchronous on purpose: nothing awaits while the locks are held."""
+    from contextlib import ExitStack
+    with ExitStack() as locks:
+        for _, path, *_ in sorted(entries, key=lambda e: str(e[1])):
+            locks.enter_context(locked_file(path, LAYOUT_SAVE_FAILED))
+        previous = {}
+        for name, path, _, expected, default in entries:
+            if not expected:
+                raise HTTPException(428, "Reload the rack layout before saving.")
+            if expected != revision(read_layout(path, default)):
+                raise HTTPException(409, LAYOUT_CONFLICT)
+            try:
+                previous[name] = path.read_bytes()
+            except FileNotFoundError:
+                previous[name] = None
+            except OSError as exc:
+                raise HTTPException(503, LAYOUT_SAVE_FAILED) from exc
+        written = []
+        try:
+            for name, path, payload, _, _ in entries:
+                written.append((name, path))
+                write_json(path, payload)
+        except BaseException as exc:
+            unrestored = []
+            for name, path in written:
+                try:
+                    _put_back(path, previous[name])
+                except Exception:
+                    pass
+                if not _holds_bytes(path, previous[name]):
+                    unrestored.append(name)
+            if not isinstance(exc, Exception):
+                raise
+            if unrestored:
+                raise HTTPException(503, LAYOUT_NOT_RESTORED.format(files=", ".join(unrestored))) from exc
+            raise HTTPException(503, LAYOUT_SAVE_FAILED) from exc
+    return {name: revision(payload) for name, _, payload, _, _ in entries}

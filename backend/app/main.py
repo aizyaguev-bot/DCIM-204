@@ -240,6 +240,27 @@ async def save_rack_overrides(payload: dict, response: Response, if_match: str |
     return _save_layout(_RACK_OVERRIDES_FILE, {}, payload, if_match, response)
 
 
+@app.put("/api/rack-layout")
+async def save_rack_layout(payload: dict):
+    """Move servers (Digital Twin Move / swap): rack_slots, rack_positions and rack_overrides change together or not
+    at all. Body: {"rack_slots": {"data": {...}, "if_match": "<ETag of GET /api/rack-slots>"}, "rack_positions": ...,
+    "rack_overrides": ...} (any non-empty subset). A stale revision is 409 and nothing is written; a failed write puts
+    back the files already written. Returns the new ETag of every store."""
+    stores = {"rack_slots": (_RACK_SLOTS_FILE, {}), "rack_positions": (_RACK_POSITIONS_FILE, {}),
+              "rack_overrides": (_RACK_OVERRIDES_FILE, {})}
+    entries = []
+    for name, part in payload.items():
+        if name not in stores:
+            raise HTTPException(422, f"Unknown rack layout store: {name}")
+        if not isinstance(part, dict) or not isinstance(part.get("data"), dict) or not isinstance(part.get("if_match"), str):
+            raise HTTPException(422, "Each rack layout store needs its data and the if_match revision from its GET.")
+        path, default = stores[name]
+        entries.append((name, path, part["data"], part["if_match"], default))
+    if not entries:
+        raise HTTPException(422, "Nothing to save.")
+    return {"ok": True, "revisions": inventory_store.save_layouts(entries)}
+
+
 @app.get("/api/opt-owners")
 async def get_opt_owners(db=Depends(get_db)):
     return await engineers.owner_map(db)
@@ -261,17 +282,15 @@ async def save_chillers(payload: dict, response: Response, if_match: str | None 
 _TWIN_DATA_FILE = TWIN_DIR / "lab-data.json"
 
 @app.get("/api/twin-data")
-async def get_twin_data():
-    """Digital twin inventory (lab-twin/lab-data.json)."""
-    try:
-        return json.loads(_TWIN_DATA_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+async def get_twin_data(response: Response):
+    """Digital twin inventory (lab-twin/lab-data.json), with an ETag for the twin's If-Match save."""
+    return _get_layout(_TWIN_DATA_FILE, {}, response)
 
 @app.put("/api/twin-data")
-async def save_twin_data(payload: dict):
-    """Save edits made inside the twin (items, shelves, rack mapping)."""
-    _TWIN_DATA_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+async def save_twin_data(payload: dict, response: Response, if_match: str | None = Header(default=None)):
+    """Save edits made inside the twin (items, shelves, rack mapping); a stale If-Match is refused with 409.
+    Hebrew stays readable in lab-data.json (ensure_ascii=False), as the file was always written."""
+    response.headers["ETag"] = inventory_store.save_layout(_TWIN_DATA_FILE, payload, if_match, {}, ensure_ascii=False)
     return {"ok": True}
 
 
