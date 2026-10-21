@@ -7,7 +7,6 @@ export default function KvmCard({ device, status, onOpen, onPortClick, onMarkFre
   const ports = status?.ports || [];
   const mappedCount = ports.filter(p => p.label?.trim() && !/^port\s*\d+$/i.test(p.label.trim())).length;
   const inUsePorts = ports.filter(p => p.in_use);
-  const isLx = device.model?.includes("LX");
   const state = deviceState(status);
 
   return (
@@ -36,17 +35,12 @@ export default function KvmCard({ device, status, onOpen, onPortClick, onMarkFre
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
           <span className="flex-1">In use — {inUsePorts.map(p => p.label || `P${p.number}`).join(", ")}</span>
           <button disabled={!canOperate} onClick={e => { e.stopPropagation(); onMarkFree && onMarkFree(); }}
-            title="Mark as free" aria-label="Mark KVM free"
+            title={canOperate ? "Mark as free" : "Requires the Operator or Admin role"} aria-label="Mark KVM free"
             className="w-6 h-6 inline-flex items-center justify-center rounded text-emerald-600 hover:text-emerald-300 hover:bg-emerald-500/10 transition leading-none">✕</button>
         </div>
       )}
       {status?.error && (
         <div role={state === "error" ? "alert" : undefined} className={`px-4 py-2 border-b text-xs ${state === "unavailable" ? "bg-zinc-800/40 border-zinc-700/60 text-zinc-400" : "bg-rose-500/10 border-rose-500/30 text-rose-300"}`}>⚠ {status.error}</div>
-      )}
-      {isLx && (
-        <div className="device-note">
-          LX II — viewer opens in a new tab
-        </div>
       )}
       <div className="px-4 py-3">
         {!canOperate && <p dir="rtl" className="text-xs text-amber-300 mb-3">לפתיחת קונסול KVM נדרשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.</p>}
@@ -74,7 +68,7 @@ function PortThumb({ port, onClick }) {
   const occupied = !!port.label && !/^port\s*\d+$/i.test(port.label);
   return (
     <button onClick={onClick} disabled={!canOperate}
-      className="kvm-port-tile" data-mapped={occupied} data-active={active}
+      className="kvm-port-tile" data-mapped={occupied} data-active={active} data-in-use={!!port.in_use}
       title={!canOperate ? "KVM console requires an Operator or Admin account" : `${port.label || `Port ${port.number}`} · ${port.in_use ? "In use" : port.status || "Unknown"}`}>
       <div className="absolute inset-0 flex items-center justify-center px-2 pb-2">
         {occupied ? (
