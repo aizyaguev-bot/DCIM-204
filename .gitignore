@@ -36,3 +36,6 @@ frontend/src/.t1-test-temp/
 
 # Local development-team activity and Codex reports
 .team/
+
+# SSH terminal private key and host pins (v2.41.0) — never commit
+backend/ssh/
