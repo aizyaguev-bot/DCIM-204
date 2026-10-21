@@ -4,7 +4,8 @@
 // BR1), and the typed phrase is checked in the dialog before anything is sent.
 //
 // Run order (outlet 1 of PDU 01 depends on it): BR6 viewer, BR4 lab off, BR5 restore, BR1 power on, BR2 reset with a
-// wrong then a right password, BR3 console popup and blocked-popup fallback, BR7 phone layout, BR9 summary.
+// wrong then a right password, BR3 console popup and blocked-popup fallback, BR7 phone layout, BR10 location change
+// (swap OPT21/OPT22: no password, one confirmation click, labels checked through GET /api/devices/), BR9 summary.
 // BR8 (flag off) runs instead of all of them when the fixture was started without ASSISTANT_ACTIONS_ENABLED=true.
 //
 //   ASSISTANT_ACTIONS_ENABLED=true POWER_PROTECTED_OUTLETS=pdu1:4 DCIM_PREVIEW_DIST=<built frontend> \
@@ -35,6 +36,7 @@ const Q = {
   reset: 'תעשה ריסט לשרת OPT11 ותפתח KVM',
   console: 'תפתח לי KVM של OPT11',
   off12: 'כבה את OPT12',
+  swap: 'תחליף בין OPT21 ל-OPT22',
 };
 const ALLOWED_WRITES = [
   /^POST \/api\/auth\/login$/,
@@ -506,6 +508,49 @@ async function br7Phone(browser) {
   }
 }
 
+// -- BR10: location change (data kind, no password, one confirmation click) -----------------------------------------
+async function deviceLabels(context, id) {
+  const list = await getJson(context, '/api/devices/');
+  return (list.find(device => device.id === id) || {}).labels || {};
+}
+
+async function br10Location(browser) {
+  const s = await session(browser, {width: 1440, height: 1000, user: 'operator'});
+  try {
+    await openPanel(s.page);
+    let made;
+    await check('BR10 location: "תחליף בין OPT21 ל-OPT22" lists the label changes, needs no password, writes nothing yet', async () => {
+      const before = await deviceLabels(s.context, 'pdu2');
+      made = await proposalCard(s.page, Q.swap, 'server_swap');
+      assert.equal(made.proposal.needs_password, false);
+      assert.equal(made.proposal.phrase, null);
+      const text = await made.card.innerText();
+      for (const part of [/OPT21/, /OPT22/, /PDU 02/, /ללא סיסמה/]) assert.match(text, part);
+      assert.deepEqual(await deviceLabels(s.context, 'pdu2'), before, 'the preview changed labels');
+      await rtlAndNames(made.card, 'BR10 location card', ['OPT21', 'OPT22']);
+      await noHorizontalOverflow(s.page, 'BR10 card');
+    });
+    await check('BR10 location: the dialog has no password field and "אשר שינוי" applies the swap once', async () => {
+      const dialog = await openDialog(s.page, made.card);
+      assert.equal(await dialog.locator('input[type="password"]').count(), 0, 'a location change asked for a password');
+      await rtlAndNames(dialog, 'BR10 location dialog', ['OPT21', 'OPT22']);
+      const executed = executeResponse(s.page);
+      await dialog.getByRole('button', {name: 'אשר שינוי'}).click();
+      assert.equal((await executed).status(), 200);
+      await dialog.waitFor({state: 'detached'});
+      await made.card.getByText('בוצע', {exact: true}).first().waitFor();
+      const labels = await deviceLabels(s.context, 'pdu2');
+      assert.equal(labels['1'], 'OPT22');
+      assert.equal(labels['2'], 'OPT21');
+      assert.equal((await getProposal(s.context, made.id)).status, 'succeeded');
+      await shot(s.page, 'br10-location');
+    });
+    clean(s, 'BR10 location');
+  } finally {
+    await s.context.close();
+  }
+}
+
 // -- BR8: flag off -------------------------------------------------------------------------------------------------
 async function br8FlagOff(browser) {
   const s = await session(browser, {width: 1440, height: 1000, user: 'admin'});
@@ -518,6 +563,10 @@ async function br8FlagOff(browser) {
         assert.match(await answer.innerText(), /כבויות|מושבתות/);
       });
     }
+    await check('BR8 flag off: a location command shows no card either', async () => {
+      const answer = await askQuestion(s.page, Q.swap);
+      assert.equal(await cardsIn(answer).count(), 0);
+    });
     await check('BR8 flag off: no write reached /api/assistant/actions', async () => {
       assert.ok(!s.log.writes.some(line => line.includes(ACTIONS)), s.log.writes.join(', '));
     });
@@ -545,7 +594,7 @@ async function actionsEnabled(browser) {
     if (expectMode === 'on') assert.ok(enabled, 'the fixture runs with assistant actions off (expected on)');
     if (expectMode === 'off') assert.ok(!enabled, 'the fixture runs with assistant actions on (expected off)');
     const runs = enabled
-      ? [br6Viewer, br4LabOff, br5Restore, br1to3Operator, br3BlockedPopup, br7Phone]
+      ? [br6Viewer, br4LabOff, br5Restore, br1to3Operator, br3BlockedPopup, br7Phone, br10Location]
       : [br8FlagOff];
     for (const run of runs) {
       try { await run(browser, state); } catch (e) { problems.push(`${run.name}: ${e.message.split('\n')[0]}`); }

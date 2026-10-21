@@ -69,6 +69,11 @@ ROLE_DENIED = "Your role does not allow this action"
 CSRF_DENIED = "Refresh the page and retry (invalid CSRF token)"
 DRIFT = "The situation changed; review the action again"
 PHRASE_ATTEMPT = "ZZ OFF 7731"          # a distinctive wrong phrase: must never be stored or echoed
+LOCATION_SWAP = {"kind": "server_swap", "server": "OPT12", "target_server": "OPT13"}
+LOCATION_CLEAR = {"kind": "server_clear", "server": "OPT13"}
+PLANNER_FUNCTIONS = ("plan_move", "apply_move", "plan_clear", "apply_clear")
+# Rack layout used by the location scenarios: OPT12 at U10 and OPT13 at U12 of R1 (both on PDU 01), OPT41 at U3 of R2.
+SLOTS = {"R1": {"opt12": 10, "opt13": 12}, "R2": {"opt41": 3}}
 
 USERS = (("viewer", "Viewer"), ("operator", "Operator"), ("operator2", "Operator"), ("admin", "Admin"),
          ("admin2", "Admin"), ("changeme", "Operator"))
@@ -205,7 +210,7 @@ async def _environment(tmp_path, monkeypatch, **overrides):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     settings = make_settings(**{**BASE_SETTINGS, **overrides})
     env = SimpleNamespace(sessions=sessions, settings=settings, fleet=Fleet(), sleeps=[], sleep_gate=None,
-                          responses=[], tokens=[], app=None)
+                          responses=[], tokens=[], app=None, layout_dir=None)
     tools = _optional("app.assistant.actions.tools")
     # Every application module that imported get_settings gets these settings (pdus.py reads the protected outlets,
     # for example), except crypto, which keeps the real key so the seeded device credentials decrypt.
@@ -236,6 +241,10 @@ async def _environment(tmp_path, monkeypatch, **overrides):
     monkeypatch.setattr(ratelimit, "gate", ratelimit.Gate())
     monkeypatch.setattr(assistant_router, "TIMEOUT_GRACE_SECONDS", 0.0)
     monkeypatch.setattr(pdus_module, "RaritanPduDriver", env.fleet)
+    # The Locations planner reads and writes the rack layout files next to the backend: always a temporary folder here.
+    env.layout_dir = tmp_path / "layouts"
+    env.layout_dir.mkdir()
+    monkeypatch.setattr(devices, "_BACKEND_DIR", env.layout_dir)
 
     # S6: the runner's waits (cycle off-time, restore stagger) go through a recording sleep.
     async def recorded_sleep(seconds):
@@ -595,7 +604,7 @@ async def test_b1_viewer_cannot_propose_list_execute_or_cancel(env):
         cfg = await c.get(f"{B}/config")
         assert cfg.status_code == 200 and cfg.json()["enabled"] is True and cfg.json().get("can_propose") is False
         for request in ({"kind": "server_off", "server": "OPT12"}, {"kind": "lab_shutdown"},
-                        {"kind": "open_console", "server": "OPT11"}):
+                        {"kind": "open_console", "server": "OPT11"}, LOCATION_SWAP, LOCATION_CLEAR):
             expect_error(await propose(c, **request), 403, detail=ROLE_DENIED)
         for r in (await c.get(f"{B}/proposals"), await c.get(f"{B}/proposals/{p['id']}"),
                   await execute(c, p["id"]), await cancel(c, p["id"])):
@@ -662,7 +671,8 @@ async def test_b5_b6_without_accounts_every_action_route_is_refused(legacy_env):
         assert cfg.status_code == 200, cfg.text
         assert cfg.json()["password_mode"] == mode and cfg.json().get("can_propose") is False
         for request in ({"kind": "server_off", "server": "OPT12"}, {"kind": "open_console", "server": "OPT11"},
-                        {"kind": "lab_shutdown"}, {"kind": "pdu_shutdown", "pdu": "pdu3"}):
+                        {"kind": "lab_shutdown"}, {"kind": "pdu_shutdown", "pdu": "pdu3"}, LOCATION_SWAP,
+                        LOCATION_CLEAR):
             expect_error(await propose(c, **request), 403, "password_mode")
         unknown = secrets.token_hex(16)
         for r in (await c.get(f"{B}/proposals"), await c.get(f"{B}/proposals/{unknown}"), await cancel(c, unknown)):
@@ -1904,3 +1914,218 @@ async def test_m2b_existing_endpoints_never_switch_a_protected_outlet(env):
         assert r.status_code == 200, r.text
         assert 4 not in r.json()["state"]["outlets_off"]
     assert not any(call[:2] == ("pdu1", 4) for call in env.fleet.calls) and env.fleet["pdu1"].states[4] == "on"
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# N. Location changes (server_swap / server_move / server_clear): data kinds, no password (D9), the real Locations
+#    planner of routers/devices.py, never a PDU/KVM contact and never a power change
+# ---------------------------------------------------------------------------------------------------------------
+@pytest.fixture
+def real_planner():
+    missing = [name for name in PLANNER_FUNCTIONS if not callable(getattr(devices, name, None))]
+    if missing:
+        pytest.skip("routers/devices.py has no " + ", ".join(missing) + " yet (ACT-12)")
+
+
+def seed_layout(env, slots=SLOTS):
+    (env.layout_dir / "rack_slots.json").write_text(json.dumps(slots), encoding="utf-8")
+
+
+def read_layout(env, name="rack_slots.json"):
+    path = env.layout_dir / name
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+async def labels_of(env, device_id):
+    async with env.sessions() as db:
+        return json.loads((await db.get(Device, device_id, populate_existing=True)).labels_json or "{}")
+
+
+def changes_of(public):
+    return sorted((c["device_id"], c["port"], c["before"], c["after"]) for c in public["impact"]["changes"])
+
+
+def positions_of(public, key="impact"):
+    rows = public[key]["positions"]
+    return {row["server"]: ((row["before"]["rack"], row["before"]["slot"]), (row["after"]["rack"], row["after"]["slot"]))
+            for row in rows}
+
+
+async def confirm_data(c, proposal_id, body=None):
+    return await c.post(f"{B}/proposals/{proposal_id}/execute", json={} if body is None else body)
+
+
+SWAP_CHANGES = sorted([("kvm1", "2", "OPT12", "OPT13"), ("kvm2", "3", "OPT12", "OPT13"),
+                       ("pdu1", "2", "OPT12", "OPT13"), ("pdu1", "3", "OPT13", "OPT12")])
+
+
+@pytest.mark.parametrize("body", [
+    {"kind": "server_swap", "server": "OPT12"},
+    {"kind": "server_swap", "server": "OPT12", "target_ports": [{"device": "pdu3", "port": "4"}]},
+    {"kind": "server_move", "server": "OPT12", "target_server": "OPT13",
+     "target_ports": [{"device": "pdu3", "port": "4"}]},
+    {"kind": "server_move", "server": "OPT12", "target_server": "OPT13", "target_slot": 3},
+    {"kind": "server_move", "server": "OPT12"},
+    {"kind": "server_move", "server": "OPT12", "target_ports": [{"device": "pdu3", "port": str(n)} for n in range(1, 10)]},
+    {"kind": "server_clear", "server": "OPT12", "target_server": "OPT13"},
+    {"kind": "server_off", "server": "OPT12", "target_server": "OPT13"},
+    {"kind": "server_swap", "server": "OPT12", "target_server": "OPT13", "pdu": "pdu1"},
+    {"kind": "server_swap", "server": "OPT12", "target_server": "OPT13‮"},
+], ids=["swap-no-target", "swap-with-ports", "move-target-and-ports", "move-target-and-slot", "move-no-target",
+        "move-nine-ports", "clear-with-target", "power-kind-with-target", "swap-with-pdu", "bidi-target"])
+async def test_n0_location_requests_are_validated_before_anything_is_planned(env, body):
+    async with user(env, "operator") as c:
+        r = await c.post(f"{B}/proposals", json=body)
+    expect_error(r, 400, "invalid")
+    assert await count(env, Proposal) == 0 and env.fleet.created == 0
+
+
+async def test_n1_swap_previews_every_change_and_runs_on_one_click_without_a_password(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        r = await propose(c, **LOCATION_SWAP)
+        assert r.status_code == 201, r.text
+        p = r.json()
+        assert (p["kind"], p["status"], p["needs_password"], p["phrase"], p["background"]) == \
+               ("server_swap", "pending", False, None, False)
+        assert p["can_execute"] is True and "pins" not in p["impact"]
+        assert changes_of(p) == SWAP_CHANGES
+        assert positions_of(p) == {"OPT12": (("R1", 10), ("R1", 12)), "OPT13": (("R1", 12), ("R1", 10))}
+        assert p["impact"]["unplaced"] == []
+        assert (await labels_of(env, "pdu1")) == LABELS["pdu1"] and read_layout(env) == SLOTS   # the preview wrote nothing
+        r = await confirm_data(c, p["id"])
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "succeeded"
+        expect_error(await confirm_data(c, p["id"]), 409, "not_pending")
+    assert (await labels_of(env, "pdu1"))["2"] == "OPT13" and (await labels_of(env, "pdu1"))["3"] == "OPT12"
+    assert (await labels_of(env, "kvm1"))["2"] == "OPT13" and (await labels_of(env, "kvm2"))["3"] == "OPT13"
+    assert read_layout(env)["R1"] == {"opt13": 10, "opt12": 12}
+    in_order(names(await events(env, p["id"])), ["proposed", "confirmed", "finished"])
+    assert env.fleet.created == 0 and env.fleet.calls == [] and await throttle_attempts(env) == 0
+    no_secrets(r.text)
+
+
+async def test_n1b_two_concurrent_confirmations_swap_once(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        p = await created(propose(c, **LOCATION_SWAP))
+        first, second = await asyncio.gather(confirm_data(c, p["id"]), confirm_data(c, p["id"]))
+    assert sorted([first.status_code, second.status_code]) == [200, 409], (first.text, second.text)
+    assert (await labels_of(env, "pdu1"))["2"] == "OPT13"           # swapped exactly once, never swapped back
+    assert read_layout(env)["R1"] == {"opt13": 10, "opt12": 12}
+
+
+async def test_n1c_a_location_confirmation_body_is_still_allowlisted(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        p = await created(propose(c, **LOCATION_SWAP))
+        for extra in ({"target_server": "OPT31"}, {"changes": []}, {"kind": "server_clear"}):
+            expect_error(await confirm_data(c, p["id"], extra), 400, "invalid")
+        assert (await get(c, p["id"]))["status"] == "pending"
+        assert (await labels_of(env, "pdu1")) == LABELS["pdu1"]
+
+
+async def test_n2_move_to_empty_ports_with_a_new_rack_slot(env, real_planner):
+    seed_layout(env)
+    request = {"kind": "server_move", "server": "OPT13", "target_ports": [{"device": "PDU 03", "port": "4"}],
+               "target_rack": "R2", "target_slot": 5}
+    async with user(env, "operator") as c:
+        p = await created(propose(c, **request))
+        assert changes_of(p) == [("pdu1", "3", "OPT13", "Outlet 3"), ("pdu3", "4", None, "OPT13")]
+        assert positions_of(p) == {"OPT13": (("R1", 12), ("R2", 5))}
+        r = await confirm_data(c, p["id"])
+        assert r.status_code == 200 and r.json()["status"] == "succeeded", r.text
+    assert (await labels_of(env, "pdu1"))["3"] == "Outlet 3" and (await labels_of(env, "pdu3"))["4"] == "OPT13"
+    assert read_layout(env)["R2"]["opt13"] == 5 and read_layout(env, "rack_overrides.json").get("opt13") == "R2"
+    assert env.fleet.created == 0 and env.fleet.calls == []
+
+
+async def test_n3_a_port_used_by_another_server_is_refused_never_swapped(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        body = expect_error(await propose(c, kind="server_move", server="OPT13",
+                                          target_ports=[{"device": "pdu3", "port": "1"}]), 409)
+    assert "OPT31" in body["detail"]
+    assert await count(env, Proposal) == 0 and (await labels_of(env, "pdu3")) == LABELS["pdu3"]
+    assert read_layout(env) == SLOTS
+
+
+async def test_n4_taking_another_servers_place_without_swap_warns_who_is_left_unplaced(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        p = await created(propose(c, kind="server_move", server="OPT12", target_server="OPT13"))
+    assert p["impact"]["unplaced"] == ["OPT13"]
+    assert any("OPT13" in text for text in p["impact"]["warnings_he"]), p["impact"]["warnings_he"]
+    assert ("pdu1", "2", "OPT12", "Outlet 2") in changes_of(p) and ("pdu1", "3", "OPT13", "OPT12") in changes_of(p)
+    assert (await labels_of(env, "pdu1")) == LABELS["pdu1"] and read_layout(env) == SLOTS
+
+
+async def test_n5_clear_resets_the_port_names_and_keeps_the_rack_position(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        p = await created(propose(c, **LOCATION_CLEAR))
+        assert changes_of(p) == [("pdu1", "3", "OPT13", "Outlet 3")]
+        assert positions_of(p) == {"OPT13": (("R1", 12), ("R1", 12))}
+        assert any("נשמר" in text for text in p["impact"]["warnings_he"]), p["impact"]["warnings_he"]
+        r = await confirm_data(c, p["id"])
+        assert r.status_code == 200 and r.json()["status"] == "succeeded", r.text
+    assert (await labels_of(env, "pdu1"))["3"] == "Outlet 3" and read_layout(env) == SLOTS
+    assert env.fleet.created == 0 and env.fleet.calls == []
+
+
+async def test_n6_any_change_after_the_preview_is_drift_and_nothing_is_written(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        swap = await created(propose(c, **LOCATION_SWAP))
+        clear = await created(propose(c, kind="server_clear", server="OPT12"))
+        r = await c.patch("/api/devices/pdu1/labels", json={**LABELS["pdu1"], "3": "OPT99"},
+                          headers={"If-Match": inventory_store.revision(LABELS["pdu1"])})
+        assert r.status_code == 200, r.text
+        await expect_drift(env, c, swap["id"])
+        assert (await labels_of(env, "pdu1"))["2"] == "OPT12" and read_layout(env) == SLOTS
+        seed_layout(env, {"R1": {"opt12": 15, "opt13": 12}, "R2": {"opt41": 3}})   # someone moved OPT12 meanwhile
+        await expect_drift(env, c, clear["id"])
+        assert (await labels_of(env, "pdu1"))["2"] == "OPT12"
+    assert env.fleet.created == 0
+
+
+async def test_n7_owner_role_and_mode_rules_apply_to_location_changes(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        p = await created(propose(c, **LOCATION_SWAP))
+    async with user(env, "operator2") as other:
+        expect_error(await confirm_data(other, p["id"]), 404, "not_found")
+    async with user(env, "viewer") as viewer:
+        expect_error(await confirm_data(viewer, p["id"]), 403, detail=ROLE_DENIED)
+    env.settings.assistant_actions_enabled = False
+    async with user(env, "operator") as c:
+        expect_error(await confirm_data(c, p["id"]), 403, "disabled")
+    env.settings.assistant_actions_enabled = True
+    assert (await row(env, p["id"])).status == "pending" and (await labels_of(env, "pdu1")) == LABELS["pdu1"]
+
+
+async def test_n8_unknown_servers_are_refused_with_candidates(env, real_planner):
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        expect_error(await propose(c, kind="server_swap", server="OPT12", target_server="OPT99"), 404, "not_resolved")
+        expect_error(await propose(c, kind="server_clear", server="OPT98"), 404, "not_resolved")
+        expect_error(await propose(c, kind="server_swap", server="OPT12", target_server="opt12"), 400)
+    assert await count(env, Proposal) == 0
+
+
+async def test_n9_chat_prepares_location_cards_and_changes_nothing_until_confirmed(env, real_planner):
+    tools_module()
+    seed_layout(env)
+    async with user(env, "operator") as c:
+        r = await chat(c, "תחליף בין OPT12 ל-OPT13")
+        assert r.status_code == 200, r.text
+        cards = r.json()["action_proposals"]
+        assert [(x["kind"], x["needs_password"], x["request"]["target_server"]) for x in cards] == \
+               [("server_swap", False, "OPT13")]
+        assert changes_of(cards[0]) == SWAP_CHANGES
+        r = await chat(c, "תנקה את OPT13")
+        assert [x["kind"] for x in r.json()["action_proposals"]] == ["server_clear"]
+        r = await chat(c, "תחליף בין OPT12 ל-OPT31?")
+        assert r.json()["action_proposals"] == []                   # a question never prepares a change
+    assert (await labels_of(env, "pdu1")) == LABELS["pdu1"] and read_layout(env) == SLOTS
+    assert await count(env, Proposal) == 2 and env.fleet.created == 0
