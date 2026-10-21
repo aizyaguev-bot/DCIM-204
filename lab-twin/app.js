@@ -44,6 +44,7 @@
     live: { connected: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
     attention: [], attnFilter: LS.get('attnFilter', 'all'), attnDockCollapsed: LS.get('attnDockCollapsed', false), attnDockAll: false, detailStale: false, detailEdited: false, labelHover: null,
+    pduOutletsSeen: LS.get('pduOutlets', {}),   // PDU device id -> outlet count it last reported while reachable (this browser)
     heat: LS.get('heat', false), embed: /[?&]embed=1/.test(location.search), editMode: false, kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
@@ -585,7 +586,7 @@
       // live-only PDUs (e.g. racks added in DCIM)
       pdus.filter(p => !items.some(i => i.type === 'pdu' && i.dcim?.deviceId === p.id)).forEach(p => {
         const sid = setupByRack[p.rack] || null; const id = 'LIVE-' + p.id;
-        items.push({ id, name: p.name, category: 'item', type: 'pdu', typeLabel: 'Raritan PDU (live)', setup: sid, placement: sid ? 'rack-strips' : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', photos: [], dcim: { deviceId: p.id, outlets: 24, labels: p.labels || {} }, live: { device: p, status: live.pdu[p.id], reachable: live.pdu[p.id]?.reachable ?? null }, notes: 'Discovered live from the DCIM backend.', ...pickOv(id) });
+        items.push({ id, name: p.name, category: 'item', type: 'pdu', typeLabel: 'Raritan PDU (live)', setup: sid, placement: sid ? 'rack-strips' : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', photos: [], dcim: { deviceId: p.id, outlets: p.port_count > 0 ? p.port_count : null, labels: p.labels || {} }, live: { device: p, status: live.pdu[p.id], reachable: live.pdu[p.id]?.reachable ?? null }, notes: 'Discovered live from the DCIM backend.', ...pickOv(id) });
       });
       // 3) rack_items (custom equipment: switches, patch panels …)
       Object.entries(live.rackItems || {}).forEach(([rack, list]) => (list || []).forEach(ci => {
@@ -765,24 +766,38 @@
       const opts = options(); if (!opts.length) { active = -1; return; }
       active = (i + opts.length) % opts.length;
       opts.forEach((el, n) => { el.classList.toggle('active', n === active); el.setAttribute('aria-selected', n === active ? 'true' : 'false'); });
-      inp.setAttribute('aria-activedescendant', opts[active].id); opts[active].scrollIntoView({ block: 'nearest' });
+      // keep the highlighted row visible by scrolling the list only (scrollIntoView could also scroll the page around an embedded twin)
+      const el = opts[active]; inp.setAttribute('aria-activedescendant', el.id);
+      if (el.offsetTop < res.scrollTop) res.scrollTop = el.offsetTop;
+      else if (el.offsetTop + el.offsetHeight > res.scrollTop + res.clientHeight) res.scrollTop = el.offsetTop + el.offsetHeight - res.clientHeight;
     };
     const choose = el => { if (el && el.dataset.id) { select(el.dataset.id); hideResults(); } };
-    inp.addEventListener('input', () => {
-      const q = inp.value.trim(); S.filters.q = q; applyFilters();
-      if (!q) { hideResults(); return; }
+    // (re)build the result list for the current text; false when there is nothing to search for
+    const showResults = () => {
+      const q = inp.value.trim();
+      if (!q) { hideResults(); return false; }
       const hits = searchHits(q).slice(0, 14); const ql = q.toLowerCase();
       res.innerHTML = hits.map((r, n) => { const owner = ownerOf(r); const byOwner = owner && owner.toLowerCase().includes(ql) && searchRank(r, q) === 5;
         return `<div class="sr" role="option" id="sr-${n}" aria-selected="false" data-id="${esc(r.id)}"><span class="id">${esc(r.id)}</span><span class="nm">${esc(r.def.name || '')}${byOwner ? `<small class="ow"> · owner ${esc(owner)}</small>` : ''}</span><span class="cat">${r.cat}</span></div>`; }).join('') || '<div class="sr" role="option" aria-disabled="true"><span class="nm muted">No matches</span></div>';
       res.classList.remove('hidden'); inp.setAttribute('aria-expanded', 'true');
       options().forEach((el, n) => { el.onclick = () => choose(el); el.onmouseenter = () => setActive(n); });
-      setActive(0);
-    });
+      setActive(0); return true;
+    };
+    inp.addEventListener('input', () => { S.filters.q = inp.value.trim(); applyFilters(); showResults(); });
+    // ↓ / ↑ move through the results (and reopen a closed list), Enter selects the highlighted one,
+    // Escape closes the list (focus stays in the box), a second Escape leaves the box.
     inp.addEventListener('keydown', e => {
+      if (e.isComposing) return;
       const open = !res.classList.contains('hidden');
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { if (!open) return; e.preventDefault(); setActive(active + (e.key === 'ArrowDown' ? 1 : -1)); }
-      else if (e.key === 'Enter') { if (open) { e.preventDefault(); choose(options()[Math.max(0, active)]); } }
-      else if (e.key === 'Escape') { hideResults(); inp.blur(); }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault(); const step = e.key === 'ArrowDown' ? 1 : -1;
+        if (open) setActive(active + step); else if (showResults() && step < 0) setActive(-1);
+      } else if (e.key === 'Enter') {
+        if (!open && !showResults()) return;
+        e.preventDefault(); choose(options()[Math.max(0, active)]);
+      } else if (e.key === 'Escape') {
+        e.preventDefault(); if (open) hideResults(); else inp.blur();
+      }
     });
     document.addEventListener('click', e => { if (!e.target.closest('.search-wrap')) hideResults(); });
   }
@@ -880,9 +895,19 @@
       r.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); focusAttention(S.attention[+r.dataset.attn]); } };
     });
   }
+  // Left column under the toolbar: the move banner (while moving), then the Attention dock. Neither covers a control:
+  // the banner starts below the toolbar / save bar and stops before the zoom column and the lab environment panel.
   function placeAttnDock() {
-    const dock = $('#attnDock'), tb = $('.toolbar'); if (!dock || !tb) return;
-    dock.style.top = (tb.offsetTop + tb.offsetHeight + 8) + 'px';
+    const dock = $('#attnDock'), tb = $('.toolbar'), mb = $('#moveBanner'); if (!tb) return;
+    let top = tb.offsetTop + tb.offsetHeight + 8;
+    if (mb && !mb.classList.contains('hidden')) {
+      const vp = $('#viewport'); const sb = $('#saveBar'); let bTop = top, right = vp ? vp.clientWidth : innerWidth;
+      if (sb && !sb.classList.contains('hidden') && sb.offsetHeight) bTop = Math.max(bTop, sb.offsetTop + sb.offsetHeight + 8);
+      for (const el of [$('.zoombar'), $('#envPanel')]) if (el && el.offsetWidth && !el.classList.contains('hidden')) right = Math.min(right, el.offsetLeft - 10);
+      mb.style.top = bTop + 'px'; mb.style.maxWidth = Math.max(200, right - mb.offsetLeft) + 'px';
+      top = bTop + mb.offsetHeight + 8;
+    }
+    if (dock) { dock.style.top = top + 'px'; dock.style.maxHeight = `max(72px, calc(100% - ${top + 152}px))`; }
   }
   function renderAttention() {
     const list = S.attention || []; const c = attnCounts(list); const worst = worstSeverity(list);
@@ -1059,8 +1084,16 @@
     // ── PDU
     if (it?.type === 'pdu') {
       const st = it.live?.status; const live = S.live.connected; const labels = it.dcim?.labels || it.live?.device?.labels || {};
-      const outlets = st?.reachable && st.outlets?.length ? st.outlets : Array.from({ length: it.dcim?.outlets || 24 }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Outlet ${i + 1}`, state: 'unknown', watts: null }));
-      html += `<div class="sec"><div class="sec-h">Outlets <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? `<span style="color:#fda4af">unreachable</span>` : st ? `${outlets.filter(x => x.state === 'on').length}/${outlets.length} on · ${st.total_watts == null ? '\u2014' : (st.total_watts / 1000).toFixed(2) + ' kW' + (st.watts_complete === false ? ' (partial)' : '')}` : 'loading…') : 'static labels · click needs backend'}</span></div>
+      // Without a live outlet list (unreachable / not loaded / offline) show the PDU's own outlets with an unknown state:
+      // the numbers it last answered with, else its known outlet count, else only its labelled outlets — never a made-up 24.
+      const unknownOutlet = (n, label) => ({ number: n, label: labels[String(n)] || label || `Outlet ${n}`, state: 'unknown', watts: null });
+      const count = st?.reachable && st.outlets?.length ? null : st?.outlets?.length ? { n: st.outlets.length, src: 'from Lab Manager' } : pduOutletCount(it);
+      const outlets = !count ? st.outlets : st?.outlets?.length ? st.outlets.map(o => unknownOutlet(o.number, o.label))
+        : count.n ? Array.from({ length: count.n }, (_, i) => unknownOutlet(i + 1))
+        : Object.keys(labels).map(Number).filter(n => Number.isInteger(n) && n > 0).sort((a, b) => a - b).map(n => unknownOutlet(n));
+      const countNote = !count ? '' : count.n ? `${count.n} outlets (${count.src}) · state unknown` : 'outlet count unknown';
+      html += `<div class="sec"><div class="sec-h">Outlets <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? `<span style="color:#fda4af">unreachable</span> · ${countNote}` : st && !count ? `${outlets.filter(x => x.state === 'on').length}/${outlets.length} on · ${st.total_watts == null ? '\u2014' : (st.total_watts / 1000).toFixed(2) + ' kW' + (st.watts_complete === false ? ' (partial)' : '')}` : st ? countNote : 'loading…') : 'static labels · click needs backend'}</span></div>
+        ${count && !count.n ? `<div class="note muted" style="margin-bottom:6px">Outlet count unknown: the PDU has not reported its outlets and no outlet count is set for it in Lab Manager.${outlets.length ? ' Only its labelled outlets are shown.' : ''}</div>` : ''}
         <div class="ogrid">${outlets.map(x => { const named = !isDefaultOutletLabel(x.label); const cls = x.state === 'unknown' ? 'unknown' : `${esc(x.state)} ${named ? 'named' : 'free'}`; return `<div class="ocell ${cls}" data-outlet="${esc(x.number)}" title="${esc(x.label)}"><span class="n">#${esc(x.number)}</span><span class="l">${named ? esc(x.label) : '—'}</span><span class="w">${x.watts == null ? '\u2014' : Math.round(x.watts) + ' W'}</span></div>`; }).join('')}</div>
         ${st?.temperature != null || st?.humidity != null ? `<div class="kv" style="margin-top:8px"><span class="k">Environment</span><span class="v">${st.temperature != null ? `🌡 ${st.temperature.toFixed(1)} °C` : ''} ${st.humidity != null ? `· 💧 ${st.humidity.toFixed(0)} %` : ''} ${st.leak_detected ? '<span style="color:#fda4af">· ⚠ leak</span>' : ''}</span></div>` : ''}
         ${st?.error ? `<div class="err-box" style="margin-top:8px">⚠ ${esc(st.error)}</div>` : ''}
@@ -1203,7 +1236,7 @@
   // Edits are numbered: a save only clears the dirty state if nothing was edited while its request was in flight.
   let editSeq = 0, saveInFlight = false;
   function markDirty() { editSeq++; S.dirty = true; S.data.meta.modified = new Date().toISOString(); LS.set('draft', { savedAt: Date.now(), base: S.dataBase, data: S.data }); updateSaveBar(); }
-  function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = saveInFlight || !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; }
+  function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = saveInFlight || !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; if (S.moveItem) placeAttnDock(); }
   // Content stamp of lab-data.json as this page last read or wrote it (FNV-1a over the canonical JSON text).
   function textStamp(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return str.length + ':' + h.toString(16); }
   const dataStamp = d => textStamp(JSON.stringify(d));
@@ -1352,6 +1385,21 @@
   }
   window.addEventListener('focus', resumeAfterSignIn);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) resumeAfterSignIn(); });
+  // A reachable PDU reports its real outlets; remember how many, so an unreachable PDU still shows its own outlet count.
+  function setPduStatus(id, s) {
+    S.live.pdu[id] = s;
+    const n = s?.reachable && Array.isArray(s.outlets) ? s.outlets.length : 0;
+    if (n && S.pduOutletsSeen[id] !== n) { S.pduOutletsSeen[id] = n; LS.set('pduOutlets', S.pduOutletsSeen); }
+  }
+  // Outlet count of a PDU without a live outlet list: set in Lab Manager (port_count), last reported here, lab-data.json;
+  // n = null when none is known (the twin never invents a count).
+  function pduOutletCount(it) {
+    const id = it.dcim?.deviceId, dev = it.live?.device;
+    if (dev?.port_count > 0) return { n: dev.port_count, src: 'set in Lab Manager' };
+    if (id && S.pduOutletsSeen[id] > 0) return { n: S.pduOutletsSeen[id], src: 'last reported' };
+    if (it.dcim?.outlets > 0) return { n: it.dcim.outlets, src: 'lab-data.json' };
+    return { n: null, src: '' };
+  }
   async function refreshStatuses() {
     const session = liveSession;
     if (!S.live.connected || refreshInFlight === session) return;
@@ -1367,7 +1415,7 @@
       // refresh: keep the detail panel's scroll / an editor that has focus, never move the camera.
       computeModel(); buildItems({ refresh: true });
       await Promise.all([
-        ...pdus.map(p => api(`/api/pdus/${p.id}/status`).then(s => { if (session === liveSession) S.live.pdu[p.id] = s; }).catch(() => {})),
+        ...pdus.map(p => api(`/api/pdus/${p.id}/status`).then(s => { if (session === liveSession) setPduStatus(p.id, s); }).catch(() => {})),
         ...kvms.map(k => api(`/api/kvms/${k.id}/status`).then(s => { if (session === liveSession) S.live.kvm[k.id] = s; }).catch(() => {})),
       ]);
       if (!S.live.connected || session !== liveSession) return;
@@ -1469,7 +1517,7 @@
     try {
       await api(`/api/pdus/${encodeURIComponent(t.pduId)}/outlets/${t.outlet}/power`, { method: 'POST', body: JSON.stringify({ action }) });
       toast(`${t.server} · outlet #${t.outlet} → ${action}`, 'ok');
-      setTimeout(async () => { try { S.live.pdu[t.pduId] = await api(`/api/pdus/${encodeURIComponent(t.pduId)}/status`); computeModel(); buildItems({ refresh: true }); } catch { /* ignore */ } }, 1500);
+      setTimeout(async () => { try { setPduStatus(t.pduId, await api(`/api/pdus/${encodeURIComponent(t.pduId)}/status`)); computeModel(); buildItems({ refresh: true }); } catch { /* ignore */ } }, 1500);
       return true;
     } catch (e) { toast('Power action failed: ' + e.message, 'err'); return false; }
     finally { if (btn) { btn.disabled = false; btn.innerHTML = old; } }
@@ -1516,6 +1564,7 @@
     if (!S.live.connected) { toast('Connect the backend to control outlets', 'err'); return; }
     const dev = pduItem.live?.device ? livePdu(pduItem.live.device.id) : null;
     if (!dev) { toast('Not in live DCIM — power disabled', 'err'); return; }
+    if (pduItem.live?.status?.reachable === false) { toast('PDU is unreachable: outlet state unknown, power actions unavailable', 'err'); return; }
     const r = e.currentTarget.getBoundingClientRect(); popEl = document.createElement('div'); popEl.className = 'pop';
     const o = pduItem.live?.status?.outlets?.find(x => x.number === outlet);
     const lbl = o?.label || dev.labels?.[String(outlet)] || `Outlet ${outlet}`;
@@ -1928,7 +1977,7 @@
     if (!S.editMode || !window.DCIM_CAN_OPERATE) return;
     controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden');
     $('#moveText').textContent = `Move ${S.recs.get(itemId)?.def.name || itemId}: tap a shelf in 3D, or`;
-    fillMoveTargets(itemId); applyFilters(); highlightTargets(true);
+    fillMoveTargets(itemId); applyFilters(); highlightTargets(true); placeAttnDock();
     $('#moveTarget').focus({ preventScroll: true });   // keyboard users can choose a destination without the 3D view
   }
   // Keyboard / screen-reader way to choose a destination: every shelf (top to bottom), rack bottom bay and storage.
@@ -1951,7 +2000,7 @@
     select(id);
   }
   $('#moveGo').onclick = () => { const r = S.recs.get($('#moveTarget').value); if (r) requestMove(r); else toast('Choose a destination first', 'err'); };
-  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); highlightTargets(false); applyFilters(); }
+  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); placeAttnDock(); highlightTargets(false); applyFilters(); }
   $('#moveCancel').onclick = cancelMove;
   function highlightTargets(on) {
     for (const r of S.recs.values()) if (r.cat === 'shelf') {
