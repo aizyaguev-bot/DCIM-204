@@ -7,6 +7,7 @@ import { splitSections, sectionHeading, versionOf } from "../api/changelog";
 import { SectionBody, plain } from "../components/WhatsNew";
 import {useAccounts, accountRequest} from "../accounts";
 import {OwnerSelect, useEngineers} from "../engineers";
+import SshButton from "../components/SshButton";
 
 const EditContext = createContext(false);
 
@@ -723,7 +724,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
                 </div>
               </div>
             </div>
-            <CloseBtn onClose={onClose}/>
+            <div className="flex items-center gap-2 flex-shrink-0"><SshButton name={server.name} size="md"/><CloseBtn onClose={onClose}/></div>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1">
             {[["Rack",server.rack||"—"],["Outlet",server.outlet!=null?`#${server.outlet}`:"—"],["U",curU!=null?`U${curU}`:"auto"],["PDU",pdu?.name||"—"]].map(([k,v])=>(
@@ -1523,6 +1524,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
 // ─── INVENTORY VIEW ───────────────────────────────────────────────────────────
 function InventoryView({ servers, switchAssignments, rackSlots, customItems, optOwners, ownersLoaded, onOwnerChange }) {
   const editMode = useContext(EditContext);
+  const {canOperate} = useAccounts();
   const [rack,  setRack]  = useState("all");
   const [state, setState] = useState("all");
   const [q, setQ]         = useState("");
@@ -1552,7 +1554,7 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="border-b border-zinc-800 bg-zinc-900/70">
-              <tr><Th k="name" label="Asset"/><Th k="rack" label="Rack"/><Th k="state" label="State"/><Th k="watts" label="W" right/><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600 text-right">U</th><Th k="outlet" label="Outlet" right/><Th k="pduName" label="PDU"/><Th k="pduIp" label="PDU IP"/><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600">Switch</th><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600">Owner</th></tr>
+              <tr><Th k="name" label="Asset"/><Th k="rack" label="Rack"/><Th k="state" label="State"/><Th k="watts" label="W" right/><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600 text-right">U</th><Th k="outlet" label="Outlet" right/><Th k="pduName" label="PDU"/><Th k="pduIp" label="PDU IP"/><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600">Switch</th><th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600">Owner</th>{canOperate&&<th className="text-[9px] font-bold uppercase tracking-widest px-3 py-2.5 text-zinc-600">SSH</th>}</tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/30">
               {rows.map(s=>{const isOn=s.state==="on",isOff=s.state==="off",sw=switchAssignments[s.id],u=(rackSlots[s.rack]||{})[s.id],ow=optOwners?.[s.id];return(
@@ -1569,9 +1571,10 @@ function InventoryView({ servers, switchAssignments, rackSlots, customItems, opt
                   <td className="px-3 py-2 text-xs min-w-[110px]">
                     {editMode?<OwnerSelect owner={ow||""} disabled={!ownersLoaded} label={`Owner for ${s.name}`} onChange={id=>onOwnerChange(s.id,id)}/>:<span className={ow?"text-zinc-200":"text-zinc-500"}>{ow||"Owner not set"}</span>}
                   </td>
+                  {canOperate&&<td className="px-3 py-2"><SshButton name={s.name}/></td>}
                 </tr>
               );})}
-              {rows.length===0&&<tr><td colSpan={10} className="px-3 py-10 text-center text-zinc-700 text-sm">No matching assets</td></tr>}
+              {rows.length===0&&<tr><td colSpan={canOperate?11:10} className="px-3 py-10 text-center text-zinc-700 text-sm">No matching assets</td></tr>}
             </tbody>
           </table>
         </div>
@@ -1681,11 +1684,11 @@ function KpiBar({servers,rackStats,pdus,pduStatuses}) {
   </div>;
 }
 
-function ReadOnlyAsset({ item, owner, onClose }) {
+function ReadOnlyAsset({ item, owner, onClose, sshName }) {
   useEscClose(onClose);
   return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
     <section role="dialog" aria-modal="true" aria-label="Asset details" onClick={e=>e.stopPropagation()} className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-      <div className="flex justify-between gap-3"><h2 className="font-mono text-xl text-white break-all">{item.name}</h2><CloseBtn onClose={onClose}/></div>
+      <div className="flex justify-between gap-3"><h2 className="font-mono text-xl text-white break-all">{item.name}</h2><div className="flex items-start gap-2 flex-shrink-0">{sshName&&<SshButton name={sshName} size="md"/>}<CloseBtn onClose={onClose}/></div></div>
       <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, Barcode:item.barcode, Shelf:item.u, Owner:owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words">{value}</dd></div>)}</dl>
       <p className="text-xs text-zinc-400">Close this panel and turn on Edit to change this asset.</p>
     </section>
@@ -1971,7 +1974,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       {section==="power"&&<PowerView rackStats={rackStats}/>}
       {section==="changelog"&&<ChangelogView/>}
 
-      {selectedServer&&!editMode&&<Portal><ReadOnlyAsset item={selectedServer} owner={optOwners[selectedServer.id]} onClose={()=>setSelectedServerId(null)}/></Portal>}
+      {selectedServer&&!editMode&&<Portal><ReadOnlyAsset item={selectedServer} owner={optOwners[selectedServer.id]} sshName={selectedServer.name} onClose={()=>setSelectedServerId(null)}/></Portal>}
       {selectedServer&&editMode&&(
         <Portal>
           <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
@@ -1983,7 +1986,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         </Portal>
       )}
 
-      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={optOwners[`item:${selectedCustom.id}`]} onClose={()=>setSelectedCustom(null)}/></Portal>}
+      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={optOwners[`item:${selectedCustom.id}`]} sshName={["computer","server"].includes(selectedCustom.type)?selectedCustom.name:null} onClose={()=>setSelectedCustom(null)}/></Portal>}
       {selectedCustom&&selectedCustomRack&&editMode&&(
         <Portal>
           <EditEquipmentPanel item={selectedCustom} rackName={selectedCustomRack}

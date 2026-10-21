@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { api, errorMessage } from "../api/client";
 import {useAccounts} from "../accounts";
+import SshButton from "../components/SshButton";
 
 // A real assignment, not the PDU/KVM default name ("Outlet 7" / "Port 7").
 const isRealLabel = label => !!label && !/^(outlet|port)\s*\d+$/i.test(String(label).trim());
@@ -325,6 +326,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
                           Clear
                         </button>
                       )}
+                      {isRealLabel(row.label) && <SshButton name={row.label} size="md" className="ml-2 align-middle" />}
                     </td>
                   </tr>
                 );
