@@ -268,3 +268,12 @@ def test_get_creds_empty_stored_fields():
     username, password = get_creds(dev)
     assert username == ""
     assert password == ""
+
+
+async def test_direct_label_clear_stores_the_default_name(client):
+    dev_id = (await _create(client, _PDU_PAYLOAD))["id"]
+    await client.patch("/api/devices/direct-label", json={"device_id": dev_id, "port": "7", "label": "OPTN45"})
+    r = await client.patch("/api/devices/direct-label", json={"device_id": dev_id, "port": "7", "label": ""})
+    assert r.status_code == 200
+    # A cleared numbered port keeps the default name so a name saved on the PDU itself cannot come back.
+    assert (await _labels(client, dev_id))["labels"] == {"7": "Outlet 7"}

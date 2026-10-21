@@ -1,7 +1,8 @@
-import { cloneElement, useEffect, useId, useRef, useState } from "react";
+import { cloneElement, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import JsBarcode from "jsbarcode";
-import { loadInventory, updateInventory, locationCode, parseLocationCode, rackCode, mainStorageCode, MAIN_STORAGE } from "../api/inventory";
+import { loadInventory, updateInventory, labelCode, parseLocationCode, MAIN_STORAGE } from "../api/inventory";
+import { qrSvgPath } from "../qr";
 import {useAccounts} from "../accounts";
 
 const input = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-nv-400 disabled:opacity-50";
@@ -33,7 +34,14 @@ function LocationFields({ value, onChange, racks, disabled }) {
 function BarcodeSvg({ value }) {
   const ref = useRef(null);
   useEffect(() => { JsBarcode(ref.current, value, { format: "CODE128", width: 1.5, height: 58, margin: 12, fontSize: 11 }); }, [value]);
-  return <svg ref={ref} role="img" aria-label={`Barcode ${value}`} className="max-w-full h-auto"/>;
+  return <svg ref={ref} role="img" aria-label={`Barcode ${value}`} className="scan-label-barcode block max-w-full h-auto"/>;
+}
+
+// The same value as the label's barcode, as a square QR code drawn locally at render/print time.
+function QrSvg({ value }) {
+  const qr = useMemo(() => { try { return qrSvgPath(value); } catch { return null; } }, [value]);
+  if (!qr) return <span className="scan-label-qr w-24 h-24 shrink-0 flex items-center justify-center text-xs text-center border border-dashed border-zinc-400">QR code unavailable</span>;
+  return <svg role="img" aria-label={`QR code ${value}`} viewBox={`0 0 ${qr.size} ${qr.size}`} shapeRendering="crispEdges" className="scan-label-qr w-24 h-24 shrink-0"><rect width={qr.size} height={qr.size} fill="#fff"/><path d={qr.path} fill="#000"/></svg>;
 }
 
 function ShelfLabels({ racks, onClose }) {
@@ -45,14 +53,15 @@ function ShelfLabels({ racks, onClose }) {
   const [position, setPosition] = useState("");
   const valid = kind === "storage" || rack && (kind === "rack" || Number.isInteger(first) && Number.isInteger(last) && first >= 1 && last <= 42 && last >= first);
   const labels = !valid ? [] : kind === "storage" ? [{ rack: MAIN_STORAGE, u: 0, position: "" }] : kind === "rack" ? [{ rack, u: 0, position: "" }] : Array.from({ length: last - first + 1 }, (_, i) => ({ rack, u: first + i, position: position.trim() }));
-  const cards = labels.map(label => <div key={label.u} className="scan-label-card bg-white text-black rounded-lg p-4">
-    <strong>{where(label)}</strong><BarcodeSvg value={label.rack === MAIN_STORAGE ? mainStorageCode : label.u === 0 ? rackCode(label.rack) : locationCode(label.rack, label.u, label.position)}/><small>{kind === "shelf" ? "Shelf 01 is the top shelf" : "Whole location - no shelf assigned"} · Lab Manager</small>
-  </div>);
+  const cards = labels.map(label => { const code = labelCode(label); return <div key={label.u} className="scan-label-card bg-white text-black rounded-lg p-4">
+    <div className="scan-label-head flex items-center gap-3"><QrSvg value={code}/><div className="scan-label-text min-w-0 flex flex-col gap-1 [overflow-wrap:anywhere]"><strong>{where(label)}</strong><small>{kind === "shelf" ? "Shelf 01 is the top shelf" : "Whole location - no shelf assigned"} · Lab Manager</small></div></div>
+    <BarcodeSvg value={code}/>
+  </div>; });
   return <>
     <div role="dialog" aria-modal="true" aria-label="Location labels" className="fixed inset-0 z-50 bg-black/80 p-4 flex items-center justify-center" onKeyDown={e => { if (e.key === "Escape") onClose(); }}>
       <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 max-w-3xl w-full max-h-[90vh] overflow-auto space-y-4">
         <div className="flex justify-between gap-4 items-center"><h2 className="text-lg font-semibold">Print location labels</h2><button className={secondary} onClick={onClose}>Close</button></div>
-        <p className="text-sm text-zinc-400">Scan a destination label, then the equipment to place there. New barcodes register automatically when enabled. Confirm moves for existing equipment with Save.</p>
+        <p className="text-sm text-zinc-400">Each label has a barcode and a square QR code with the same value; scan either one. Scan a destination label, then the equipment to place there. New barcodes register automatically when enabled. Confirm moves for existing equipment with Save.</p>
         <Field label="Label type"><select className={input} value={kind} onChange={e => setKind(e.target.value)}><option value="shelf">Shelf</option><option value="rack">Whole rack</option><option value="storage">Main storage (one label)</option></select></Field>
         <div className="grid sm:grid-cols-4 gap-3">
           <Field label="Rack"><select className={input} disabled={kind === "storage"} value={rack} onChange={e => setRack(e.target.value)}>{physicalRacks.map(r => <option key={r}>{r}</option>)}</select></Field>
@@ -73,6 +82,9 @@ function ShelfLabels({ racks, onClose }) {
         body > .scan-label-print { display: grid !important; grid-template-columns: repeat(2, 1fr); gap: 5mm; color: black; background: white; }
         .scan-label-card { break-inside: avoid; border: 1px solid #bbb; padding: 3mm; font: 12pt sans-serif; }
         .scan-label-card svg { max-width: 100%; height: auto; }
+        .scan-label-card .scan-label-head { display: flex; align-items: center; gap: 3mm; margin-bottom: 1mm; }
+        .scan-label-card .scan-label-text { display: flex; flex-direction: column; gap: 1mm; min-width: 0; overflow-wrap: anywhere; }
+        .scan-label-card .scan-label-qr { width: 26mm; height: 26mm; max-width: none; flex: none; }
       }
     `}</style>{cards}</div>, document.body)}
   </>;
@@ -224,7 +236,7 @@ export default function ScanView() {
       {destinationChosen ? <div aria-label="Selected destination" className="rounded-xl border border-nv-400/40 bg-nv-400/5 p-4 flex flex-wrap justify-between items-center gap-3">
         <div><div className="text-xs text-nv-400">Destination for equipment scans</div><div className="text-lg font-semibold mt-1">{where(destination)}</div><p className="text-xs text-zinc-400 mt-1">This destination stays selected for the next items. Scan another location label to change it.</p></div>
         <button type="button" className={secondary} disabled={busy} onClick={clearDestination}>Clear destination</button>
-      </div> : <p className="text-sm text-zinc-300">Start by scanning a shelf, rack or main storage label, then scan the equipment to place there. You can also look up equipment first.</p>}
+      </div> : <p className="text-sm text-zinc-300">Start by scanning a shelf, rack or main storage label (its barcode or QR code), then scan the equipment to place there. You can also look up equipment first.</p>}
       <form onSubmit={scanCode} className="flex flex-wrap gap-3 items-end">
         <div className="flex-1 min-w-[220px]"><Field label={destinationChosen ? "Scan the equipment barcode for this destination" : "Scan a shelf, rack or storage barcode"}><input ref={inputRef} aria-label="Scan barcode" value={scan} onChange={e => setScan(e.target.value)} onKeyDown={e => { if (e.key === "Tab" && scan.trim()) scanCode(e); }} disabled={busy || labelsOpen} autoComplete="off" spellCheck={false} maxLength={600} placeholder={destinationChosen ? "Scan equipment to place here…" : "Click here, then scan a location…"} className={`${input} text-lg font-mono py-3`}/></Field></div>
         <button type="submit" className={primary} disabled={busy || !scan.trim()}>{busy ? "Please wait…" : "Find barcode"}</button>
@@ -232,7 +244,7 @@ export default function ScanView() {
       </form>
       <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="accent-nv-400" checked={autoRegister} disabled={busy || !canOperate} onChange={e => { setAutoRegister(e.target.checked); inputRef.current?.focus(); }}/>Automatically register new equipment</label>
       <p className="text-xs text-zinc-400">{autoRegister ? "New barcodes are saved immediately at your selected destination, using the barcode as the name and type Other. Edit these details later in DCIM. Existing equipment moves still require Save." : "Unknown barcodes can be linked to existing equipment or registered manually. Moves require Save."}</p>
-      <p className="text-xs text-zinc-400">USB / Bluetooth keyboard scanner: use English keyboard mode and an Enter or Tab suffix. Shelf 01 is the top shelf.</p>
+      <p className="text-xs text-zinc-400">USB / Bluetooth keyboard scanner: use English keyboard mode and an Enter or Tab suffix. Location QR codes need a 2D (imager) scanner. Shelf 01 is the top shelf.</p>
     </section>
     {error && <div role="alert" className="rounded-xl border border-rose-800 bg-rose-950/30 text-rose-200 p-4">{error}</div>}
     {message && <div role="status" aria-live="polite" className="rounded-xl border border-nv-400/30 bg-nv-400/5 text-nv-400 p-4">{message}</div>}

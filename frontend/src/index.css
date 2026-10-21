@@ -211,9 +211,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .page-intro p { color: #a7a7a7; font-size: 14px; margin-top: 6px; }
 .edit-mode-notice { border: 1px solid #76b900; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; background: #161616; }
 /* Header marks the edges of the tab strip that hide tabs; the fade is the "more tabs" hint. */
-.app-tabs[data-overflow-end="true"] { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
-.app-tabs[data-overflow-start="true"] { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent); }
-.app-tabs[data-overflow-start="true"][data-overflow-end="true"] { -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); }
+.app-tabs[data-overflow-end="true"], .app-subnav[data-overflow-end="true"] { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
+.app-tabs[data-overflow-start="true"], .app-subnav[data-overflow-start="true"] { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent); }
+.app-tabs[data-overflow-start="true"][data-overflow-end="true"], .app-subnav[data-overflow-start="true"][data-overflow-end="true"] { -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); }
 @media (max-width: 1600px) {
   .app-header { gap: 16px; }
   .app-tabs button { padding: 0 8px; font-size: 13px; }

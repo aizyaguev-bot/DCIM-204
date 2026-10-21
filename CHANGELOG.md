@@ -2,7 +2,84 @@
 
 ---
 
-## Unreleased — Remote PXE install
+## v2.39.4 — 2026-10-21 — Locations (move and swap servers) and Export CSV
+
+### Added
+- **Admin → Locations.** One row per server: rack, U slot, PDU outlets and KVM
+  port. **Move…** sends a server to another server's location (the two swap by
+  default; untick "Swap" to leave the other server unplaced) or to empty
+  outlets and ports, with an optional rack and U. Every move shows the exact
+  list of changes first (each port before → after, positions, servers left
+  unplaced) and applies only what was previewed; if anything changed in the
+  meantime, it asks you to preview again. Monitors and owners stay with the
+  server. **Clear location** removes a server from all its PDU outlets and KVM
+  ports and keeps its rack position.
+- **Admin → Connections** and an **Export CSV** button (also on Locations): every
+  server with rack, U slot, server address, owner, ping state, PDU outlets and
+  KVM ports, ready to send. Operator role and up, because it lists addresses.
+
+### Fixed
+- Editing labels on a PDU or KVM page can no longer wipe the device's other
+  saved labels when the page had not finished loading.
+- A cleared port keeps its default name even when the name came only from the
+  device itself.
+- Moving a server to new ports keeps its rack and U unless you choose new ones.
+- A move that fails half way puts everything back, and says so honestly if it
+  could not.
+
+---
+
+## v2.39.3 — 2026-10-20 — Clear a mapping on the PDU–KVM page
+
+### Added
+- **Clear button in Admin → PDU–KVM mapping.** Every outlet assigned to a
+  server has a Clear button next to Edit. After a confirmation that names the
+  exact ports, it removes the server from that PDU outlet and from its linked
+  KVM port, and changes nothing else.
+
+### Fixed
+- A cleared port keeps its default name ("Outlet 7" / "Port 7"), so a name
+  stored on the PDU or KVM itself cannot reappear after clearing.
+- The Assigned / Empty counts and filters on that page treat default names as
+  empty.
+
+---
+
+## v2.39.2 — 2026-10-20 — QR codes on location labels
+
+### Added
+- **QR codes on printed location labels.** Every shelf, whole-rack and
+  main-storage label from Scan & Track → Print location labels now carries a
+  square QR code next to the existing barcode. Both hold exactly the same value,
+  so a 2D scanner reading the QR and a 1D scanner reading the barcode type the
+  same text into the scan field and go through the same checks.
+
+### Notes
+- An A4 page now holds 8 labels instead of 12, because the barcode keeps its
+  full width below the QR.
+- Reading the QR needs a 2D imager scanner; 1D laser scanners keep using the
+  barcode.
+
+---
+
+## v2.39.1 — 2026-10-20 — Port label edits change only that port
+
+### Fixed
+- **Editing a port label no longer renames the server everywhere.** Writing a
+  new name on a PDU outlet or KVM port (Power and Consoles pages) used to be
+  treated as a rename: the old name was replaced on every other PDU and KVM,
+  in the rack positions, and in the monitor and owner records. Moving a server
+  to another port therefore renamed the server that used to be there. Now only
+  the edited port changes. Renaming a server on purpose still works by editing
+  its name in the Racks view (edit mode).
+
+### Notes
+- To repair labels changed by the old behaviour, use Admin → PDU–KVM mapping:
+  each edit there changes only that outlet and its KVM port.
+
+---
+
+## v2.39.0 — 2026-10-20 — AI lab assistant and remote PXE install (off by default)
 
 ### Added
 - **Remote install** for Operator and Admin accounts. Choose a computer from its
@@ -87,6 +164,9 @@
   closes their consoles.
 
 ### Notes
+- The lab assistant runs in demo mode until an Anthropic API key
+  (`ASSISTANT_ANTHROPIC_API_KEY`) is set in the server's `.env` and the service
+  is restarted.
 - Remote install stays off until `PXE_ENABLED` is set. The default driver is
   simulated and does not open a KVM, switch a PDU outlet, or reboot a computer.
 - The live KVM regression tests in `backend/tests/test_kvm_regression.py` run

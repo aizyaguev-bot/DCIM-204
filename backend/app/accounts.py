@@ -93,10 +93,11 @@ def required_role(path, method):
     # (work items) keeps the Operator default below, and its other reads are Viewer like any GET.
     if method == "POST" and re.fullmatch(r"/api/assistant/chat", path): return "Viewer"
     if method == "DELETE" and re.fullmatch(r"/api/assistant/conversations/[0-9a-f]{32}", path): return "Viewer"
+    if re.fullmatch(r"/api/devices/connections(?:\.csv)?", path): return "Operator"
     if method in ("GET", "HEAD", "OPTIONS"): return "Viewer"
     if path in ("/api/auth/logout", "/api/me", "/api/me/password", "/api/me/preferences"): return "Viewer"
     if path == "/api/devices" or re.fullmatch(r"/api/devices/[^/]+", path):
-        if path not in ("/api/devices/rename-opt", "/api/devices/direct-label"): return "Admin"
+        if path not in ("/api/devices/rename-opt", "/api/devices/direct-label", "/api/devices/move-server"): return "Admin"
     return "Operator"
 
 

@@ -2,12 +2,15 @@ import { Fragment, useState } from "react";
 import StatusDot from "../components/StatusDot";
 import {useAccounts} from "../accounts";
 import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
+import { labelChanges, labelEditState, labelMoveHints, labelPatchBody } from "../api/locations";
 
-export default function KvmDetail({ device, status, onBack, from, onPortClick, onDelete, onLabelsSave, onMarkFree }) {
+export default function KvmDetail({ device, status, onBack, from, onPortClick, onDelete, onLabelsSave, onMarkFree, devices }) {
   const {canOperate,canAdmin} = useAccounts();
   const [editMode, setEditMode] = useState(false);
   const [draftLabels, setDraftLabels] = useState({});
   const [draftRevision, setDraftRevision] = useState(undefined);
+  const [draftOriginal, setDraftOriginal] = useState({});
+  const [draftBase, setDraftBase] = useState({});   // saved labels when editing started
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
   if (!device) return null;
@@ -16,22 +19,27 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
   const inUsePorts = ports.filter(p => p.in_use);
   const isLx = device.model?.includes("LX");
   const state = deviceState(status);
+  const moveHints = editMode ? labelMoveHints(device, draftLabels, draftOriginal, devices) : {};
 
   function startEdit() {
-    // Saved labels win over the status reading so the map matches the revision sent with it.
-    const current = {};
-    ports.forEach(p => { current[p.number] = device.labels?.[String(p.number)] ?? p.label ?? ""; });
-    setDraftLabels(current);
+    // The PATCH replaces the whole map: never start from an empty list. Saved labels win over the status reading
+    // so the map matches the revision sent with it; saved ports the status does not list are kept as they are.
+    if (!ports.length) return;
+    const { draft, original, base } = labelEditState(device.labels, ports);
+    setDraftLabels(draft);
+    setDraftOriginal(original);
+    setDraftBase(base);
     setDraftRevision(device.labels_revision);
     setSaveError("");
     setEditMode(true);
   }
 
   async function saveLabels() {
+    if (labelChanges(draftLabels, draftOriginal).length === 0) { setEditMode(false); return; }
     setSaving(true);
     setSaveError("");
     try {
-      await onLabelsSave(draftLabels, draftRevision);
+      await onLabelsSave(labelPatchBody(draftBase, draftLabels, draftOriginal), draftRevision);
       setEditMode(false);
     } catch (e) {
       setSaveError(errorMessage(e));
@@ -77,8 +85,9 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-zinc-500">Ports</div>
               {!editMode ? (
-                <button disabled={!canOperate} onClick={startEdit}
-                  className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition">
+                <button disabled={!canOperate || ports.length === 0} onClick={startEdit}
+                  title={canOperate && ports.length === 0 ? "Labels can be edited once the port list has loaded" : undefined}
+                  className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-zinc-400">
                   <PencilIcon /> Edit Labels
                 </button>
               ) : (
@@ -95,6 +104,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
               )}
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
+            {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these port labels on {device.name}. To move a server with its PDU outlets, KVM port and rack position, use Admin → Locations → Move.</p>}
             {ports.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
                 {state === "offline" ? `Cannot reach device: ${status.error}` : state === "error" ? "The port list is unavailable." : state === "unavailable" ? `Status unavailable: ${status.error}` : "Loading…"}
@@ -110,8 +120,15 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
                           value={draftLabels[p.number] ?? ""}
                           onChange={e => setDraftLabels(d => ({ ...d, [p.number]: e.target.value }))}
                           placeholder="Empty"
+                          aria-label={`Label for port ${p.number}`}
+                          aria-describedby={moveHints[p.number] ? `move-hint-kvm-${p.number}` : undefined}
                           className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200 focus:outline-none focus:border-nv-400 w-full"
                         />
+                        {moveHints[p.number] && (
+                          <p id={`move-hint-kvm-${p.number}`} className="text-[11px] leading-snug text-amber-300">
+                            {moveHints[p.number].name} is already on {moveHints[p.number].where.join(", ")}. Saving changes only this port. To move a server use Locations → Move.
+                          </p>
+                        )}
                       </div>
                     ) : (
                       <PortCard port={p} onClick={() => onPortClick(p)} />

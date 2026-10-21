@@ -9,6 +9,9 @@
     "test:pxe": "node --test src/__tests__/pxe.test.js",
     "test:layout": "node --test src/__tests__/layout.test.js",
     "test:assistant": "node --test src/__tests__/assistant.test.js",
+    "test:qr": "node --test src/__tests__/qr.test.js",
+    "test:locations": "node --test src/__tests__/locations.test.js",
+    "test:connections": "node --test src/__tests__/connections.test.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
@@ -18,6 +21,7 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "jsbarcode": "3.12.3",
+    "qrcode": "1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
