@@ -390,7 +390,18 @@ async def build_impact(db, req: ProposalRequest, settings, now: float) -> Impact
         impact.pins[dev.id] = pin
 
     if not impact.pdus or (not impact.targets and not restore):
-        raise ActionError(409, "no_targets", "No actionable PDU outlets remain in this scope")
+        details = []
+        if (spec.switch == "cycle" and impact.excluded
+                and all(item.reason == "already_off" for item in impact.excluded)):
+            # Lead decision 2026-10-20 (ACT-10 F2): nothing to reset; tell the user how to power it on instead.
+            if spec.scope == "server":
+                details.append(f"כל ההזנות של {name} כבר כבויות — אין מה לאתחל. "
+                               f"כדי להדליק אותו בקש 'תדליק את {name}'.")
+            else:
+                outlet = f"שקע {req.outlet} ב-{selected[0].name}"
+                details.append(f"{outlet} כבר כבוי — אין מה לאתחל. כדי להדליק אותו בקש 'תדליק את {outlet}'.")
+        raise ActionError(409, "no_targets", "No actionable PDU outlets remain in this scope",
+                          [_clean(text) for text in details])
     canonical = {}
     for target in impact.targets:
         identity = server_identity(target.label)

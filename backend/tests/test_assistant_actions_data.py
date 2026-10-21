@@ -266,6 +266,26 @@ async def test_nothing_to_change_is_no_targets(sessions, planner):
     assert (caught.value.status, caught.value.code) == (409, "no_targets")
 
 
+@pytest.mark.parametrize("state,details", [
+    ("off", ["שקע 3 ב-PDU-05 כבר כבוי — אין מה לאתחל. כדי להדליק אותו בקש 'תדליק את שקע 3 ב-PDU-05'."]),
+    ("unknown", []),   # not known to be off: no advice to power it on
+])
+async def test_outlet_cycle_with_nothing_on_is_no_targets_with_hebrew_advice(sessions, monkeypatch, state, details):
+    """ACT-10 F2 (lead 2026-10-20): code stays no_targets; the Hebrew details say how to power it on instead."""
+    status = SimpleNamespace(reachable=True, outlets=[SimpleNamespace(number=3, label="optn12", state=state)])
+
+    async def live(dev):
+        return status
+
+    monkeypatch.setattr(resolve, "_live", live)
+    async with sessions() as db:
+        with pytest.raises(ActionError) as caught:
+            await resolve.build_impact(db, req("outlet_cycle", pdu="PDU-05", outlet=3),
+                                       SimpleNamespace(power_protected_outlets="none"), NOW)
+    assert (caught.value.status, caught.value.code) == (409, "no_targets")
+    assert caught.value.details == details
+
+
 async def test_drift_is_any_difference_from_the_pinned_plan(sessions, planner):
     async with sessions() as db:
         impact = (await resolve.build_impact(db, req("server_swap", server="optn45", target_server="optn44"),
