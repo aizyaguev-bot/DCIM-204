@@ -17,6 +17,7 @@ STORES = {
     "/api/switch-assignments": ("_SWITCH_ASSIGN_FILE", {}),
     "/api/rack-overrides": ("_RACK_OVERRIDES_FILE", {}),
     "/api/chillers": ("_CHILLERS_FILE", {"units": [], "connections": []}),
+    "/api/twin-data": ("_TWIN_DATA_FILE", {}),
 }
 CONFLICT = "This layout was changed in another session. Reload and try again."
 SAVED = {"Rack-01": {"opt11": 2}, "units": [{"id": "ch1", "rack": "Rack-01"}]}

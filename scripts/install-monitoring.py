@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Install a reviewed Lab Manager release using the Linux VM's existing venv.
 
-No sudo, package installation, database seeding, or remote Git write is performed.
+No sudo, system package installation, database seeding, or remote Git write is performed.
+Before the smoke test, packages that the reviewed backend/requirements.txt needs and the
+existing venv lacks are added with pip (skipped when already satisfied). Installed versions
+are never changed, and a pip problem is only a warning: the update continues and a feature
+whose package is missing reports that it is not installed.
 The checkout must be clean except for live twin data and the deployment version.
 Use --backup-frontend-lock to preserve a locally modified npm lockfile in the
 backup and install the reviewed lockfile alongside the prebuilt frontend.
@@ -32,6 +36,93 @@ from http.cookiejar import CookieJar
 REPOSITORY = "https://github.com/aizyaguev-bot/DCIM-204.git"
 LIVE_TRACKED = {"lab-twin/lab-data.json", "backend/version.txt"}
 FRONTEND_LOCK = "frontend/package-lock.json"
+
+# Backend Python dependencies of the reviewed tree (security review M6/M7). The step only ADDS
+# missing packages: every installed package is pinned by a constraints file, `pip download` from a
+# fixed index (wheels only) is the dry run whose files are inspected before anything changes, and
+# only those new wheels are then installed offline with --no-deps. It is never fatal: a feature
+# whose package is missing (such as the AI assistant) reports "not installed" and the update goes on.
+REQUIREMENTS = "backend/requirements.txt"
+PIP_INDEX_URL = "https://pypi.org/simple"  # fixed; --isolated ignores pip.conf and PIP_* variables
+PIP_OPTIONS = ["--isolated", "--disable-pip-version-check", "--no-input", "-q"]
+# Worst case 1.5 + 10 + 3 + 1.5 minutes stays well inside vm-auto-update.py's 25-minute installer limit.
+PIP_CHECK_TIMEOUT = 90
+PIP_DOWNLOAD_TIMEOUT = 10 * 60
+PIP_INSTALL_TIMEOUT = 3 * 60
+PIP_STOP_GRACE = 10
+PACKAGES_TIMEOUT = 60
+PACKAGES_BEFORE = "python-packages-before.txt"  # also the constraints file that pins installed versions
+PIP_LOG = "pip.log"
+PIP_WHEELS = "pip-wheels"
+# Saved by `scripts/vm-auto-update.py install` for the cron job (it never saves a value that may
+# hold credentials). The cron job starts this installer without them so the backend never sends
+# lab-device traffic through a proxy; only the pip child process receives them, as environment
+# variables (never --proxy on a command line).
+AUTO_UPDATE_STATE = Path(".monitor-backups") / "auto-update" / "state.json"
+PIP_NETWORK_VARIABLES = ("https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY",
+                         "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO")
+
+# Installed distributions of the venv as {normalized name: version}; read-only, no network.
+VENV_PACKAGES = r'''
+import importlib.metadata as metadata, json, re
+found = {}
+for dist in metadata.distributions():
+    try:
+        name, version = dist.metadata["Name"], dist.version
+    except Exception:
+        continue
+    if isinstance(name, str) and name and isinstance(version, str) and version:
+        found.setdefault(re.sub(r"[-_.]+", "-", name).lower(), version)
+print(json.dumps(found, sort_keys=True))
+'''
+
+# Classify each line of a requirements file against the venv: missing, installed with another
+# version (never changed automatically) or not a plain requirement. Read-only, no network.
+REQUIREMENT_STATUS = r'''
+import importlib.metadata as metadata, json, re, sys
+try:
+    from packaging.requirements import Requirement
+except ImportError:
+    from pip._vendor.packaging.requirements import Requirement
+result = {"missing": [], "conflicts": [], "unsupported": []}
+def text(requirement):
+    extras = "[" + ",".join(sorted(requirement.extras)) + "]" if requirement.extras else ""
+    return requirement.name + extras + str(requirement.specifier)
+def check(requirement, depth=0):
+    try:
+        version = metadata.version(requirement.name)
+    except metadata.PackageNotFoundError:
+        if text(requirement) not in result["missing"]:
+            result["missing"].append(text(requirement))
+        return
+    try:
+        ok = requirement.specifier.contains(version, prereleases=True)
+    except Exception:
+        ok = False
+    if not ok:
+        result["conflicts"].append({"name": requirement.name, "installed": version, "wanted": str(requirement.specifier)})
+        return
+    for extra in sorted(requirement.extras) if depth < 3 else ():
+        for line in metadata.requires(requirement.name) or []:
+            dependency = Requirement(line)
+            marker = dependency.marker
+            if marker is not None and marker.evaluate({"extra": extra}) and not marker.evaluate({"extra": ""}):
+                check(Requirement(text(dependency)), depth + 1)
+for raw in open(sys.argv[1], encoding="utf-8").read().splitlines():
+    line = re.sub(r"(^|\s)#.*$", "", raw).strip()
+    if not line:
+        continue
+    try:
+        requirement = None if line.startswith("-") else Requirement(line)
+    except Exception:
+        requirement = None
+    if requirement is None or requirement.url:
+        result["unsupported"].append(line[:200])
+        continue
+    if requirement.marker is None or requirement.marker.evaluate({"extra": ""}):
+        check(requirement)
+print(json.dumps(result))
+'''
 
 # Read credentials in the application environment without exposing them in argv,
 # stdout, shell history or logs. The only HTTP destination is the local backend.
@@ -260,6 +351,249 @@ def smoke_test(source, python, backup, enable_accounts=False):
             process.wait()
 
 
+def saved_network_settings(root):
+    """Proxy/CA settings saved for the auto-update cron job, re-checked like vm-auto-update.py does."""
+    path = root / AUTO_UPDATE_STATE
+    try:
+        if path.is_symlink() or not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    raw = data.get("environment") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {name: raw[name] for name in PIP_NETWORK_VARIABLES
+            if isinstance(raw.get(name), str) and raw[name] and not any(mark in raw[name] for mark in "@\n\r\0")}
+
+
+def pip_environment(root, environ=None):
+    """(environment, CA file) for pip's download only: own settings win, saved cron settings fill the gaps."""
+    env = dict(os.environ if environ is None else environ)
+    for name, value in saved_network_settings(root).items():
+        if not env.get(name):
+            env[name] = value
+    cafile = env.get("SSL_CERT_FILE") or env.get("GIT_SSL_CAINFO")
+    return env, (cafile if cafile and os.path.isfile(cafile) else None)
+
+
+def mask_secrets(text, env=None):
+    """Hide URL credentials and any proxy/pip setting that may hold them before text is logged or printed."""
+    text = str(text or "")
+    for name, value in (env or {}).items():
+        upper = name.upper()
+        if value and "@" in value and len(value) >= 4 and (upper.endswith("_PROXY") or upper.startswith("PIP_")):
+            text = text.replace(value, "***")
+    return re.sub(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]*@", r"\1***@", text)
+
+
+def output_tail(text, lines=6, limit=1200):
+    kept = [line.rstrip()[:300] for line in str(text or "").splitlines() if line.strip()][-lines:]
+    return "\n".join(kept)[-limit:]
+
+
+def exited_unreaped(pid):
+    """True once our child has exited, without reaping it, so its process group ID stays reserved."""
+    try:
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
+def stop_process_group(process, grace=PIP_STOP_GRACE):
+    """TERM, then KILL, pip's own process group; the leader is reaped only afterwards."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:  # not Linux: only the child itself can be stopped
+        process.kill()
+    else:
+        try:
+            killpg(process.pid, signal.SIGTERM)
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline and not exited_unreaped(process.pid):
+                time.sleep(.2)
+            killpg(process.pid, signal.SIGKILL)  # members that ignored TERM or outlived the leader
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass  # stuck in uninterruptible I/O; the warning line names the limit
+
+
+@contextmanager
+def stop_on_termination(process):
+    """If this installer is told to stop (the auto-update's own limit), stop pip's process group first."""
+    def handler(number, frame):
+        stop_process_group(process)
+        raise SystemExit(128 + number)
+    try:
+        previous = signal.signal(signal.SIGTERM, handler)
+    except ValueError:  # not the main thread: nothing can be forwarded
+        previous = False
+    try:
+        yield
+    finally:
+        if previous is not False:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
+
+
+def run_pip(python, arguments, backup, timeout, env=None):
+    """Run the venv's pip in its own process group; return (exit code, or None after the time limit, masked output).
+
+    The masked output is appended to the private backup folder; nothing is printed here.
+    """
+    argv = [str(python), "-I", "-m", "pip", *arguments]
+    try:
+        process = subprocess.Popen(argv, cwd=str(backup), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                                   start_new_session=True)
+    except OSError as exc:
+        code, output = -1, "pip could not start: " + type(exc).__name__
+    else:
+        with stop_on_termination(process):
+            try:
+                output, _ = process.communicate(timeout=timeout)
+                code = process.returncode
+            except subprocess.TimeoutExpired:
+                stop_process_group(process)
+                try:
+                    output = process.communicate(timeout=PIP_STOP_GRACE)[0] or ""
+                except (subprocess.TimeoutExpired, ValueError, OSError):
+                    output = ""
+                code, output = None, output + "\n[stopped after " + str(timeout) + " seconds]"
+    output = mask_secrets(output, env)
+    descriptor = os.open(backup / PIP_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "a", encoding="utf-8") as log:
+        log.write("$ pip " + mask_secrets(" ".join(arguments), env) + "\n" + (output or "").rstrip() + "\n"
+                  + "exit: " + ("timeout" if code is None else str(code)) + "\n\n")
+    return code, output or ""
+
+
+def venv_python_json(python, backup, script, *arguments):
+    try:
+        result = subprocess.run([str(python), "-I", "-c", script, *arguments], cwd=str(backup), stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=PACKAGES_TIMEOUT)
+        data = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        data = None
+    if not isinstance(data, dict):
+        raise RuntimeError("the Python packages in backend/.venv cannot be read")
+    return data
+
+
+def venv_packages(python, backup):
+    return {str(name): str(version) for name, version in venv_python_json(python, backup, VENV_PACKAGES).items()}
+
+
+def wheel_plan(directory, installed):
+    """Verdict of the dry run: {name: (version, wheel)} to add. Any change to an installed version is refused."""
+    plan, changes = {}, []
+    for path in sorted(directory.iterdir()) if directory.is_dir() else []:
+        parts = path.name[:-4].split("-") if path.name.endswith(".whl") else []
+        if len(parts) not in (5, 6) or path.is_symlink() or not path.is_file():
+            raise RuntimeError("the dry run downloaded an unexpected file (" + path.name[:80] + "); nothing was installed")
+        name, version = re.sub(r"[-_.]+", "-", parts[0]).lower(), parts[1]
+        if name in installed:
+            if installed[name] != version:
+                changes.append(name + " " + installed[name] + " -> " + version)
+            continue
+        if name in plan:
+            raise RuntimeError("the dry run downloaded two versions of " + name + "; nothing was installed")
+        plan[name] = (version, path)
+    if changes:
+        raise RuntimeError("the dry run would change installed packages (" + ", ".join(changes) + "); nothing was installed")
+    return plan
+
+
+def pip_warning(reason, backup, output=""):
+    print("WARNING: backend Python packages were not added: " + reason + ". The update continues; a feature whose "
+          "package is missing (such as the AI assistant) reports that it is not installed. pip log: "
+          + str(backup / PIP_LOG), flush=True)
+    tail = output_tail(output)  # already masked by run_pip
+    if tail:
+        print("  pip: " + tail.replace("\n", "\n  pip: "), flush=True)
+
+
+def install_requirements(root, source, python, backup):
+    """Add the reviewed tree's missing backend packages to the venv while the old site keeps running.
+
+    Never fatal and never changes an installed version. Returns the added {name: version}, or None.
+    """
+    requirements = source / REQUIREMENTS
+    if not requirements.is_file():
+        print("This release has no " + REQUIREMENTS + "; Python packages were left unchanged.", flush=True)
+        return None
+    print("Checking the backend Python packages…", flush=True)
+    try:
+        return add_missing_packages(root, requirements, python, backup)
+    except Exception as exc:  # pip must never block a release
+        pip_warning(mask_secrets(str(exc)) or type(exc).__name__, backup)
+        return None
+    finally:
+        shutil.rmtree(backup / PIP_WHEELS, ignore_errors=True)
+
+
+def add_missing_packages(root, requirements, python, backup):
+    # Local only: --no-index (and --isolated: no pip configuration) cannot reach any index.
+    check = ["install", *PIP_OPTIONS, "--no-index", "-r", str(requirements)]
+    if run_pip(python, check, backup, PIP_CHECK_TIMEOUT)[0] == 0:
+        print("Backend Python packages already match " + REQUIREMENTS + ".", flush=True)
+        return None
+    status = venv_python_json(python, backup, REQUIREMENT_STATUS, str(requirements))
+    conflicts = [item for item in status.get("conflicts", []) if isinstance(item, dict)]
+    if conflicts:
+        print("NOTE: installed versions are never changed automatically; these stay as they are: " + "; ".join(
+            str(item.get("name")) + " " + str(item.get("installed")) + " (release asks " + str(item.get("wanted")) + ")"
+            for item in conflicts), flush=True)
+    if status.get("unsupported"):
+        print("NOTE: requirement lines that are not plain packages are skipped: "
+              + mask_secrets(", ".join(map(str, status["unsupported"]))), flush=True)
+    missing = [str(item) for item in status.get("missing", [])]
+    if not missing:
+        if not conflicts:
+            pip_warning("pip reports unmet requirements but no package is missing; check them with "
+                        "backend/.venv/bin/python -m pip check", backup)
+        return None
+    installed = venv_packages(python, backup)
+    constraints = backup / PACKAGES_BEFORE
+    constraints.write_text("".join(name + "==" + installed[name] + "\n" for name in sorted(installed)), encoding="utf-8")
+    os.chmod(constraints, 0o600)
+    env, cafile = pip_environment(root)
+    wheels = backup / PIP_WHEELS
+    print("Downloading missing backend Python packages: " + ", ".join(missing) + " (time limit "
+          + str(PIP_DOWNLOAD_TIMEOUT // 60) + " minutes)…", flush=True)
+    download = ["download", *PIP_OPTIONS, "--only-binary=:all:", "--index-url", PIP_INDEX_URL,
+                "-c", str(constraints), "-d", str(wheels)] + (["--cert", cafile] if cafile else [])
+    code, output = run_pip(python, download + missing, backup, PIP_DOWNLOAD_TIMEOUT, env)
+    if code != 0:
+        reason = ("the download did not finish within " + str(PIP_DOWNLOAD_TIMEOUT // 60) + " minutes" if code is None
+                  else "the download failed (pip exit " + str(code) + ")")
+        pip_warning(reason, backup, output)
+        return None
+    plan = wheel_plan(wheels, installed)
+    if not plan:
+        pip_warning("the download brought no new package", backup)
+        return None
+    print("Adding " + ", ".join(name + " " + plan[name][0] for name in sorted(plan)) + "…", flush=True)
+    add = ["install", *PIP_OPTIONS, "--no-index", "--no-deps", "--only-binary=:all:"]
+    code, output = run_pip(python, add + [str(plan[name][1]) for name in sorted(plan)], backup, PIP_INSTALL_TIMEOUT)
+    after = venv_packages(python, backup)
+    changed = [name for name in sorted(installed) if after.get(name) != installed[name]]
+    if changed:
+        print("WARNING: installed packages changed unexpectedly (" + ", ".join(changed) + "); restore them with: "
+              "backend/.venv/bin/python -m pip install --no-deps -r " + str(constraints), flush=True)
+    if code != 0:
+        reason = "adding the downloaded packages " + ("timed out" if code is None else "failed (pip exit " + str(code) + ")")
+        pip_warning(reason, backup, output)
+        return None
+    added = {name: after[name] for name in sorted(after) if name not in installed}
+    print("Backend Python packages added: " + (", ".join(name + " " + version for name, version in added.items())
+                                               or "none") + ".", flush=True)
+    if run_pip(python, check, backup, PIP_CHECK_TIMEOUT)[0] != 0:
+        print("NOTE: " + REQUIREMENTS + " is still not fully satisfied; see the pip log: " + str(backup / PIP_LOG), flush=True)
+    return added
+
+
 def service_pids(root, proc_root=Path("/proc")):
     expected_cwd = (root / "backend").resolve()
     matches = []
@@ -483,6 +817,9 @@ def install(root, commit, backup_frontend_lock=False, enable_accounts=False, fin
         source = backup / "source"
         source.mkdir()
         safe_extract(archive, source)
+        # Missing dependencies are added to the shared venv while the old site keeps running (never
+        # fatal, never a version change), so the smoke test runs the new tree with the final packages.
+        packages = install_requirements(root, source, python, backup)
         print("Checking startup with the VM's Python environment…", flush=True)
         smoke_test(source, python, backup, enable_accounts)
         for relative in local_source:
@@ -570,6 +907,9 @@ def install(root, commit, backup_frontend_lock=False, enable_accounts=False, fin
             print("Update failed. Original source and live twin data restored. Backup: " + str(backup), file=sys.stderr)
             raise
         print("Installed " + commit[:7] + ". Inventory preserved. Backup: " + str(backup))
+        if packages:
+            print("Python packages added: " + ", ".join(packages) + " (earlier package list: "
+                  + str(backup / PACKAGES_BEFORE) + ")")
         print("Open the site with ?tab=dashboard and refresh existing DCIM / 3D Twin tabs.")
         if enable_accounts:
             print("Accounts enabled. First administrator: ACCOUNTS_ADMIN_USERNAME (admin by default), using the existing site password.")

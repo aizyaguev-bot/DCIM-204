@@ -2,6 +2,53 @@
 
 ---
 
+## v2.39.6 — 2026-10-21 — 3D Digital Twin: clearer moves and keyboard search
+
+### Fixed
+- The move banner no longer covers the toolbar buttons or the Attention list; it
+  sits just under the toolbar and its destination list fits the screen.
+- An unreachable PDU shows its real number of outlets (from Lab Manager or what it
+  last reported) with an unknown state, instead of always 24. Its outlet menu
+  refuses power actions, like the PDU page.
+- Search results: the arrow keys move through them, Enter selects, Escape closes.
+  The Zone and Setup lists show a focus ring.
+- On the 3D Twin page the lab assistant button sits in the page title row, so it
+  never covers the twin's panels; other pages keep it in the corner.
+
+---
+
+## v2.39.5 — 2026-10-21 — Safer 3D Digital Twin and automatic package install
+
+### Fixed
+- **3D Digital Twin — power and console are safe.** Power and console buttons work
+  only for servers that are in the live DCIM mappings; a server that is not shows
+  "Not in live DCIM — power disabled" and a stale PDU is marked "(stale)". Every
+  power confirmation names the server, PDU, outlet and the new state.
+- **3D Digital Twin — moves ask first.** Moving a server always shows where it is
+  going (rack, shelf and U). Moving onto an occupied shelf offers **Swap places**
+  or **Cancel** instead of pushing the other servers down; Cancel writes nothing.
+- The rack bar now flies to the chosen rack without hiding it behind the opposite
+  row, and one tap can no longer save a move to the wrong rack.
+- Moving works while a search is active, and the Attention panel no longer covers
+  the target rack's top shelf during a move.
+- Search: an exact name (for example "OPT11") is selected first; owner names are
+  found again.
+- A blocked KVM pop-up no longer reports success; the console opens inside the
+  twin and closing it frees the port.
+- Zone names sit on their floor areas again; labels and notes are shown as plain
+  text.
+- Rack moves from the twin and from Locations can no longer overwrite each other:
+  a save based on an older layout is refused and asks you to reload.
+- The DCIM rack rows skip the same non-server labels as the 3D twin (PDU, KVM
+  power, spare, free and similar).
+
+### Changed
+- The VM installer now adds any missing Python package the site needs (such as
+  the AI assistant's), without changing packages that are already installed. A
+  failed download never stops the update.
+
+---
+
 ## v2.39.4 — 2026-10-21 — Locations (move and swap servers) and Export CSV
 
 ### Added

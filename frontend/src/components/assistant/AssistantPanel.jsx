@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useAccounts } from "../../accounts";
 import {
   getStatus, sendMessage, listConversations, getConversation, resetConversation, normalizeAnswer, normalizeSources,
@@ -248,6 +249,31 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
     if (!open && wasOpen.current) requestAnimationFrame(() => launcherRef.current?.focus());
     wasOpen.current = open;
   }, [open]);
+
+  // ---- 3D Twin page: the twin fills the screen, and its sidebar, controls and detail panel sit where the floating
+  // launcher normally is. There the launcher moves into the page title row (it scrolls with the page, so it never
+  // covers the twin); everywhere else it stays in the bottom corner. ----
+  const onTwin = context?.tab === "twin" && !context?.detail;
+  const [twinSpot, setTwinSpot] = useState(null);             // {top, right} in page coordinates, null = bottom corner
+  useLayoutEffect(() => {
+    if (!onTwin || open) { setTwinSpot(null); return undefined; }
+    const place = () => {
+      const title = document.querySelector(".page-intro h1"), btn = launcherRef.current;
+      if (!title || !btn) { setTwinSpot(spot => (spot ? null : spot)); return; }
+      const t = title.getBoundingClientRect(), row = title.parentElement.getBoundingClientRect();
+      const pad = parseFloat(getComputedStyle(title.parentElement).paddingRight) || 12;   // line up with the title's margin
+      const next = { top: Math.round(t.top + window.scrollY + (t.height - btn.offsetHeight) / 2),
+        right: Math.max(8, Math.round(document.documentElement.clientWidth - row.right + pad)) };
+      setTwinSpot(spot => (spot && spot.top === next.top && spot.right === next.right ? spot : next));
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(document.body);
+    const title = document.querySelector(".page-intro");
+    if (title?.parentElement) observer.observe(title.parentElement);   // banners above the title move it down
+    window.addEventListener("resize", place);
+    return () => { observer.disconnect(); window.removeEventListener("resize", place); };
+  }, [onTwin, open]);
 
   // ---- keep the newest message in view: the top of a new answer, or the end while waiting ----
   useEffect(() => {
@@ -563,16 +589,19 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
 
   return (
     <>
-      {!open && (
+      {!open && createPortal(
         <button ref={launcherRef} type="button" onClick={() => setOpen(true)} aria-expanded="false" aria-controls="assistant-panel"
-          dir="rtl" lang="he" style={{ left: 16, bottom: "calc(72px + env(safe-area-inset-bottom, 0px))" }}
-          className="fixed z-[45] inline-flex items-center gap-2 rounded border border-nv-400/70 bg-zinc-950 px-3.5 py-2.5 text-sm font-semibold text-zinc-100 hover:border-nv-400 hover:bg-zinc-900">
+          dir="rtl" lang="he" data-placement={twinSpot ? "title" : "corner"}
+          style={twinSpot ? { position: "absolute", top: twinSpot.top, right: twinSpot.right }
+            : { left: 16, bottom: "calc(72px + env(safe-area-inset-bottom, 0px))" }}
+          className={`fixed z-[45] inline-flex items-center gap-2 rounded border border-nv-400/70 bg-zinc-950 px-3.5 text-sm font-semibold text-zinc-100 hover:border-nv-400 hover:bg-zinc-900 ${onTwin ? "py-1.5" : "py-2.5"}`}>
           <span className="text-nv-300"><ChatIcon /></span>
           עוזר המעבדה
           {pending && <span className="h-2 w-2 rounded-full bg-nv-400 motion-safe:animate-pulse" role="img" aria-label="תשובה בהכנה" />}
           {anyExecuting && <span className="h-2 w-2 rounded-full bg-amber-400 motion-safe:animate-pulse" role="img" aria-label="פעולה בביצוע" />}
           {!anyExecuting && actionDone && <span className="h-2 w-2 rounded-full bg-emerald-400" role="img" aria-label="פעולה הסתיימה" />}
-        </button>
+        </button>,
+        document.body,
       )}
 
       {open && (

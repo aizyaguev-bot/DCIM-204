@@ -68,12 +68,15 @@ export function isDefaultOutletLabel(label) {
 }
 function genId() { return `ci-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`; }
 
-function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
+export function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
   const order  = rackOrder[rackName] || [];
   const slots  = rackSlots[rackName] || {};
   const custom = customItems[rackName] || [];
+  // Outlet labels that are not computers ("empty", "KVM Power", placeholders) never take a U slot. The 3D Twin
+  // (lab-twin/app.js NON_SERVER_LABEL) drops the same labels before its U assignment, so both show the same shelves.
+  const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
 
-  const sorted = [...servers].sort((a, b) => {
+  const sorted = servers.filter(s => !NON_SERVER_LABEL.test(String(s.name || "").trim())).sort((a, b) => {
     const ai = order.indexOf(a.id), bi = order.indexOf(b.id);
     if (ai === -1 && bi === -1) return a.name.localeCompare(b.name);
     if (ai === -1) return 1; if (bi === -1) return -1;

@@ -42,7 +42,9 @@ code { font-family: var(--mono); font-size: 11px; background: var(--z-900); bord
 #search::placeholder { color: var(--z-500); }
 .search-results { position: absolute; top: 40px; left: 0; right: 0; background: var(--z-950); border: 1px solid var(--z-800); border-radius: 8px; max-height: 320px; overflow: auto; z-index: 50; box-shadow: 0 10px 30px rgba(0,0,0,.6); }
 .search-results .sr { display: flex; gap: 10px; align-items: center; padding: 7px 12px; cursor: pointer; border-bottom: 1px solid rgba(39,39,42,.5); }
-.search-results .sr:hover { background: rgba(118,185,0,.08); }
+.search-results .sr:hover, .search-results .sr.active { background: rgba(118,185,0,.12); }
+.search-results .sr.active { box-shadow: inset 2px 0 0 var(--nv-400); }
+.search-results .sr .ow { color: var(--z-400); font-size: 10.5px; }
 .search-results .sr .id { font-family: var(--mono); font-size: 11px; color: var(--nv-300); min-width: 90px; }
 .search-results .sr .nm { flex: 1; color: var(--z-200); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .search-results .sr .cat { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--z-500); }
@@ -271,8 +273,9 @@ code { font-family: var(--mono); font-size: 11px; background: var(--z-900); bord
 #btnKiosk.on { background: rgba(34,211,238,.15); color: #a5f3fc; border-color: rgba(34,211,238,.45); }
 body.editmode .viewport { outline: 2px solid rgba(251,191,36,.55); outline-offset: -2px; }
 body.moving #c { cursor: crosshair; }
-.movebanner { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 7; display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-radius: 12px; background: rgba(8,51,68,.92); border: 1px solid rgba(34,211,238,.6); color: #cffafe; font-size: 15px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
-.movebanner .mv-ic { font-size: 20px; color: var(--cyan); }
+/* move banner: left column under the toolbar (top / max-width set by placeAttnDock in app.js), so it never covers a control */
+.movebanner { position: absolute; left: 12px; top: 58px; z-index: 7; display: flex; align-items: center; gap: 8px 10px; padding: 8px 12px; border-radius: 10px; background: rgba(8,51,68,.92); border: 1px solid rgba(34,211,238,.6); color: #cffafe; font-size: 13px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.5); max-width: calc(100% - 80px); }
+.movebanner .mv-ic { font-size: 17px; color: var(--cyan); }
 .edit-hint { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: #fde68a; background: rgba(251,191,36,.08); border: 1px dashed rgba(251,191,36,.35); border-radius: 8px; padding: 6px 10px; text-align: center; }
 .sec.big { display: flex; flex-direction: column; gap: 8px; padding: 14px; }
 .lbl-lg { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--z-500); margin-top: 6px; }
@@ -342,7 +345,9 @@ body.embed .search-wrap { margin-left: 0; }
 .rackbar button { background: rgba(9,9,11,.82); border: 1px solid var(--z-700); color: var(--z-200); border-radius: 10px; padding: 8px 12px; font-family: var(--mono); font-size: 12px; font-weight: 700; cursor: pointer; min-height: 40px; display: flex; flex-direction: column; align-items: center; line-height: 1.1; backdrop-filter: blur(6px); }
 .rackbar button small { font-family: var(--sans); font-weight: 500; font-size: 10px; color: var(--z-500); }
 .rackbar button:hover, .rackbar button.on { border-color: var(--nv-400); color: #fff; }
-.rackbar button.on { background: rgba(118,185,0,.15); }
+/* selected rack: opaque so the 3D scene behind (often the light floor) never washes out the text */
+.rackbar button.on { background: #1f3608; border-color: var(--nv-400); color: #fff; box-shadow: 0 0 0 1px rgba(118,185,0,.35); }
+.rackbar button.on small { color: #d9f99d; }
 .rackbar button .rb-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: 1px; }
 .zoombar { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 5; }
 .zb { width: 44px; height: 44px; border-radius: 10px; background: rgba(9,9,11,.82); border: 1px solid var(--z-700); color: #fff; font-size: 20px; cursor: pointer; backdrop-filter: blur(6px); }
@@ -392,7 +397,8 @@ body.kiosk .envpanel { top: 76px; min-width: 240px; font-size: 14px; } body.kios
 #attn .zone-h .sw { width: 8px; height: 8px; border-radius: 50%; background: var(--sev); }
 #attn .zone-h { color: var(--sev-fg); }
 .attn-row { display: flex; align-items: flex-start; gap: 7px; padding: 5px 7px; margin: 2px 0; border-radius: 6px; border-left: 2px solid var(--sev); background: rgba(9,9,11,.35); cursor: pointer; font-size: 12px; color: var(--z-200); }
-.attn-row:hover, .attn-row:focus-visible { background: rgba(255,255,255,.06); outline: none; }
+.attn-row:hover, .attn-row:focus-visible { background: rgba(255,255,255,.06); }
+.attn-row:focus { outline: none; }
 .attn-row .attn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--sev); flex: 0 0 auto; margin-top: 4px; }
 .attn-row .attn-txt { flex: 1; min-width: 0; line-height: 1.3; overflow-wrap: anywhere; }
 .attn-row .attn-txt small { display: block; color: var(--z-500); font-size: 10.5px; margin-top: 1px; }
@@ -462,6 +468,39 @@ body.kiosk .attn-badge { font-size: 13px; padding: 2px 8px; } body.kiosk .stats 
   .hint { left: 0; right: 0; bottom: 0; max-width: none; border-radius: 0; font-size: 11.5px; line-height: 1.45; padding: 4px 10px; }
   .compass, .envpanel { display: none; }
   .savebar { left: 8px; right: 8px; flex-wrap: wrap; }
-  .movebanner { max-width: calc(100% - 16px); font-size: 13px; }
+  .movebanner { left: 8px; max-width: calc(100% - 60px); padding: 6px 8px; gap: 6px 8px; }
   .toast { max-width: calc(100vw - 24px); }
 }
+
+/* ─── TWIN-FIX: keyboard focus, confirmation dialog, inline KVM console, reduced motion ───────── */
+.attn-row:focus-visible, .tn:focus-visible, .rackbar button:focus-visible, .tb:focus-visible, .zb:focus-visible,
+.btn:focus-visible, .icon-btn:focus-visible, .attn-dock-h:focus-visible, .attn-more:focus-visible, .tab:focus-visible, .st-attn:focus-visible {
+  outline: 2px solid var(--nv-300); outline-offset: 2px;
+}
+.tn:focus-visible { outline-offset: 0; }
+.readonly-note { color: var(--z-300); }
+#confirmModal { z-index: 150; }
+.confirm-card { width: 440px; }
+.confirm-card .modal-h { font-size: 15px; }
+.confirm-card .modal-b { font-size: 13px; color: var(--z-200); }
+.confirm-card .cf-line { font-family: var(--mono); font-size: 12.5px; color: var(--z-100); background: var(--z-900); border: 1px solid var(--z-800); border-radius: 8px; padding: 8px 10px; }
+.confirm-card .cf-move { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 12.5px; background: var(--z-900); border: 1px solid var(--z-800); border-radius: 8px; padding: 8px 10px; }
+.confirm-card .cf-move .k { color: var(--z-500); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; align-self: center; }
+.confirm-card .cf-move b { font-family: var(--mono); font-weight: 600; color: var(--z-100); overflow-wrap: anywhere; }
+.confirm-card .modal-f .btn { min-height: 36px; padding: 8px 16px; }
+.kvm-inline { position: fixed; inset: 0; z-index: 140; display: flex; flex-direction: column; background: var(--z-950); }
+.kvm-inline-h { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px; border-bottom: 1px solid var(--z-800); }
+.kvm-inline iframe { flex: 1; width: 100%; border: 0; background: #000; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+.movebanner { flex-wrap: wrap; justify-content: flex-start; }
+.movebanner #moveText { flex: 1 1 160px; min-width: 0; }
+.movebanner select { flex: 1 1 150px; min-width: 0; max-width: 320px; font-size: 13px; padding: 6px 8px; border-radius: 8px; border: 1px solid rgba(34,211,238,.6); background: var(--z-950); color: var(--z-100); font-family: var(--sans); }
+.movebanner select:focus-visible { outline: 2px solid var(--nv-300); outline-offset: 2px; }
+body.kiosk .movebanner { font-size: 15px; }
+/* TWIN-LOW: visible keyboard focus on the sidebar dropdowns and the search box; a clear highlighted search result */
+.filters select:focus-visible, .detail select:focus-visible, .chk input:focus-visible { outline: 2px solid var(--nv-300); outline-offset: 2px; border-color: rgba(118,185,0,.6); }
+#search:focus-visible { box-shadow: 0 0 0 2px rgba(159,224,64,.45); }
+.search-results .sr.active { background: rgba(118,185,0,.22); box-shadow: inset 3px 0 0 var(--nv-400); }
+.search-results .sr.active .nm { color: #fff; }
