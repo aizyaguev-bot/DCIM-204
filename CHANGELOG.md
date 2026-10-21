@@ -2,6 +2,21 @@
 
 ---
 
+## v2.39.6 — 2026-10-21 — 3D Digital Twin: clearer moves and keyboard search
+
+### Fixed
+- The move banner no longer covers the toolbar buttons or the Attention list; it
+  sits just under the toolbar and its destination list fits the screen.
+- An unreachable PDU shows its real number of outlets (from Lab Manager or what it
+  last reported) with an unknown state, instead of always 24. Its outlet menu
+  refuses power actions, like the PDU page.
+- Search results: the arrow keys move through them, Enter selects, Escape closes.
+  The Zone and Setup lists show a focus ring.
+- On the 3D Twin page the lab assistant button sits in the page title row, so it
+  never covers the twin's panels; other pages keep it in the corner.
+
+---
+
 ## v2.39.5 — 2026-10-21 — Safer 3D Digital Twin and automatic package install
 
 ### Fixed
