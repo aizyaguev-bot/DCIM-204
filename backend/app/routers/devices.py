@@ -342,6 +342,9 @@ _MAX_LISTED_PORTS = 512
 _MAX_TARGET_PORTS = 64
 _MAX_NAME = 200
 _MOVE_FAILED = "The move could not be saved. No changes were made; please retry."
+_MOVE_HALF_SAVED = ("The move was only partly saved: the port labels changed but the rack positions did not. "
+                    "Check this server in Locations and move it again.")
+_LAYOUT_CHANGED = "The rack layout changed in another session during the move. No changes were made; preview again."
 
 
 def _identity(name):
@@ -836,7 +839,12 @@ def _plan_move(body, devices, labels, unreadable, layouts, names):
 async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: None = Depends(_one_label_writer)):
     """Move a server to another server's location (swap, or take it over) or to empty ports, with its rack position.
     dry_run returns the same answer without writing, plus plan_revision; an Apply that sends it back is refused if
-    anything changed since. Monitors and owners follow the server and are not touched."""
+    anything changed since. Monitors and owners follow the server and are not touched.
+
+    Order, so that a failure never leaves half a move behind: plan everything in memory; commit the port labels;
+    then, holding the layout file locks with no await inside, write the changed layout files and put back the ones
+    already written if any write fails; only after that (locks released) undo the labels in a second commit. No other
+    layout writer can run between this move's file writes and their restore."""
     dry_run, expected_plan = body.get("dry_run", False), body.get("plan_revision")
     if not isinstance(dry_run, bool):
         raise HTTPException(400, "dry_run must be true or false")
@@ -850,50 +858,47 @@ async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: N
             unreadable.add(dev.id)
         # Names the PDU/KVM reports itself count as occupied ports and as the mover's own ports.
         labels[dev.id] = _effective_labels(dev, saved[dev.id])
-    with ExitStack() as locks:
-        # The file locks are synchronous (they also serialize uvicorn workers): nothing below awaits while one is
-        # held, or a layout save waiting on the same lock would block the event loop and this move with it.
-        if not dry_run:
-            _lock_layouts(locks)
-        layouts, present = _read_layouts(strict=True)
-        new_labels, new_layouts, result = _plan_move(body, devices, labels, unreadable, layouts, names)
-        result = {"ok": True, "dry_run": dry_run, **{k: v for k, v in result.items() if k != "ok"}}
-        if dry_run:
-            return result
-        if expected_plan is not None and expected_plan != result["plan_revision"]:
-            raise HTTPException(409, "Changed since the preview. Preview again.")
-        try:
-            written = _write_layouts(layouts, new_layouts, present)
-        except Exception:
-            log.exception("Server move: a rack layout file could not be written")
-            raise HTTPException(503, _MOVE_FAILED) from None
+    original = {dev.id: dev.labels_json for dev in devices}
+    # Layout files are replaced atomically, so this read needs no lock; the write below checks them again locked.
+    layouts, present = _read_layouts(strict=True)
+    new_labels, new_layouts, result = _plan_move(body, devices, labels, unreadable, layouts, names)
+    result = {"ok": True, "dry_run": dry_run, **{k: v for k, v in result.items() if k != "ok"}}
+    if dry_run:
+        return result
+    if expected_plan is not None and expected_plan != result["plan_revision"]:
+        raise HTTPException(409, "Changed since the preview. Preview again.")
 
-    def restore_files():
-        try:
-            with ExitStack() as relock:
-                _lock_layouts(relock)
-                _restore_layouts(written, layouts, present, new_layouts)
-        except Exception:
-            log.exception("Could not restore the rack layout files after a failed server move")
-
-    try:
-        for dev in devices:
-            if new_labels[dev.id] != labels[dev.id]:
-                dev.labels_json = json.dumps(_saved_after(saved[dev.id], labels[dev.id], new_labels[dev.id]))
-        error, cancelled = await _finish_commit(db)
-    except BaseException:
-        restore_files()  # still no await while the files are locked
-        raise
+    # 1. The port labels. Nothing else has been written yet, so a failed commit needs only a rollback.
+    for dev in devices:
+        if new_labels[dev.id] != labels[dev.id]:
+            dev.labels_json = json.dumps(_saved_after(saved[dev.id], labels[dev.id], new_labels[dev.id]))
+    error, cancelled = await _finish_commit(db)
     if error is not None:
-        log.error("Server move was not saved (%s); restoring the rack layout files", type(error).__name__)
-        restore_files()
-        try:
-            await db.rollback()
-        except BaseException:
-            log.exception("Rollback after a failed server move did not finish")
+        log.error("Server move was not saved (%s); no layout file was written", type(error).__name__)
+        await _rollback(db)
         if cancelled:
             raise asyncio.CancelledError()
         raise HTTPException(503, _MOVE_FAILED)
+
+    # 2. The layout files, all-or-nothing (see _write_layouts).
+    try:
+        _write_layouts((body, devices, labels, unreadable, names), layouts, present, new_labels, new_layouts, result)
+    except BaseException as failure:
+        # 3. The files are as they were before the move: put the labels back as well. A write or lock error reaches
+        # here as the file lock's generic 503 (locked_file turns an OSError into it).
+        refused = isinstance(failure, HTTPException) and failure.detail != inventory_store.LAYOUT_SAVE_FAILED
+        if isinstance(failure, Exception) and not refused:
+            log.error("Server move: a rack layout file could not be written; undoing the move", exc_info=failure)
+        reverted, cancelled_again = await _revert_labels(db, devices, original)
+        if not isinstance(failure, Exception):
+            raise failure  # KeyboardInterrupt, SystemExit, CancelledError: undone as far as possible, then passed on
+        if not reverted:
+            raise HTTPException(503, _MOVE_HALF_SAVED) from None
+        if cancelled or cancelled_again:
+            raise asyncio.CancelledError() from None
+        if refused:
+            raise failure  # 409 layout changed, or 503 unreadable layout file: nothing was written
+        raise HTTPException(503, _MOVE_FAILED) from None
     if cancelled:
         raise asyncio.CancelledError()  # saved; only the caller went away
     return result
@@ -930,39 +935,70 @@ async def _finish_commit(db):
     return commit.exception(), cancelled
 
 
+async def _rollback(db):
+    try:
+        await db.rollback()
+    except BaseException:
+        log.exception("Rollback after a failed server move did not finish")
+
+
+async def _revert_labels(db, devices, original):
+    """Second commit after the layout files could not be written: every port label as it was before the move.
+    Returns (reverted, cancelled)."""
+    for dev in devices:
+        if dev.labels_json != original[dev.id]:
+            dev.labels_json = original[dev.id]
+    error, cancelled = await _finish_commit(db)
+    if error is not None:
+        log.error("Server move: the port labels could not be put back (%s)", type(error).__name__)
+        await _rollback(db)
+        return False, cancelled
+    return True, cancelled
+
+
 def _lock_layouts(stack):
     """The same per-file locks as the layout PUT endpoints, always taken in one order."""
     for fname in sorted(_LAYOUT_FILES):
         stack.enter_context(inventory_store.locked_file(_BACKEND_DIR / fname, inventory_store.LAYOUT_SAVE_FAILED))
 
 
-def _write_layouts(layouts, new_layouts, present):
-    """Under the layout locks: write the changed files atomically. A failed write puts back the ones written."""
-    written = []
-    try:
-        for fname in _LAYOUT_FILES:
-            if new_layouts[fname] != layouts[fname]:
-                written.append(fname)
-                inventory_store.write_json(_BACKEND_DIR / fname, new_layouts[fname])
-    except Exception:
-        _restore_layouts(written, layouts, present, new_layouts)
-        raise
-    return written
+def _write_layouts(plan_inputs, layouts, present, new_labels, new_layouts, result):
+    """Write a move's layout changes under the layout file locks. The locks are synchronous (they also serialize
+    uvicorn workers), so nothing here awaits: a layout save waiting on one of them only waits for this function.
+
+    If another session saved a layout file since the plan was made, the move is planned again on the current files
+    and goes ahead only when it changes exactly the same labels and positions (that other edit is kept); otherwise
+    409 and nothing is written. Any failure while writing, including KeyboardInterrupt or cancellation, puts back
+    every file already written before the locks are released, then propagates."""
+    body, devices, labels, unreadable, names = plan_inputs
+    with ExitStack() as locks:
+        _lock_layouts(locks)
+        current, current_present = _read_layouts(strict=True)
+        if current != layouts or current_present != present:
+            try:
+                replanned_labels, new_layouts, replanned = _plan_move(body, devices, labels, unreadable, current, names)
+            except HTTPException as exc:
+                raise HTTPException(409, _LAYOUT_CHANGED) from exc
+            if replanned_labels != new_labels or replanned["plan_revision"] != result["plan_revision"]:
+                raise HTTPException(409, _LAYOUT_CHANGED)
+            layouts, present = current, current_present
+        written = []
+        try:
+            for fname in _LAYOUT_FILES:
+                if new_layouts[fname] != layouts[fname]:
+                    written.append(fname)
+                    inventory_store.write_json(_BACKEND_DIR / fname, new_layouts[fname])
+        except BaseException:
+            _restore_layouts(written, layouts, present)
+            raise
 
 
-def _restore_layouts(written, layouts, present, new_layouts):
-    """Under the layout locks: put back each file this move wrote (a file it created is removed), unless the file
-    no longer holds what the move wrote (its own write failed, or another session saved it since)."""
+def _restore_layouts(written, layouts, present):
+    """Still under the layout locks that covered the writes: put back each file the move wrote (a file it created is
+    removed). Nobody else can have saved them in between."""
     for fname in written:
         path = _BACKEND_DIR / fname
         try:
-            try:
-                current = json.loads(path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                current = None
-            if current != new_layouts[fname]:
-                log.warning("%s does not hold the failed server move's content; it was left as it is", fname)
-                continue
             if fname in present:
                 inventory_store.write_json(path, layouts[fname])
             else:

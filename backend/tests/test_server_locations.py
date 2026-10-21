@@ -709,3 +709,140 @@ async def test_viewer_reads_locations_and_operator_moves(accounts_lab, username,
             assert r.status_code == move_status, r.text
         # Adding or editing a device stays Admin-only.
         assert (await c.put("/api/devices/pdu-a", json={})).status_code == (422 if username == "admin" else 403)
+
+
+# ── Codex HF-R2: labels are committed first, then the layout files are written all-or-nothing ────────────────────
+
+SWAPPED_SLOTS = {"optn45": 3, "optn44 (psu1)": 7}
+
+
+def fail_on_layout_write(monkeypatch, number, error):
+    """inventory_store.write_json raises `error` on the move's `number`-th layout file write; later writes (the
+    restore) go through."""
+    real_write, calls = inventory_store.write_json, []
+
+    def write_json(path, data, *args, **kwargs):
+        calls.append(path.name)
+        if len(calls) == number:
+            raise error
+        return real_write(path, data, *args, **kwargs)
+    monkeypatch.setattr(inventory_store, "write_json", write_json)
+    return calls
+
+
+async def test_a_failed_second_layout_write_restores_the_first_file_and_the_labels(lab, monkeypatch):
+    before = read_layout(lab.folder)
+    calls = fail_on_layout_write(monkeypatch, 2, OSError("disk full"))
+    r = await move(lab, server="optn45", target_server="optn44")
+    assert r.status_code == 503 and r.json()["detail"] == devices._MOVE_FAILED
+    # The first file was written, then put back (third write), under the same locks.
+    assert calls[:3] == ["rack_overrides.json", "rack_positions.json", "rack_overrides.json"]
+    assert read_layout(lab.folder) == before
+    assert await saved_labels(lab.db) == LABELS          # the label commit was undone by a second commit
+    assert not list(lab.folder.glob("*.tmp"))
+    rows = {s["key"]: s for s in (await lab.client.get("/api/devices/locations")).json()["servers"]}
+    assert (rows["optn44"]["slot"], rows["optn45"]["slot"]) == (3, 7)
+
+
+class Interrupted(BaseException):
+    """Stands for KeyboardInterrupt / SystemExit: not an Exception."""
+
+
+@pytest.mark.parametrize("error", [Interrupted, KeyboardInterrupt, asyncio.CancelledError])
+async def test_an_interrupt_during_the_file_writes_restores_files_and_labels_and_is_passed_on(lab, monkeypatch, error):
+    before = read_layout(lab.folder)
+    fail_on_layout_write(monkeypatch, 2, error())
+    with pytest.raises(error):
+        # Called directly: a BaseException leaving an ASGI app is not turned into a response.
+        await devices.move_server({"server": "optn45", "target_server": "optn44"}, lab.db, None)
+    assert read_layout(lab.folder) == before
+    assert await saved_labels(lab.db) == LABELS
+
+
+async def test_a_failed_label_commit_writes_no_layout_file_and_keeps_a_concurrent_save(lab, monkeypatch):
+    # Codex HF-R2 P1: another page saves rack slots while the move commits, then the commit fails. Nothing of the
+    # move may stay behind (no swapped slots), and the other page's save is kept.
+    path = lab.folder / "rack_slots.json"
+
+    async def commit():
+        payload = {**json.loads(path.read_text()), "Rack-07": {"spare": 1}}
+        await asyncio.wait_for(asyncio.to_thread(inventory_store.save_layout, path, payload, None, {}), timeout=5)
+        raise RuntimeError("disk I/O error")
+    monkeypatch.setattr(lab.db, "commit", commit)
+    r = await move(lab, server="optn45", target_server="optn44")
+    assert r.status_code == 503 and r.json()["detail"] == devices._MOVE_FAILED
+    assert json.loads(path.read_text()) == {**LAYOUT["rack_slots.json"], "Rack-07": {"spare": 1}}
+    assert {k: v for k, v in read_layout(lab.folder).items() if k != "rack_slots.json"} == {
+        k: v for k, v in LAYOUT.items() if k != "rack_slots.json"}
+    assert await saved_labels(lab.db) == LABELS
+
+
+async def test_a_layout_put_during_the_move_completes_and_is_kept(lab, monkeypatch):
+    # The real PUT /api/rack-slots (it takes the same file lock synchronously) runs while the move commits its labels.
+    import app.main as main
+    monkeypatch.setattr(main, "_RACK_SLOTS_FILE", lab.folder / "rack_slots.json")
+    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(accounts_enabled=False, lab_manager_password=""))
+    real_commit, seen = lab.db.commit, {}
+
+    async def commit():
+        if "put" not in seen:
+            slots = json.loads((lab.folder / "rack_slots.json").read_text())
+            async with AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test") as other:
+                seen["put"] = await asyncio.wait_for(
+                    other.put("/api/rack-slots", json={**slots, "Rack-07": {"spare": 1}}), timeout=5)
+        await real_commit()
+    monkeypatch.setattr(lab.db, "commit", commit)
+    r = await move(lab, server="optn45", target_server="optn44")
+    assert r.status_code == 200, r.text
+    assert seen["put"].status_code == 200, seen["put"].text
+    slots = json.loads((lab.folder / "rack_slots.json").read_text())
+    assert slots["Rack-07"] == {"spare": 1} and slots["Rack-01"] == SWAPPED_SLOTS   # both saves are there
+    assert (await saved_labels(lab.db))["pdu-a"]["1"] == "OPTN45"
+
+
+async def test_a_concurrent_save_that_changes_the_move_is_refused_and_undone(lab, monkeypatch):
+    # Another page moves OPTN44 to U5 while the move commits: the previewed swap is no longer what would happen.
+    path, real_commit, calls = lab.folder / "rack_slots.json", lab.db.commit, []
+
+    async def commit():
+        calls.append(1)
+        if len(calls) == 1:
+            slots = json.loads(path.read_text())
+            slots["Rack-01"]["optn44"] = 5
+            await asyncio.to_thread(inventory_store.save_layout, path, slots, None, {})
+        await real_commit()
+    monkeypatch.setattr(lab.db, "commit", commit)
+    r = await move(lab, server="optn45", target_server="optn44")
+    assert r.status_code == 409 and r.json()["detail"] == devices._LAYOUT_CHANGED
+    assert len(calls) == 2                                   # labels committed, then put back
+    assert await saved_labels(lab.db) == LABELS
+    assert json.loads(path.read_text())["Rack-01"] == {"optn44": 5, "optn45 (psu1)": 7}   # only the other save
+    assert read_layout(lab.folder)["rack_overrides.json"] == LAYOUT["rack_overrides.json"]
+
+
+async def test_a_save_from_another_worker_waits_for_the_move_writes_and_then_sees_them(lab, monkeypatch):
+    # Another uvicorn worker (a thread here) saves rack slots with the revision it read before the move, while the
+    # move holds the file locks. It waits, then gets 409 against the moved file: no deadlock, no lost update.
+    import threading
+    path = lab.folder / "rack_slots.json"
+    stale = inventory_store.revision(json.loads(path.read_text()))
+    real_write, outcome, workers = inventory_store.write_json, {}, []
+
+    def other_worker():
+        try:
+            outcome["etag"] = inventory_store.save_layout(path, {"Rack-09": {}}, stale, {})
+        except Exception as exc:  # HTTPException 409 expected
+            outcome["error"] = exc
+
+    def write_json(target, data, *args, **kwargs):
+        if not workers:
+            workers.append(threading.Thread(target=other_worker))
+            workers[0].start()
+        return real_write(target, data, *args, **kwargs)
+    monkeypatch.setattr(inventory_store, "write_json", write_json)
+    r = await move(lab, server="optn45", target_server="optn44")
+    assert r.status_code == 200, r.text
+    workers[0].join(timeout=15)
+    assert not workers[0].is_alive()
+    assert getattr(outcome.get("error"), "status_code", None) == 409
+    assert json.loads(path.read_text())["Rack-01"] == SWAPPED_SLOTS
