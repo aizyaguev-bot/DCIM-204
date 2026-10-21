@@ -865,3 +865,24 @@ async def test_real_planner_drift_refuses_after_a_label_edit(lab):
         response = await client.post(f"{PROPOSALS}/{proposal['id']}/execute", json={})
         assert response.status_code == 409 and response.json()["code"] == "drift", response.text
     assert await lab_state(lab) == before
+
+
+@needs_planner
+async def test_real_planner_apply_refuses_a_plan_other_than_the_confirmed_one(lab):
+    initial = await lab_state(lab)
+    body = {"server": "optn45", "target_server": "optn44", "swap": True}
+    async with lab.sessions() as db:
+        preview = locations.plan_of(await devices.plan_move(db, body))
+        cleared = locations.plan_of(await devices.plan_clear(db, "optn44"))
+    stale = copy.deepcopy(preview)
+    stale["changes"][0]["before"] = "optn46"
+    for apply in (lambda db: devices.apply_move(db, body, expected=stale),
+                  lambda db: devices.apply_clear(db, "optn44", expected={**cleared, "unplaced": ["x"]})):
+        async with lab.sessions() as db:
+            with pytest.raises(HTTPException) as caught:
+                await apply(db)
+        assert caught.value.status_code == 409
+    assert await lab_state(lab) == initial
+    async with lab.sessions() as db:
+        applied = await devices.apply_clear(db, "optn44", expected=cleared)
+    assert locations.plan_of(applied) == cleared and await lab_state(lab) != initial

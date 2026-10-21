@@ -1052,6 +1052,92 @@ def _holds(path, expected):
         return False
 
 
+# ── Assistant location changes (assistant/actions/locations.py): the same planner and writer as the endpoints ──
+# Each answer has the move-server shape ({ok, dry_run, changes, positions, unplaced, plan_revision}); refusals are the
+# same HTTPExceptions. `expected` is the {changes, positions, unplaced} the user confirmed in the assistant's card:
+# its revision is the preview's plan_revision, so anything that changed since is refused (409) and nothing is written.
+
+_CLEAR_FAILED = "The change could not be saved. No changes were made; please retry."
+_PREVIEW_CHANGED = "Changed since the preview. Preview again."
+
+
+async def plan_move(db, body: dict) -> dict:
+    """The POST /move-server dry-run answer, under the label writer lock."""
+    async with _labels_lock:
+        return await move_server({**body, "dry_run": True}, db)
+
+
+async def apply_move(db, body: dict, expected: dict | None = None) -> dict:
+    """POST /move-server exactly (same order, locks, restore on failure); refused when the plan is not `expected`."""
+    send = {**body, "dry_run": False}
+    if expected is not None:
+        send["plan_revision"] = inventory_store.revision(expected)
+    async with _labels_lock:
+        return await move_server(send, db)
+
+
+async def plan_clear(db, server: str) -> dict:
+    """Clearing a server's location: every PDU outlet / KVM port it is on gets the default name (as Locations ->
+    Clear location does with direct-label ""); the rack layout files are not touched, so the rack position is kept."""
+    async with _labels_lock:
+        return await _clear(db, server, True)
+
+
+async def apply_clear(db, server: str, expected: dict | None = None) -> dict:
+    async with _labels_lock:
+        return await _clear(db, server, False, expected)
+
+
+async def _clear(db, server, dry_run: bool, expected: dict | None = None) -> dict:
+    if not isinstance(server, str) or len(server) > _MAX_NAME or not _key_of(server):
+        raise HTTPException(400, "Choose the server to clear")
+    devices = await _port_devices(db)
+    saved, labels, unreadable = {}, {}, set()
+    for dev in devices:
+        saved[dev.id], readable = _saved_labels(dev)
+        if not readable:
+            unreadable.add(dev.id)
+        labels[dev.id] = _effective_labels(dev, saved[dev.id])
+    found = _servers(devices, labels).get(_key_of(server))
+    if found is None:
+        raise HTTPException(404, "Server not found on any PDU or KVM port")
+    new_labels = {dev_id: dict(current) for dev_id, current in labels.items()}
+    for dev, port, _ in found["ports"]:
+        _clear_port(new_labels[dev.id], dev, port)
+    changes = []
+    for dev in devices:
+        before, after = labels[dev.id], new_labels[dev.id]
+        for port in sorted(set(before) | set(after), key=_port_order):
+            if before.get(port) != after.get(port):
+                if dev.id in unreadable:
+                    raise HTTPException(503, f"The saved port labels of {dev.name} cannot be read, so nothing was changed.")
+                changes.append({"device_id": dev.id, "device_name": dev.name, "kind": dev.kind, "port": port,
+                                "before": before.get(port), "after": after.get(port)})
+    layouts, _ = _read_layouts(strict=False)   # read only: the position shown, which this change keeps
+    position = _position(found, _layout_ids(layouts).get(_key_of(server), set()), layouts)
+    plan = {"changes": changes, "positions": [{"server": found["name"], "before": position, "after": dict(position)}],
+            "unplaced": []}
+    plan["plan_revision"] = inventory_store.revision(plan)
+    result = {"ok": True, "dry_run": dry_run, **plan}
+    if dry_run:
+        return result
+    if expected is not None and inventory_store.revision(expected) != plan["plan_revision"]:
+        raise HTTPException(409, _PREVIEW_CHANGED)
+    for dev in devices:
+        if new_labels[dev.id] != labels[dev.id]:
+            dev.labels_json = json.dumps(_saved_after(saved[dev.id], labels[dev.id], new_labels[dev.id]))
+    error, cancelled = await _finish_commit(db)
+    if error is not None:
+        log.error("Clearing a server's ports was not saved (%s)", type(error).__name__)
+        await _rollback(db)
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise HTTPException(503, _CLEAR_FAILED)
+    if cancelled:
+        raise asyncio.CancelledError()  # saved; only the caller went away
+    return result
+
+
 @router.delete("/{device_id}", status_code=204)
 async def delete_device(device_id: str, db: AsyncSession = Depends(get_db)):
     async with _locked_device(device_id, db) as dev:
