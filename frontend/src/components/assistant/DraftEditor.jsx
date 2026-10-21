@@ -21,6 +21,9 @@ export const PRIORITY_STYLES = {
 };
 export const WORK_ITEMS_CHANGED_EVENT = "dcim-assistant-work-items-changed";
 const FORBIDDEN_TEXT = "נדרשת הרשאת Operator כדי לשמור";
+// AM-3: a Viewer sees the draft read-only. Nothing there can be saved or handed on, so nothing invites editing.
+const READ_ONLY_TEXT = `${FORBIDDEN_TEXT}. הטיוטה מוצגת לקריאה בלבד ולא תישמר.`;
+const READ_ONLY_STATE_NOTE = "הצעה מהעוזר, לקריאה בלבד. לא נשמרה.";
 
 const STATES = {
   suggestion: { label: "הצעה", note: "הצעה מהעוזר. עדיין לא נשמרה; אפשר לערוך כל שדה לפני השמירה.", cls: "border-zinc-600 bg-zinc-900 text-zinc-200" },
@@ -29,6 +32,7 @@ const STATES = {
 };
 
 const FIELD = "w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-nv-400/60 disabled:opacity-60";
+const READ_ONLY_FIELD = "w-full bg-zinc-900/40 border border-zinc-800 rounded-md px-3 py-2 text-sm text-zinc-300 focus:outline-none focus:border-nv-400/60 disabled:opacity-60";
 const LABEL = "block text-xs text-zinc-400 mb-1";
 const SMALL_BUTTON = "w-7 h-7 shrink-0 inline-flex items-center justify-center rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 disabled:opacity-30 disabled:hover:bg-transparent";
 const PRIMARY = "text-sm px-3.5 py-1.5 rounded bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium disabled:opacity-50";
@@ -136,6 +140,8 @@ function Summary({ payload }) {
 
 export default function DraftEditor({ draft, conversationId, onSaved, onCancel }) {
   const { canOperate } = useAccounts();
+  const readOnly = !canOperate;
+  const field = readOnly ? READ_ONLY_FIELD : FIELD;
   const [form, setForm] = useState(() => formFromDraft(draft));
   const [initialJson] = useState(() => JSON.stringify(draftPayload(form)));
   const [phase, setPhase] = useState("edit");          // edit | confirm | saved
@@ -166,18 +172,21 @@ export default function DraftEditor({ draft, conversationId, onSaved, onCancel }
   const payload = draftPayload(form);
   const dirty = JSON.stringify(payload) !== initialJson;
   const state = phase === "saved" ? STATES.saved : dirty ? STATES.draft : STATES.suggestion;
+  const stateNote = readOnly && phase === "edit" && !dirty ? READ_ONLY_STATE_NOTE : state.note;
 
   function update(field, value) {
+    if (readOnly) return;
     setForm(f => ({ ...f, [field]: value }));
     if (field === "title" && value.trim()) setFieldError("");
   }
 
   // ---- steps -----------------------------------------------------------------------------------------------
   function setStepText(key, text) {
+    if (readOnly) return;
     setForm(f => ({ ...f, steps: f.steps.map(s => (s.key === key ? { ...s, text } : s)) }));
   }
   function addStep(afterIndex) {
-    if (form.steps.length >= LIMITS.steps) return;
+    if (readOnly || form.steps.length >= LIMITS.steps) return;
     const step = newStep();
     setForm(f => {
       const steps = [...f.steps];
@@ -188,7 +197,7 @@ export default function DraftEditor({ draft, conversationId, onSaved, onCancel }
   }
   function moveStep(index, delta) {
     const to = index + delta;
-    if (to < 0 || to >= form.steps.length) return;
+    if (readOnly || to < 0 || to >= form.steps.length) return;
     const key = form.steps[index].key;
     setForm(f => {
       const steps = [...f.steps];
@@ -200,6 +209,7 @@ export default function DraftEditor({ draft, conversationId, onSaved, onCancel }
     setFocusTarget({ key, part: edge ? "input" : delta < 0 ? "up" : "down" });
   }
   function removeStep(index) {
+    if (readOnly) return;
     const next = form.steps[index + 1] || form.steps[index - 1];
     setForm(f => ({ ...f, steps: f.steps.filter((_, i) => i !== index) }));
     setFocusTarget(next ? { key: next.key, part: "input" } : { key: "add", part: "add" });
@@ -321,7 +331,7 @@ export default function DraftEditor({ draft, conversationId, onSaved, onCancel }
           <button type="button" onClick={requestClose} disabled={busy} aria-label="סגור"
             className="mr-auto text-zinc-400 hover:text-zinc-100 w-7 h-7 rounded hover:bg-zinc-800 disabled:opacity-40">✕</button>
         </div>
-        <p id={ids.state} role="status" className="px-5 pt-3 text-xs text-zinc-400">{state.note}</p>
+        <p id={ids.state} role="status" className="px-5 pt-3 text-xs text-zinc-400">{stateNote}</p>
 
         {phase === "saved" ? (
           <>
@@ -356,28 +366,26 @@ export default function DraftEditor({ draft, conversationId, onSaved, onCancel }
         ) : (
           <form onSubmit={toConfirm} noValidate className="flex flex-col min-h-0">
             <div className="p-5 space-y-4 overflow-y-auto">
-              {!canOperate && (
-                <p role="note" className="rounded-lg border border-amber-900 bg-amber-950/30 p-3 text-xs text-amber-300">
-                  {FORBIDDEN_TEXT}. אפשר לערוך את הטיוטה ולהעביר אותה למי שמורשה לשמור.
-                </p>
+              {readOnly && (
+                <p role="note" className="rounded-lg border border-amber-900 bg-amber-950/30 p-3 text-xs text-amber-300">{READ_ONLY_TEXT}</p>
               )}
               <div>
                 <label htmlFor={ids.title} className={LABEL}>כותרת <span className="text-rose-400" aria-hidden="true">*</span></label>
                 <input id={ids.title} ref={titleRef} value={form.title} onChange={e => update("title", e.target.value)} required
-                  maxLength={LIMITS.title} dir="auto" aria-invalid={fieldError ? "true" : undefined}
-                  aria-describedby={fieldError ? ids.titleError : undefined} className={FIELD} />
+                  readOnly={readOnly} maxLength={LIMITS.title} dir="auto" aria-invalid={fieldError ? "true" : undefined}
+                  aria-describedby={fieldError ? ids.titleError : undefined} className={field} />
                 {fieldError && <p id={ids.titleError} role="alert" className="mt-1 text-xs text-rose-300">{fieldError}</p>}
               </div>
               <div>
                 <label htmlFor={ids.priority} className={LABEL}>עדיפות</label>
-                <select id={ids.priority} value={form.priority} onChange={e => update("priority", e.target.value)} className={FIELD}>
+                <select id={ids.priority} value={form.priority} onChange={e => update("priority", e.target.value)} disabled={readOnly} className={field}>
                   {PRIORITIES.map(p => <option key={p} value={p}>{priorityLabel(p)}</option>)}
                 </select>
               </div>
               <div>
                 <label htmlFor={ids.description} className={LABEL}>תיאור</label>
                 <textarea id={ids.description} value={form.description} onChange={e => update("description", e.target.value)}
-                  rows={4} maxLength={LIMITS.description} dir="auto" className={`${FIELD} resize-y`} />
+                  readOnly={readOnly} rows={4} maxLength={LIMITS.description} dir="auto" className={`${field} resize-y`} />
               </div>
               <fieldset>
                 <legend className={LABEL}>שלבים מוצעים</legend>
@@ -388,22 +396,22 @@ export default function DraftEditor({ draft, conversationId, onSaved, onCancel }
                         <span className="w-5 shrink-0 text-xs font-mono text-zinc-500 text-center" aria-hidden="true">{i + 1}.</span>
                         <input ref={stepRef(step.key, "input")} value={step.text} onChange={e => setStepText(step.key, e.target.value)}
                           onKeyDown={e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); addStep(i); } }}
-                          aria-label={`שלב ${i + 1}`} maxLength={LIMITS.step} dir="auto" className={`${FIELD} py-1.5`} />
-                        <button type="button" ref={stepRef(step.key, "up")} onClick={() => moveStep(i, -1)} disabled={i === 0}
+                          readOnly={readOnly} aria-label={`שלב ${i + 1}`} maxLength={LIMITS.step} dir="auto" className={`${field} py-1.5`} />
+                        <button type="button" ref={stepRef(step.key, "up")} onClick={() => moveStep(i, -1)} disabled={readOnly || i === 0}
                           aria-label={`העבר את שלב ${i + 1} למעלה`} title="למעלה" className={SMALL_BUTTON}>↑</button>
-                        <button type="button" ref={stepRef(step.key, "down")} onClick={() => moveStep(i, 1)} disabled={i === form.steps.length - 1}
+                        <button type="button" ref={stepRef(step.key, "down")} onClick={() => moveStep(i, 1)} disabled={readOnly || i === form.steps.length - 1}
                           aria-label={`העבר את שלב ${i + 1} למטה`} title="למטה" className={SMALL_BUTTON}>↓</button>
-                        <button type="button" onClick={() => removeStep(i)} aria-label={`מחק את שלב ${i + 1}`} title="מחק"
+                        <button type="button" onClick={() => removeStep(i)} disabled={readOnly} aria-label={`מחק את שלב ${i + 1}`} title="מחק"
                           className={`${SMALL_BUTTON} hover:text-rose-300`}>✕</button>
                       </li>
                     ))}
                   </ol>
                 )}
-                <button type="button" ref={addStepRef} onClick={() => addStep()} disabled={form.steps.length >= LIMITS.steps}
+                <button type="button" ref={addStepRef} onClick={() => addStep()} disabled={readOnly || form.steps.length >= LIMITS.steps}
                   className="text-xs px-2.5 py-1 rounded border border-zinc-800 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
                   + הוסף שלב
                 </button>
-                {form.steps.length >= LIMITS.steps && <span className="mr-2 text-xs text-zinc-500">עד {LIMITS.steps} שלבים.</span>}
+                {!readOnly && form.steps.length >= LIMITS.steps && <span className="mr-2 text-xs text-zinc-500">עד {LIMITS.steps} שלבים.</span>}
               </fieldset>
               <div>
                 <div className={LABEL}>ציוד קשור (מנתוני המערכת, לא ניתן לעריכה)</div>
@@ -412,7 +420,7 @@ export default function DraftEditor({ draft, conversationId, onSaved, onCancel }
               <div>
                 <label htmlFor={ids.rationale} className={LABEL}>נימוק</label>
                 <textarea id={ids.rationale} value={form.rationale} onChange={e => update("rationale", e.target.value)}
-                  rows={3} maxLength={LIMITS.rationale} dir="auto" className={`${FIELD} resize-y`} />
+                  readOnly={readOnly} rows={3} maxLength={LIMITS.rationale} dir="auto" className={`${field} resize-y`} />
               </div>
             </div>
             {confirmDiscard && <DiscardBar keepRef={keepEditingRef} onKeep={() => setConfirmDiscard(false)} onDiscard={() => onCancel?.()} />}

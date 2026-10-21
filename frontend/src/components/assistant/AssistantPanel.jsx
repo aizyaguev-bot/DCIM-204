@@ -38,7 +38,34 @@ function writeConversation(userKey, id) {
     else localStorage.removeItem(CONVERSATION_KEY);
   } catch { /* private mode: not remembered */ }
 }
-const narrowScreen = () => { try { return window.matchMedia("(max-width: 580px)").matches; } catch { return false; } };
+// Phones (up to 580 px) get the full-screen sheet; that width also matches the min-[581px] classes below.
+const NARROW_QUERY = "(max-width: 580px)";
+const narrowScreen = () => { try { return window.matchMedia(NARROW_QUERY).matches; } catch { return false; } };
+// AM-2: up to a tablet's width the 420 px panel would sit over the page a record or rack link opens, so such a link
+// closes the panel there; wider screens keep it open beside the page.
+const linkClosesPanel = () => { try { return window.matchMedia("(max-width: 1023px)").matches; } catch { return false; } };
+const FOCUSABLE = "button, input, textarea, select, summary, [href], [tabindex]";
+function tabbables(container) {
+  return [...container.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length > 0);
+}
+// AM-4: keeps Tab and Shift+Tab inside the phone sheet (a modal there). Only the edges are handled; inside the sheet
+// the browser moves focus as usual.
+function trapTab(e, container) {
+  const items = tabbables(container);
+  const active = document.activeElement;
+  if (!items.length) { e.preventDefault(); container.focus(); return; }
+  const first = items[0], last = items[items.length - 1];
+  if (!container.contains(active) || active === container) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+    return;
+  }
+  const side = e.shiftKey ? Node.DOCUMENT_POSITION_PRECEDING : Node.DOCUMENT_POSITION_FOLLOWING;
+  if (!items.some(el => el !== active && (active.compareDocumentPosition(el) & side))) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+  }
+}
 
 function Spinner() {
   return <span aria-hidden="true" className="inline-block h-3.5 w-3.5 flex-shrink-0 animate-spin rounded-full border-2 border-zinc-600 border-t-nv-400" />;
@@ -61,7 +88,9 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   const baseId = useId();
   const titleId = `${baseId}-title`, inputId = `${baseId}-input`, counterId = `${baseId}-counter`, hintId = `${baseId}-hint`;
 
-  const [open, setOpen] = useState(readOpen);
+  // AM-4: a phone never reopens the sheet by itself after a reload; it would cover the page that was just loaded.
+  const [open, setOpen] = useState(() => readOpen() && !narrowScreen());
+  const [narrow, setNarrow] = useState(narrowScreen);
   const [tab, setTab] = useState("chat");
   const [status, setStatus] = useState(undefined);            // undefined: not loaded yet
   const [statusError, setStatusError] = useState(null);
@@ -102,6 +131,8 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   const tabRefs = useRef({});
   const wasOpen = useRef(open);
   const userRef = useRef(userKey);
+  const draftRef = useRef(null);       // the draft dialog has its own focus trap while it is open
+  draftRef.current = draft;
 
   const maxChars = Number.isInteger(status?.limits?.max_chars) && status.limits.max_chars > 0 ? status.limits.max_chars : DEFAULT_MAX_CHARS;
   const notInstalled = statusError?.status === 404;
@@ -129,6 +160,34 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
       controllerRef.current?.abort();
     };
   }, [open]);
+
+  // ---- phone sheet (AM-4): follows the screen width; while open it is modal ----
+  useEffect(() => {
+    let query;
+    try { query = window.matchMedia(NARROW_QUERY); } catch { return undefined; }
+    const onChange = () => setNarrow(query.matches);
+    onChange();
+    if (query.addEventListener) query.addEventListener("change", onChange); else query.addListener?.(onChange);
+    return () => { if (query.removeEventListener) query.removeEventListener("change", onChange); else query.removeListener?.(onChange); };
+  }, []);
+  useEffect(() => {
+    if (!open || !narrow) return undefined;
+    const root = document.documentElement;
+    const previousOverflow = root.style.overflow;
+    root.style.overflow = "hidden";                       // the page under the sheet does not scroll
+    const onPop = () => setOpen(false);                   // phone Back: the page changes, so the sheet closes
+    const onKey = e => {
+      if (e.key !== "Tab" || e.defaultPrevented || draftRef.current || !panelRef.current) return;
+      trapTab(e, panelRef.current);
+    };
+    window.addEventListener("popstate", onPop);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      root.style.overflow = previousOverflow;
+      window.removeEventListener("popstate", onPop);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open, narrow]);
 
   // ---- persistence (try/catch inside the helpers) ----
   useEffect(() => { writeOpen(open); }, [open]);
@@ -377,7 +436,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   function openLink(link) {
     if (link.detail) openDetail?.(link.detail);
     else navigate?.(link.tab, link.rack);
-    if (narrowScreen()) setOpen(false);
+    if (linkClosesPanel()) setOpen(false);
   }
 
   function onPanelKey(e) {
@@ -433,10 +492,13 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
       )}
 
       {open && (
-        <aside id="assistant-panel" ref={panelRef} role="complementary" aria-labelledby={titleId} dir="rtl" lang="he" tabIndex={-1}
+        // AM-1: on short screens (a phone or small tablet in landscape) the fixed parts get compact and the panel itself
+        // scrolls, so the conversation keeps at least 7rem. AM-4: on a phone the full-screen sheet is a modal dialog.
+        <aside id="assistant-panel" ref={panelRef} role={narrow ? "dialog" : "complementary"} aria-modal={narrow ? "true" : undefined}
+          aria-labelledby={titleId} dir="rtl" lang="he" tabIndex={-1}
           onKeyDown={onPanelKey}
-          className="fixed inset-0 z-[45] flex h-[100dvh] w-full flex-col bg-zinc-950 text-zinc-200 focus:outline-none min-[581px]:inset-auto min-[581px]:bottom-0 min-[581px]:left-0 min-[581px]:top-0 min-[581px]:h-auto min-[581px]:w-[420px] min-[581px]:border-r min-[581px]:border-zinc-800">
-          <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
+          className="fixed inset-0 z-[45] flex h-[100dvh] w-full flex-col overscroll-contain bg-zinc-950 text-zinc-200 focus:outline-none min-[581px]:inset-auto min-[581px]:bottom-0 min-[581px]:left-0 min-[581px]:top-0 min-[581px]:h-auto min-[581px]:w-[420px] min-[581px]:border-r min-[581px]:border-zinc-800 [@media(max-height:500px)]:overflow-y-auto">
+          <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-4 py-3 [@media(max-height:500px)]:py-1">
             <span className="text-nv-300"><ChatIcon /></span>
             <h2 id={titleId} className="text-sm font-bold text-zinc-100">עוזר המעבדה</h2>
             {status?.mode === "llm" && (
@@ -454,7 +516,8 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
           </div>
 
           {status?.mode === "demo" && (
-            <div role="note" className="border-b border-amber-800 bg-amber-950/40 px-4 py-2 text-xs text-amber-200">
+            <div role="note" title={`מצב הדגמה — ללא מודל שפה. ${status.demo_reason ? `${status.demo_reason} ` : ""}התשובות נבנות מכללים קבועים מעל נתוני המעבדה האמיתיים.`}
+              className="border-b border-amber-800 bg-amber-950/40 px-4 py-2 text-xs text-amber-200 [@media(max-height:500px)]:truncate [@media(max-height:500px)]:py-1">
               <strong>מצב הדגמה — ללא מודל שפה.</strong>{" "}
               {status.demo_reason && <span dir="auto">{status.demo_reason} </span>}
               התשובות נבנות מכללים קבועים מעל נתוני המעבדה האמיתיים.
@@ -480,7 +543,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
             {TABS.map(([id, label]) => (
               <button key={id} ref={el => { tabRefs.current[id] = el; }} type="button" role="tab" id={`${baseId}-tab-${id}`}
                 aria-selected={tab === id} aria-controls={`${baseId}-panel-${id}`} tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)}
-                className={`-mb-px border-b-2 px-3 py-2 text-xs ${tab === id ? "border-nv-400 font-semibold text-nv-300" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
+                className={`-mb-px border-b-2 px-3 py-2 text-xs [@media(max-height:500px)]:py-1 ${tab === id ? "border-nv-400 font-semibold text-nv-300" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
                 {label}
               </button>
             ))}
@@ -502,7 +565,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
               )}
 
               <div ref={logRef} role="log" aria-live="polite" aria-relevant="additions" aria-label="השיחה עם העוזר" aria-busy={!!pending || convLoading}
-                className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3">
+                className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-3 [@media(max-height:500px)]:min-h-[7rem]">
                 {convLoading && <p role="status" className="flex items-center gap-2 text-sm text-zinc-400"><Spinner />טוען את השיחה…</p>}
                 {convError && (
                   <div role="alert" className="rounded border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">
@@ -588,12 +651,13 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
                 </div>
               )}
 
-              <form onSubmit={e => { e.preventDefault(); send(input); }} className="space-y-1.5 border-t border-zinc-800 bg-zinc-900/40 p-3">
+              <form onSubmit={e => { e.preventDefault(); send(input); }}
+                className="space-y-1.5 border-t border-zinc-800 bg-zinc-900/40 p-3 [@media(max-height:500px)]:space-y-1 [@media(max-height:500px)]:p-2">
                 <label htmlFor={inputId} className="sr-only">שאלה לעוזר המעבדה</label>
                 <textarea id={inputId} ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={onInputKey} rows={3} dir="auto"
                   disabled={blocked} aria-invalid={over || undefined} aria-describedby={`${hintId} ${counterId}`}
                   placeholder="למשל: למה השרת הזה לא זמין?"
-                  className="block w-full resize-none rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-nv-400/60 focus:outline-none disabled:opacity-50" />
+                  className="block w-full resize-none rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-nv-400/60 focus:outline-none disabled:opacity-50 [@media(max-height:500px)]:h-10" />
                 <div className="flex items-center gap-2">
                   <VoiceControls className="min-w-0 flex-1" onTranscript={text => setInput(cur => mergeTranscript(cur, text))} speakText={speakText} disabled={!!pending || blocked} />
                   <span id={counterId} className={`ms-auto font-mono text-[11px] ${over ? "text-rose-400" : "text-zinc-500"}`}>
@@ -606,13 +670,14 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
                         {rateRemaining > 0 ? `שלח (${rateRemaining})` : "שלח"}
                       </button>}
                 </div>
-                <p id={hintId} className="text-[11px] text-zinc-600">Enter לשליחה · Shift+Enter לשורה חדשה{over ? ` · מקסימום ${maxChars} תווים` : ""}</p>
+                {/* Short screens: kept for screen readers only (the textarea's aria-describedby points here). */}
+                <p id={hintId} className="text-[11px] text-zinc-600 [@media(max-height:500px)]:sr-only">Enter לשליחה · Shift+Enter לשורה חדשה{over ? ` · מקסימום ${maxChars} תווים` : ""}</p>
               </form>
             </div>
           )}
 
           {tab === "history" && (
-            <div role="tabpanel" id={`${baseId}-panel-history`} aria-labelledby={`${baseId}-tab-history`} className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4">
+            <div role="tabpanel" id={`${baseId}-panel-history`} aria-labelledby={`${baseId}-tab-history`} className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-4">
               <div className="flex items-center justify-between gap-2">
                 <h3 className="text-sm font-semibold text-zinc-100">שיחות קודמות</h3>
                 <button type="button" className={subtle} onClick={loadHistory} disabled={history.loading}>רענון</button>
@@ -653,7 +718,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
           )}
 
           {tab === "work" && (
-            <div role="tabpanel" id={`${baseId}-panel-work`} aria-labelledby={`${baseId}-tab-work`} className="min-h-0 flex-1 overflow-y-auto p-4">
+            <div role="tabpanel" id={`${baseId}-panel-work`} aria-labelledby={`${baseId}-tab-work`} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
               <WorkItemsList refreshKey={workVersion} />
             </div>
           )}
