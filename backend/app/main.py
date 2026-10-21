@@ -58,7 +58,11 @@ async def lifespan(app: FastAPI):
     from .engineers import bootstrap_engineers
     await bootstrap_engineers()
     await bootstrap_admin()
-    await action_runner.recover_interrupted(AsyncSessionLocal)
+    try:
+        # Marks assistant actions a restart interrupted; a failure here must never stop the site from starting.
+        await action_runner.recover_interrupted(AsyncSessionLocal)
+    except Exception as exc:  # noqa: BLE001
+        print(f"assistant actions: interrupted-job recovery skipped ({type(exc).__name__})", file=sys.stderr)
     warmup = asyncio.create_task(_warm_cache())
     monitor = asyncio.create_task(monitor_loop())
     alerts = asyncio.create_task(alert_loop())
