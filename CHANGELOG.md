@@ -2,6 +2,38 @@
 
 ---
 
+## v2.39.5 — 2026-10-21 — Safer 3D Digital Twin and automatic package install
+
+### Fixed
+- **3D Digital Twin — power and console are safe.** Power and console buttons work
+  only for servers that are in the live DCIM mappings; a server that is not shows
+  "Not in live DCIM — power disabled" and a stale PDU is marked "(stale)". Every
+  power confirmation names the server, PDU, outlet and the new state.
+- **3D Digital Twin — moves ask first.** Moving a server always shows where it is
+  going (rack, shelf and U). Moving onto an occupied shelf offers **Swap places**
+  or **Cancel** instead of pushing the other servers down; Cancel writes nothing.
+- The rack bar now flies to the chosen rack without hiding it behind the opposite
+  row, and one tap can no longer save a move to the wrong rack.
+- Moving works while a search is active, and the Attention panel no longer covers
+  the target rack's top shelf during a move.
+- Search: an exact name (for example "OPT11") is selected first; owner names are
+  found again.
+- A blocked KVM pop-up no longer reports success; the console opens inside the
+  twin and closing it frees the port.
+- Zone names sit on their floor areas again; labels and notes are shown as plain
+  text.
+- Rack moves from the twin and from Locations can no longer overwrite each other:
+  a save based on an older layout is refused and asks you to reload.
+- The DCIM rack rows skip the same non-server labels as the 3D twin (PDU, KVM
+  power, spare, free and similar).
+
+### Changed
+- The VM installer now adds any missing Python package the site needs (such as
+  the AI assistant's), without changing packages that are already installed. A
+  failed download never stops the update.
+
+---
+
 ## v2.39.4 — 2026-10-21 — Locations (move and swap servers) and Export CSV
 
 ### Added
