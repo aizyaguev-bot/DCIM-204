@@ -202,6 +202,12 @@ async def update_labels(
     for port, before in old_labels.items():
         if port not in new_labels and isinstance(before, str) and before.strip():
             _clear_port(new_labels, dev, port)
+    # The same for a port sent explicitly as "" whose server name comes only from the PDU/KVM itself (nothing saved,
+    # status cache only): without the default name the device's own name would still show and the clear not stick.
+    reported = _live_labels(dev)
+    for port in (str(k) for k, v in labels.items() if not v):
+        if port not in new_labels and _identity(reported.get(port)):
+            _clear_port(new_labels, dev, port)
     # Only this device's ports change: no cascade to other PDUs/KVMs, monitors, owners or rack layout files.
     # A move goes through /move-server and a deliberate global rename through /rename-opt.
     dev.labels_json = json.dumps(new_labels)
@@ -345,6 +351,16 @@ _MOVE_FAILED = "The move could not be saved. No changes were made; please retry.
 _MOVE_HALF_SAVED = ("The move was only partly saved: the port labels changed but the rack positions did not. "
                     "Check this server in Locations and move it again.")
 _LAYOUT_CHANGED = "The rack layout changed in another session during the move. No changes were made; preview again."
+_MOVE_NOT_RESTORED = ("The move failed and the rack layout could not be fully restored ({files}). "
+                      "Check Locations and fix the rack positions there.")
+
+
+class _LayoutNotRestored(Exception):
+    """A layout write failed and putting back an already written file failed too: the move is partly applied."""
+
+    def __init__(self, files):
+        super().__init__(", ".join(files))
+        self.files = files
 
 
 def _identity(name):
@@ -884,14 +900,23 @@ async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: N
     try:
         _write_layouts((body, devices, labels, unreadable, names), layouts, present, new_labels, new_layouts, result)
     except BaseException as failure:
-        # 3. The files are as they were before the move: put the labels back as well. A write or lock error reaches
-        # here as the file lock's generic 503 (locked_file turns an OSError into it).
+        # 3. Put the labels back as well. The files are as they were before the move, unless restoring one of them
+        # failed too (_LayoutNotRestored): then the answer says so. A write or lock error otherwise reaches here as
+        # the file lock's generic 503 (locked_file turns an OSError into it).
+        unrestored = failure.files if isinstance(failure, _LayoutNotRestored) else []
         refused = isinstance(failure, HTTPException) and failure.detail != inventory_store.LAYOUT_SAVE_FAILED
         if isinstance(failure, Exception) and not refused:
-            log.error("Server move: a rack layout file could not be written; undoing the move", exc_info=failure)
+            cause = failure.__cause__ or failure.__context__ or failure
+            log.error("Server move: a rack layout file could not be written (%s); undoing the move",
+                      type(cause).__name__)
         reverted, cancelled_again = await _revert_labels(db, devices, original)
         if not isinstance(failure, Exception):
             raise failure  # KeyboardInterrupt, SystemExit, CancelledError: undone as far as possible, then passed on
+        if unrestored:
+            detail = _MOVE_NOT_RESTORED.format(files=", ".join(unrestored))
+            if not reverted:
+                detail += " The port labels could not be put back either."
+            raise HTTPException(503, detail) from None
         if not reverted:
             raise HTTPException(503, _MOVE_HALF_SAVED) from None
         if cancelled or cancelled_again:
@@ -969,7 +994,8 @@ def _write_layouts(plan_inputs, layouts, present, new_labels, new_layouts, resul
     If another session saved a layout file since the plan was made, the move is planned again on the current files
     and goes ahead only when it changes exactly the same labels and positions (that other edit is kept); otherwise
     409 and nothing is written. Any failure while writing, including KeyboardInterrupt or cancellation, puts back
-    every file already written before the locks are released, then propagates."""
+    every file already written before the locks are released, then propagates; if a file cannot be put back, an
+    Exception becomes _LayoutNotRestored naming the files (a BaseException still propagates as it is)."""
     body, devices, labels, unreadable, names = plan_inputs
     with ExitStack() as locks:
         _lock_layouts(locks)
@@ -988,14 +1014,20 @@ def _write_layouts(plan_inputs, layouts, present, new_labels, new_layouts, resul
                 if new_layouts[fname] != layouts[fname]:
                     written.append(fname)
                     inventory_store.write_json(_BACKEND_DIR / fname, new_layouts[fname])
-        except BaseException:
-            _restore_layouts(written, layouts, present)
+        except BaseException as exc:
+            unrestored = _restore_layouts(written, layouts, present)
+            if unrestored:
+                if isinstance(exc, Exception):
+                    raise _LayoutNotRestored(unrestored) from exc
+                log.error("Server move interrupted; rack layout files not restored: %s", ", ".join(unrestored))
             raise
 
 
 def _restore_layouts(written, layouts, present):
     """Still under the layout locks that covered the writes: put back each file the move wrote (a file it created is
-    removed). Nobody else can have saved them in between."""
+    removed). Nobody else can have saved them in between. Returns the files that do not hold their content from
+    before the move afterwards (a file whose own write failed and was left untouched counts as restored)."""
+    failed = []
     for fname in written:
         path = _BACKEND_DIR / fname
         try:
@@ -1003,8 +1035,21 @@ def _restore_layouts(written, layouts, present):
                 inventory_store.write_json(path, layouts[fname])
             else:
                 path.unlink(missing_ok=True)
-        except Exception:
-            log.exception("Could not restore %s after a failed server move", fname)
+        except Exception as exc:
+            if not _holds(path, layouts[fname] if fname in present else None):
+                log.error("Could not restore %s after a failed server move (%s)", fname, type(exc).__name__)
+                failed.append(fname)
+    return failed
+
+
+def _holds(path, expected):
+    """True when the file holds exactly `expected` (None: the file does not exist)."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) == expected
+    except FileNotFoundError:
+        return expected is None
+    except (OSError, ValueError):
+        return False
 
 
 @router.delete("/{device_id}", status_code=204)

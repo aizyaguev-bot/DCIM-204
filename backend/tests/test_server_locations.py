@@ -846,3 +846,65 @@ async def test_a_save_from_another_worker_waits_for_the_move_writes_and_then_see
     assert not workers[0].is_alive()
     assert getattr(outcome.get("error"), "status_code", None) == 409
     assert json.loads(path.read_text())["Rack-01"] == SWAPPED_SLOTS
+
+
+# ── Codex HF-R3: an honest answer when a restore fails; a clear of a device-reported name sticks ────────────────────
+
+def fail_layout_writes(monkeypatch, numbers):
+    """inventory_store.write_json raises OSError on the given call numbers (1-based), counting the move's layout
+    writes and its restores."""
+    real_write, calls = inventory_store.write_json, []
+
+    def write_json(path, data, *args, **kwargs):
+        calls.append(path.name)
+        if len(calls) in numbers:
+            raise OSError("disk full")
+        return real_write(path, data, *args, **kwargs)
+    monkeypatch.setattr(inventory_store, "write_json", write_json)
+    return calls
+
+
+async def test_a_failed_restore_is_reported_and_the_labels_still_go_back(lab, monkeypatch):
+    before = read_layout(lab.folder)
+    # Write 2 (rack_positions) fails, then write 3, putting rack_overrides back, fails too.
+    calls = fail_layout_writes(monkeypatch, {2, 3})
+    r = await move(lab, server="optn45", target_server="optn44")
+    assert calls[:4] == ["rack_overrides.json", "rack_positions.json", "rack_overrides.json", "rack_positions.json"]
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert detail == devices._MOVE_NOT_RESTORED.format(files="rack_overrides.json")
+    assert "No changes were made" not in detail
+    assert not any(text in detail for text in ("\\", "/", "disk full", str(lab.folder)))   # no paths, no error text
+    assert await saved_labels(lab.db) == LABELS                                             # labels still reverted
+    after = read_layout(lab.folder)
+    assert after["rack_overrides.json"] != before["rack_overrides.json"]                    # really left moved
+    assert {k: v for k, v in after.items() if k != "rack_overrides.json"} == {
+        k: v for k, v in before.items() if k != "rack_overrides.json"}
+
+
+async def test_a_failed_restore_of_the_untouched_failing_file_still_counts_as_no_change(lab, monkeypatch):
+    before = read_layout(lab.folder)
+    # Write 2 (rack_positions) fails and leaves the file as it was; putting it back (write 4) fails too: harmless.
+    calls = fail_layout_writes(monkeypatch, {2, 4})
+    r = await move(lab, server="optn45", target_server="optn44")
+    assert calls[:4] == ["rack_overrides.json", "rack_positions.json", "rack_overrides.json", "rack_positions.json"]
+    assert r.status_code == 503 and r.json()["detail"] == devices._MOVE_FAILED
+    assert read_layout(lab.folder) == before and await saved_labels(lab.db) == LABELS
+
+
+async def test_clearing_a_port_named_only_by_the_device_keeps_the_default_name(lab):
+    from app.routers import kvms as kvms_module
+    from app.schemas import KvmPort, KvmStatus
+    # PDU-A outlets 4-6 have nothing saved; the PDU itself reports OPTN99, OPTN98 and its default name.
+    cache_pdu("pdu-a", {4: "OPTN99", 5: "OPTN98", 6: "Outlet 6"})
+    r = await lab.client.patch("/api/devices/pdu-a/labels", json={**LABELS["pdu-a"], "4": "", "6": ""})
+    assert r.status_code == 200, r.text
+    # 4 is stored as the default name so OPTN99 no longer shows; 5 was not sent and 6 reports only the default.
+    assert (await saved_labels(lab.db))["pdu-a"] == {**LABELS["pdu-a"], "4": "Outlet 4"}
+    rows = {s["key"] for s in (await lab.client.get("/api/devices/locations")).json()["servers"]}
+    assert "optn99" not in rows and "optn98" in rows
+    kvms_module._cache["kvm-a"] = (time.time(), KvmStatus(device_id="kvm-a", reachable=True, ports=[
+        KvmPort(number=3, label="OPTN97", status="active")]))
+    r = await lab.client.patch("/api/devices/kvm-a/labels", json={**LABELS["kvm-a"], "3": ""})
+    assert r.status_code == 200, r.text
+    assert (await saved_labels(lab.db))["kvm-a"] == {**LABELS["kvm-a"], "3": "Port 3"}
