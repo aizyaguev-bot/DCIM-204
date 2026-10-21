@@ -14,7 +14,11 @@ const assert=require('node:assert/strict');const origin=process.env.DCIM_PREVIEW
  // On a reused fixture the OPT may already sit elsewhere; a move back to its PDU's rack correctly clears the override.
  const ids=await p.evaluate(()=>{const t=__twin;const r=[...t.S.recs.values()].find(r=>r.cat==='item'&&r.item?.type==='opt'&&r.item.live?.inDcim);const home=t.S.live.devices.find(d=>d.id===r.item.dcim.pdu)?.rack;const rackOf=s=>t.S.data.setups.find(x=>x.id===s.setup)?.dcimRack;const target=[...t.S.recs.values()].find(s=>s.cat==='shelf'&&s.setup!==r.setup&&rackOf(s)&&rackOf(s)!==home);t.select(r.id,{keepCamera:true});return{id:r.id,key:r.item.dcim.optKey,target:target.id,rack:rackOf(target)};});
  await p.locator('#eMove').click();assert.equal(await p.evaluate(()=>__twin.S.moveItem),ids.id);
- await p.evaluate(async target=>{await __twin.finishMove(__twin.S.recs.get(target));},ids.target);
+ // The move always asks first (From → To; an occupied shelf offers Swap): confirm it like a user, then the one atomic layout write lands.
+ const saved=p.waitForResponse(r=>r.url().endsWith('/api/rack-layout')&&r.request().method()==='PUT');
+ await p.evaluate(target=>{__twin.finishMove(__twin.S.recs.get(target));},ids.target);
+ await p.locator('#confirmModal:not(.hidden) #cfActions').locator('[data-choice="move"], [data-choice="swap"]').click();
+ assert.equal((await saved).status(),200);
  const overrides=await(await c.request.get(origin+'/api/rack-overrides')).json();assert.equal(overrides[ids.key],ids.rack);assert.equal(await p.evaluate(()=>__twin.S.moveItem),null);assert.equal(await p.evaluate(()=>__twin.controls.enableRotate),true);
  await p.evaluate(()=>__twin.refreshStatuses());assert.equal(await p.evaluate(id=>__twin.S.recs.get(id).shelf,ids.id),ids.target);assert.deepEqual(errors,[]);
  console.log(JSON.stringify({passed:['mouse selects without camera jump','focused zoom does not enter equipment','explicit Move saves placement and survives refresh'],errors}));

@@ -25,7 +25,8 @@
     const r = bar.getBoundingClientRect(); frame.style.top = Math.round(r.bottom + 1) + 'px'; frame.style.height = `calc(100vh - ${Math.round(r.bottom + 1)}px)`;
   }
   function setActive(on) {
-    active = on; const f = ensureFrame(); f.style.display = on ? 'block' : 'none'; place();
+    // the hidden Twin iframe (3D renderer + live polling) is created only when the Twin tab is actually opened
+    active = on; const f = on ? ensureFrame() : frame; if (f) { f.style.display = on ? 'block' : 'none'; place(); }
     const bar = tabBar(); if (!bar) return;
     [...bar.querySelectorAll('button')].forEach(b => {
       const isTwin = b.dataset.twinTab === '1';

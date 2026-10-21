@@ -74,6 +74,12 @@
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
   controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
   canvas.style.touchAction = 'none';
+  // prefers-reduced-motion: camera moves jump instead of gliding, no inertia, no pulsing.
+  const reduceMotionQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const reducedMotion = () => !!(reduceMotionQuery && reduceMotionQuery.matches);
+  const applyMotionPreference = () => { controls.enableDamping = !reducedMotion(); };
+  applyMotionPreference();
+  if (reduceMotionQuery && reduceMotionQuery.addEventListener) reduceMotionQuery.addEventListener('change', applyMotionPreference);
   const activePointers = new Set();
   function cancelNavigation() {
     controls.cancel();
@@ -116,7 +122,15 @@
   const world = new THREE.Group(); world.name = 'world'; world.scale.x = -1;
   world.add(wallsGroup, zonesGroup, staticGroup, itemsGroup); scene.add(world);
   const WX = x => -x; // data x -> world x (for camera targets)
+  const DX = x => -x; // world x -> data x (WX is its own inverse; named for readability)
+  // A data-space point (x across, y up, z depth) as a world-space vector. Walls, zones and free items sit directly
+  // under the mirrored `world` group, so their label anchors must go through WX like every camera position.
+  const W3 = (x, y, z) => new THREE.Vector3(WX(x), y, z);
   let selectionHelper = null;
+  function clearSelectionHelper() {
+    if (!selectionHelper) return;
+    scene.remove(selectionHelper); selectionHelper.geometry.dispose(); selectionHelper.material.dispose(); selectionHelper = null;
+  }
 
   const labelsLayer = $('#labels');
   const raycaster = new THREE.Raycaster();
@@ -149,11 +163,13 @@
     const g = new THREE.EdgesGeometry(mesh.geometry, 20);
     const m = dashed ? new THREE.LineDashedMaterial({ color: new THREE.Color(color), dashSize: 0.05, gapSize: 0.035, transparent: true, opacity: 0.95 })
                      : new THREE.LineBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity: 0.9 });
+    m.userData.unique = true;   // one material per outline: disposeGroup() frees it on rebuild
     const l = new THREE.LineSegments(g, m); l.position.copy(mesh.position); l.rotation.copy(mesh.rotation); l.scale.copy(mesh.scale);
     if (dashed) l.computeLineDistances();
     l.userData.baseOpacity = m.opacity; l.renderOrder = 2;
     return l;
   }
+  const uniqueMat = m => { m.userData.unique = true; return m; };   // created per build → disposed with its group
   function disposeGroup(g) {
     g.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.userData.unique) o.material.dispose(); });
     while (g.children.length) g.remove(g.children[0]);
@@ -177,7 +193,7 @@
     for (let x = 0; x <= W + 1e-6; x += 0.6) pts.push(x, 0.002, 0, x, 0.002, D);
     for (let z = 0; z <= D + 1e-6; z += 0.6) pts.push(0, 0.002, z, W, 0.002, z);
     const gg = new THREE.BufferGeometry(); gg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    staticGroup.add(new THREE.LineSegments(gg, new THREE.LineBasicMaterial({ color: 0x9a9ea3, transparent: true, opacity: 0.55 })));
+    staticGroup.add(new THREE.LineSegments(gg, uniqueMat(new THREE.LineBasicMaterial({ color: 0x9a9ea3, transparent: true, opacity: 0.55 }))));
     // walls
     const wallMat = mat('#eceef0', { opacity: 0.38, double: true, rough: 1, metal: 0, unique: true });
     const t = 0.08;
@@ -191,7 +207,7 @@
     // wall base line (visible even with translucent walls)
     const base = [0, 0.01, 0, W, 0.01, 0, W, 0.01, 0, W, 0.01, D, W, 0.01, D, 0, 0.01, D, 0, 0.01, D, 0, 0.01, 0];
     const bg = new THREE.BufferGeometry(); bg.setAttribute('position', new THREE.Float32BufferAttribute(base, 3));
-    staticGroup.add(new THREE.LineSegments(bg, new THREE.LineBasicMaterial({ color: 0x9a9aa3 })));
+    staticGroup.add(new THREE.LineSegments(bg, uniqueMat(new THREE.LineBasicMaterial({ color: 0x9a9aa3 }))));
     // doors
     (d.structure.doors || []).forEach(dr => {
       const onZ = dr.wall === 'WALL-L' || dr.wall === 'WALL-R';
@@ -200,7 +216,7 @@
       const low = dr.confidence === 'low';
       if (low) m.material = mat('#cbb994', { rough: .8, opacity: .5, unique: true });
       wallsGroup.add(m); wallsGroup.add(edges(m, low ? '#f43f5e' : '#a8977a', low));
-      const rec = reg({ id: dr.id, cat: 'structure', def: dr, group: m, meshes: [m], edges: [], status: 'active', conf: dr.confidence, zone: null, anchor: new THREE.Vector3(m.position.x, dr.height + 0.05, m.position.z) });
+      const rec = reg({ id: dr.id, cat: 'structure', def: dr, group: m, meshes: [m], edges: [], status: 'active', conf: dr.confidence, zone: null, anchor: W3(m.position.x, dr.height + 0.05, m.position.z) });
       makeLabel(rec, 'item' + (low ? ' low' : ''), `${esc(dr.id)}<small>door${low ? ' — verify' : ''}</small>`);
     });
     // windows
@@ -210,7 +226,7 @@
       const m = onZ ? box(0.1, wn.height, wn.width, glass, wn.pos[0], wn.sill + wn.height / 2, wn.pos[1] + wn.width / 2)
                     : box(wn.width, wn.height, 0.1, glass, wn.pos[0] + wn.width / 2, wn.sill + wn.height / 2, wn.pos[1]);
       wallsGroup.add(m); wallsGroup.add(edges(m, '#7dd3fc', wn.confidence === 'low'));
-      const rec = reg({ id: wn.id, cat: 'structure', def: wn, group: m, meshes: [m], edges: [], status: 'active', conf: wn.confidence, zone: null, anchor: new THREE.Vector3(m.position.x, wn.sill + wn.height + 0.05, m.position.z) });
+      const rec = reg({ id: wn.id, cat: 'structure', def: wn, group: m, meshes: [m], edges: [], status: 'active', conf: wn.confidence, zone: null, anchor: W3(m.position.x, wn.sill + wn.height + 0.05, m.position.z) });
       makeLabel(rec, 'item', `${esc(wn.id)}<small>window</small>`);
     });
     // pillar
@@ -218,14 +234,14 @@
       const cx = Math.min(Math.max(p.pos[0] - p.radius * 0.8, 0), W), cz = Math.min(Math.max(p.pos[1] - p.radius * 0.8, 0), D);
       const m = new THREE.Mesh(new THREE.CylinderGeometry(p.radius, p.radius, H, 32), mat('#7c7c86', { opacity: .55, unique: true })); m.position.set(cx, H / 2, cz);
       wallsGroup.add(m);
-      const rec = reg({ id: p.id, cat: 'structure', def: p, group: m, meshes: [m], edges: [], status: 'active', conf: p.confidence, zone: null, anchor: new THREE.Vector3(cx, H * 0.75, cz) });
+      const rec = reg({ id: p.id, cat: 'structure', def: p, group: m, meshes: [m], edges: [], status: 'active', conf: p.confidence, zone: null, anchor: W3(cx, H * 0.75, cz) });
       makeLabel(rec, 'item', `${esc(p.id)}<small>column</small>`);
     });
     // fixtures (E-stop)
     (d.structure.fixtures || []).forEach(f => {
       const m = box(0.06, 0.1, 0.1, mat('#ef4444', { emissive: '#ef4444', emissiveIntensity: .4 }), f.pos[0] + 0.04, f.height, f.pos[1]);
       wallsGroup.add(m);
-      const rec = reg({ id: f.id, cat: 'structure', def: f, group: m, meshes: [m], edges: [], status: 'active', conf: f.confidence, zone: null, anchor: new THREE.Vector3(f.pos[0] + 0.1, f.height + 0.1, f.pos[1]) });
+      const rec = reg({ id: f.id, cat: 'structure', def: f, group: m, meshes: [m], edges: [], status: 'active', conf: f.confidence, zone: null, anchor: W3(f.pos[0] + 0.1, f.height + 0.1, f.pos[1]) });
       makeLabel(rec, 'item', `${esc(f.id)}<small>emergency stop</small>`);
     });
     // ceiling lights
@@ -238,7 +254,7 @@
       const m = box(x2 - x1, 0.004, z2 - z1, mat(zn.color, { opacity: .10, unique: true, rough: 1 }), (x1 + x2) / 2, 0.006, (z1 + z2) / 2);
       m.renderOrder = 1; zonesGroup.add(m);
       const e = setEdgeOp(edges(m, zn.color, zn.confidence === 'low'), .55); zonesGroup.add(e);
-      const rec = reg({ id: zn.id, cat: 'zone', def: zn, group: m, meshes: [m], edges: [e], status: 'active', conf: zn.confidence, zone: zn.id, anchor: new THREE.Vector3((x1 + x2) / 2, 0.02, (z1 + z2) / 2) });
+      const rec = reg({ id: zn.id, cat: 'zone', def: zn, group: m, meshes: [m], edges: [e], status: 'active', conf: zn.confidence, zone: zn.id, anchor: W3((x1 + x2) / 2, 0.02, (z1 + z2) / 2) });
       makeLabel(rec, 'zone', `<span style="color:${esc(zn.color)}">${esc(zn.id)}</span>`);
     });
   }
@@ -280,7 +296,7 @@
     rec.attnEl = attnEl; rec.attnN = 0; rec.attnAnchor = localToWorld(g, dd / 2 + 0.02, h - 0.18, 0);
     // heat-map patch under the rack + leak ring (hidden until live data / toggle)
     const patch = box(dd + 0.3, 0.012, w + 0.3, mat('#22c55e', { opacity: .45, unique: true, rough: 1, emissive: '#22c55e', emissiveIntensity: .35 }), 0, 0.012, 0); patch.visible = false; g.add(patch); rec.heatPatch = patch;
-    const ring = new THREE.Mesh(new THREE.RingGeometry(Math.max(dd, w) * 0.55, Math.max(dd, w) * 0.62, 48), new THREE.MeshBasicMaterial({ color: 0xf43f5e, transparent: true, opacity: .8, side: THREE.DoubleSide })); ring.rotation.x = -Math.PI / 2; ring.position.y = 0.02; ring.visible = false; g.add(ring); rec.leakRing = ring;
+    const ring = new THREE.Mesh(new THREE.RingGeometry(Math.max(dd, w) * 0.55, Math.max(dd, w) * 0.62, 48), uniqueMat(new THREE.MeshBasicMaterial({ color: 0xf43f5e, transparent: true, opacity: .8, side: THREE.DoubleSide }))); ring.rotation.x = -Math.PI / 2; ring.position.y = 0.02; ring.visible = false; g.add(ring); rec.leakRing = ring;
 
     // shelves
     shelvesDefs.forEach(sh => {
@@ -461,9 +477,12 @@
         const top = shelves.reduce((a, s) => Math.max(a, s.y), 0);
         anchor = () => localToWorld(su.group, -su.tpl.depth / 2 + 0.1, top + 0.32, 0);
       } else if (it.storage && S.recs.has(it.storage) && it.type === 'spare-chassis') {
-        const st = S.recs.get(it.storage); g = new THREE.Group(); const q = Math.min(it.quantity || 1, st.trayY.length);
-        for (let i = 0; i < q; i++) { const m = makeBox(0.40, 0.045, 0.44, bodyCol); m.material.opacity = op; m.position.set(0, st.trayY[i] + 0.03, 0); g.add(m); meshes.push(m); eds.push(edges(m, col, dashed)); g.add(box(0.006, 0.02, 0.36, mat('#3f3f46', { rough: .8, opacity: op, unique: true }), 0.204, st.trayY[i] + 0.03, 0)); }
-        eds.forEach(e => g.add(e)); st.group.add(g); anchor = () => localToWorld(st.group, 0.3, st.trayY[q - 1] + 0.12, 0);
+        // tray stands have tray heights; a plain cabinet has none, so chassis stack inside it from the floor
+        const st = S.recs.get(it.storage); g = new THREE.Group();
+        const cabH = st.def?.size?.[2] || 1.8; const levels = st.trayY || Array.from({ length: Math.max(1, Math.floor((cabH - 0.15) / 0.06)) }, (_, i) => 0.08 + i * 0.06);
+        const q = Math.max(1, Math.min(it.quantity || 1, levels.length));
+        for (let i = 0; i < q; i++) { const m = makeBox(0.40, 0.045, 0.44, bodyCol); m.material.opacity = op; m.position.set(0, levels[i] + 0.03, 0); g.add(m); meshes.push(m); eds.push(edges(m, col, dashed)); g.add(box(0.006, 0.02, 0.36, mat('#3f3f46', { rough: .8, opacity: op, unique: true }), 0.204, levels[i] + 0.03, 0)); }
+        eds.forEach(e => g.add(e)); st.group.add(g); anchor = () => localToWorld(st.group, 0.3, levels[q - 1] + 0.12, 0);
       } else if (it.pos && it.size) {
         const [w, d, h] = it.size; const y0 = it.y || 0; g = new THREE.Group(); g.position.set(it.pos[0], y0, it.pos[1]);
         const body = makeBox(w, h, d, bodyCol); body.position.set(0, h / 2, 0); g.add(body); meshes.push(body);
@@ -471,7 +490,7 @@
         if (it.type === 'cart') { g.add(box(w * .8, 0.02, d * .6, mat('#0b0b0e', { rough: .4, opacity: op, unique: true }), 0, h + 0.01, 0)); g.add(box(0.04, 0.5, 0.04, mat('#2f6fd6', { rough: .5, opacity: op, unique: true }), 0, h + 0.25, -d / 2 * .6)); }
         if (it.type === 'ladder') { for (let i = 1; i <= 3; i++) g.add(box(w * .9, 0.02, 0.06, mat('#9ca3af', { metal: .5, rough: .4, opacity: op, unique: true }), 0, h * i / 3.5, -d / 2 + d * i / 4)); }
         const e = edges(body, col, dashed); g.add(e); eds.push(e);
-        itemsGroup.add(g); anchor = new THREE.Vector3(it.pos[0], y0 + h + 0.05, it.pos[1]);
+        itemsGroup.add(g); anchor = W3(it.pos[0], y0 + h + 0.05, it.pos[1]);
       } else {
         // unplaced — no geometry
         S.recs.set(it.id, { id: it.id, cat: 'item', def: it, group: null, meshes: [], edges: [], status, conf: it.confidence, zone: it.zone || null, setup: it.setup || null, shelf: null, unplaced: true, item: it });
@@ -494,7 +513,15 @@
   function dcimRackOf(su) { return su.dcimRack; }
   function effStatus(def) { return def.status || 'unknown'; }
   function isDefaultOutletLabel(label) { return !label || /^(outlet\s*\d+|port\s*\d+|\s*)$/i.test(label.trim()); }
+  // A computer label: not a default "Outlet N" and not "empty" / "KVM Power" / a placeholder. Filtered BEFORE the U
+  // assignment, exactly like Lab Manager's rack view (DcimView.buildRackRows), so both show the same shelf/U mapping.
+  const isServerLabel = label => !isDefaultOutletLabel(label) && !NON_SERVER_LABEL.test(label.trim());
   const optKey = s => (s || '').trim().toLowerCase();
+  // Live-data warnings are shown next to the notes, never written into them (the editor saves notes to lab-data.json).
+  // Older saves may already contain the appended text, so it is stripped wherever notes are shown or saved.
+  const LIVE_WARN = { notInDcim: 'Not present in the live DCIM labels.', notInRackItems: 'Not present in the Lab Manager rack items.' };
+  const LIVE_WARN_RE = / ?⚠ Not present in the (?:live DCIM labels|Lab Manager rack items)\./g;
+  const cleanNotes = s => String(s || '').replace(LIVE_WARN_RE, '').trim();
 
   function computeModel() {
     const d = S.data; const live = S.live; const uTopDown = (d.dcim?.uNumbering || 'top-down') === 'top-down';
@@ -513,12 +540,12 @@
       pdus.forEach(pdu => {
         const stored = pdu.labels || {}; const liveOut = live.pdu[pdu.id]?.reachable ? live.pdu[pdu.id].outlets || [] : []; const liveByN = Object.fromEntries(liveOut.map(o => [String(o.number), o]));
         Object.entries(stored).forEach(([num, label]) => {
-          if (isDefaultOutletLabel(label)) return; const key = optKey(label); if (servers.has(key)) return;
+          if (!isServerLabel(label)) return; const key = optKey(label); if (servers.has(key)) return;
           const lo = liveByN[num];
           servers.set(key, { key, name: label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: lo?.state ?? 'unknown', watts: lo?.watts ?? null });
         });
         liveOut.forEach(o => {
-          if (isDefaultOutletLabel(o.label)) return; const key = optKey(o.label);
+          if (!isServerLabel(o.label)) return; const key = optKey(o.label);
           if (servers.has(key)) { const e = servers.get(key); e.state = o.state; e.watts = o.watts ?? null; return; }
           servers.set(key, { key, name: o.label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts ?? null });
         });
@@ -549,7 +576,7 @@
         it.unmappedRack = !!s.rack && !sid;
         items = items.filter(x => x !== jsonOpts.get(s.key)); items.push(it);
       });
-      items.filter(i => i.type === 'opt' && !seen.has(i.dcim?.optKey || optKey(i.name))).forEach(i => { i.live = { inDcim: false }; i.notes = (i.notes || '') + ' ⚠ Not present in the live DCIM labels.'; });
+      items.filter(i => i.type === 'opt' && !seen.has(i.dcim?.optKey || optKey(i.name))).forEach(i => { i.live = { inDcim: false }; i.liveWarning = LIVE_WARN.notInDcim; });
       // 2) PDU / KVM devices
       items.forEach(i => {
         if (i.type === 'pdu' && i.dcim?.deviceId) { const dev = pdus.find(p => p.id === i.dcim.deviceId); const st = live.pdu[i.dcim.deviceId]; if (dev) { i.live = { device: dev, status: st, reachable: st?.reachable ?? null }; if (dev.rack && setupByRack[dev.rack]) { i.setup = setupByRack[dev.rack]; i.zone = setups.find(x => x.id === i.setup)?.zone; } } }
@@ -592,7 +619,7 @@
       const liveNames = new Set(liveEq.map(i => norm(i.name)));
       const liveShelves = new Set(liveEq.map(i => i.shelf).filter(Boolean));
       items = items.filter(i => !(i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && (liveNames.has(norm(i.name)) || (i.shelf && liveShelves.has(i.shelf)))));
-      items.forEach(i => { if (i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && i.setup && setups.find(x => x.id === i.setup)?.dcimRack) i.notes = (i.notes || '') + ' ⚠ Not present in the Lab Manager rack items.'; });
+      items.forEach(i => { if (i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && i.setup && setups.find(x => x.id === i.setup)?.dcimRack) i.liveWarning = LIVE_WARN.notInRackItems; });
     }
     // DCIM racks without a physical setup
     const liveRacks = live.connected ? [...new Set(live.devices.filter(x => x.kind === 'pdu' || x.kind === 'rack').map(x => x.rack).filter(Boolean))] : (d.dcim?.pdus || []).map(p => p.rack);
@@ -666,12 +693,33 @@
   function fmtTs(ts) { const d = new Date(ts); if (isNaN(d)) return String(ts); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
 
   // ───────────────────────────────────────────────────────────── filters / search
+  const ownerOf = rec => rec.item?.owner || rec.item?.live?.owner || rec.def.owner || '';
   function matchesQuery(rec, query) {
     const q = query.toLowerCase();
-    return [rec.id, rec.def.name, rec.item?.serial_number || rec.def.serial_number, rec.item?.barcode, rec.item?.shelf_position].some(value => String(value || '').toLowerCase().includes(q));
+    return [rec.id, rec.def.name, rec.item?.serial_number || rec.def.serial_number, rec.item?.barcode, rec.item?.shelf_position, ownerOf(rec)].some(value => String(value || '').toLowerCase().includes(q));
+  }
+  // Lower = better. An exact name / ID match must beat a longer name that merely starts the same (OPT11 before Opt114).
+  function searchRank(rec, query) {
+    const q = query.trim().toLowerCase(); const name = String(rec.def.name || '').trim().toLowerCase(); const id = rec.id.toLowerCase();
+    const base = name.replace(/\s*\(.*\)\s*$/, '');
+    if (name === q || id === q) return 0;
+    if (base === q || id === 'live-' + q) return 1;
+    if (name.startsWith(q) || id.startsWith(q) || id.startsWith('live-' + q)) return 2;
+    if (name.split(/[\s·—\-_/]+/).some(w => w.startsWith(q))) return 3;
+    if (name.includes(q) || id.includes(q)) return 4;
+    return 5;   // serial number, barcode, shelf position or owner
+  }
+  function searchHits(query) {
+    const catOrder = { item: 0, setup: 1, shelf: 2, storage: 3, structure: 4, zone: 5 };
+    return [...S.recs.values()].filter(r => matchesQuery(r, query))
+      .map(r => ({ r, rank: searchRank(r, query) }))
+      .sort((a, b) => a.rank - b.rank || (catOrder[a.r.cat] ?? 9) - (catOrder[b.r.cat] ?? 9) || String(a.r.def.name || a.r.id).length - String(b.r.def.name || b.r.id).length || a.r.id.localeCompare(b.r.id))
+      .map(x => x.r);
   }
   function matches(rec) {
     const f = S.filters;
+    // While moving, every possible destination stays visible and pickable, whatever the search / filters hide.
+    if (S.moveItem && (rec.cat === 'shelf' || rec.cat === 'setup' || rec.cat === 'storage')) return true;
     if (rec.cat === 'zone') return !f.zone || rec.id === f.zone;
     if (f.zone && rec.zone !== f.zone && rec.cat !== 'structure') return false;
     if (f.setup && rec.setup !== f.setup && rec.id !== f.setup) return false;
@@ -710,16 +758,33 @@
       `<div class="li wide"><span class="sw" style="background:${TYPE_STRIPE.opt}"></span>edge stripe: OPT</div><div class="li"><span class="sw" style="background:${TYPE_STRIPE.kvm}"></span>KVM</div><div class="li"><span class="sw" style="background:${TYPE_STRIPE.pdu}"></span>PDU</div><div class="li"><span class="sw" style="background:${TYPE_STRIPE['equip-switch']}"></span>Switch / chiller</div>`;
     // search
     const inp = $('#search'), res = $('#searchResults');
+    let active = -1;
+    const options = () => $$('.sr[data-id]', res);
+    const hideResults = () => { res.classList.add('hidden'); inp.setAttribute('aria-expanded', 'false'); inp.removeAttribute('aria-activedescendant'); active = -1; };
+    const setActive = i => {
+      const opts = options(); if (!opts.length) { active = -1; return; }
+      active = (i + opts.length) % opts.length;
+      opts.forEach((el, n) => { el.classList.toggle('active', n === active); el.setAttribute('aria-selected', n === active ? 'true' : 'false'); });
+      inp.setAttribute('aria-activedescendant', opts[active].id); opts[active].scrollIntoView({ block: 'nearest' });
+    };
+    const choose = el => { if (el && el.dataset.id) { select(el.dataset.id); hideResults(); } };
     inp.addEventListener('input', () => {
       const q = inp.value.trim(); S.filters.q = q; applyFilters();
-      if (!q) { res.classList.add('hidden'); return; }
-      const hits = [...S.recs.values()].filter(r => matchesQuery(r, q)).slice(0, 14);
-      res.innerHTML = hits.map(r => `<div class="sr" data-id="${esc(r.id)}"><span class="id">${esc(r.id)}</span><span class="nm">${esc(r.def.name || '')}</span><span class="cat">${r.cat}</span></div>`).join('') || '<div class="sr"><span class="nm muted">No matches</span></div>';
-      res.classList.remove('hidden');
-      $$('.sr', res).forEach(el => el.onclick = () => { if (el.dataset.id) { select(el.dataset.id); res.classList.add('hidden'); } });
+      if (!q) { hideResults(); return; }
+      const hits = searchHits(q).slice(0, 14); const ql = q.toLowerCase();
+      res.innerHTML = hits.map((r, n) => { const owner = ownerOf(r); const byOwner = owner && owner.toLowerCase().includes(ql) && searchRank(r, q) === 5;
+        return `<div class="sr" role="option" id="sr-${n}" aria-selected="false" data-id="${esc(r.id)}"><span class="id">${esc(r.id)}</span><span class="nm">${esc(r.def.name || '')}${byOwner ? `<small class="ow"> · owner ${esc(owner)}</small>` : ''}</span><span class="cat">${r.cat}</span></div>`; }).join('') || '<div class="sr" role="option" aria-disabled="true"><span class="nm muted">No matches</span></div>';
+      res.classList.remove('hidden'); inp.setAttribute('aria-expanded', 'true');
+      options().forEach((el, n) => { el.onclick = () => choose(el); el.onmouseenter = () => setActive(n); });
+      setActive(0);
     });
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { const first = $('.sr[data-id]', res); if (first) { select(first.dataset.id); res.classList.add('hidden'); } } if (e.key === 'Escape') { res.classList.add('hidden'); inp.blur(); } });
-    document.addEventListener('click', e => { if (!e.target.closest('.search-wrap')) res.classList.add('hidden'); });
+    inp.addEventListener('keydown', e => {
+      const open = !res.classList.contains('hidden');
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { if (!open) return; e.preventDefault(); setActive(active + (e.key === 'ArrowDown' ? 1 : -1)); }
+      else if (e.key === 'Enter') { if (open) { e.preventDefault(); choose(options()[Math.max(0, active)]); } }
+      else if (e.key === 'Escape') { hideResults(); inp.blur(); }
+    });
+    document.addEventListener('click', e => { if (!e.target.closest('.search-wrap')) hideResults(); });
   }
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -728,39 +793,48 @@
   function dot(rec) { return `<span class="st ${rec.pconf === 'low' || rec.conf === 'low' ? 'low' : ''}" style="background:${STATUS_COLOR[rec.status]}"></span>`; }
   function renderTree() {
     const d = S.data; const el = $('#tree'); const open = LS.get('treeOpen', {});
-    const node = (rec, cls, extra = '', depth = 0) => `<div class="tn ${rec.filtered ? 'dim' : ''} ${S.selected === rec.id ? 'sel' : ''}" data-id="${esc(rec.id)}">${dot(rec)}<span class="id ${cls}">${esc(rec.id)}</span><span class="nm">${esc(rec.def.name || '')}</span>${extra}</div>`;
+    const node = (rec, cls, extra = '', depth = 0) => `<div class="tn ${rec.filtered ? 'dim' : ''} ${S.selected === rec.id ? 'sel' : ''}" data-id="${esc(rec.id)}" tabindex="0" role="button">${dot(rec)}<span class="id ${cls}">${esc(rec.id)}</span><span class="nm">${esc(rec.def.name || '')}</span>${extra}</div>`;
     let html = '';
     d.zones.forEach(zn => {
       html += `<div class="zone-h"><span class="sw" style="background:${esc(zn.color)}"></span>${esc(zn.id)} · ${esc(zn.name)}</div>`;
       // setups in zone
       recsOf(r => r.cat === 'setup' && r.zone === zn.id).forEach(su => {
         const isOpen = open[su.id] !== false;
-        html += `<div class="tn grp ${isOpen ? 'open' : ''} ${su.filtered ? 'dim' : ''} ${S.selected === su.id ? 'sel' : ''}" data-id="${esc(su.id)}" data-grp="${esc(su.id)}"><span class="caret">▶</span>${dot(su)}<span class="id">${esc(su.id)}</span><span class="nm">${esc(su.def.name)}</span><span class="tag">${esc(dcimRackOf(su.def) || '—')}</span></div>`;
+        html += `<div class="tn grp ${isOpen ? 'open' : ''} ${su.filtered ? 'dim' : ''} ${S.selected === su.id ? 'sel' : ''}" data-id="${esc(su.id)}" data-grp="${esc(su.id)}" tabindex="0" role="button" aria-expanded="${isOpen}"><span class="caret">▶</span>${dot(su)}<span class="id">${esc(su.id)}</span><span class="nm">${esc(su.def.name)}</span><span class="tag">${esc(dcimRackOf(su.def) || '—')}</span></div>`;
         if (isOpen) {
           html += `<div class="tgroup">`;
           recsOf(r => r.cat === 'shelf' && r.setup === su.id).sort((a, b) => b.level - a.level).forEach(sh => {
             const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id);
-            html += `<div class="tn ${sh.filtered ? 'dim' : ''} ${S.selected === sh.id ? 'sel' : ''}" data-id="${esc(sh.id)}">${dot(sh)}<span class="id shelf">${esc(sh.id)}</span><span class="nm">L${esc(sh.level)}${its.length ? '' : ' · empty'}</span></div>`;
-            its.forEach(it => { const lv = it.item.live; const tag = it.item.type === 'opt' ? (lv?.inDcim ? `<span class="tag ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'offp' : ''}">${lv.state}</span>${lv.sw ? `<span class="tag sw">${esc(lv.sw.switch)}${lv.sw.port ? '·' + esc(lv.sw.port) : ''}</span>` : ''}` : `<span class="tag">#${esc(it.item.dcim?.outlet ?? '?')}</span>`) : `<span class="tag">${esc(it.item.type)}</span>`; html += `<div class="tgroup">${node(it, 'item', tag)}</div>`; });
+            html += `<div class="tn ${sh.filtered ? 'dim' : ''} ${S.selected === sh.id ? 'sel' : ''}" data-id="${esc(sh.id)}" tabindex="0" role="button">${dot(sh)}<span class="id shelf">${esc(sh.id)}</span><span class="nm">L${esc(sh.level)}${its.length ? '' : ' · empty'}</span></div>`;
+            its.forEach(it => { const lv = it.item.live; const tag = it.item.type === 'opt' ? (lv?.inDcim ? `<span class="tag ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'offp' : ''}">${esc(lv.state)}</span>${lv.sw ? `<span class="tag sw">${esc(lv.sw.switch)}${lv.sw.port ? '·' + esc(lv.sw.port) : ''}</span>` : ''}` : `<span class="tag">#${esc(it.item.dcim?.outlet ?? '?')}</span>`) : `<span class="tag">${esc(it.item.type)}</span>`; html += `<div class="tgroup">${node(it, 'item', tag)}</div>`; });
           });
           recsOf(r => r.cat === 'item' && r.setup === su.id && !r.shelf).forEach(it => { html += node(it, 'item', `<span class="tag">${esc(it.item.placement === 'side-mount' ? 'side · ' + (it.item.side || 'right') : it.item.type)}</span>`); });
           html += `</div>`;
         }
       });
       recsOf(r => r.cat === 'storage' && r.zone === zn.id).forEach(st => {
-        html += `<div class="tn ${st.filtered ? 'dim' : ''} ${S.selected === st.id ? 'sel' : ''}" data-id="${esc(st.id)}">${dot(st)}<span class="id" style="color:#c4b5fd">${esc(st.id)}</span><span class="nm">${esc(st.def.name)}</span></div>`;
+        html += `<div class="tn ${st.filtered ? 'dim' : ''} ${S.selected === st.id ? 'sel' : ''}" data-id="${esc(st.id)}" tabindex="0" role="button">${dot(st)}<span class="id" style="color:#c4b5fd">${esc(st.id)}</span><span class="nm">${esc(st.def.name)}</span></div>`;
         recsOf(r => r.cat === 'item' && r.item?.storage === st.id).forEach(it => { html += `<div class="tgroup">${node(it, 'item', `<span class="tag">×${esc(it.item.quantity || 1)}</span>`)}</div>`; });
       });
       recsOf(r => r.cat === 'item' && r.zone === zn.id && !r.setup && !r.item?.storage && !r.unplaced).forEach(it => { html += node(it, 'item', `<span class="tag">${esc(it.item.type)}</span>`); });
     });
     html += `<div class="zone-h"><span class="sw" style="background:#52525b"></span>Structure</div>`;
     recsOf(r => r.cat === 'structure').forEach(r => { html += node(r, 'item', `<span class="tag">${esc(r.conf)}</span>`); });
+    const focusedId = el.contains(document.activeElement) ? document.activeElement.dataset.id : null;
     el.innerHTML = html;
-    $$('.tn', el).forEach(n => n.onclick = e => {
-      const id = n.dataset.id;
-      if (n.dataset.grp && (e.target.classList.contains('caret'))) { const o = LS.get('treeOpen', {}); o[id] = !(o[id] !== false); LS.set('treeOpen', o); renderTree(); return; }
-      select(id);
+    const toggle = id => { const o = LS.get('treeOpen', {}); o[id] = !(o[id] !== false); LS.set('treeOpen', o); renderTree(); };
+    $$('.tn', el).forEach(n => {
+      n.onclick = e => {
+        const id = n.dataset.id;
+        if (n.dataset.grp && (e.target.classList.contains('caret'))) { toggle(id); return; }
+        activateTreeRow(id);
+      };
+      n.onkeydown = e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTreeRow(n.dataset.id); }
+        else if (n.dataset.grp && ((e.key === 'ArrowRight') !== n.classList.contains('open')) && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) { e.preventDefault(); toggle(n.dataset.id); }
+      };
     });
+    if (focusedId) { const again = $$('.tn[data-id]', el).find(n => n.dataset.id === focusedId); if (again) again.focus({ preventScroll: true }); }
   }
   function renderInventory() {
     const el = $('#inv'); const rows = [...S.recs.values()].filter(r => r.cat !== 'zone').sort((a, b) => a.id.localeCompare(b.id));
@@ -783,7 +857,7 @@
     let kw = 0, known = 0, partial = false, temps = []; S.live.devices.filter(d => d.kind === 'pdu').forEach(p => { const st = S.live.pdu[p.id]; if (st?.reachable && st.total_watts != null) { kw += st.total_watts; known++; } if (!st?.reachable || st.watts_complete !== true) partial = true; if (st?.temperature != null) temps.push(st.temperature); });
     const live = S.live.connected; const ac = attnCounts(S.attention);
     $('#stats').innerHTML = [
-      `<button type="button" class="st st-attn${ac.crit ? ' crit' : ac.warn ? ' warn' : ''}" id="stAttn" title="פתיחת רשימת הפריטים שדורשים טיפול">Attention ${ac.crit + ac.warn ? `${ac.crit ? `<b class="bad">${ac.crit}</b> crit` : ''}${ac.crit && ac.warn ? ' · ' : ''}${ac.warn ? `<b class="warn">${ac.warn}</b> warn` : ''}` : '<b class="nv">✓</b>'}${ac.info ? ` · <b>${ac.info}</b> info` : ''}</button>`,
+      `<button type="button" class="st st-attn${ac.crit ? ' crit' : ac.warn ? ' warn' : ''}" id="stAttn" title="Open the list of items that need attention">Attention ${ac.crit + ac.warn ? `${ac.crit ? `<b class="bad">${ac.crit}</b> crit` : ''}${ac.crit && ac.warn ? ' · ' : ''}${ac.warn ? `<b class="warn">${ac.warn}</b> warn` : ''}` : '<b class="nv">✓</b>'}${ac.info ? ` · <b>${ac.info}</b> info` : ''}</button>`,
       `<span class="st">Setups <b>${S.data.setups.length}</b></span>`,
       `<span class="st">Shelves <b>${S.data.shelves.length}</b></span>`,
       `<span class="st">OPTs <b class="nv">${opts.length}</b>${live ? ` <span>on <b class="nv">${on}</b> · off <b>${off}</b></span>` : ''}</span>`,
@@ -798,7 +872,7 @@
 
   // ───────────────────────────────────────────────────────────── attention: sidebar tab + floating dock + rack badges
   function attnRow(e, i, compact) {
-    return `<div class="attn-row sev-${e.severity}${compact ? ' compact' : ''}" data-attn="${i}" role="button" tabindex="0"${compact && e.hint ? ` title="${esc(e.hint)}"` : ''}><span class="attn-dot"></span><span class="attn-txt">${esc(e.text)}${e.hint && !compact ? `<small dir="auto">${esc(e.hint)}</small>` : ''}</span>${e.setup ? `<span class="tag">${esc(e.setup)}</span>` : ''}</div>`;
+    return `<div class="attn-row sev-${e.severity}${compact ? ' compact' : ''}" data-attn="${i}" data-key="${esc(e.key)}" role="button" tabindex="0"${compact ? ` title="${esc(e.text)}"` : ''}><span class="attn-dot"></span><span class="attn-txt">${esc(e.text)}${e.hint && !compact ? `<small dir="auto">${esc(e.hint)}</small>` : ''}</span>${e.setup ? `<span class="tag">${esc(e.setup)}</span>` : ''}</div>`;
   }
   function bindAttnRows(root) {
     $$('[data-attn]', root).forEach(r => {
@@ -812,6 +886,8 @@
   }
   function renderAttention() {
     const list = S.attention || []; const c = attnCounts(list); const worst = worstSeverity(list);
+    // keep keyboard focus on the same row across the 15 s live refresh
+    const fa = document.activeElement; const focusKey = fa && fa.dataset && fa.dataset.key && fa.closest('#attn, #attnDock') ? [fa.closest('#attn') ? 'attn' : 'attnDock', fa.dataset.key] : null;
     const indexed = list.map((e, i) => [e, i]);
     const el = $('#attn');
     if (el) {
@@ -833,13 +909,14 @@
       const collapsed = !!S.attnDockCollapsed; const shown = S.attnDockAll ? indexed : indexed.slice(0, 5);
       const dockScroll = $('.attn-dock-b', dock)?.scrollTop || 0;
       dock.className = 'attn-dock' + (collapsed ? ' collapsed' : '') + (worst ? ' sev-' + worst : '');
-      dock.innerHTML = `<button type="button" class="attn-dock-h" id="attnDockToggle" aria-expanded="${!collapsed}" title="${collapsed ? 'הצגת הרשימה' : 'קיפול הרשימה'}"><span class="caret">${collapsed ? '▸' : '▾'}</span>Attention<span class="attn-sum">${c.crit ? `<b class="bad">${c.crit}</b>` : ''}${c.warn ? `<b class="warn">${c.warn}</b>` : ''}${c.info ? `<b class="info">${c.info}</b>` : ''}${list.length ? '' : '<b class="ok">✓</b>'}</span></button>` +
+      dock.innerHTML = `<button type="button" class="attn-dock-h" id="attnDockToggle" aria-expanded="${!collapsed}" title="${collapsed ? 'Show the list' : 'Collapse the list'}"><span class="caret">${collapsed ? '▸' : '▾'}</span>Attention<span class="attn-sum">${c.crit ? `<b class="bad">${c.crit}</b>` : ''}${c.warn ? `<b class="warn">${c.warn}</b>` : ''}${c.info ? `<b class="info">${c.info}</b>` : ''}${list.length ? '' : '<b class="ok">✓</b>'}</span></button>` +
         (collapsed ? '' : `<div class="attn-dock-b">${shown.map(([e, i]) => attnRow(e, i, true)).join('') || '<div class="muted small attn-empty">✓ Nothing needs attention right now.</div>'}${list.length > 5 ? `<button type="button" class="attn-more" id="attnMore">${S.attnDockAll ? 'Show top 5' : `+${list.length - 5} more…`}</button>` : ''}</div>`);
       const dockBody = $('.attn-dock-b', dock); if (dockBody) dockBody.scrollTop = dockScroll;
       $('#attnDockToggle').onclick = () => { S.attnDockCollapsed = !S.attnDockCollapsed; LS.set('attnDockCollapsed', S.attnDockCollapsed); renderAttention(); };
       const more = $('#attnMore'); if (more) more.onclick = () => { if (!S.kiosk && !S.attnDockAll) { showTab('attn'); return; } S.attnDockAll = !S.attnDockAll; renderAttention(); };
       bindAttnRows(dock); placeAttnDock();
     }
+    if (focusKey) { const again = $$('[data-key]', $('#' + focusKey[0])).find(r => r.dataset.key === focusKey[1]); if (again) again.focus({ preventScroll: true }); }
     // per-rack 3D badges
     const bySetup = new Map(); list.forEach(e => { if (e.setup) { if (!bySetup.has(e.setup)) bySetup.set(e.setup, []); bySetup.get(e.setup).push(e); } });
     for (const rec of S.recs.values()) {
@@ -890,18 +967,20 @@
     const rec = S.recs.get(id); if (!rec) return;
     const refresh = !!opts.refresh && S.selected === id;
     S.selected = id; $('#vFocus').disabled = !id;
-    if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+    clearSelectionHelper();   // dispose: a live refresh re-selects every 15 s
     if (rec.group) {
+      scene.updateMatrixWorld(true);   // groups rebuilt a moment ago have not been rendered yet: their world matrices are stale
       const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (rec.cat === 'setup' || rec.cat === 'storage') b.setFromObject(rec.group);
       if (!b.isEmpty()) { b.expandByScalar(0.02); selectionHelper = new THREE.Box3Helper(b, new THREE.Color('#76b900')); selectionHelper.material.transparent = true; selectionHelper.material.opacity = .95; scene.add(selectionHelper); }
-      if (!opts.keepCamera && opts.fly !== false) flyTo(rec);
     }
     $$('.lbl.sel').forEach(l => l.classList.remove('sel')); if (rec.label) rec.label.classList.add('sel');
     if (refresh && detailBusy()) S.detailStale = true; else renderPanel(rec, refresh);
     renderTree(); renderRackBar();
     $('#detail').classList.remove('hidden'); resize();
+    // fly only after the detail panel is open: framing uses the final viewport size and overlays
+    if (rec.group && !opts.keepCamera && opts.fly !== false) flyTo(rec);
   }
-  function closeDetail() { S.selected = null; $('#vFocus').disabled = true; if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; } $('#detail').classList.add('hidden'); $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); resize(); }
+  function closeDetail() { S.selected = null; $('#vFocus').disabled = true; clearSelectionHelper(); $('#detail').classList.add('hidden'); $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); resize(); }
   $('#dClose').onclick = closeDetail;
   $('#dFocus').onclick = () => { const r = S.recs.get(S.selected); if (r) flyTo(r, true); };
 
@@ -920,7 +999,7 @@
     if (rec.shelf) { const sh = S.recs.get(rec.shelf); parts.push(link(rec.shelf, sh ? `${sh.id} · level L${sh.level}` : rec.shelf)); }
     if (rec.item?.placement === 'bottom-bay') parts.push('bottom bay (floor)');
     if (rec.item?.storage) parts.push(link(rec.item.storage));
-    const a = anchorOf(rec); if (a) parts.push(`<span class="mono muted">x ${a.x.toFixed(2)} · z ${a.z.toFixed(2)} m</span>`);
+    const a = anchorOf(rec); if (a) parts.push(`<span class="mono muted" title="metres from the left wall (x) and from the entrance wall (z)">x ${DX(a.x).toFixed(2)} · z ${a.z.toFixed(2)} m</span>`);
     return parts.join('<br/>') || '—';
   }
 
@@ -937,7 +1016,7 @@
       ${it?.shelf_position ? `<span class="k">Shelf position</span><span class="v">${esc(it.shelf_position)}</span>` : ''}
       ${it?.last_seen_at ? `<span class="k">Last seen</span><span class="v">${esc(ago(it.last_seen_at))} <span class="muted small mono">${esc(fmtTs(it.last_seen_at))}</span></span>` : it?.tracking ? `<span class="k">Last seen</span><span class="v muted">never scanned</span>` : ''}
       ${it?.tracking?.count ? `<span class="k">Tracking</span><span class="v">${it.tracking.count} event${it.tracking.count === 1 ? '' : 's'}${it.tracking.last ? ` · last: ${esc(it.tracking.last.action || '?')}${it.tracking.last.at ? ' ' + esc(ago(it.tracking.last.at)) : ''}` : ''}</span>` : ''}
-      <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${it.live.state}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + ' W')}</span>` : ''}</span>
+      <span class="k">Status</span><span class="v">${statusPill(rec.status)}${it?.live?.inDcim ? ` <span class="pill live-${it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unk'}">${esc(it.live.state)}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + ' W')}</span>` : ''}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(ov(rec.id).dcimRack !== undefined ? 'medium' : def.dcimMappingConfidence)}` : ''}</span>
       <span class="k">Owner</span><span class="v">${esc(it?.owner || def.owner || '—')}${it?.live?.owner ? ' <span class="muted small">(DCIM)</span>' : ''}</span>
       <span class="k">Location</span><span class="v">${locationOf(rec)}</span>
@@ -947,31 +1026,42 @@
     // ── OPT controls
     if (it?.type === 'opt') {
       const dc = it.dcim || {}; const live = S.live.connected;
-      const kv = (dc.kvm || []);
-      html += `<div class="sec"><div class="sec-h">Connections <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? 'live · DCIM' : 'from DCIM seed (static)'}</span></div><div class="kv">
-        <span class="k">PDU outlet</span><span class="v mono">${dc.pduName ? link(pduItemId(dc.pdu), dc.pduName) : '—'} · <b>#${esc(dc.outlet ?? '?')}</b></span>
-        <span class="k">KVM port</span><span class="v">${kv.length ? kv.map(k => `<span class="pill kvm-pill">${esc(k.kvmName)} · port ${k.port}${k.status ? ' · ' + k.status : ''}</span>`).join(' ') : '<span class="muted">none</span>'}</span>
-        <span class="k">Network switch</span><span class="v">${it.live?.sw?.switch ? `<span class="pill sw-pill">${esc(it.live.sw.switch)}${it.live.sw.port ? ' · port ' + it.live.sw.port : ''}</span>` : `<span class="muted">${live ? 'not assigned in DCIM' : 'needs backend (switch_assignments.json is runtime data)'}</span>`}</span>
-        <span class="k">DCIM rack / U</span><span class="v mono">${it.live?.rack ? `${esc(it.live.rack)} · U${String(it.live.u).padStart(2, '0')}${it.placementConfidence === 'low' ? ' <span class="muted">(auto)</span>' : ''}` : (S.recs.get(rec.setup)?.def ? esc(dcimRackOf(S.recs.get(rec.setup).def)) : '—')}</span>
+      // Power and console act only on a mapping that comes from live DCIM data. A lab-data.json outlet / KVM port
+      // of a server missing from the live PDU labels may be stale and point at another machine.
+      const pw = powerTarget(it); const kvLive = kvmTargets(it); const stale = live && !pw;
+      const kv = live ? kvLive : (dc.kvm || []);
+      const maint = pw && inMaintenance(pw.pduId); const canOperate = !!window.DCIM_CAN_OPERATE;
+      html += `<div class="sec"><div class="sec-h">Connections <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (stale ? 'lab-data.json · not in live DCIM' : 'live · DCIM') : 'from DCIM seed (static)'}</span></div><div class="kv">
+        <span class="k">PDU outlet</span><span class="v mono">${dc.pduName ? (pw ? link(pduItemId(dc.pdu), dc.pduName) : esc(dc.pduName)) : '—'} · <b>#${esc(dc.outlet ?? '?')}</b>${stale ? ' <span class="muted">(stale)</span>' : ''}</span>
+        <span class="k">KVM port</span><span class="v">${kv.length ? kv.map(k => `<span class="pill kvm-pill">${esc(k.kvmName)} · port ${esc(k.port)}${k.status ? ' · ' + esc(k.status) : ''}</span>`).join(' ') : `<span class="muted">${stale && (dc.kvm || []).length ? 'not in live DCIM' : 'none'}</span>`}</span>
+        <span class="k">Network switch</span><span class="v">${it.live?.sw?.switch ? `<span class="pill sw-pill">${esc(it.live.sw.switch)}${it.live.sw.port ? ' · port ' + esc(it.live.sw.port) : ''}</span>` : `<span class="muted">${live ? 'not assigned in DCIM' : 'needs backend (switch_assignments.json is runtime data)'}</span>`}</span>
+        <span class="k">DCIM rack / U</span><span class="v mono">${it.live?.rack ? `${esc(it.live.rack)} · U${esc(String(it.live.u).padStart(2, '0'))}${it.placementConfidence === 'low' ? ' <span class="muted">(auto)</span>' : ''}` : (S.recs.get(rec.setup)?.def ? esc(dcimRackOf(S.recs.get(rec.setup).def)) : '—')}</span>
       </div></div>`;
-      html += `<div class="sec"><div class="sec-h">Power control</div>
+      if (!canOperate) {
+        html += `<div class="sec"><div class="sec-h">Power control</div><div class="note readonly-note">Read-only · Power and console need the Operator role.</div></div>`;
+      } else {
+        const off = !pw ? ' disabled' : '';
+        const why = !live ? ' title="Connect the backend first"' : stale ? ' title="Not in live DCIM — power disabled"' : '';
+        html += `<div class="sec"><div class="sec-h">Power control${pw ? ` <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${esc(pw.pduName)} · outlet ${esc(pw.outlet)}</span>` : ''}</div>
+        ${stale ? `<div class="warn-box" role="status" style="margin-bottom:8px"><b>Not in live DCIM — power disabled</b><br/>This server is not in the live PDU labels, so the outlet and KVM port saved in lab-data.json may belong to another machine. Power and console stay disabled until it appears in Lab Manager.</div>` : ''}
         <div class="ctl-row">
-          <button class="btn btn-on" data-pw="on" ${live && !inMaintenance(dc.pdu) ? '' : 'disabled'}${inMaintenance(dc.pdu) ? ' title="PDU in maintenance mode"' : ''}>Power On</button>
-          <button class="btn btn-off" data-pw="off" ${live ? '' : 'disabled'}>Power Off</button>
-          <button class="btn btn-cycle" data-pw="cycle" ${live && !inMaintenance(dc.pdu) ? '' : 'disabled'}${inMaintenance(dc.pdu) ? ' title="PDU in maintenance mode"' : ''}>Cycle</button>
+          <button class="btn btn-on" data-pw="on"${off || (maint ? ' disabled' : '')}${maint ? ' title="PDU in maintenance mode"' : why}>Power On</button>
+          <button class="btn btn-off" data-pw="off"${off}${why}>Power Off</button>
+          <button class="btn btn-cycle" data-pw="cycle"${off || (maint ? ' disabled' : '')}${maint ? ' title="PDU in maintenance mode"' : why}>Cycle</button>
         </div>
-        ${inMaintenance(dc.pdu) ? '<div class="note muted" style="margin-top:6px">This PDU is in maintenance mode: Power On and Cycle stay blocked until it is restored in Lab Manager.</div>' : ''}
-        ${kv.length ? `<div class="ctl-row" style="margin-top:6px">${kv.map(k => `<button class="btn btn-kvm" data-kvm="${esc(k.kvm)}" data-port="${k.port}" ${live ? '' : 'disabled'}>Open KVM console · ${esc(k.kvmName)} p${k.port}</button>`).join('')}</div>` : ''}
+        ${maint ? '<div class="note muted" style="margin-top:6px">This PDU is in maintenance mode: Power On and Cycle stay blocked until it is restored in Lab Manager.</div>' : ''}
+        ${kv.length ? `<div class="ctl-row" style="margin-top:6px">${kv.map(k => `<button class="btn btn-kvm" data-kvm="${esc(k.kvm)}" data-port="${esc(k.port)}"${live && kvLive.includes(k) ? '' : ' disabled'}>Open KVM console · ${esc(k.kvmName)} p${esc(k.port)}</button>`).join('')}</div>` : ''}
         ${live ? '' : '<div class="note muted" style="margin-top:8px">Connect the Lab Manager backend (⚙ Backend) to enable outlet control and KVM console — exactly the same API calls as the DCIM UI.</div>'}
         ${it.unmappedRack ? `<div class="warn-box" style="margin-top:8px">This OPT lives in DCIM rack <b>${esc(it.live.rack)}</b> which is not mapped to a physical SETUP yet.</div>` : ''}
       </div>`;
+      }
     }
     // ── PDU
     if (it?.type === 'pdu') {
       const st = it.live?.status; const live = S.live.connected; const labels = it.dcim?.labels || it.live?.device?.labels || {};
       const outlets = st?.reachable && st.outlets?.length ? st.outlets : Array.from({ length: it.dcim?.outlets || 24 }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Outlet ${i + 1}`, state: 'unknown', watts: null }));
       html += `<div class="sec"><div class="sec-h">Outlets <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? `<span style="color:#fda4af">unreachable</span>` : st ? `${outlets.filter(x => x.state === 'on').length}/${outlets.length} on · ${st.total_watts == null ? '\u2014' : (st.total_watts / 1000).toFixed(2) + ' kW' + (st.watts_complete === false ? ' (partial)' : '')}` : 'loading…') : 'static labels · click needs backend'}</span></div>
-        <div class="ogrid">${outlets.map(x => { const named = !isDefaultOutletLabel(x.label); const cls = x.state === 'unknown' ? 'unknown' : `${x.state} ${named ? 'named' : 'free'}`; return `<div class="ocell ${cls}" data-outlet="${x.number}" title="${esc(x.label)}"><span class="n">#${x.number}</span><span class="l">${named ? esc(x.label) : '—'}</span><span class="w">${x.watts == null ? '\u2014' : Math.round(x.watts) + ' W'}</span></div>`; }).join('')}</div>
+        <div class="ogrid">${outlets.map(x => { const named = !isDefaultOutletLabel(x.label); const cls = x.state === 'unknown' ? 'unknown' : `${esc(x.state)} ${named ? 'named' : 'free'}`; return `<div class="ocell ${cls}" data-outlet="${esc(x.number)}" title="${esc(x.label)}"><span class="n">#${esc(x.number)}</span><span class="l">${named ? esc(x.label) : '—'}</span><span class="w">${x.watts == null ? '\u2014' : Math.round(x.watts) + ' W'}</span></div>`; }).join('')}</div>
         ${st?.temperature != null || st?.humidity != null ? `<div class="kv" style="margin-top:8px"><span class="k">Environment</span><span class="v">${st.temperature != null ? `🌡 ${st.temperature.toFixed(1)} °C` : ''} ${st.humidity != null ? `· 💧 ${st.humidity.toFixed(0)} %` : ''} ${st.leak_detected ? '<span style="color:#fda4af">· ⚠ leak</span>' : ''}</span></div>` : ''}
         ${st?.error ? `<div class="err-box" style="margin-top:8px">⚠ ${esc(st.error)}</div>` : ''}
       </div>`;
@@ -981,8 +1071,8 @@
       const st = it.live?.status; const live = S.live.connected; const labels = it.dcim?.labels || it.live?.device?.labels || {}; const n = it.dcim?.ports || it.live?.device?.port_count || 8;
       const failed = live && st?.reachable && st.error;   // answered, but sign-in / API failed: port states are unknown
       const ports = st?.ports?.length && !failed ? st.ports : Array.from({ length: n }, (_, i) => ({ number: i + 1, label: labels[String(i + 1)] || `Port ${i + 1}`, status: failed ? 'unknown' : labels[String(i + 1)] ? 'idle' : 'empty' }));
-      html += `<div class="sec"><div class="sec-h">Ports <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? '<span style="color:#fda4af">unreachable</span>' : failed ? '<span style="color:#fda4af">sign-in failed</span>' : 'click a port to open the console') : 'static labels'}</span></div>
-        <div class="ogrid ${n <= 8 ? 'k8' : ''}">${ports.map(p => `<div class="ocell ${p.status}${p.in_use ? ' hl' : ''}" data-kport="${p.number}" title="${esc(p.label)}"><span class="n">p${p.number}</span><span class="l">${isDefaultOutletLabel(p.label) ? '—' : esc(p.label)}</span>${p.in_use ? '<span class="w">IN USE</span>' : ''}</div>`).join('')}</div>${failed ? `<div class="err-box" style="margin-top:8px">⚠ ${esc(st.error)}</div>` : ''}</div>`;
+      html += `<div class="sec"><div class="sec-h">Ports <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">${live ? (st?.reachable === false ? '<span style="color:#fda4af">unreachable</span>' : failed ? '<span style="color:#fda4af">sign-in failed</span>' : !window.DCIM_CAN_OPERATE ? 'read-only · console needs the Operator role' : !it.live?.device ? 'not in live DCIM — console disabled' : 'click a port to open the console') : 'static labels'}</span></div>
+        <div class="ogrid ${n <= 8 ? 'k8' : ''}">${ports.map(p => `<div class="ocell ${esc(p.status)}${p.in_use ? ' hl' : ''}" data-kport="${esc(p.number)}" title="${esc(p.label)}"><span class="n">p${esc(p.number)}</span><span class="l">${isDefaultOutletLabel(p.label) ? '—' : esc(p.label)}</span>${p.in_use ? '<span class="w">IN USE</span>' : ''}</div>`).join('')}</div>${failed ? `<div class="err-box" style="margin-top:8px">⚠ ${esc(st.error)}</div>` : ''}</div>`;
     }
     // ── Setup: mapping + contents
     if (rec.cat === 'setup') {
@@ -1002,7 +1092,7 @@
     // ── Shelf contents
     if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
-      html += `<div class="sec"><div class="sec-h">On this shelf</div>${its.length ? its.map(i => { const lv = i.item.live; return `<div class="srow" data-go="${esc(i.id)}"><span class="stripe" style="background:${STATUS_COLOR[i.status]}"></span><span class="nm">${esc(i.item.name)}</span><span class="sub">${i.item.type === 'opt' ? `#${esc(i.item.dcim?.outlet ?? '?')}${lv?.sw ? ' · ' + esc(lv.sw.switch) + (lv.sw.port ? '·' + esc(lv.sw.port) : '') : ''}` : esc(i.item.type)}</span>${lv?.inDcim ? `<span class="stt ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'off' : 'unk'}">${lv.state}</span>` : ''}</div>`; }).join('') : '<div class="note muted">Nothing assigned to this shelf.</div>'}
+      html += `<div class="sec"><div class="sec-h">On this shelf</div>${its.length ? its.map(i => { const lv = i.item.live; return `<div class="srow" data-go="${esc(i.id)}"><span class="stripe" style="background:${STATUS_COLOR[i.status]}"></span><span class="nm">${esc(i.item.name)}</span><span class="sub">${i.item.type === 'opt' ? `#${esc(i.item.dcim?.outlet ?? '?')}${lv?.sw ? ' · ' + esc(lv.sw.switch) + (lv.sw.port ? '·' + esc(lv.sw.port) : '') : ''}` : esc(i.item.type)}</span>${lv?.inDcim ? `<span class="stt ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'off' : 'unk'}">${esc(lv.state)}</span>` : ''}</div>`; }).join('') : '<div class="note muted">Nothing assigned to this shelf.</div>'}
         <div class="note muted" style="margin-top:6px">Shelf → OPT assignment comes from DCIM <code>rack_slots</code> when connected; otherwise a provisional top-down fill by outlet number.</div></div>`;
     }
     // ── Storage contents
@@ -1013,7 +1103,8 @@
     // ── Edit (mutates lab-data.json in memory → Save to server / Download)
     const isLive = rec.id.startsWith('LIVE-');
     if (!S.editMode) {
-      const notes = (it?.notes || def.notes || '').trim();
+      const notes = cleanNotes(it?.notes || def.notes);
+      if (it?.liveWarning) html += `<div class="warn-box" role="status">⚠ ${esc(it.liveWarning)}</div>`;
       if (notes) html += `<div class="sec"><div class="sec-h">Notes</div><div class="note">${esc(notes)}</div></div>`;
     } else if (rec.cat === 'item' && isLive) {
       html += `<div class="sec"><div class="sec-h">Edit</div><div class="note muted">This object comes live from the DCIM backend (labels / rack items). Rename or move it in Lab Manager. To keep a physical record of it in the twin (photos, notes, exact shelf), add it to lab-data.json:</div>
@@ -1022,7 +1113,7 @@
       const TYPES = ['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'];
       const locVal = it.setup ? 'setup:' + it.setup : it.storage ? 'storage:' + it.storage : '';
       const shelvesOf = sid => S.data.shelves.filter(x => x.setup === sid).sort((a, b) => b.level - a.level);
-      const shelfOpts = sid => `<option value="">— free / rack level —</option>` + shelvesOf(sid).map(x => `<option value="shelf:${x.id}" ${it.shelf === x.id ? 'selected' : ''}>${x.id} · L${x.level}</option>`).join('') + `<option value="bottom-bay" ${it.placement === 'bottom-bay' ? 'selected' : ''}>bottom bay (floor)</option><option value="side-right" ${it.placement === 'side-mount' && it.side !== 'left' ? 'selected' : ''}>hung on the right side</option><option value="side-left" ${it.placement === 'side-mount' && it.side === 'left' ? 'selected' : ''}>hung on the left side</option><option value="rack-strips" ${it.placement === 'rack-strips' ? 'selected' : ''}>power strips (PDU)</option>`;
+      const shelfOpts = sid => `<option value="">— free / rack level —</option>` + shelvesOf(sid).map(x => `<option value="shelf:${esc(x.id)}" ${it.shelf === x.id ? 'selected' : ''}>${esc(x.id)} · L${esc(x.level)}</option>`).join('') + `<option value="bottom-bay" ${it.placement === 'bottom-bay' ? 'selected' : ''}>bottom bay (floor)</option><option value="side-right" ${it.placement === 'side-mount' && it.side !== 'left' ? 'selected' : ''}>hung on the right side</option><option value="side-left" ${it.placement === 'side-mount' && it.side === 'left' ? 'selected' : ''}>hung on the left side</option><option value="rack-strips" ${it.placement === 'rack-strips' ? 'selected' : ''}>power strips (PDU)</option>`;
       const pdus = S.data.dcim?.pdus || [];
       html += `<div class="sec"><div class="sec-h">Edit item <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none">changes → Save</span></div><div class="edit-grid">
         <span>Name</span><input id="eName" value="${esc(it.name || '')}" />
@@ -1031,13 +1122,13 @@
         <span>Status</span><select id="eStatus">${STATUSES.map(x => `<option value="${x}" ${(it.status || 'unknown') === x ? 'selected' : ''}>${STATUS_LABEL[x]}</option>`).join('')}</select>
         <span>Owner</span>${ownerPicker(it.owner)}
         <span>Confidence</span><select id="eConf">${['high', 'medium', 'low'].map(x => `<option value="${x}" ${(it.confidence || 'medium') === x ? 'selected' : ''}>${x}</option>`).join('')}</select>
-        <span>Location</span><select id="eLoc"><option value="">— free position —</option>${S.data.setups.map(x => `<option value="setup:${x.id}" ${locVal === 'setup:' + x.id ? 'selected' : ''}>${x.id} · ${esc(x.name.split('—')[0].replace('Rack', '').trim())}</option>`).join('')}${S.data.storage.map(x => `<option value="storage:${x.id}" ${locVal === 'storage:' + x.id ? 'selected' : ''}>${x.id} · ${esc(x.name)}</option>`).join('')}</select>
+        <span>Location</span><select id="eLoc"><option value="">— free position —</option>${S.data.setups.map(x => `<option value="setup:${esc(x.id)}" ${locVal === 'setup:' + x.id ? 'selected' : ''}>${esc(x.id)} · ${esc(x.name.split('—')[0].replace('Rack', '').trim())}</option>`).join('')}${S.data.storage.map(x => `<option value="storage:${esc(x.id)}" ${locVal === 'storage:' + x.id ? 'selected' : ''}>${esc(x.id)} · ${esc(x.name)}</option>`).join('')}</select>
         <span>Shelf</span><select id="eShelf" ${it.setup ? '' : 'disabled'}>${it.setup ? shelfOpts(it.setup) : '<option value="">—</option>'}</select>
-        <span>Free pos x, z</span><div style="display:flex;gap:6px"><input id="eX" type="number" step="0.05" value="${it.pos ? it.pos[0] : ''}" placeholder="x m" ${it.setup || it.storage ? 'disabled' : ''}/><input id="eZ" type="number" step="0.05" value="${it.pos ? it.pos[1] : ''}" placeholder="z m" ${it.setup || it.storage ? 'disabled' : ''}/></div>
-        <span>Size w, d, h</span><div style="display:flex;gap:6px"><input id="eW" type="number" step="0.05" value="${it.size ? it.size[0] : ''}" placeholder="w"/><input id="eD" type="number" step="0.05" value="${it.size ? it.size[1] : ''}" placeholder="d"/><input id="eH" type="number" step="0.05" value="${it.size ? it.size[2] : ''}" placeholder="h"/></div>
-        <span>PDU / outlet</span><div style="display:flex;gap:6px"><select id="ePdu"><option value="">—</option>${pdus.map(x => `<option value="${x.id}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select><input id="eOutlet" type="number" min="1" max="48" value="${it.dcim?.outlet ?? ''}" placeholder="#" style="width:64px"/></div>
+        <span>Free pos x, z</span><div style="display:flex;gap:6px"><input id="eX" type="number" step="0.05" value="${esc(it.pos ? it.pos[0] : '')}" placeholder="x m" ${it.setup || it.storage ? 'disabled' : ''}/><input id="eZ" type="number" step="0.05" value="${esc(it.pos ? it.pos[1] : '')}" placeholder="z m" ${it.setup || it.storage ? 'disabled' : ''}/></div>
+        <span>Size w, d, h</span><div style="display:flex;gap:6px"><input id="eW" type="number" step="0.05" value="${esc(it.size ? it.size[0] : '')}" placeholder="w"/><input id="eD" type="number" step="0.05" value="${esc(it.size ? it.size[1] : '')}" placeholder="d"/><input id="eH" type="number" step="0.05" value="${esc(it.size ? it.size[2] : '')}" placeholder="h"/></div>
+        <span>PDU / outlet</span><div style="display:flex;gap:6px"><select id="ePdu"><option value="">—</option>${pdus.map(x => `<option value="${esc(x.id)}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select><input id="eOutlet" type="number" min="1" max="48" value="${esc(it.dcim?.outlet ?? '')}" placeholder="#" style="width:64px"/></div>
       </div>
-      <textarea id="eNotes" placeholder="notes…" style="margin-top:6px">${esc(it.notes || '')}</textarea>
+      <textarea id="eNotes" placeholder="notes…" style="margin-top:6px">${esc(cleanNotes(it.notes))}</textarea>
       <div class="ctl-row" style="margin-top:8px"><button class="btn btn-primary" id="eSave">Save item</button><button class="btn btn-xs" id="eDup">Duplicate</button><button class="btn btn-off" id="eDel">Delete</button></div></div>`;
     } else if (rec.cat === 'setup' || rec.cat === 'shelf' || rec.cat === 'storage') {
       html += `<div class="sec"><div class="sec-h">Edit</div><div class="edit-grid">
@@ -1053,14 +1144,15 @@
 
     // handlers
     $$('[data-go]', $('#dBody')).forEach(el => el.onclick = e => { e.preventDefault(); select(el.dataset.go); });
-    $$('[data-pw]', $('#dBody')).forEach(b => b.onclick = () => outletAction(it.dcim.pdu, it.dcim.outlet, b.dataset.pw, b));
-    $$('[data-kvm]', $('#dBody')).forEach(b => b.onclick = () => openKvm(b.dataset.kvm, parseInt(b.dataset.port, 10)));
+    // the mapping is re-checked at click time (a live refresh may have changed it since the panel was drawn)
+    $$('[data-pw]', $('#dBody')).forEach(b => b.onclick = () => outletAction(powerTarget(it), b.dataset.pw, b));
+    $$('[data-kvm]', $('#dBody')).forEach(b => b.onclick = () => openKvm(b.dataset.kvm, parseInt(b.dataset.port, 10), it.name));
     $$('[data-outlet]', $('#dBody')).forEach(c => c.onclick = e => outletMenu(e, it, parseInt(c.dataset.outlet, 10)));
-    $$('[data-kport]', $('#dBody')).forEach(c => c.onclick = () => { if (!S.live.connected) { toast('Connect the backend to open the KVM console', 'err'); return; } openKvm(it.dcim.deviceId, parseInt(c.dataset.kport, 10)); });
+    $$('[data-kport]', $('#dBody')).forEach(c => c.onclick = () => { if (!S.live.connected) { toast('Connect the backend to open the KVM console', 'err'); return; } if (!it.live?.device) { toast('Not in live DCIM — console disabled', 'err'); return; } openKvm(it.live.device.id, parseInt(c.dataset.kport, 10), c.title); });
     const dr = $('#dRack'); if (dr) dr.onchange = () => { patchDef(rec.id, { dcimRack: dr.value || null, dcimMappingConfidence: 'medium' }); rebuildAll(); toast(`${rec.id} → ${dr.value || 'no DCIM rack'}`, 'ok'); };
-    const eLoc = $('#eLoc'); if (eLoc) eLoc.onchange = () => { const v = eLoc.value; const sh = $('#eShelf'); const free = !v; ['#eX', '#eZ'].forEach(q => { $(q).disabled = !free; }); if (v.startsWith('setup:')) { sh.disabled = false; sh.innerHTML = `<option value="">— free / rack level —</option>` + S.data.shelves.filter(x => x.setup === v.slice(6)).sort((a, b) => b.level - a.level).map(x => `<option value="shelf:${x.id}">${x.id} · L${x.level}</option>`).join('') + `<option value="bottom-bay">bottom bay (floor)</option><option value="side-right">hung on the right side</option><option value="side-left">hung on the left side</option><option value="rack-strips">power strips (PDU)</option>`; } else { sh.disabled = true; sh.innerHTML = '<option value="">—</option>'; } };
+    const eLoc = $('#eLoc'); if (eLoc) eLoc.onchange = () => { const v = eLoc.value; const sh = $('#eShelf'); const free = !v; ['#eX', '#eZ'].forEach(q => { $(q).disabled = !free; }); if (v.startsWith('setup:')) { sh.disabled = false; sh.innerHTML = `<option value="">— free / rack level —</option>` + S.data.shelves.filter(x => x.setup === v.slice(6)).sort((a, b) => b.level - a.level).map(x => `<option value="shelf:${esc(x.id)}">${esc(x.id)} · L${esc(x.level)}</option>`).join('') + `<option value="bottom-bay">bottom bay (floor)</option><option value="side-right">hung on the right side</option><option value="side-left">hung on the left side</option><option value="rack-strips">power strips (PDU)</option>`; } else { sh.disabled = true; sh.innerHTML = '<option value="">—</option>'; } };
     const eSave = $('#eSave'); if (eSave) eSave.onclick = () => {
-      const patch = { name: $('#eName').value.trim() || def.name, status: $('#eStatus').value, owner: $('#eOwner').value.trim() || null, notes: $('#eNotes').value };
+      const patch = { name: $('#eName').value.trim() || def.name, status: $('#eStatus').value, owner: $('#eOwner').value.trim() || null, notes: cleanNotes($('#eNotes').value) };
       if (rec.cat === 'item') {
         patch.type = $('#eType').value; patch.typeLabel = $('#eTypeLabel').value.trim() || undefined; patch.confidence = $('#eConf').value || it.confidence || 'medium';
         const loc = $('#eLoc').value, shv = $('#eShelf').value;
@@ -1098,7 +1190,7 @@
   async function saveDcimOwner(key, name) {
     const person = name ? S.live.engineers.find(p => p.name === name) : null;
     if (name && !person) throw new Error('Choose an engineer from the list');
-    S.live.owners = await api('/api/opt-owners/' + encodeURIComponent(key), { method: 'PUT', body: JSON.stringify({ engineer_id: person ? person.id : null }) });
+    S.live.owners = await layoutWrite(() => api('/api/opt-owners/' + encodeURIComponent(key), { method: 'PUT', body: JSON.stringify({ engineer_id: person ? person.id : null }) }));
     computeModel(); buildItems();
   }
   function findDef(id) { const d = S.data; return d.setups.find(x => x.id === id) || d.shelves.find(x => x.id === id) || d.storage.find(x => x.id === id) || d.items.find(x => x.id === id) || null; }
@@ -1108,13 +1200,42 @@
   function addItem(partial) { const it = { id: nextItemId(), name: 'New item', category: 'item', type: 'other', status: 'unknown', owner: null, confidence: 'high', placementConfidence: 'high', photos: [], notes: '', ...partial }; S.data.items.push(it); markDirty(); rebuildAll(); select(it.id, { keepCamera: true }); toast(`${it.id} added — fill in the details and Save`, 'ok'); }
   function deleteItem(id) { S.data.items = S.data.items.filter(i => i.id !== id); markDirty(); closeDetail(); rebuildAll(); toast(`${id} deleted`, 'ok'); }
   function dataFingerprint(d) { const str = JSON.stringify({ m: d.meta && d.meta.generated, v: d.meta && d.meta.version, s: d.setups.map(x => x.id + x.dcimRack), sh: d.shelves.map(x => x.id), i: d.items.map(x => x.id + (x.shelf || '') + (x.placement || '')) }); let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0; return str.length + ':' + h; }
-  function markDirty() { S.dirty = true; S.data.meta.modified = new Date().toISOString(); LS.set('draft', { savedAt: Date.now(), base: S.dataBase, data: S.data }); updateSaveBar(); }
-  function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; }
+  // Edits are numbered: a save only clears the dirty state if nothing was edited while its request was in flight.
+  let editSeq = 0, saveInFlight = false;
+  function markDirty() { editSeq++; S.dirty = true; S.data.meta.modified = new Date().toISOString(); LS.set('draft', { savedAt: Date.now(), base: S.dataBase, data: S.data }); updateSaveBar(); }
+  function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = saveInFlight || !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; }
+  // Content stamp of lab-data.json as this page last read or wrote it (FNV-1a over the canonical JSON text).
+  function textStamp(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return str.length + ':' + h.toString(16); }
+  const dataStamp = d => textStamp(JSON.stringify(d));
+  async function staleSaveDialog() {
+    const choice = await askChoice({ title: 'lab-data.json changed on the server',
+      html: '<div class="warn-box">Someone saved lab-data.json after this page loaded it. Saving now would overwrite their changes, so nothing was saved.</div><div class="note">Download your edits as JSON to keep them, then reload the page and apply them again.</div>',
+      choices: [{ id: 'cancel', label: 'Close' }, { id: 'download', label: 'Download my edits', cls: 'btn-primary' }] });
+    if (choice === 'download') downloadJson();
+  }
   async function saveToServer() {
-    const b = $('#sbSave'); b.disabled = true; b.innerHTML = '<span class="busy"></span> Saving…';
-    try { await api('/api/twin-data', { method: 'PUT', body: JSON.stringify(S.data) }); S.dirty = false; LS.set('draft', null); updateSaveBar(); toast('lab-data.json saved on the server', 'ok'); }
-    catch (e) { toast('Save failed: ' + e.message + ' — use Download JSON', 'err'); }
-    finally { b.disabled = false; b.textContent = 'Save to server'; }
+    if (saveInFlight) return;
+    const b = $('#sbSave'); saveInFlight = true; b.disabled = true; b.innerHTML = '<span class="busy"></span> Saving…';
+    try {
+      // Refuse to overwrite a lab-data.json that someone else (another window, another person) saved after this page
+      // read it; the ETag of that check then goes out as If-Match, so a save landing in between is refused too (409).
+      let etag = null;
+      if (S.serverStamp) {
+        const fresh = await api('/api/twin-data', { cache: 'no-store', withEtag: true });
+        const current = fresh.data; etag = fresh.etag;
+        if (dataStamp(current) !== S.serverStamp) { await staleSaveDialog(); return; }
+      }
+      const seq = editSeq; const body = JSON.stringify(S.data);
+      await api('/api/twin-data', { method: 'PUT', body, headers: etag ? { 'If-Match': etag } : {} });
+      S.serverStamp = textStamp(body); S.dataBase = dataFingerprint(JSON.parse(body));
+      S.dirty = editSeq !== seq;   // an edit made while the request was in flight is not on the server yet
+      if (S.dirty) markDirty(); else LS.set('draft', null);
+      toast(S.dirty ? 'Saved — newer edits made during the save are still unsaved' : 'lab-data.json saved on the server', 'ok');
+    } catch (e) {
+      if (e.status === 409) await staleSaveDialog();   // someone saved between our check and our PUT (If-Match)
+      else toast('Save failed: ' + e.message + ' — use Download JSON', 'err');
+    }
+    finally { saveInFlight = false; b.textContent = 'Save to server'; updateSaveBar(); }
   }
   function downloadJson() { const blob = new Blob([JSON.stringify(S.data, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'lab-data.json'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); toast('lab-data.json downloaded — replace the file next to index.html', 'ok'); }
   function pduItemId(deviceId) { const r = [...S.recs.values()].find(r => r.cat === 'item' && r.item?.type === 'pdu' && r.item.dcim?.deviceId === deviceId); return r ? r.id : ''; }
@@ -1153,18 +1274,15 @@
     if (path === '/api/rack-items' && data && typeof data === 'object') rackItemVersions.set(data, r.headers.get('ETag'));
     return withEtag ? { data, etag: r.headers.get('ETag') } : data;
   }
-  // Lab Manager layout stores: fresh GET → apply only this edit → PUT with If-Match (only when the GET sent an ETag) → one retry on 409.
-  async function saveLayout(path, edit) {
-    for (let attempt = 1; ; attempt++) {
-      const { data, etag } = await api(path, { withEtag: true });
-      const next = edit(JSON.parse(JSON.stringify(data || {})));
-      try { await api(path, { method: 'PUT', headers: etag ? { 'If-Match': etag } : {}, body: JSON.stringify(next) }); return next; }
-      catch (e) { if (e.status !== 409 || attempt > 1) throw e; }
-    }
-  }
+  // Layout reads / writes are counted (at start and end): a live refresh that overlapped one keeps the newer local copy
+  // of the layout stores instead of its older response (otherwise a just-saved move would jump back until the next poll).
+  // Moves write through readMoveLayout() + dcimMoveMany() (one atomic PUT /api/rack-layout with If-Match revisions).
+  let layoutWrites = 0;
+  const LAYOUT_KEYS = ['rackSlots', 'rackOverrides', 'rackOrder', 'rackItems', 'owners'];
+  async function layoutWrite(fn) { layoutWrites++; try { return await fn(); } finally { layoutWrites++; } }
   // after a failed Lab Manager move, show what the server actually stores
   async function reloadLayout() {
-    const fresh = await Promise.all(['/api/rack-slots', '/api/rack-overrides', '/api/rack-positions', '/api/rack-items'].map(p => api(p).catch(() => null)));
+    const fresh = await layoutWrite(() => Promise.all(['/api/rack-slots', '/api/rack-overrides', '/api/rack-positions', '/api/rack-items'].map(p => api(p).catch(() => null))));
     ['rackSlots', 'rackOverrides', 'rackOrder', 'rackItems'].forEach((key, i) => { if (fresh[i]) S.live[key] = fresh[i]; });
   }
   const INVENTORY_PATHS = {
@@ -1239,8 +1357,10 @@
     if (!S.live.connected || refreshInFlight === session) return;
     refreshInFlight = session;
     try {
+      const writes = layoutWrites;
       const inventory = await readLiveInventory();
       if (!S.live.connected || session !== liveSession) return;
+      if (layoutWrites !== writes) LAYOUT_KEYS.forEach(k => { delete inventory[k]; });   // a move / owner change landed meanwhile
       Object.assign(S.live, inventory);
       const pdus = S.live.devices.filter(d => d.kind === 'pdu'), kvms = S.live.devices.filter(d => d.kind === 'kvm');
       // Update inventory immediately; a slow PDU must not delay shelf/SN changes.
@@ -1256,39 +1376,156 @@
       if (refreshInFlight === session) refreshInFlight = null;
     }
   }
-  async function outletAction(pduId, outlet, action, btn) {
-    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
-    if (window.DCIM_ACCOUNT_PREFS.confirm_power && ['off', 'cycle'].includes(action) && !confirm(`Power ${action} outlet ${outlet}?`)) return;
-    if (!S.live.connected) { toast('Connect the backend first', 'err'); return; }
-    if (action !== 'off' && inMaintenance(pduId)) { toast('This PDU is in maintenance mode — restore it in Lab Manager first', 'err'); return; }
+  // ── power / console safety: act only on mappings that come from live DCIM data, always after an explicit choice
+  const livePdu = id => (S.live.connected && id ? (S.live.devices || []).find(d => d.kind === 'pdu' && d.id === id) : null) || null;
+  const liveKvm = id => (S.live.connected && id ? (S.live.devices || []).find(d => d.kind === 'kvm' && d.id === id) : null) || null;
+  function powerTarget(it) {
+    if (!it || it.type !== 'opt' || it.live?.inDcim !== true) return null;
+    const pdu = livePdu(it.dcim?.pdu); const outlet = Number(it.dcim?.outlet);
+    if (!pdu || !Number.isInteger(outlet) || outlet < 1) return null;
+    return { pduId: pdu.id, pduName: pdu.name || pdu.id, outlet, server: it.name || it.id, state: it.live.state, key: it.dcim.optKey || null };
+  }
+  function kvmTargets(it) {
+    if (!it || it.live?.inDcim !== true) return [];
+    return (it.dcim?.kvm || []).filter(k => liveKvm(k.kvm) && Number.isInteger(Number(k.port)) && Number(k.port) > 0);
+  }
+  // Re-resolve against the current live model at click time and again after the dialog.
+  function freshPowerTarget(target) {
+    if (!target || !S.live.connected) return null;
+    if (target.key) {
+      const it = (S.model?.items || []).find(i => i.type === 'opt' && i.live?.inDcim && i.dcim?.optKey === target.key);
+      const t = powerTarget(it); if (!t) return null;
+      return t.pduId === target.pduId && t.outlet === target.outlet ? t : { ...t, changed: true };
+    }
+    // PDU outlet menu: the outlet must still carry the same server label as when the menu was opened
+    const dev = livePdu(target.pduId); if (!dev) return null;
+    const o = S.live.pdu?.[dev.id]?.outlets?.find(x => x.number === target.outlet);
+    const t = { ...target, pduName: dev.name || target.pduName, state: o ? o.state : target.state };
+    return outletLabelKey(dev.id, target.outlet) === target.labelKey ? t : { ...t, changed: true };
+  }
+  // Which server an outlet is labelled for right now (live reading first, then the stored DCIM label); '' = no server.
+  function outletLabelKey(pduId, outlet) {
+    const dev = livePdu(pduId); if (!dev) return null;
+    const o = S.live.pdu?.[pduId]?.outlets?.find(x => x.number === outlet);
+    const label = (o && o.label) || dev.labels?.[String(outlet)] || '';
+    return isDefaultOutletLabel(label) ? '' : optKey(label);
+  }
+  const STATE_TEXT = st => st === 'on' ? 'On' : st === 'off' ? 'Off' : 'Unknown';
+  const ACTION_TEXT = { on: 'Power on', off: 'Power off', cycle: 'Power cycle' };
+  const ACTION_BTN = { on: 'btn-on', off: 'btn-off', cycle: 'btn-cycle' };
+  // One modal for every risky choice. Cancel has the focus, Escape / backdrop = cancel, Tab stays inside.
+  let choiceOpen = null;
+  function askChoice({ title, html, choices, focus = 'cancel' }) {
+    if (choiceOpen) choiceOpen('cancel');
+    const modal = $('#confirmModal'), acts = $('#cfActions'); const opener = document.activeElement;
+    $('#cfTitle').textContent = title; $('#cfBody').innerHTML = html;
+    acts.innerHTML = choices.map(c => `<button type="button" class="btn ${c.cls || 'btn-ghost'}" data-choice="${esc(c.id)}">${esc(c.label)}</button>`).join('');
+    if (popEl) { popEl.remove(); popEl = null; }
+    modal.classList.remove('hidden');
+    return new Promise(resolve => {
+      const buttons = $$('[data-choice]', acts);
+      const onKey = e => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done('cancel'); }
+        else if (e.key === 'Tab') { e.preventDefault(); const i = buttons.indexOf(document.activeElement); buttons[(i + (e.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus(); }
+        else if (!modal.contains(e.target)) e.stopPropagation();   // view shortcuts wait until the dialog is closed
+      };
+      function done(choice) {
+        if (choiceOpen !== done) return; choiceOpen = null;
+        window.removeEventListener('keydown', onKey, true); modal.onclick = null; modal.classList.add('hidden'); acts.innerHTML = '';
+        if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus({ preventScroll: true });
+        resolve(choice);
+      }
+      choiceOpen = done;
+      window.addEventListener('keydown', onKey, true);
+      modal.onclick = e => { if (e.target === modal) done('cancel'); };
+      buttons.forEach(b => { b.onclick = () => done(b.dataset.choice); });
+      (buttons.find(b => b.dataset.choice === focus) || buttons[0]).focus();
+    });
+  }
+  async function outletAction(target, action, btn) {
+    if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return false; }
+    if (!S.live.connected) { toast('Connect the backend first', 'err'); return false; }
+    if (!ACTION_TEXT[action]) return false;
+    let t = freshPowerTarget(target);
+    if (!t) { toast('Not in live DCIM — power disabled', 'err'); return false; }
+    if (t.changed) { toast('The outlet mapping changed in Lab Manager — check the panel and try again', 'err'); computeModel(); buildItems({ refresh: true }); return false; }
+    if (action !== 'off' && inMaintenance(t.pduId)) { toast('This PDU is in maintenance mode — restore it in Lab Manager first', 'err'); return false; }
+    // Off and Cycle always ask. The account preference confirm_power=false may skip the question for Power on only —
+    // a deliberate team-lead decision (2026-10-21): switching a server on cannot interrupt work running on it.
+    if (!(action === 'on' && window.DCIM_ACCOUNT_PREFS?.confirm_power === false)) {
+      const consequence = action === 'on' ? '' : `<div class="note">${action === 'off' ? 'The server loses power immediately; unsaved work on it is lost.' : 'The server is switched off and on again; unsaved work on it is lost.'}</div>`;
+      const choice = await askChoice({
+        title: `${ACTION_TEXT[action]} ${t.server}?`,
+        html: `<div class="cf-line">${esc(t.pduName)} · outlet ${esc(t.outlet)} · currently ${esc(STATE_TEXT(t.state))}</div>${consequence}`,
+        choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'go', label: ACTION_TEXT[action], cls: ACTION_BTN[action] }],
+      });
+      if (choice !== 'go') return false;
+      const again = freshPowerTarget(target);   // a refresh may have changed the mapping while the dialog was open
+      if (!again || again.changed) { toast('The outlet mapping changed while the dialog was open — nothing was switched', 'err'); return false; }
+      if (action !== 'off' && inMaintenance(again.pduId)) { toast('This PDU is in maintenance mode — restore it in Lab Manager first', 'err'); return false; }
+      t = again;
+    }
     const old = btn ? btn.innerHTML : null; if (btn) { btn.disabled = true; btn.innerHTML = `<span class="busy"></span> ${action}…`; }
     try {
-      await api(`/api/pdus/${pduId}/outlets/${outlet}/power`, { method: 'POST', body: JSON.stringify({ action }) });
-      toast(`Outlet #${outlet} → ${action}`, 'ok');
-      setTimeout(async () => { try { S.live.pdu[pduId] = await api(`/api/pdus/${pduId}/status`); computeModel(); buildItems({ refresh: true }); } catch { /* ignore */ } }, 1500);
-    } catch (e) { toast('Power action failed: ' + e.message, 'err'); }
+      await api(`/api/pdus/${encodeURIComponent(t.pduId)}/outlets/${t.outlet}/power`, { method: 'POST', body: JSON.stringify({ action }) });
+      toast(`${t.server} · outlet #${t.outlet} → ${action}`, 'ok');
+      setTimeout(async () => { try { S.live.pdu[t.pduId] = await api(`/api/pdus/${encodeURIComponent(t.pduId)}/status`); computeModel(); buildItems({ refresh: true }); } catch { /* ignore */ } }, 1500);
+      return true;
+    } catch (e) { toast('Power action failed: ' + e.message, 'err'); return false; }
     finally { if (btn) { btn.disabled = false; btn.innerHTML = old; } }
   }
-  function openKvm(kvmId, port) {
+  // KVM console: like the Lab Manager UI — window.open inside the click; if the browser refuses a new tab the console
+  // opens inline. The port is marked in use and always marked free again when the tab / inline console closes.
+  let inlineConsole = null;
+  function openKvm(kvmId, port, label) {
     if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
-    const base = (S.settings.url || '').replace(/\/$/, '');
-    api(`/api/kvms/${kvmId}/ports/${port}/mark-in-use`, { method: 'POST' }).catch(() => {});
-    const popup = window.open(`${base}/api/kvms/${kvmId}/autologin?port=${port}`, '_blank');
-    if (popup) { const t = setInterval(() => { if (popup.closed) { clearInterval(t); api(`/api/kvms/${kvmId}/ports/${port}/mark-free`, { method: 'POST' }).catch(() => {}); refreshStatuses(); } }, 2000); }
-    toast(`Opening KVM console · port ${port}`, 'ok');
+    const dev = liveKvm(kvmId);
+    if (!dev || !Number.isInteger(port) || port < 1) { toast('Not in live DCIM — console disabled', 'err'); return; }
+    const base = (S.settings.url || '').replace(/\/$/, ''); const path = `/api/kvms/${encodeURIComponent(kvmId)}`;
+    const url = `${base}${path}/autologin?port=${encodeURIComponent(port)}`;
+    let popup = null; try { popup = window.open(url, '_blank'); } catch { popup = null; }
+    const inUse = api(`${path}/ports/${port}/mark-in-use`, { method: 'POST' }).then(() => true, () => { toast('The console opened, but marking the port as in use failed — check that you are still signed in', 'err'); return false; });
+    // mark-free waits for mark-in-use, so a fast close can never leave the port stuck "in use"
+    const markFree = init => inUse.then(() => api(`${path}/ports/${port}/mark-free`, { method: 'POST', ...(init || {}) })).catch(() => {}).then(() => { if (!init) refreshStatuses(); });
+    if (popup) {
+      const t = setInterval(() => { if (popup.closed) { clearInterval(t); markFree(); } }, 2000);
+      toast(`Opening KVM console · ${dev.name || kvmId} port ${port}`, 'ok'); return;
+    }
+    openInlineConsole({ title: `${dev.name || kvmId} · Port ${port}${label && !isDefaultOutletLabel(label) ? ' · ' + label : ''}`, url, markFree });
+    toast('The browser blocked a new tab — the console opened inside the twin', 'err');
   }
+  function openInlineConsole({ title, url, markFree }) {
+    closeInlineConsole();
+    inlineConsole = { markFree, opener: document.activeElement };
+    $('#kvmInlineTitle').textContent = title; $('#kvmInlineFrame').src = url;
+    $('#kvmInline').classList.remove('hidden'); $('#kvmInlineClose').focus();
+  }
+  function closeInlineConsole(init) {
+    if (!inlineConsole) return; const c = inlineConsole; inlineConsole = null;
+    $('#kvmInline').classList.add('hidden'); $('#kvmInlineFrame').src = 'about:blank';
+    c.markFree(init);
+    if (c.opener && c.opener.isConnected && typeof c.opener.focus === 'function') c.opener.focus({ preventScroll: true });
+  }
+  $('#kvmInlineClose').onclick = () => closeInlineConsole();
+  window.addEventListener('keydown', e => { if (e.key === 'Escape' && inlineConsole && !choiceOpen) { e.preventDefault(); e.stopPropagation(); closeInlineConsole(); } }, true);
+  window.addEventListener('pagehide', () => { if (inlineConsole) closeInlineConsole({ keepalive: true }); });
   let popEl = null;
   function outletMenu(e, pduItem, outlet) {
-    if (popEl) popEl.remove();
+    if (popEl) { popEl.remove(); popEl = null; }
     if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
     if (!S.live.connected) { toast('Connect the backend to control outlets', 'err'); return; }
+    const dev = pduItem.live?.device ? livePdu(pduItem.live.device.id) : null;
+    if (!dev) { toast('Not in live DCIM — power disabled', 'err'); return; }
     const r = e.currentTarget.getBoundingClientRect(); popEl = document.createElement('div'); popEl.className = 'pop';
-    const lbl = pduItem.live?.status?.outlets?.find(o => o.number === outlet)?.label || pduItem.dcim?.labels?.[String(outlet)] || `Outlet ${outlet}`;
-    const maint = inMaintenance(pduItem.dcim?.deviceId) ? ' disabled title="PDU in maintenance mode"' : '';
+    const o = pduItem.live?.status?.outlets?.find(x => x.number === outlet);
+    const lbl = o?.label || dev.labels?.[String(outlet)] || `Outlet ${outlet}`;
+    // labelKey = the server this outlet is for now; checked again after the confirmation (a refresh may remap it)
+    const target = { pduId: dev.id, pduName: dev.name || pduItem.name, outlet, server: isDefaultOutletLabel(lbl) ? `outlet ${outlet}` : lbl.trim(), state: o?.state, labelKey: outletLabelKey(dev.id, outlet) };
+    const maint = inMaintenance(dev.id) ? ' disabled title="PDU in maintenance mode"' : '';
     popEl.innerHTML = `<div class="pt">${esc(pduItem.name)} · #${outlet} · ${esc(lbl)}${maint ? ' · maintenance' : ''}</div><button class="btn btn-on" data-a="on"${maint}>Power On</button><button class="btn btn-off" data-a="off">Power Off</button><button class="btn btn-cycle" data-a="cycle"${maint}>Power Cycle</button>`;
     const openUp = r.bottom > window.innerHeight / 2; popEl.style.left = Math.min(Math.max(r.left + r.width / 2 - 100, 8), window.innerWidth - 210) + 'px'; popEl.style.top = (openUp ? r.top - 130 : r.bottom + 4) + 'px';
     document.body.appendChild(popEl);
-    $$('button', popEl).forEach(b => b.onclick = () => { outletAction(pduItem.dcim.deviceId, outlet, b.dataset.a, b); setTimeout(() => popEl && popEl.remove(), 400); });
+    $$('button', popEl).forEach(b => b.onclick = () => { if (popEl) { popEl.remove(); popEl = null; } outletAction(target, b.dataset.a, null); });
     setTimeout(() => document.addEventListener('click', function h(ev) { if (popEl && !popEl.contains(ev.target)) { popEl.remove(); popEl = null; } document.removeEventListener('click', h); }), 0);
   }
 
@@ -1318,7 +1555,7 @@
     if (collisions) {
       const delta = camera.position.clone().sub(previousCamera), distance = delta.length();
       if (distance > 1e-6) {
-        const solids = S.pickables.filter(m => m.visible && ['item', 'setup', 'shelf', 'storage'].includes(S.recs.get(m.userData.id)?.cat));
+        const solids = S.pickables.filter(m => isShown(m) && ['item', 'setup', 'shelf', 'storage'].includes(S.recs.get(m.userData.id)?.cat));
         collisionRay.set(previousCamera, delta.normalize()); collisionRay.far = distance + 0.18;
         const hit = collisionRay.intersectObjects(solids, false)[0];
         if (hit && hit.distance < distance + 0.18) {
@@ -1345,7 +1582,8 @@
   function roomCenter() { const { width: W, depth: D, height: H } = S.data.room; return new THREE.Vector3(WX(W / 2), H * 0.35, D / 2); }
   function tweenCamera(pos, target, ms = 700) {
     controls.cancel();
-    S.tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() };
+    // reduced motion: a zero-length tween jumps in one frame (collision sweep is skipped for that frame, like any tween)
+    S.tween = { t0: performance.now(), ms: reducedMotion() ? 0 : ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() };
   }
   function fitLab(top = false) {
     scene.updateMatrixWorld(true);
@@ -1367,15 +1605,177 @@
   function markView(name) { S.view = VIEW_BTN[name] ? name : null; Object.entries(VIEW_BTN).forEach(([k, q]) => $(q).classList.toggle('active', k === S.view)); }
   function setView(name) { VIEWS[name](); markView(name); }
   controls.addEventListener('start', () => markView(null));
+  // ── fly-to framing
+  // Frame the target's bounding box inside the part of the viewport no overlay covers, from a camera position in free
+  // space: inside the room, outside the target's own rack and in front of every other rack, cabinet or free item.
+  // Candidate directions fan out from the rack front (or towards the room centre); the best one that fits wins, otherwise
+  // the one that shows the largest part of the target from as far back as the free space allows.
+  const fitCam = new THREE.PerspectiveCamera();
+  function visibleBox(obj, box = new THREE.Box3()) {
+    obj.updateMatrixWorld(true);
+    obj.traverseVisible(o => { if ((o.isMesh || o.isLine) && o.geometry) { if (!o.geometry.boundingBox) o.geometry.computeBoundingBox(); box.union(o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld)); } });
+    return box;
+  }
+  function meshesBox(meshes, box = new THREE.Box3()) {
+    meshes.forEach(m => { m.updateMatrixWorld(true); if (!m.geometry.boundingBox) m.geometry.computeBoundingBox(); box.union(m.geometry.boundingBox.clone().applyMatrix4(m.matrixWorld)); });
+    return box;
+  }
+  // Boxes to frame, best first. A rack is tried whole (with its label), then just its shelves.
+  function frameBoxes(rec) {
+    if (rec.cat === 'setup') {
+      const full = visibleBox(rec.group); full.max.y = Math.max(full.max.y, (rec.tpl?.height || 2.2) + 0.2);
+      const levels = recsOf(r => r.cat === 'shelf' && r.setup === rec.id).map(r => r.y);
+      const shelves = full.clone(); if (levels.length) shelves.min.y = Math.max(full.min.y, Math.min(...levels) - 0.15);
+      return [full, shelves];
+    }
+    if (rec.cat === 'storage') return [visibleBox(rec.group)];
+    const b = meshesBox(rec.cat === 'shelf' && rec.slot ? [...rec.meshes, rec.slot] : rec.meshes);
+    if (rec.cat === 'shelf') recsOf(r => r.cat === 'item' && r.shelf === rec.id).forEach(r => meshesBox(r.meshes, b));
+    if (rec.cat === 'item' || rec.cat === 'structure') {   // keep some context around small objects
+      const c = b.getCenter(new THREE.Vector3()); b.setFromCenterAndSize(c, b.getSize(new THREE.Vector3()).max(new THREE.Vector3(0.7, 0.5, 0.7)));
+    }
+    return [b];
+  }
+  // [entry, exit] distances of a ray through an axis-aligned box, or null
+  function slab(o, d, box) {
+    let t0 = -Infinity, t1 = Infinity;
+    for (const k of ['x', 'y', 'z']) {
+      if (Math.abs(d[k]) < 1e-9) { if (o[k] < box.min[k] || o[k] > box.max[k]) return null; continue; }
+      let a = (box.min[k] - o[k]) / d[k], b = (box.max[k] - o[k]) / d[k]; if (a > b) [a, b] = [b, a];
+      t0 = Math.max(t0, a); t1 = Math.min(t1, b); if (t0 > t1) return null;
+    }
+    return [t0, t1];
+  }
+  function obstacleBoxes(rec) {
+    const skip = new Set([rec.id, rec.setup, rec.item?.storage].filter(Boolean)); const out = [];
+    for (const r of S.recs.values()) {
+      if (skip.has(r.id) || !r.group) continue;
+      // clearance: the camera never hovers in the narrow gap above a rack or cabinet; above a cart or ladder is fine
+      if (r.cat === 'setup' || r.cat === 'storage') out.push(Object.assign(visibleBox(r.group), { clearance: 0.45 }));
+      else if (r.cat === 'item' && r.group.parent === itemsGroup && r.meshes.length) out.push(Object.assign(meshesBox(r.meshes), { clearance: 0.1 }));
+      else if (r.cat === 'structure' && r.def?.radius != null) out.push(Object.assign(meshesBox(r.meshes), { clearance: 0.45 }));   // pillar
+    }
+    return out;
+  }
+  // Share of the target the camera at P actually sees: its centre plus the corners and middle of the face that matters
+  // (a rack's front, else the side facing the room), each sight line tested against other racks / cabinets / free items.
+  function visibleShare(P, box, C, blockers, face) {
+    const onX = Math.abs(face.x) >= Math.abs(face.z); const k = onX ? (face.x > 0 ? box.max.x : box.min.x) : (face.z > 0 ? box.max.z : box.min.z);
+    const samples = [C, onX ? new THREE.Vector3(k, C.y, C.z) : new THREE.Vector3(C.x, C.y, k)];
+    // corners pulled 10 % inwards: an edge shared with the neighbouring rack is not "hidden" by it
+    const lerp = (a, b, f) => a + (b - a) * f; const ws = onX ? [box.min.z, box.max.z] : [box.min.x, box.max.x];
+    for (const y of [lerp(box.min.y, box.max.y, 0.1), lerp(box.min.y, box.max.y, 0.9)]) for (const w of [lerp(ws[0], ws[1], 0.1), lerp(ws[0], ws[1], 0.9)]) samples.push(onX ? new THREE.Vector3(k, y, w) : new THREE.Vector3(w, y, k));
+    let seen = 0;
+    for (const q of samples) {
+      const d = q.clone().sub(P); const len = d.length(); d.divideScalar(len || 1);
+      // a sample inside another box (side-mounted gear makes neighbouring boxes overlap) is not hidden by it
+      const hitBy = blockers.find(b => { if (b.containsPoint(P) || b.containsPoint(q)) return false; const s = slab(P, d, b); return s && s[0] > 0.02 && s[0] < len - 0.05; });
+      if (!hitBy) seen++;
+    }
+    return seen / samples.length;
+  }
+  function roomInnerBox() {
+    const { width: W, depth: D, height: H } = S.data.room;
+    return new THREE.Box3(new THREE.Vector3(WX(W) + 0.15, 0.35, 0.15), new THREE.Vector3(WX(0) - 0.15, H - 0.1, D - 0.15));
+  }
+  // Part of the canvas that no overlay covers, in NDC. Each overlay trims the side that leaves the most room for a target
+  // of the given on-screen aspect (width / height): a tall rack keeps a tall area, a flat zone a wide one.
+  function safeArea(aspect = 1) {
+    const vp = canvas.getBoundingClientRect(); const W = vp.width, H = vp.height; if (!W || !H) return { l: -1, r: 1, t: 1, b: -1 };
+    const area = q => Math.max(0, q.r - q.l) * Math.max(0, q.b - q.t);
+    const rects = ['.toolbar', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#rackBar', '#hint', '#compass']
+      .map(q => $(q)).filter(Boolean).map(el => el.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0)
+      .map(r => ({ l: r.left - vp.left - 6, t: r.top - vp.top - 6, r: r.right - vp.left + 6, b: r.bottom - vp.top + 6 }))
+      .sort((a, b) => area(b) - area(a));
+    let s = { l: 0, t: 0, r: W, b: H };
+    for (const o of rects) {
+      if (o.r <= s.l || o.l >= s.r || o.b <= s.t || o.t >= s.b) continue;
+      const use = q => Math.min(Math.max(0, q.r - q.l) / aspect, Math.max(0, q.b - q.t));
+      s = [{ ...s, t: Math.max(s.t, o.b) }, { ...s, b: Math.min(s.b, o.t) }, { ...s, l: Math.max(s.l, o.r) }, { ...s, r: Math.min(s.r, o.l) }]
+        .reduce((a, q) => use(q) > use(a) + 0.5 || (Math.abs(use(q) - use(a)) <= 0.5 && area(q) > area(a)) ? q : a);
+    }
+    if (s.r - s.l < W * 0.3 || s.b - s.t < H * 0.3) s = { l: 0, t: 0, r: W, b: H };   // overlays cover too much: use the whole view
+    return { l: s.l / W * 2 - 1, r: s.r / W * 2 - 1, t: 1 - s.t / H * 2, b: 1 - s.b / H * 2 };
+  }
+  // Camera at P: where to look so the box centre C sits in the middle of the safe area, and is the whole box inside it?
+  function framing(P, C, box, safe) {
+    fitCam.position.copy(P); fitCam.lookAt(C); fitCam.updateMatrixWorld(true);
+    const dist = P.distanceTo(C), halfH = dist * Math.tan(THREE.MathUtils.degToRad(fitCam.fov / 2)), halfW = halfH * fitCam.aspect;
+    const sx = (safe.l + safe.r) / 2, sy = (safe.t + safe.b) / 2;
+    const T = C.clone().sub(new THREE.Vector3().setFromMatrixColumn(fitCam.matrixWorld, 0).multiplyScalar(sx * halfW)).sub(new THREE.Vector3().setFromMatrixColumn(fitCam.matrixWorld, 1).multiplyScalar(sy * halfH));
+    fitCam.lookAt(T); fitCam.updateMatrixWorld(true);
+    const m = 0.04; let ok = true;
+    for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+      const v = new THREE.Vector3(x, y, z).applyMatrix4(fitCam.matrixWorldInverse);
+      if (v.z > -fitCam.near * 2) { ok = false; break; }
+      v.applyMatrix4(fitCam.projectionMatrix);
+      if (v.x < safe.l + m || v.x > safe.r - m || v.y < safe.b + m || v.y > safe.t - m) { ok = false; break; }
+    }
+    return { ok, T };
+  }
+  function planFlight(rec) {
+    scene.updateMatrixWorld(true);
+    fitCam.fov = camera.fov; fitCam.aspect = camera.aspect; fitCam.near = camera.near; fitCam.far = camera.far; fitCam.up.set(0, 1, 0); fitCam.updateProjectionMatrix();
+    const boxes = frameBoxes(rec).filter(b => !b.isEmpty()); if (!boxes.length) return null;
+    const sz0 = boxes[0].getSize(new THREE.Vector3()); const safe = safeArea(Math.max(0.2, Math.min(5, Math.max(sz0.x, sz0.z) / Math.max(0.05, sz0.y)))); const zone = rec.cat === 'zone';
+    const own = rec.setup && S.recs.get(rec.setup)?.group ? visibleBox(S.recs.get(rec.setup).group)
+      : rec.item?.storage && S.recs.get(rec.item.storage)?.group ? visibleBox(S.recs.get(rec.item.storage).group) : boxes[0].clone();
+    own.expandByScalar(0.12);
+    // camera clearance: never inside, nor in the gap just above, another rack / cabinet / free item
+    const blockers = zone ? [] : obstacleBoxes(rec); const room = zone ? null : roomInnerBox();
+    const obstacles = blockers.map(b => { const e = b.clone().expandByScalar(0.06); e.max.y += b.clearance; return e; });
+    const C0 = boxes[0].getCenter(new THREE.Vector3());
+    // base approach: rack front, else from the object towards the room centre, else the current view direction
+    const su = S.recs.get(rec.cat === 'setup' ? rec.id : rec.setup);
+    let base = su?.group && su.cat === 'setup' ? new THREE.Vector3(1, 0, 0).transformDirection(su.group.matrixWorld) : null;
+    if (!base && !zone) base = roomCenter().sub(C0);
+    if (!base || zone) base = camera.position.clone().sub(controls.target);
+    base.y = 0; if (base.lengthSq() < 1e-6) base.set(0, 0, -1); base.normalize();
+    const yaws = [0, 10, -10, 20, -20, 30, -30, 40, -40, 50, -50, 65, -65, 80, -80];
+    const elevs = zone ? [50, 62, 75] : rec.cat === 'setup' ? [12, 20, 30, 42] : [15, 25, 35, 50, 65];
+    const prefElev = zone ? 62 : 20; const maxD = controls.maxDistance * 0.9;
+    let best = null;
+    boxes.forEach((box, bi) => {
+      const C = box.getCenter(new THREE.Vector3());
+      for (const yaw of yaws) for (const elev of elevs) {
+        const h = base.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), THREE.MathUtils.degToRad(yaw));
+        const dir = h.multiplyScalar(Math.cos(THREE.MathUtils.degToRad(elev))).setY(Math.sin(THREE.MathUtils.degToRad(elev))).normalize();
+        // the camera must be outside the target (or its rack) …
+        const ownExit = slab(C, dir, own); let dmin = Math.max(controls.minDistance + 0.05, ownExit ? ownExit[1] : 0);
+        // … and in front of the first obstacle / inside the room
+        let free = maxD;
+        if (room) { const s = slab(C, dir, room); free = Math.min(free, s && s[1] > 0 ? s[1] : 0); }
+        for (const ob of obstacles) { const s = slab(C, dir, ob); if (s && s[0] > 0) free = Math.min(free, s[0] - 0.1); }
+        if (free < dmin) continue;
+        const fitsAt = d => framing(C.clone().addScaledVector(dir, d), C, box, safe).ok;
+        let need = Infinity;
+        if (fitsAt(free)) {
+          let lo = dmin, hi = free; if (fitsAt(lo)) hi = lo; else for (let i = 0; i < 22; i++) { const mid = (lo + hi) / 2; if (fitsAt(mid)) hi = mid; else lo = mid; }
+          need = hi;
+        } else if (fitsAt(maxD)) {
+          let lo = free, hi = maxD; for (let i = 0; i < 18; i++) { const mid = (lo + hi) / 2; if (fitsAt(mid)) hi = mid; else lo = mid; }
+          need = hi;
+        }
+        const fits = need <= free + 1e-6; const coverage = fits ? 1 : Number.isFinite(need) ? free / need : 0;
+        const d = fits ? need : free; const seen = blockers.length ? visibleShare(C.clone().addScaledVector(dir, d), box, C, blockers, base) : 1;
+        const score = (fits && seen === 1 ? 3 - bi : coverage * seen * seen) - 0.3 * Math.abs(yaw) / 90 - 0.12 * Math.abs(elev - prefElev) / 60;
+        if (!best || score > best.score) best = { score, d, dir, C, box, fits, yaw, elev, bi, coverage, seen };
+      }
+    });
+    if (!best) return null;
+    const P = best.C.clone().addScaledVector(best.dir, best.d);
+    return { P, T: framing(P, best.C, best.box, safe).T, fits: best.fits, yaw: best.yaw, elev: best.elev, box: best.bi, coverage: +best.coverage.toFixed(2), seen: best.seen, safe };
+  }
   function flyTo(rec, force) {
-    if (!rec.group) return;
-    markView(null); const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (b.isEmpty()) return;
-    const c = b.getCenter(new THREE.Vector3()), s = b.getSize(new THREE.Vector3()); let dist = Math.max(s.x, s.y, s.z) * 1.7 + 1.1;
-    if (rec.cat === 'setup') { dist = 3.4; c.y = 1.25; } else if (rec.cat === 'shelf') { dist = 2.2; } else if (rec.cat === 'item' && rec.setup) { dist = Math.max(1.2, dist * 0.8); }
-    let dir = camera.position.clone().sub(controls.target); if (dir.length() < 0.01) dir.set(-1, 1, -1); dir.normalize(); if (dir.y < 0.25) dir.y = 0.25; dir.normalize();
-    // prefer approaching a rack from its front
-    if (rec.cat === 'setup' || rec.cat === 'shelf' || (rec.cat === 'item' && rec.setup)) { const su = S.recs.get(rec.setup || rec.id); if (su && su.group) { const front = new THREE.Vector3(1, 0, 0).transformDirection(su.group.matrixWorld); dir = front.multiplyScalar(1).add(new THREE.Vector3(0, rec.cat === 'setup' ? 0.28 : 0.4, 0)).normalize(); } }
-    tweenCamera(c.clone().add(dir.multiplyScalar(dist)), c, force ? 500 : 800);
+    if (!rec.group || !S.data) return;
+    markView(null);
+    let plan = null;
+    try { plan = planFlight(rec); } catch (e) { console.warn('fly-to framing failed', e); }   // the camera still moves (fallback below)
+    if (plan) { tweenCamera(plan.P, plan.T, force ? 500 : 800); return; }
+    // nothing free around the target (should not happen inside the room): look from the current side, close in
+    const b = meshesBox(rec.meshes); if (b.isEmpty()) return;
+    const c = b.getCenter(new THREE.Vector3()); const dir = camera.position.clone().sub(c).setY(0).normalize().setY(0.5).normalize();
+    tweenCamera(c.clone().addScaledVector(dir, Math.max(1.2, b.getSize(new THREE.Vector3()).length() * 1.2)), c, force ? 500 : 800);
   }
   $('#vOrbit').onclick = () => setView('orbit'); $('#vTop').onclick = () => setView('top'); $('#vEye').onclick = () => setView('eye');
   $('#vReset').onclick = () => { cancelMove(); closeDetail(); setView('orbit'); };
@@ -1414,7 +1814,7 @@
     const hit = pickAt(e);
     if (S.moveItem && S.editMode && window.DCIM_CAN_OPERATE) {
       const target = hit ? resolveMoveTarget(hit) : null;
-      if (target) finishMove(target); else toast('Choose a shelf, rack or storage destination, or Cancel', 'err');
+      if (target) requestMove(target); else toast('Choose a shelf, rack or storage destination, or Cancel', 'err');
       return;
     }
     if (hit) select(hit.object.userData.id, { keepCamera: true });
@@ -1430,11 +1830,13 @@
   function pickAt(e) {
     const r = canvas.getBoundingClientRect(); ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     raycaster.setFromCamera(ndc, camera);
-    const hits = raycaster.intersectObjects(S.pickables.filter(m => m.visible && m.parent && (m.material.opacity > 0.2)), false);
+    const hits = raycaster.intersectObjects(S.pickables.filter(m => isShown(m) && (m.material.opacity > 0.2)), false);
     for (const h of hits) { const rec = S.recs.get(h.object.userData.id); if (!rec || rec.filtered) continue; if (rec.cat === 'zone') continue; return h; }
     // fall back to zone plane
     return hits.find(h => S.recs.get(h.object.userData.id)?.cat === 'zone') || null;
   }
+  // visible only if every ancestor up to the scene is visible (Walls / Zones off hide whole groups)
+  function isShown(o) { for (let x = o; x; x = x.parent) { if (!x.visible) return false; if (x === scene) return true; } return false; }
   function pick(e) { const h = pickAt(e); return h ? h.object : null; }
   // Which shelf / rack / storage does a tap mean while moving an item? Items → their shelf; rack frame → shelf at that height.
   function resolveMoveTarget(hit) {
@@ -1510,8 +1912,8 @@
     requestAnimationFrame(animate);
     controls.autoRotate = false;
     const animating = !!S.tween;
-    if (S.tween) { const k = Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms); const e = 1 - Math.pow(1 - k, 3); camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); if (k >= 1) S.tween = null; }
-    const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
+    if (S.tween) { const k = S.tween.ms > 0 ? Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms) : 1; const e = 1 - Math.pow(1 - k, 3); camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); if (k >= 1) S.tween = null; }
+    const pulse = reducedMotion() ? 0.85 : 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
     controls.update(); constrainNavigation(!animating); renderer.render(scene, camera); updateLabels();
   }
 
@@ -1522,8 +1924,34 @@
   function toggleKiosk(force) { S.kiosk = force !== undefined ? force : !S.kiosk; LS.set('kiosk', S.kiosk); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); if (S.kiosk && S.labelMode === 'none') setLabelMode('setups'); resize(); }
   $('#btnEdit').onclick = () => toggleEdit(); $('#btnKiosk').onclick = () => toggleKiosk();
 
-  function startMove(itemId) { if (!S.editMode || !window.DCIM_CAN_OPERATE) return; controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden'); $('#moveText').textContent = `Tap the shelf (or rack / storage) where ${S.recs.get(itemId)?.def.name || itemId} goes now`; highlightTargets(true); }
-  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); highlightTargets(false); }
+  function startMove(itemId) {
+    if (!S.editMode || !window.DCIM_CAN_OPERATE) return;
+    controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden');
+    $('#moveText').textContent = `Move ${S.recs.get(itemId)?.def.name || itemId}: tap a shelf in 3D, or`;
+    fillMoveTargets(itemId); applyFilters(); highlightTargets(true);
+    $('#moveTarget').focus({ preventScroll: true });   // keyboard users can choose a destination without the 3D view
+  }
+  // Keyboard / screen-reader way to choose a destination: every shelf (top to bottom), rack bottom bay and storage.
+  function fillMoveTargets(itemId) {
+    const sel = $('#moveTarget'); const here = S.recs.get(itemId)?.item?.shelf;
+    const opt = (id, text) => `<option value="${esc(id)}"${id === here ? ' disabled' : ''}>${esc(text)}</option>`;
+    sel.innerHTML = `<option value="">Destination…</option>` + S.data.setups.map(su => {
+      const shelves = recsOf(r => r.cat === 'shelf' && r.setup === su.id).sort((a, b) => b.level - a.level);
+      const who = sh => recsOf(r => r.cat === 'item' && r.shelf === sh.id).map(r => r.def.name || r.id).join(', ');
+      return `<optgroup label="${esc(su.id + (su.dcimRack ? ' · ' + su.dcimRack : ''))}">` + shelves.map(sh => opt(sh.id, `${sh.id} · L${sh.level}${who(sh) ? ' — ' + who(sh) : ' — empty'}`)).join('') + opt(su.id, `${su.id} · bottom bay`) + `</optgroup>`;
+    }).join('') + `<optgroup label="Storage">${S.data.storage.map(st => opt(st.id, `${st.id} · ${st.name}`)).join('')}</optgroup>`;
+  }
+  // Tree rows: while moving, a shelf / rack / storage row (or a device row → its shelf) is the destination.
+  function activateTreeRow(id) {
+    const r = S.recs.get(id);
+    if (S.moveItem && r) {
+      const target = ['shelf', 'setup', 'storage'].includes(r.cat) ? r : r.cat === 'item' && r.shelf ? S.recs.get(r.shelf) : null;
+      if (target) { requestMove(target); return; }
+    }
+    select(id);
+  }
+  $('#moveGo').onclick = () => { const r = S.recs.get($('#moveTarget').value); if (r) requestMove(r); else toast('Choose a destination first', 'err'); };
+  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); highlightTargets(false); applyFilters(); }
   $('#moveCancel').onclick = cancelMove;
   function highlightTargets(on) {
     for (const r of S.recs.values()) if (r.cat === 'shelf') {
@@ -1546,59 +1974,187 @@
     const idx = shelfId ? shelves.findIndex(s => s.id === shelfId) : 0;   // no shelf (bottom bay) → lowest shelf
     return uTopDown ? n - Math.max(0, idx) : Math.max(0, idx) + 1;
   }
-  async function dcimMove(mit, kind, target) {
+  function dcimDestination(target) {
     const sid = target.cat === 'shelf' ? target.setup : target.cat === 'setup' ? target.id : null;
     if (!sid) throw new Error('Lab Manager devices can only be moved onto a rack or a shelf');
     const su = S.data.setups.find(s => s.id === sid); const rack = dcimRackOf(su);
     if (!rack) throw new Error(`${sid} is not mapped to a DCIM rack yet — open the rack in Edit mode and set "DCIM rack" first`);
-    const u = shelfToU(sid, target.cat === 'shelf' ? target.id : null);
-    if (kind === 'opt') {
-      const key = mit.dcim.optKey;
-      const pduRack = S.live.devices.find(d => d.id === mit.dcim.pdu)?.rack || null;
-      // rack first: if a later store fails, the OPT is already in the right rack (auto U) instead of losing its old U
-      S.live.rackOverrides = await saveLayout('/api/rack-overrides', ov => { if (rack === pduRack) delete ov[key]; else ov[key] = rack; return ov; });
-      S.live.rackSlots = await saveLayout('/api/rack-slots', slots => {
+    return { rack, u: shelfToU(sid, target.cat === 'shelf' ? target.id : null) };
+  }
+  // One write per Lab Manager store for the whole move (one device, or two for a swap), so a swap can never leave both
+  // devices on one shelf. Servers the move does not touch keep their shelf: auto-placed ones in the affected racks are
+  // pinned to the U they show now, otherwise taking or freeing a U would silently renumber them.
+  // Fresh copies of the layout stores with their revisions (ETags). The occupancy check made right before a move and
+  // the write itself use the same revisions, so a change by anyone in between is refused (409) instead of overwritten.
+  async function readMoveLayout() {
+    return layoutWrite(async () => {
+      const [rackSlots, rackOverrides, rackOrder, rackItems] = await Promise.all(['/api/rack-slots', '/api/rack-overrides', '/api/rack-positions', '/api/rack-items']
+        .map(p => api(p, { withEtag: true, cache: 'no-store' })));
+      Object.assign(S.live, { rackSlots: rackSlots.data || {}, rackOverrides: rackOverrides.data || {}, rackOrder: rackOrder.data || {}, rackItems: rackItems.data || {} });
+      return { rackSlots, rackOverrides, rackOrder, rackItems };
+    });
+  }
+  // Write a move (one device, or two for a swap) in ONE request per store kind, against the revisions in `fresh`:
+  // OPTs → PUT /api/rack-layout (rack_slots + rack_positions + rack_overrides together or not at all, server side);
+  // DCIM rack items → PUT /api/rack-items. Servers the move does not touch keep their shelf: auto-placed ones in the
+  // affected racks are pinned to the U they show now, otherwise taking or freeing a U would silently renumber them.
+  async function dcimMoveMany(moves, fresh) {
+    const dest = moves.map(m => ({ ...m, ...dcimDestination(m.target) }));
+    const opts = dest.filter(m => m.kind === 'opt'), equips = dest.filter(m => m.kind === 'rack-item');
+    const clone = x => JSON.parse(JSON.stringify(x || {}));
+    if (opts.length) {
+      const keys = new Set(opts.map(m => m.mit.dcim.optKey));
+      const racks = new Set(opts.flatMap(m => [m.rack, m.mit.live?.rack].filter(Boolean)));
+      const pins = (S.model?.items || []).filter(i => i.type === 'opt' && i.live?.inDcim && i.dcim?.optKey && !keys.has(i.dcim.optKey) && racks.has(i.live.rack) && i.placementConfidence === 'low' && Number.isInteger(i.live.u));
+      const ov = clone(fresh.rackOverrides.data), slots = clone(fresh.rackSlots.data), order = clone(fresh.rackOrder.data);
+      opts.forEach(m => {
+        const key = m.mit.dcim.optKey; const pduRack = S.live.devices.find(d => d.id === m.mit.dcim.pdu)?.rack || null;
+        if (m.rack === pduRack) delete ov[key]; else ov[key] = m.rack;
         Object.keys(slots).forEach(r => { if (slots[r] && key in slots[r]) delete slots[r][key]; });
-        (slots[rack] = slots[rack] || {})[key] = u; return slots;
-      });
-      S.live.rackOrder = await saveLayout('/api/rack-positions', order => {
         Object.keys(order).forEach(r => { if (Array.isArray(order[r])) order[r] = order[r].filter(k => k !== key); });
-        (order[rack] = order[rack] || []).push(key); return order;
       });
-      return `${rack} · U${u}`;
+      pins.forEach(i => { const r = (slots[i.live.rack] = slots[i.live.rack] || {}); if (r[i.dcim.optKey] == null) r[i.dcim.optKey] = i.live.u; });
+      opts.forEach(m => { (slots[m.rack] = slots[m.rack] || {})[m.mit.dcim.optKey] = m.u; (order[m.rack] = order[m.rack] || []).push(m.mit.dcim.optKey); });
+      await layoutWrite(() => api('/api/rack-layout', { method: 'PUT', body: JSON.stringify({
+        rack_overrides: { data: ov, if_match: fresh.rackOverrides.etag }, rack_slots: { data: slots, if_match: fresh.rackSlots.etag }, rack_positions: { data: order, if_match: fresh.rackOrder.etag } }) }));
+      Object.assign(S.live, { rackOverrides: ov, rackSlots: slots, rackOrder: order });
     }
-    // DCIM rack item (switch / patch panel …)
-    const ciId = mit.id.slice(5); const items = JSON.parse(JSON.stringify(S.live.rackItems || {})); let ci = null;
-    Object.keys(items).forEach(r => { const i = (items[r] || []).findIndex(x => String(x.id) === ciId); if (i >= 0) { ci = items[r][i]; items[r].splice(i, 1); } });
-    if (!ci) throw new Error('rack item not found in Lab Manager data');
-    ci.u = u; (items[rack] = items[rack] || []).push(ci);
-    const version = rackItemVersions.get(S.live.rackItems);
-    if (!version) throw new Error('Refresh the backend connection before moving equipment');
-    const saved = await api('/api/rack-items', { method: 'PUT', headers: { 'If-Match': version }, body: JSON.stringify(items) }); S.live.rackItems = saved;
-    return `${rack} · U${u}`;
+    if (equips.length) {
+      // the whole record moves, so SN, barcode and tracking fields stay with it
+      const items = clone(fresh.rackItems.data);
+      const found = equips.map(m => {
+        const ciId = m.mit.id.slice(5); let ci = null;
+        Object.keys(items).forEach(r => { const i = (items[r] || []).findIndex(x => String(x.id) === ciId); if (i >= 0) { ci = items[r][i]; items[r].splice(i, 1); } });
+        if (!ci) throw new Error('rack item not found in Lab Manager data');
+        return { m, ci };
+      });
+      found.forEach(({ m, ci }) => { ci.u = m.u; (items[m.rack] = items[m.rack] || []).push(ci); });
+      if (!fresh.rackItems.etag) throw new Error('Refresh the backend connection before moving equipment');
+      S.live.rackItems = await layoutWrite(() => api('/api/rack-items', { method: 'PUT', headers: { 'If-Match': fresh.rackItems.etag }, body: JSON.stringify(items) }));
+    }
+    return dest.map(m => `${m.rack} · U${m.u}`);
   }
-  async function finishMove(target) {
-    if (!S.editMode || !window.DCIM_CAN_OPERATE) { cancelMove(); return; }
-    const id = S.moveItem; cancelMove(); if (!id) return;
+  function placeText(it) {
+    if (!it) return 'not placed';
+    const u = it.live?.rack && it.live?.u != null ? ` (${it.live.rack} · U${it.live.u})` : '';
+    if (it.shelf) return shelfName(it.shelf) + u;
+    if (it.placement === 'bottom-bay' && it.setup) return `${it.setup} · bottom bay`;
+    if (it.placement === 'side-mount' && it.setup) return `${it.setup} · ${it.side || 'right'} side`;
+    if (it.placement === 'rack-strips' && it.setup) return `${it.setup} · power strips`;
+    if (it.storage) return it.storage;
+    if (it.pos) return `free · x ${it.pos[0]} z ${it.pos[1]}`;
+    if (it.live?.rack) return `${it.live.rack}${it.live.u != null ? ' · U' + it.live.u : ''} · no shelf`;
+    return 'not placed';
+  }
+  function targetText(target, kind) {
+    let u = '';
+    if (kind) { try { const d = dcimDestination(target); u = ` (${d.rack} · U${d.u})`; } catch { /* reported as plan.error */ } }
+    if (target.cat === 'shelf') return shelfName(target.id) + u;
+    if (target.cat === 'setup') return `${target.id} · bottom bay` + u;
+    return target.id;
+  }
+  function placementPatch(target) {
+    const patch = { setup: null, shelf: null, storage: undefined, placement: undefined, pos: undefined, side: undefined, placementConfidence: 'high' };
+    if (target.cat === 'shelf') { patch.setup = target.setup; patch.shelf = target.id; patch.zone = target.zone; }
+    else if (target.cat === 'setup') { patch.setup = target.id; patch.placement = 'bottom-bay'; patch.zone = target.zone; }
+    else if (target.cat === 'storage') { patch.storage = target.id; patch.zone = target.zone; }
+    return patch;
+  }
+  // What a drop on `target` would do: from → to, who already occupies the shelf, and whether the two can swap.
+  // Shelf rule: one PC (OPT) and one rack item per shelf.
+  function movePlan(id, target) {
     const rec = S.recs.get(id); const mit = rec?.item; const def = S.data.items.find(x => x.id === id);
-    if (!def && !mit) return;
-    const name = (mit || def).name || id;
-    const kind = movesViaDcim(mit);
-    if (kind) {
-      toast(`Moving ${name} in Lab Manager…`);
-      try { const where = await dcimMove(mit, kind, target); toast(`${name} → ${target.id} (${where} saved in Lab Manager)`, 'ok'); }
-      catch (e) { toast('Move failed: ' + e.message, 'err'); await reloadLayout(); computeModel(); buildItems(); return; }
+    if (!target || (!def && !mit)) return null;
+    const it = mit || def; const kind = movesViaDcim(mit);
+    // Lab Manager places a device dropped on a rack's bottom bay on its lowest shelf: say so, and check that shelf
+    if (kind && target.cat === 'setup') { const low = recsOf(r => r.cat === 'shelf' && r.setup === target.id).sort((a, b) => a.level - b.level)[0]; if (low) target = low; }
+    const plan = { id, rec, mit, def, name: it.name || id, kind, target, from: placeText(it), to: targetText(target, kind), occupant: null, swappable: false, swapWhy: '', source: null, error: null, same: false };
+    if (kind) { try { dcimDestination(target); } catch (e) { plan.error = e.message; } }
+    if (target.cat !== 'shelf') return plan;
+    if (it.shelf === target.id) { plan.same = true; return plan; }
+    const isPC = it.type === 'opt';
+    const occ = recsOf(r => r.cat === 'item' && r.shelf === target.id && r.id !== id && ((r.item?.type === 'opt') === isPC))
+      .sort((a, b) => (movesViaDcim(b.item) ? 1 : 0) - (movesViaDcim(a.item) ? 1 : 0));   // live devices first
+    plan.occupant = occ[0] || null;
+    if (plan.occupant) {
+      const src = it.shelf ? S.recs.get(it.shelf) : null; plan.source = src || null;
+      const okind = movesViaDcim(plan.occupant.item); const odef = S.data.items.find(x => x.id === plan.occupant.id);
+      if (!src) plan.swapWhy = `${plan.name} is not on a shelf now, so there is no place to swap to.`;
+      else if (!okind && !odef) plan.swapWhy = `${plan.occupant.def.name || plan.occupant.id} cannot be moved from the twin.`;
+      else if (okind) { try { dcimDestination(src); } catch (e) { plan.swapWhy = e.message; } }
+      plan.swappable = !plan.swapWhy;
     }
-    if (def) {
-      const patch = { setup: null, shelf: null, storage: undefined, placement: undefined, pos: undefined, side: undefined, placementConfidence: 'high' };
-      if (target.cat === 'shelf') { patch.setup = target.setup; patch.shelf = target.id; patch.zone = target.zone; }
-      else if (target.cat === 'setup') { patch.setup = target.id; patch.placement = 'bottom-bay'; patch.zone = target.zone; }
-      else if (target.cat === 'storage') { patch.storage = target.id; patch.zone = target.zone; }
-      patchDef(id, patch); rebuildAll();
-      if (!kind) toast(`${name} → ${target.id}`, 'ok');
-    } else { computeModel(); buildItems(); }
-    select(id, { keepCamera: true });
+    return plan;
   }
+  // Runs only after the user confirmed `plan` in the dialog. The destination may have changed while the dialog was
+  // open (a live refresh, another person's move), so it is planned again on what Lab Manager holds right now — read
+  // with the revisions the write will carry. If the occupant (or the swap source) is not the one the user confirmed,
+  // nothing is written and the user is asked again.
+  async function performMove(plan, swap) {
+    const occupantMoves = swap && plan.occupant && movesViaDcim(plan.occupant.item);
+    let fresh = null;
+    if (plan.kind || occupantMoves) {
+      try { fresh = await readMoveLayout(); }
+      catch (e) { toast('Move failed: ' + e.message, 'err'); return false; }
+      computeModel(); buildItems();
+    }
+    const now = movePlan(plan.id, plan.target);
+    const unchanged = !!now && !now.same && !now.error && (now.occupant?.id || null) === (plan.occupant?.id || null) && now.kind === plan.kind &&
+      (!swap || (now.swappable && now.source?.id === plan.source?.id));
+    if (!unchanged) {
+      toast('The destination changed while the dialog was open — nothing was moved; check it and confirm again', 'err');
+      if (S.editMode && window.DCIM_CAN_OPERATE && now && !now.same) { startMove(plan.id); return requestMove(plan.target); }
+      return false;
+    }
+    plan = now;
+    const moves = [{ id: plan.id, mit: plan.mit, def: plan.def, kind: plan.kind, target: plan.target }];
+    if (swap) { const o = plan.occupant; moves.push({ id: o.id, mit: o.item, def: S.data.items.find(x => x.id === o.id), kind: movesViaDcim(o.item), target: plan.source }); }
+    const viaDcim = moves.filter(m => m.kind);
+    if (viaDcim.length) {
+      toast(`Moving ${plan.name} in Lab Manager…`);
+      try { await dcimMoveMany(viaDcim, fresh); }
+      catch (e) {
+        toast(e.status === 409 ? 'The rack layout changed in another session at the same moment — nothing was moved; try again' : 'Move failed: ' + e.message, 'err');
+        await reloadLayout(); computeModel(); buildItems(); return false;
+      }
+    }
+    const local = moves.filter(m => m.def);
+    local.forEach(m => patchDef(m.id, placementPatch(m.target)));
+    if (local.length) rebuildAll(); else { computeModel(); buildItems(); }
+    const saved = viaDcim.length ? ' (saved in Lab Manager)' : '';
+    toast(moves.length > 1 ? `${plan.name} ⇄ ${plan.occupant.def.name || plan.occupant.id} swapped${saved}` : `${plan.name} → ${plan.to}${saved}`, 'ok');
+    select(plan.id, { keepCamera: true });
+    return true;
+  }
+  // A tap (or the destination list / a tree row) while moving: always ask, showing from → to; an occupied shelf offers
+  // Swap or Cancel. Cancel keeps the move mode so another shelf can be chosen (the banner's Cancel ends it).
+  // There is deliberately no way to move without this dialog (window.__twin.finishMove opens it too).
+  let moveAsking = false;
+  async function requestMove(target) {
+    if (!S.editMode || !window.DCIM_CAN_OPERATE) { cancelMove(); return false; }
+    const id = S.moveItem; if (!id || moveAsking) return false;
+    const plan = movePlan(id, target); if (!plan) { cancelMove(); return false; }
+    if (plan.same) { toast(`${plan.name} is already on ${plan.to}`, 'err'); return false; }
+    if (plan.error) { toast(plan.error, 'err'); return false; }
+    moveAsking = true;
+    let choice;
+    try {
+      const fromTo = `<div class="cf-move"><span class="k">From</span><b>${esc(plan.from)}</b><span class="k">To</span><b>${esc(plan.to)}</b></div>`;
+      const where = plan.kind ? 'Saved in Lab Manager (rack / U slot).' : 'Saved in the twin — press “Save to server” afterwards.';
+      if (plan.occupant) {
+        const other = plan.occupant.def.name || plan.occupant.id;
+        choice = await askChoice(plan.swappable
+          ? { title: `${plan.target.id} is occupied`, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div>${fromTo}<div class="note">Swap places: ${esc(other)} moves to ${esc(plan.from)}. Nothing else moves. ${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'swap', label: 'Swap places', cls: 'btn-cycle' }] }
+          : { title: `${plan.target.id} is occupied`, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div><div class="note">The two cannot swap places: ${esc(plan.swapWhy)} Choose a free shelf, or move ${esc(other)} first.</div>`, choices: [{ id: 'cancel', label: 'Choose another shelf' }] });
+      } else {
+        choice = await askChoice({ title: `Move ${plan.name}?`, html: `${fromTo}<div class="note">${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'move', label: 'Move here', cls: 'btn-primary' }] });
+      }
+    } finally { moveAsking = false; }
+    if (choice !== 'move' && choice !== 'swap') return false;
+    cancelMove();
+    return performMove(plan, choice === 'swap');
+  }
+  const finishMove = target => requestMove(target);   // kept name (debug handle, older notes): the same confirmed path
 
   function bigChips(cur) { return `<div class="chips-lg">${STATUSES.map(st => `<button class="chip-lg ${cur === st ? 'on' : ''}" data-st="${st}" style="--c:${STATUS_COLOR[st]}"><span class="ic">${STATUS_ICON[st]}</span>${STATUS_LABEL[st]}</button>`).join('')}</div>`; }
   function shelfName(id) { const sh = S.data.shelves.find(x => x.id === id); return sh ? `${sh.setup} · L${sh.level}` : id; }
@@ -1629,7 +2185,8 @@
         <label class="lbl-lg">PDU · outlet</label>
         <div class="row-lg"><select class="in-lg" id="ePdu" style="flex:2"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${esc(x.id)}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
           <div class="stepper"><button data-step="-1">−</button><input id="eOutlet" type="number" min="1" max="48" value="${esc(it.dcim?.outlet ?? '')}" placeholder="#" /><button data-step="1">＋</button></div></div>
-        <label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(it.notes || '')}</textarea>
+        ${it.liveWarning ? `<div class="warn-box" role="status">⚠ ${esc(it.liveWarning)} <span class="muted">(live check — not part of the notes)</span></div>` : ''}
+        <label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(cleanNotes(it.notes))}</textarea>
         <input type="hidden" id="eStatus" value="${esc(it.status || 'unknown')}" />
       </div>
       <div class="sec big actions">
@@ -1672,7 +2229,7 @@
     const un = $('#eUnplace'); if (un) un.onclick = () => { patchDef(rec.id, { setup: null, shelf: null, placement: undefined, storage: undefined, pos: undefined }); rebuildAll(); select(rec.id, { keepCamera: true }); toast('Item unplaced — find it under Unplaced', 'ok'); };
     const dr = $('#dRack'); if (dr) dr.onchange = () => { patchDef(rec.id, { dcimRack: dr.value || null, dcimMappingConfidence: 'medium' }); rebuildAll(); select(rec.id, { keepCamera: true }); toast(`${rec.id} → ${dr.value || 'no DCIM rack'}`, 'ok'); };
     const sv = $('#eSave'); if (sv) sv.onclick = () => {
-      const patch = { status: $('#eStatus').value, notes: $('#eNotes')?.value ?? def.notes };
+      const patch = { status: $('#eStatus').value, notes: cleanNotes($('#eNotes') ? $('#eNotes').value : def.notes) };
       if ($('#eName')) patch.name = $('#eName').value.trim() || def.name;
       const ownerKey = rec.cat === 'item' ? dcimOwnerKey(it) : null; const owner = $('#eOwner') ? $('#eOwner').value.trim() || null : null;
       if (rec.cat === 'item') {
@@ -1687,9 +2244,9 @@
     const rp = $('#eReplace'); if (rp) rp.onclick = () => {
       const name = prompt('Name of the NEW device (the old one is kept as “dismantled” history):', it.name); if (!name) return;
       const n = { ...JSON.parse(JSON.stringify(it)), id: nextItemId(), name, status: 'building', confidence: 'high', placementConfidence: 'high', photos: [], notes: `Replaced ${it.name} (${it.id}) on ${new Date().toISOString().slice(0, 10)}.` };
-      if (n.dcim) n.dcim.optKey = optKey(name); delete n.live; delete n.effStatus;
+      if (n.dcim) n.dcim.optKey = optKey(name); delete n.live; delete n.effStatus; delete n.liveWarning; delete n.unmappedRack;
       S.data.items.push(n);
-      patchDef(rec.id, { status: 'dismantled', setup: null, shelf: null, placement: undefined, storage: undefined, pos: undefined, notes: (it.notes || '') + ` Replaced by ${n.id} (${name}) on ${new Date().toISOString().slice(0, 10)}.` });
+      patchDef(rec.id, { status: 'dismantled', setup: null, shelf: null, placement: undefined, storage: undefined, pos: undefined, notes: (cleanNotes(it.notes) + ` Replaced by ${n.id} (${name}) on ${new Date().toISOString().slice(0, 10)}.`).trim() });
       rebuildAll(); select(n.id, { keepCamera: true }); toast(`${name} installed in place of ${it.name}`, 'ok');
     };
     const dup = $('#eDup'); if (dup) dup.onclick = () => { const c = JSON.parse(JSON.stringify(S.data.items.find(x => x.id === rec.id))); c.id = nextItemId(); c.name += ' (copy)'; delete c.live; delete c.effStatus; S.data.items.push(c); markDirty(); rebuildAll(); select(c.id, { keepCamera: true }); };
@@ -1804,6 +2361,8 @@
     if (!window.DCIM_CAN_OPERATE) S.editMode = false;
     // a browser draft is only restored if it was made on top of THIS exact dataset (otherwise a newer lab-data.json would be hidden by stale edits)
     S.dataBase = dataFingerprint(data);
+    // what the server holds right now (before any browser draft is applied): the stale-save check compares against it
+    S.serverStamp = location.protocol.startsWith('http') && !window.LAB_DATA ? dataStamp(data) : null;
     const draft = LS.get('draft', null);
     if (draft && draft.data && draft.data.meta && draft.base === S.dataBase) { data = draft.data; S.dirty = true; setTimeout(() => toast('Restored unsaved edits from this browser — Save or Discard', 'ok'), 800); }
     else if (draft) { LS.set('draft', null); if (draft.data) setTimeout(() => toast('lab-data.json changed on the server — old unsaved browser edits were dropped', 'err'), 800); }
@@ -1822,7 +2381,7 @@
     if (S.settings.url) connect(); else if (auto) { api('/api/version').then(() => connect()).catch(() => {}); }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, select, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, startMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab };
+  window.__twin = { S, scene, camera, controls, renderer, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
