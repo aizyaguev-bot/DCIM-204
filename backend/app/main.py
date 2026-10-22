@@ -73,11 +73,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Lab Manager", lifespan=lifespan)
 
 
+def _validation_item(error: dict) -> dict:
+    """Only loc, msg and type. A validator's own message is shown without Pydantic's "Value error, " prefix."""
+    item = {key: error[key] for key in ("loc", "msg", "type") if key in error}
+    if item.get("type") == "value_error" and isinstance(item.get("msg"), str):
+        item["msg"] = item["msg"].removeprefix("Value error, ")
+    return item
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError):
     """No `input` or `ctx`: a submitted value, such as a password, is never echoed back."""
-    errors = [{key: error[key] for key in ("loc", "msg", "type") if key in error} for error in exc.errors()]
-    return JSONResponse({"detail": errors}, status_code=422)
+    return JSONResponse({"detail": [_validation_item(error) for error in exc.errors()]}, status_code=422)
 
 
 _basic_failures: dict[str, float] = {}  # client address -> time of its last wrong Basic password

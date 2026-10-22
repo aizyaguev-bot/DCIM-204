@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, WebSocket
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import accounts
 from app.database import Base
-from app.models import User, UserSession
+from app.models import AuthThrottle, User, UserSession
 
 PASSWORD = "test-password-123"
 
@@ -31,7 +32,9 @@ async def setup(tmp_path, monkeypatch):
         for role in ["Viewer", "Operator"]:
             db.add(User(id=role.lower(),username=role.lower(),name=role,role=role,password_hash=password_hash,created_at=time.time()))
         await db.commit()
+    from app.main import validation_error  # the production 422 body, so messages are checked as users see them
     app = FastAPI()
+    app.add_exception_handler(RequestValidationError, validation_error)
     app.add_middleware(accounts.AccountAccess)
     app.include_router(accounts.router)
     app.state.actions = []
@@ -224,6 +227,80 @@ async def test_password_hash_throttle_and_secure_cookie(setup):
         setup.settings.accounts_secure_cookie=True
         r=await sign_in(c)
         assert "Secure" in r.headers["set-cookie"]
+
+
+async def throttle_attempts(setup, name):
+    """The login throttle's count for "user:<name>" or "ip:<address>" (keys are stored hashed)."""
+    async with setup.sessions() as db:
+        row = await db.get(AuthThrottle, hashlib.sha256(name.encode()).hexdigest())
+        return row.attempts if row else None
+
+
+async def test_successful_logins_do_not_use_up_the_throttle(setup):
+    async with client(setup) as c:
+        for _ in range(15):
+            await sign_in(c, "operator")
+    assert await throttle_attempts(setup, "user:operator") == 0
+    assert await throttle_attempts(setup, "ip:127.0.0.1") == 0
+
+
+async def test_a_success_refunds_only_itself_and_failures_stay_counted(setup):
+    wrong = {"username": "operator", "password": "wrong-password"}
+    async with client(setup) as c:
+        for _ in range(3):
+            assert (await c.post("/api/auth/login", json=wrong)).status_code == 401
+        await sign_in(c, "operator")
+        assert await throttle_attempts(setup, "user:operator") == 3
+        for _ in range(7):
+            assert (await c.post("/api/auth/login", json=wrong)).status_code == 401
+        # Ten failures in the window: the right password waits too, so a guess gives no signal.
+        r = await c.post("/api/auth/login", json={"username": "operator", "password": PASSWORD})
+        assert r.status_code == 429 and r.headers["retry-after"] == "300"
+        assert await throttle_attempts(setup, "user:operator") == 11
+    async with client(setup) as c:
+        for _ in range(10):
+            assert (await c.post("/api/auth/login", json={"username": "admin", "password": "wrong-password"})).status_code == 401
+        assert (await c.post("/api/auth/login", json={"username": "admin", "password": PASSWORD})).status_code == 429
+
+
+async def test_password_changes_are_refunded_but_a_wrong_current_password_counts(setup):
+    async with client(setup) as c:
+        await sign_in(c, "operator")
+        for _ in range(8):
+            assert (await c.post("/api/auth/login", json={"username": "operator", "password": "wrong-password"})).status_code == 401
+        current = PASSWORD
+        for new in ("replacement-password-1", "replacement-password-2"):
+            r = await c.put("/api/me/password", json={"current_password": current, "new_password": new})
+            assert r.status_code == 200, r.text
+            c.headers["X-DCIM-CSRF"] = r.json()["csrf_token"]
+            current = new
+        assert await throttle_attempts(setup, "user:operator") == 8
+        await sign_in(c, "operator", current)
+        assert await throttle_attempts(setup, "user:operator") == 8
+        r = await c.put("/api/me/password", json={"current_password": "not-the-password", "new_password": "replacement-password-3"})
+        assert r.status_code == 400
+        assert await throttle_attempts(setup, "user:operator") == 9
+
+
+async def test_validation_messages_have_no_pydantic_prefix(setup):
+    setup.settings.accounts_registration_enabled = True
+    async with client(setup) as c:
+        r = await c.post("/api/auth/register", json={"username": "Bad User", "name": "Bad", "password": PASSWORD})
+        assert r.status_code == 422
+        assert r.json()["detail"] == [{"loc": ["body", "username"], "type": "value_error",
+                                       "msg": "Use 3–32 letters, digits, dots, dashes or underscores"}]
+        await sign_in(c, "operator")
+        r = await c.put("/api/me", json={"name": "Operator", "email": "ops@lab"})
+        assert r.status_code == 422
+        assert r.json()["detail"] == [{"loc": ["body", "email"], "msg": "Enter a valid email address", "type": "value_error"}]
+        r = await c.put("/api/me", json={"name": "   ", "email": "ops@lab"})
+        assert r.status_code == 422
+        assert [e["msg"] for e in r.json()["detail"]] == ["Full name is required", "Enter a valid email address"]
+        await sign_in(c, "admin")
+        r = await c.post("/api/users", json={"username": "x", "name": " ", "password": "short", "role": "Owner"})
+        assert r.status_code == 422
+        messages = [e["msg"] for e in r.json()["detail"]]
+        assert len(messages) == 4 and not any(m.startswith("Value error, ") for m in messages)
 
 
 async def test_websocket_role_and_origin_are_checked(setup):

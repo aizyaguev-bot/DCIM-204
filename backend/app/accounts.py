@@ -232,10 +232,13 @@ class Preferences(Input):
 
 
 async def throttle(request, username):
+    """Counts one attempt per client address and per username; returns the counter keys so a success can be refunded."""
     now = time.time()
     peer = request.client.host if request.client else "unknown"
+    keys = []
     for key, limit in (("ip:" + peer, 50), ("user:" + username.strip().lower(), 10)):
         key = hashlib.sha256(key.encode()).hexdigest()
+        keys.append(key)
         async with AsyncSessionLocal() as db:
             await db.execute(delete(AuthThrottle).where(AuthThrottle.window_at < now - 3600))
             values = {"attempts":case((AuthThrottle.window_at < now-300, 1), else_=AuthThrottle.attempts+1),
@@ -249,6 +252,15 @@ async def throttle(request, username):
                     attempts = (await db.execute(update(AuthThrottle).where(AuthThrottle.key == key).values(**values).returning(AuthThrottle.attempts))).scalar_one()
             await db.commit()
             if attempts and attempts > limit: raise HTTPException(429, "Too many attempts. Try again in five minutes.", headers={"Retry-After":"300"})
+    return keys
+
+
+async def refund(db, keys):
+    """Gives back the attempt a successful sign-in or password change counted. Never resets or deletes a counter,
+    so failures stay counted; the caller's commit applies it."""
+    for key in keys:
+        await db.execute(update(AuthThrottle).where(AuthThrottle.key == key, AuthThrottle.attempts > 0)
+                         .values(attempts=AuthThrottle.attempts - 1))
 
 
 async def issue_session(db, user, request, response):
@@ -276,7 +288,7 @@ async def auth_status(request: Request, response: Response):
 @router.post("/auth/login")
 async def login(body: Credentials, request: Request, response: Response):
     if not get_settings().accounts_enabled: raise HTTPException(404, "User accounts are not enabled")
-    await throttle(request, body.username)
+    keys = await throttle(request, body.username)
     async with AsyncSessionLocal() as db:
         user = await db.scalar(select(User).where(User.username == body.username.strip().lower()))
         # Run the same password work for unknown names to avoid a cheap username oracle.
@@ -287,6 +299,7 @@ async def login(body: Credentials, request: Request, response: Response):
         old = getattr(request.state, "account", None)
         if old: await db.execute(delete(UserSession).where(UserSession.token_hash == old["session_hash"]))
         result = await issue_session(db, user, request, response)
+        await refund(db, keys)
         await db.commit()
         return result
 
@@ -345,7 +358,7 @@ async def preferences(body: Preferences, request: Request):
 @router.put("/me/password")
 async def password_change(body: PasswordChange, request: Request, response: Response):
     current = account(request)
-    await throttle(request, current["user"]["username"])
+    keys = await throttle(request, current["user"]["username"])
     async with AsyncSessionLocal() as db:
         user = await db.get(User, current["user"]["id"])
         if not await asyncio.to_thread(verify_password, body.current_password, user.password_hash): raise HTTPException(400, "Current password is wrong")
@@ -353,6 +366,7 @@ async def password_change(body: PasswordChange, request: Request, response: Resp
         user.must_change_password = False
         await db.execute(delete(UserSession).where(UserSession.user_id == user.id))
         result = await issue_session(db, user, request, response)
+        await refund(db, keys)
         await db.commit()
         return result
 
