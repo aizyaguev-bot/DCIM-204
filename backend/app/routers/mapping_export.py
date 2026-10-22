@@ -1,7 +1,8 @@
-"""Read-only server connections from saved labels and existing status caches, with each server's rack and U slot
-as the Locations page shows them."""
+"""Read-only server connections from saved labels, existing status caches and the last persisted monitor
+observation, with each server's rack and U slot as the Locations page shows them."""
 import csv
 import io
+import json
 import re
 from datetime import datetime, timezone
 
@@ -12,7 +13,7 @@ from sqlalchemy.orm import load_only
 
 from .. import engineers, ping_monitor
 from ..database import get_db
-from ..models import Device, PingTarget
+from ..models import Device, MonitorDeviceSnapshot, PingTarget
 from . import kvms, pdus
 from .devices import server_locations
 
@@ -25,6 +26,20 @@ def natural_key(value):
                  for index, part in enumerate(re.split(r"([0-9]+)", str(value))))
 
 
+def snapshot_labels(snapshot, device):
+    """Port names from the device's persisted monitor snapshot, when it still describes the same device."""
+    if snapshot is None or (snapshot.kind, snapshot.ip) != (device.kind, device.ip):
+        return []
+    try:
+        ports = json.loads(snapshot.ports_json or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(ports, list):
+        return []
+    return [(str(port["number"]), port.get("label")) for port in ports
+            if isinstance(port, dict) and port.get("number") is not None]
+
+
 async def connection_summary(db: AsyncSession):
     # Only public device fields are loaded. Never request status or refresh a cache:
     # a stale cached observation is still useful for this inventory export.
@@ -32,6 +47,9 @@ async def connection_summary(db: AsyncSession):
         load_only(Device.id, Device.name, Device.kind, Device.ip, Device.rack, Device.labels_json)
     ).order_by(Device.id))).all()
     targets = {target.source_key: target for target in (await db.scalars(select(PingTarget))).all()}
+    # The scheduled monitor persists each device's last observed ports, so port names learned from the device
+    # itself survive an API restart (when the in-memory status caches are empty).
+    snapshots = {snapshot.device_id: snapshot for snapshot in (await db.scalars(select(MonitorDeviceSnapshot))).all()}
     owners = await engineers.owner_map(db)
     # Rack and U slot come from the Locations view itself (same files and rules), and every server it lists is
     # exported, including servers with no PDU outlet or KVM port (known from the rack layout or a ping monitor).
@@ -63,6 +81,10 @@ async def connection_summary(db: AsyncSession):
             labels.setdefault(str(entry.number), entry.label)
             if device.kind == "pdu":
                 states[str(entry.number)] = entry.state
+        if not entries:
+            # Names only: a persisted outlet state may be old, so those outlets stay "unknown".
+            for port, label in snapshot_labels(snapshots.get(device.id), device):
+                labels.setdefault(port, label)
         for port, label in sorted(labels.items(), key=lambda item: natural_key(item[0])):
             if not isinstance(label, str):
                 continue
