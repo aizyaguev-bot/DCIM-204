@@ -42,7 +42,9 @@ code { font-family: var(--mono); font-size: 11px; background: var(--z-900); bord
 #search::placeholder { color: var(--z-500); }
 .search-results { position: absolute; top: 40px; left: 0; right: 0; background: var(--z-950); border: 1px solid var(--z-800); border-radius: 8px; max-height: 320px; overflow: auto; z-index: 50; box-shadow: 0 10px 30px rgba(0,0,0,.6); }
 .search-results .sr { display: flex; gap: 10px; align-items: center; padding: 7px 12px; cursor: pointer; border-bottom: 1px solid rgba(39,39,42,.5); }
-.search-results .sr:hover { background: rgba(118,185,0,.08); }
+.search-results .sr:hover, .search-results .sr.active { background: rgba(118,185,0,.12); }
+.search-results .sr.active { box-shadow: inset 2px 0 0 var(--nv-400); }
+.search-results .sr .ow { color: var(--z-400); font-size: 10.5px; }
 .search-results .sr .id { font-family: var(--mono); font-size: 11px; color: var(--nv-300); min-width: 90px; }
 .search-results .sr .nm { flex: 1; color: var(--z-200); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .search-results .sr .cat { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--z-500); }
@@ -147,7 +149,7 @@ code { font-family: var(--mono); font-size: 11px; background: var(--z-900); bord
 /* ─── viewport ─────────────────────────────────────────────────────────── */
 .viewport { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 #c { width: 100%; height: 100%; display: block; }
-.labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
 .lbl { position: absolute; transform: translate(-50%, -100%); pointer-events: auto; cursor: pointer; white-space: nowrap; font-family: var(--mono); font-size: 10.5px; padding: 2px 6px; border-radius: 5px; border: 1px solid; background: rgba(9,9,11,.82); color: var(--z-200); backdrop-filter: blur(3px); line-height: 1.35; transition: opacity .12s; }
 .lbl small { display: block; font-family: var(--sans); font-size: 9.5px; color: var(--z-400); }
 .lbl.setup { border-color: rgba(118,185,0,.55); color: var(--nv-100); font-weight: 700; font-size: 11.5px; }
@@ -166,7 +168,7 @@ code { font-family: var(--mono); font-size: 11px; background: var(--z-900); bord
 .tb:hover { color: #fff; background: rgba(255,255,255,.05); }
 .tb.active { background: rgba(118,185,0,.16); color: var(--nv-300); }
 .tb.tb-accent { color: var(--nv-300); }
-.hint { position: absolute; bottom: 12px; left: 12px; font-size: 11px; color: var(--z-600); background: rgba(9,9,11,.6); padding: 4px 9px; border-radius: 6px; pointer-events: none; }
+.hint { position: absolute; bottom: 12px; left: 12px; max-width: calc(100% - 120px); font-size: 12px; line-height: 1.6; color: var(--z-200); background: rgba(9,9,11,.85); padding: 4px 9px; border-radius: 6px; pointer-events: none; }
 .compass { position: absolute; bottom: 12px; right: 12px; font-size: 10px; font-weight: 700; letter-spacing: .14em; color: var(--z-500); background: rgba(9,9,11,.6); padding: 4px 9px; border-radius: 6px; pointer-events: none; }
 
 /* ─── detail panel ─────────────────────────────────────────────────────── */
@@ -271,8 +273,9 @@ code { font-family: var(--mono); font-size: 11px; background: var(--z-900); bord
 #btnKiosk.on { background: rgba(34,211,238,.15); color: #a5f3fc; border-color: rgba(34,211,238,.45); }
 body.editmode .viewport { outline: 2px solid rgba(251,191,36,.55); outline-offset: -2px; }
 body.moving #c { cursor: crosshair; }
-.movebanner { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 7; display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-radius: 12px; background: rgba(8,51,68,.92); border: 1px solid rgba(34,211,238,.6); color: #cffafe; font-size: 15px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
-.movebanner .mv-ic { font-size: 20px; color: var(--cyan); }
+/* move banner: left column under the toolbar (top / max-width set by placeAttnDock in app.js), so it never covers a control */
+.movebanner { position: absolute; left: 12px; top: 58px; z-index: 7; display: flex; align-items: center; gap: 8px 10px; padding: 8px 12px; border-radius: 10px; background: rgba(8,51,68,.92); border: 1px solid rgba(34,211,238,.6); color: #cffafe; font-size: 13px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.5); max-width: calc(100% - 80px); }
+.movebanner .mv-ic { font-size: 17px; color: var(--cyan); }
 .edit-hint { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: #fde68a; background: rgba(251,191,36,.08); border: 1px dashed rgba(251,191,36,.35); border-radius: 8px; padding: 6px 10px; text-align: center; }
 .sec.big { display: flex; flex-direction: column; gap: 8px; padding: 14px; }
 .lbl-lg { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--z-500); margin-top: 6px; }
@@ -342,7 +345,9 @@ body.embed .search-wrap { margin-left: 0; }
 .rackbar button { background: rgba(9,9,11,.82); border: 1px solid var(--z-700); color: var(--z-200); border-radius: 10px; padding: 8px 12px; font-family: var(--mono); font-size: 12px; font-weight: 700; cursor: pointer; min-height: 40px; display: flex; flex-direction: column; align-items: center; line-height: 1.1; backdrop-filter: blur(6px); }
 .rackbar button small { font-family: var(--sans); font-weight: 500; font-size: 10px; color: var(--z-500); }
 .rackbar button:hover, .rackbar button.on { border-color: var(--nv-400); color: #fff; }
-.rackbar button.on { background: rgba(118,185,0,.15); }
+/* selected rack: opaque so the 3D scene behind (often the light floor) never washes out the text */
+.rackbar button.on { background: #1f3608; border-color: var(--nv-400); color: #fff; box-shadow: 0 0 0 1px rgba(118,185,0,.35); }
+.rackbar button.on small { color: #d9f99d; }
 .rackbar button .rb-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: 1px; }
 .zoombar { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 5; }
 .zb { width: 44px; height: 44px; border-radius: 10px; background: rgba(9,9,11,.82); border: 1px solid var(--z-700); color: #fff; font-size: 20px; cursor: pointer; backdrop-filter: blur(6px); }
@@ -377,3 +382,125 @@ body.kiosk .telem { font-size: 12px; min-width: 150px; padding: 5px 9px; } body.
 .envpanel .e-foot { border-top: 1px solid rgba(39,39,42,.8); margin-top: 6px; padding-top: 5px; }
 body.editmode .envpanel, body.moving .envpanel { top: 64px; }
 body.kiosk .envpanel { top: 76px; min-width: 240px; font-size: 14px; } body.kiosk .envpanel b { font-size: 24px; }
+
+/* ─── attention: what needs a person today (sidebar tab, floating dock, rack badges) ─── */
+.sev-crit { --sev: #f43f5e; --sev-fg: #fecdd3; } .sev-warn { --sev: #fbbf24; --sev-fg: #fde68a; } .sev-info { --sev: #38bdf8; --sev-fg: #bae6fd; }
+.tabs { flex-wrap: wrap; gap: 0; padding: 4px; }
+.tab { font-size: 9.5px; letter-spacing: .02em; padding: 5px 4px; gap: 3px; }
+.tab .badge { padding: 0 4px; }
+.badge.sev-crit, .badge.sev-warn, .badge.sev-info { background: color-mix(in srgb, var(--sev) 24%, transparent); color: var(--sev-fg); }
+.attn-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 2px 6px; }
+.attn-chips .chip { font-family: var(--sans); }
+.attn-chips .chip .sw { background: var(--sev); }
+.attn-chips .chip b { font-family: var(--mono); font-weight: 500; color: var(--z-300); }
+.attn-chips .chip.off { opacity: .6; }
+#attn .zone-h .sw { width: 8px; height: 8px; border-radius: 50%; background: var(--sev); }
+#attn .zone-h { color: var(--sev-fg); }
+.attn-row { display: flex; align-items: flex-start; gap: 7px; padding: 5px 7px; margin: 2px 0; border-radius: 6px; border-left: 2px solid var(--sev); background: rgba(9,9,11,.35); cursor: pointer; font-size: 12px; color: var(--z-200); }
+.attn-row:hover, .attn-row:focus-visible { background: rgba(255,255,255,.06); }
+.attn-row:focus { outline: none; }
+.attn-row .attn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--sev); flex: 0 0 auto; margin-top: 4px; }
+.attn-row .attn-txt { flex: 1; min-width: 0; line-height: 1.3; overflow-wrap: anywhere; }
+.attn-row .attn-txt small { display: block; color: var(--z-500); font-size: 10.5px; margin-top: 1px; }
+.attn-row.compact { align-items: center; padding: 4px 7px; }
+.attn-row.compact .attn-dot { margin-top: 0; }
+.attn-row.compact .attn-txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attn-row .tag { font-size: 9px; font-family: var(--mono); padding: 0 4px; border-radius: 3px; border: 1px solid var(--z-800); color: var(--z-500); white-space: nowrap; margin-top: 2px; }
+.stats .st-attn { background: rgba(24,24,27,.6); border: 1px solid var(--z-800); border-radius: 999px; padding: 3px 10px; color: var(--z-400); font: inherit; cursor: pointer; }
+.stats .st-attn:hover { border-color: var(--z-600); color: #fff; }
+.stats .st-attn.crit { border-color: rgba(244,63,94,.55); } .stats .st-attn.warn { border-color: rgba(251,191,36,.45); }
+/* floating dock: top-left under the toolbar (top set from JS), also in kiosk where the sidebar is hidden */
+.attn-dock { position: absolute; left: 12px; top: 58px; z-index: 5; width: 290px; max-width: calc(100% - 90px); max-height: calc(100% - 210px); display: flex; flex-direction: column; overflow: hidden; background: rgba(9,9,11,.84); border: 1px solid var(--z-800); border-radius: 10px; backdrop-filter: blur(6px); }
+.attn-dock.sev-crit { border-color: rgba(244,63,94,.55); } .attn-dock.sev-warn { border-color: rgba(251,191,36,.45); }
+.attn-dock-h { display: flex; align-items: center; gap: 7px; width: 100%; background: none; border: 0; color: var(--z-300); font-family: var(--sans); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; padding: 7px 10px; cursor: pointer; text-align: left; }
+.attn-dock-h:hover { color: #fff; }
+.attn-dock-h .caret { color: var(--z-500); width: 10px; }
+.attn-dock-h .attn-sum { margin-left: auto; display: flex; gap: 5px; letter-spacing: 0; }
+.attn-sum b { font-family: var(--mono); font-size: 10.5px; font-weight: 700; min-width: 20px; text-align: center; padding: 0 5px; border-radius: 999px; line-height: 16px; }
+.attn-sum .bad { background: rgba(244,63,94,.25); color: #fecdd3; } .attn-sum .warn { background: rgba(251,191,36,.2); color: #fde68a; } .attn-sum .info { background: rgba(56,189,248,.16); color: #bae6fd; } .attn-sum .ok { color: var(--nv-300); }
+.attn-dock-b { overflow: auto; padding: 0 6px 6px; min-height: 0; }
+.attn-dock .attn-empty { padding: 4px 6px 6px; }
+.attn-more { display: block; width: 100%; margin-top: 4px; background: none; border: 1px dashed var(--z-700); border-radius: 6px; color: var(--z-400); font-size: 11px; padding: 4px; cursor: pointer; font-family: var(--sans); }
+.attn-more:hover { color: #fff; border-color: var(--z-500); }
+/* rack badge on the rack front — visual only, never intercepts clicks */
+.attn-badge { position: absolute; z-index: 130; transform: translate(-50%, -50%); pointer-events: none; font-family: var(--mono); font-size: 10.5px; font-weight: 700; padding: 1px 6px; border-radius: 999px; white-space: nowrap; color: #0a0a0a; background: var(--sev, #a1a1aa); box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 0 10px color-mix(in srgb, var(--sev, #a1a1aa) 70%, transparent); }
+.attn-badge.sev-info { opacity: .85; }
+.rackbar .rb-n { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 999px; font-size: 9.5px; line-height: 14px; background: color-mix(in srgb, var(--sev) 26%, transparent); color: var(--sev-fg); vertical-align: 1px; }
+/* compact telemetry line inside the setup label (the full card only on selection / hover / Heat) */
+.lbl .lt { display: flex; align-items: center; gap: 4px; font-size: 9.5px; font-weight: 500; color: var(--z-300); margin-top: 1px; }
+.lbl .lt:empty { display: none; }
+.lbl .lt b { color: var(--nv-300); font-weight: 700; }
+.lbl .lt.muted { color: var(--z-500); } .lbl .lt.off { color: #fda4af; }
+.lbl .lt .lt-bar { display: inline-block; width: 28px; height: 3px; margin-left: 2px; background: rgba(255,255,255,.14); border-radius: 2px; overflow: hidden; }
+.lbl .lt .lt-bar i { display: block; height: 100%; background: var(--nv-400); }
+.lbl .lt.warn .lt-bar i { background: var(--amber); } .lbl .lt.bad .lt-bar i { background: var(--rose); } .lbl .lt.bad b { color: #fda4af; }
+.lbl .lt .lt-leak { color: #fff; background: #e11d48; padding: 0 4px; border-radius: 3px; font-weight: 700; font-size: 8.5px; }
+body.kiosk .lbl .lt { font-size: 12px; } body.kiosk .lbl .lt .lt-bar { width: 36px; height: 4px; }
+body.kiosk .attn-dock { width: 380px; } body.kiosk .attn-dock-h { font-size: 13px; padding: 12px 14px; } body.kiosk .attn-row { font-size: 15px; padding: 10px 10px; min-height: 48px; } body.kiosk .attn-row.compact { padding: 8px 10px; } body.kiosk .attn-row .attn-txt small { font-size: 12.5px; } body.kiosk .attn-more { font-size: 14px; padding: 10px; }
+body.kiosk .attn-badge { font-size: 13px; padding: 2px 8px; } body.kiosk .stats .st-attn { padding: 4px 14px; }
+
+/* ─── narrow screens (phones, the 3D Twin tab on a phone): no page-level overflow, 3D view stacked above the lists, compact edge controls ─── */
+@media (max-width: 720px) {
+  .hdr, body.embed .hdr { height: auto; flex-wrap: wrap; gap: 6px 8px; padding: 6px 10px; }
+  .brand-text { display: none; }
+  .search-wrap { order: 3; flex: 1 1 100%; max-width: none; margin: 0; }
+  .hdr-right, .stats, .toolbar, .rackbar { overflow-x: auto; scrollbar-width: none; }
+  .hdr-right::-webkit-scrollbar, .stats::-webkit-scrollbar, .toolbar::-webkit-scrollbar, .rackbar::-webkit-scrollbar { display: none; }
+  .hdr-right { flex: 1 1 0; min-width: 0; gap: 6px; }
+  .stats { gap: 14px; padding: 0 10px; }
+  body:not(.kiosk) .layout { grid-template-columns: 1fr; grid-template-rows: minmax(240px, 60%) minmax(0, 1fr); }
+  body:not(.kiosk) .viewport { order: -1; }
+  body:not(.kiosk) .side { border-right: 0; border-top: 1px solid rgba(39,39,42,.6); overflow-y: auto; padding: 8px; }
+  body:not(.kiosk) .side .card.grow { order: -1; flex: none; }
+  /* an open detail panel takes the lists' place under the 3D view instead of squeezing the canvas out */
+  body:not(.kiosk) .detail, body.editmode:not(.kiosk) .detail { width: auto; border-left: 0; border-top: 1px solid rgba(39,39,42,.7); }
+  body:not(.kiosk) .layout:has(> .detail:not(.hidden)) > .side { display: none; }
+  /* the Attention tab is right below the 3D view here, so the floating dock would only cover the canvas */
+  body:not(.kiosk) .attn-dock { display: none; }
+  .toolbar { left: 8px; right: 8px; top: 8px; flex-wrap: nowrap; gap: 6px; }
+  .tb-group { flex: 0 0 auto; }
+  .tb { padding: 5px 8px; }
+  .rackbar { left: 8px; right: 8px; bottom: 46px; transform: none; max-width: none; flex-wrap: nowrap; justify-content: flex-start; }
+  .rackbar button { flex: 0 0 auto; min-height: 32px; padding: 4px 8px; font-size: 11px; }
+  .zoombar { right: 8px; gap: 4px; }
+  .zb { width: 34px; height: 34px; font-size: 16px; }
+  #pL, #pR, #pF, #pB, .zb-sep { display: none; }
+  .hint { left: 0; right: 0; bottom: 0; max-width: none; border-radius: 0; font-size: 11.5px; line-height: 1.45; padding: 4px 10px; }
+  .compass, .envpanel { display: none; }
+  .savebar { left: 8px; right: 8px; flex-wrap: wrap; }
+  .movebanner { left: 8px; max-width: calc(100% - 60px); padding: 6px 8px; gap: 6px 8px; }
+  .toast { max-width: calc(100vw - 24px); }
+}
+
+/* ─── TWIN-FIX: keyboard focus, confirmation dialog, inline KVM console, reduced motion ───────── */
+.attn-row:focus-visible, .tn:focus-visible, .rackbar button:focus-visible, .tb:focus-visible, .zb:focus-visible,
+.btn:focus-visible, .icon-btn:focus-visible, .attn-dock-h:focus-visible, .attn-more:focus-visible, .tab:focus-visible, .st-attn:focus-visible {
+  outline: 2px solid var(--nv-300); outline-offset: 2px;
+}
+.tn:focus-visible { outline-offset: 0; }
+.readonly-note { color: var(--z-300); }
+#confirmModal { z-index: 150; }
+.confirm-card { width: 440px; }
+.confirm-card .modal-h { font-size: 15px; }
+.confirm-card .modal-b { font-size: 13px; color: var(--z-200); }
+.confirm-card .cf-line { font-family: var(--mono); font-size: 12.5px; color: var(--z-100); background: var(--z-900); border: 1px solid var(--z-800); border-radius: 8px; padding: 8px 10px; }
+.confirm-card .cf-move { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 12.5px; background: var(--z-900); border: 1px solid var(--z-800); border-radius: 8px; padding: 8px 10px; }
+.confirm-card .cf-move .k { color: var(--z-500); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; align-self: center; }
+.confirm-card .cf-move b { font-family: var(--mono); font-weight: 600; color: var(--z-100); overflow-wrap: anywhere; }
+.confirm-card .modal-f .btn { min-height: 36px; padding: 8px 16px; }
+.kvm-inline { position: fixed; inset: 0; z-index: 140; display: flex; flex-direction: column; background: var(--z-950); }
+.kvm-inline-h { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px; border-bottom: 1px solid var(--z-800); }
+.kvm-inline iframe { flex: 1; width: 100%; border: 0; background: #000; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+.movebanner { flex-wrap: wrap; justify-content: flex-start; }
+.movebanner #moveText { flex: 1 1 160px; min-width: 0; }
+.movebanner select { flex: 1 1 150px; min-width: 0; max-width: 320px; font-size: 13px; padding: 6px 8px; border-radius: 8px; border: 1px solid rgba(34,211,238,.6); background: var(--z-950); color: var(--z-100); font-family: var(--sans); }
+.movebanner select:focus-visible { outline: 2px solid var(--nv-300); outline-offset: 2px; }
+body.kiosk .movebanner { font-size: 15px; }
+/* TWIN-LOW: visible keyboard focus on the sidebar dropdowns and the search box; a clear highlighted search result */
+.filters select:focus-visible, .detail select:focus-visible, .chk input:focus-visible { outline: 2px solid var(--nv-300); outline-offset: 2px; border-color: rgba(118,185,0,.6); }
+#search:focus-visible { box-shadow: 0 0 0 2px rgba(159,224,64,.45); }
+.search-results .sr.active { background: rgba(118,185,0,.22); box-shadow: inset 3px 0 0 var(--nv-400); }
+.search-results .sr.active .nm { color: #fff; }

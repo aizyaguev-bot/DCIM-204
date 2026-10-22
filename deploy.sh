@@ -32,7 +32,17 @@ sleep 4
 
 echo "=== Running regression tests (live smoke test) ==="
 cd backend
-python -m pytest tests/test_kvm_regression.py -v
+# Only these three credentials come from ../.env (values already in the environment win);
+# the deploy shell never loads that file.
+python - <<'PY'
+import os, subprocess, sys
+from dotenv import dotenv_values
+keys = ("LAB_MANAGER_PASSWORD", "DCIM_TEST_USERNAME", "DCIM_TEST_PASSWORD")
+env = {k: v for k, v in dotenv_values("../.env").items() if k in keys and v}
+env.update(os.environ)
+env.update(DCIM_LIVE_KVM_TESTS="1", DCIM_TEST_BASE_URL="http://localhost:8000")
+sys.exit(subprocess.call([sys.executable, "-m", "pytest", "tests/test_kvm_regression.py", "-v"], env=env))
+PY
 cd ..
 
 echo ""

@@ -13,6 +13,10 @@ from fastapi import HTTPException
 ITEMS_FILE = Path(__file__).resolve().parent.parent / "rack_items.json"
 HISTORY_LIMIT = 100
 TRACKING_FIELDS = ("tracking_history", "last_seen_at")
+MAX_U = 42
+U_SLOT_INVALID = "U slot must be a whole number from 0 to 42."
+LAYOUT_CONFLICT = "This layout was changed in another session. Reload and try again."
+LAYOUT_SAVE_FAILED = "The layout could not be saved. Please retry."
 
 
 def read_items():
@@ -42,10 +46,10 @@ def check_revision(data, expected):
 
 
 @contextmanager
-def locked_items():
-    """Also serialize writers across uvicorn workers on the Linux deployment."""
+def locked_file(path, detail):
+    """Also serialize writers across uvicorn workers on the Linux deployment. The lock file sits next to `path`."""
     try:
-        with ITEMS_FILE.with_suffix(".lock").open("a+b") as lock:
+        with path.with_suffix(".lock").open("a+b") as lock:
             if os.name == "nt":
                 import msvcrt
                 if lock.tell() == 0:
@@ -57,7 +61,7 @@ def locked_items():
                 import fcntl
                 fcntl.flock(lock, fcntl.LOCK_EX)
             try:
-                yield read_items()
+                yield
             finally:
                 if os.name == "nt":
                     lock.seek(0)
@@ -65,21 +69,49 @@ def locked_items():
                 else:
                     fcntl.flock(lock, fcntl.LOCK_UN)
     except OSError as exc:
-        raise HTTPException(503, "Equipment inventory could not be saved. Please retry.") from exc
+        raise HTTPException(503, detail) from exc
 
 
-def write_items(data):
+@contextmanager
+def locked_items():
+    with locked_file(ITEMS_FILE, "Equipment inventory could not be saved. Please retry."):
+        yield read_items()
+
+
+def write_json(path, data, prefix=None, ensure_ascii=True):
+    """Atomic: a temporary file in the same folder replaces `path`."""
     filename = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=ITEMS_FILE.parent, prefix=".rack-items-", suffix=".tmp", encoding="utf-8", delete=False) as out:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=prefix or f".{path.stem}-", suffix=".tmp", encoding="utf-8", delete=False) as out:
             filename = out.name
-            json.dump(data, out, indent=2, ensure_ascii=False)
+            json.dump(data, out, indent=2, ensure_ascii=ensure_ascii)
             out.flush()
             os.fsync(out.fileno())
-        os.replace(filename, ITEMS_FILE)
+        os.replace(filename, path)
     finally:
         if filename and os.path.exists(filename):
             os.unlink(filename)
+
+
+def write_items(data):
+    write_json(ITEMS_FILE, data, prefix=".rack-items-", ensure_ascii=False)
+
+
+def read_layout(path, default):
+    """A missing or unreadable layout file reads as the store's empty value, as before."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def save_layout(path, payload, expected, default, ensure_ascii=True):
+    """If-Match is optional, so old kiosk pages keep saving; a stale revision leaves the file untouched."""
+    with locked_file(path, LAYOUT_SAVE_FAILED):
+        if expected and expected != revision(read_layout(path, default)):
+            raise HTTPException(409, LAYOUT_CONFLICT)
+        write_json(path, payload, ensure_ascii=ensure_ascii)
+    return revision(payload)
 
 
 def location(rack, item):
@@ -102,8 +134,22 @@ def record(item, action, before, after, note=""):
     return event
 
 
+def valid_u(value):
+    """A U slot is a JSON whole number 0..MAX_U; booleans, floats, strings and null are not."""
+    return type(value) is int and 0 <= value <= MAX_U
+
+
+def _same_u(old, item):
+    # Type-strict: JSON 1.0 or true must not pass as an unchanged legacy 1.
+    a, b = old.get("u"), item.get("u")
+    return type(a) is type(b) and a == b
+
+
 def replace_items(payload, expected):
-    """Existing DCIM/Twin editors participate in version checks and movement history."""
+    """Existing DCIM/Twin editors participate in version checks and movement history.
+
+    Refusal order: revision (428/409), then shape and U slot (422), then barcode/serial uniqueness (409).
+    Nothing is written when any of them fails."""
     with locked_items() as current:
         check_revision(current, expected)
         incoming = deepcopy(payload)
@@ -117,6 +163,15 @@ def replace_items(payload, expected):
                 if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"] or item["id"] in seen:
                     raise HTTPException(422, "Every equipment item needs a unique ID.")
                 seen.add(item["id"])
+                # New items and changed U values must be valid; an untouched legacy value is kept as it is.
+                _, old = previous.get(item["id"], (None, None))
+                if not valid_u(item.get("u")) and (old is None or not _same_u(old, item)):
+                    raise HTTPException(422, U_SLOT_INVALID)
+                # Like the scanner's link step, a whole-list save never drops or replaces a linked barcode:
+                # a stale DCIM/Twin copy that omits, blanks or changes it keeps the stored one. Restored here,
+                # before any uniqueness check, so a new item cannot take that barcode in the same save.
+                if old is not None and old.get("barcode") and item.get("barcode") != old["barcode"]:
+                    item["barcode"] = old["barcode"]
         for rack, items in incoming.items():
             for item in items:
                 old_rack, old = previous.get(item["id"], (None, {}))
@@ -131,3 +186,80 @@ def replace_items(payload, expected):
                     record(item, "moved", location(old_rack, old), location(rack, item), "Edited in DCIM or 3D Twin")
         write_items(incoming)
         return incoming
+
+
+# ─── several layout stores in one step (server moves from the Digital Twin) ───────────────────────────────────────
+LAYOUT_NOT_RESTORED = ("The rack layout was only partly saved and could not be fully restored ({files}). "
+                       "Reload and check the rack positions.")
+
+
+def _put_back(path, raw):
+    """Restore a file's exact previous bytes (None: the file did not exist)."""
+    if raw is None:
+        path.unlink(missing_ok=True)
+        return
+    filename = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp", delete=False) as out:
+            filename = out.name
+            out.write(raw)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(filename, path)
+    finally:
+        if filename and os.path.exists(filename):
+            os.unlink(filename)
+
+
+def _holds_bytes(path, raw):
+    try:
+        return path.read_bytes() == raw
+    except FileNotFoundError:
+        return raw is None
+    except OSError:
+        return False
+
+
+def save_layouts(entries):
+    """Write several layout stores together or not at all. `entries`: [(name, path, payload, expected, default)].
+
+    Every file lock is taken first, always in one order (by path). Every If-Match revision is then checked before
+    anything is written: one stale or missing revision means nothing is written (409 / 428). If a write fails, each
+    file already written is put back to its exact previous bytes while the locks are still held, so no other writer
+    can see or save the half-written layout. Synchronous on purpose: nothing awaits while the locks are held."""
+    from contextlib import ExitStack
+    with ExitStack() as locks:
+        for _, path, *_ in sorted(entries, key=lambda e: str(e[1])):
+            locks.enter_context(locked_file(path, LAYOUT_SAVE_FAILED))
+        previous = {}
+        for name, path, _, expected, default in entries:
+            if not expected:
+                raise HTTPException(428, "Reload the rack layout before saving.")
+            if expected != revision(read_layout(path, default)):
+                raise HTTPException(409, LAYOUT_CONFLICT)
+            try:
+                previous[name] = path.read_bytes()
+            except FileNotFoundError:
+                previous[name] = None
+            except OSError as exc:
+                raise HTTPException(503, LAYOUT_SAVE_FAILED) from exc
+        written = []
+        try:
+            for name, path, payload, _, _ in entries:
+                written.append((name, path))
+                write_json(path, payload)
+        except BaseException as exc:
+            unrestored = []
+            for name, path in written:
+                try:
+                    _put_back(path, previous[name])
+                except Exception:
+                    pass
+                if not _holds_bytes(path, previous[name]):
+                    unrestored.append(name)
+            if not isinstance(exc, Exception):
+                raise
+            if unrestored:
+                raise HTTPException(503, LAYOUT_NOT_RESTORED.format(files=", ".join(unrestored))) from exc
+            raise HTTPException(503, LAYOUT_SAVE_FAILED) from exc
+    return {name: revision(payload) for name, _, payload, _, _ in entries}

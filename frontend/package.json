@@ -5,15 +5,30 @@
   "type": "module",
   "scripts": {
     "test:inventory": "node --test src/__tests__/inventory.test.js",
+    "test:changelog": "node --test src/__tests__/changelog.test.js",
+    "test:pxe": "node --test src/__tests__/pxe.test.js",
+    "test:layout": "node --test src/__tests__/layout.test.js",
+    "test:assistant": "node --test src/__tests__/assistant.test.js",
+    "test:qr": "node --test src/__tests__/qr.test.js",
+    "test:locations": "node --test src/__tests__/locations.test.js",
+    "test:connections": "node --test src/__tests__/connections.test.js",
+    "test:rack-rows": "node --test src/__tests__/rack-rows.test.js",
+    "test:assistant-key": "node --test src/__tests__/assistant-key.test.js",
+    "test:ssh": "node --test src/__tests__/ssh.test.js",
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:assistant-actions": "node --test src/__tests__/assistantActions.test.js src/__tests__/assistantActionHistory.test.js",
+    "test:devicenames": "node --test src/__tests__/deviceNames.test.js"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0",
     "jsbarcode": "3.12.3",
+    "qrcode": "1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

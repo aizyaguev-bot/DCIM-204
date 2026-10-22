@@ -4,8 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Lab Manager — Digital Twin</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -23,8 +21,8 @@
 
     <div class="search-wrap">
       <svg class="search-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-3.5-3.5"/></svg>
-      <input id="search" type="text" placeholder="Search ID or name — SETUP-003, Opt133, chiller, KVM…" autocomplete="off" />
-      <div id="searchResults" class="search-results hidden"></div>
+      <input id="search" type="text" placeholder="Search ID, name, owner or SN — SETUP-003, Opt133, chiller, KVM…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchResults" aria-label="Search the lab" />
+      <div id="searchResults" class="search-results hidden" role="listbox" aria-label="Search results"></div>
     </div>
 
     <div class="hdr-right">
@@ -32,7 +30,7 @@
         <span class="dot"></span><span id="liveText">Offline · static data</span>
       </div>
       <button class="btn btn-edit" id="btnEdit" title="Edit mode (F2) — tap objects to edit, move, replace">Edit</button>
-      <button class="btn btn-ghost" id="btnKiosk" title="Lab screen mode (K) — big touch UI, auto-rotate when idle">Screen</button>
+      <button class="btn btn-ghost" id="btnKiosk" title="Lab screen mode (K) — large touch UI, no sidebar; the camera never rotates on its own">Screen</button>
       <button class="btn btn-ghost" id="btnPlan" title="Open the 2D floor plan (floorplan.svg)">2D plan</button>
       <button class="btn btn-ghost" id="btnExport" title="Download the current lab-data.json (with your edits)">Export JSON</button>
       <button class="btn btn-primary" id="btnSettings">
@@ -70,11 +68,13 @@
 
       <section class="card grow">
         <div class="card-h tabs">
-          <button class="tab active" data-tab="tree">Tree</button>
+          <button class="tab active" data-tab="attn" title="What needs attention today">Attention <span class="badge" id="attnCount">0</span></button>
+          <button class="tab" data-tab="tree">Tree</button>
           <button class="tab" data-tab="inv">Inventory</button>
           <button class="tab" data-tab="unplaced">Unplaced <span class="badge" id="unplacedCount">0</span></button>
         </div>
-        <div class="card-b list" id="tree"></div>
+        <div class="card-b list" id="attn"></div>
+        <div class="card-b list hidden" id="tree"></div>
         <div class="card-b list hidden" id="inv"></div>
         <div class="card-b list hidden" id="unplaced"></div>
       </section>
@@ -82,32 +82,35 @@
 
     <!-- 3D viewport -->
     <section class="viewport" id="viewport">
-      <canvas id="c"></canvas>
+      <canvas id="c" tabindex="0" aria-label="3D view of the lab"></canvas>
       <div id="labels" class="labels"></div>
 
       <div class="toolbar">
         <div class="tb-group">
           <button class="tb" id="vOrbit" title="Overview from the entrance (R)">Overview</button>
           <button class="tb" id="vTop" title="Top view (T)">Top</button>
-          <button class="tb" id="vEye" title="Eye-level walk (E)">Eye level</button>
+          <button class="tb" id="vEye" title="Eye-level view (E)">Eye level</button>
         </div>
         <div class="tb-group">
-          <button class="tb" id="tWalls" title="Hide / show walls (W)">Walls</button>
-          <button class="tb" id="tLabels" title="Label density (L)">Labels: setups</button>
-          <button class="tb" id="tZones" title="Zone overlays (Z)">Zones</button>
-          <button class="tb" id="tHeat" title="Temperature heat-map under the racks (live PDU sensors)">Heat</button>
+          <button class="tb" id="tWalls" title="Show / hide the walls (W)">Walls</button>
+          <button class="tb" id="tLabels" title="Label density: racks / all / off (L)">Labels: setups</button>
+          <button class="tb" id="tZones" title="Show / hide the zones (Z)">Zones</button>
+          <button class="tb" id="tHeat" title="Heat map under the racks and full telemetry cards (live PDU sensors)">Heat</button>
         </div>
         <div class="tb-group">
-          <button class="tb tb-accent" id="vReset" title="Reset view (Home)">Reset View</button>
+          <button class="tb tb-accent" id="vReset" title="Reset: close the selection and return to the overview (Home)">Reset</button>
+          <button class="tb" id="vFit" title="Show the whole lab without closing the selection">Fit lab</button>
+          <button class="tb" id="vFocus" title="Fly the camera to the selected object" disabled>Focus</button>
         </div>
       </div>
+      <div class="attn-dock" id="attnDock" aria-label="Attention" aria-live="polite"></div>
 
-      <div class="movebanner hidden" id="moveBanner"><span class="mv-ic">⇄</span><span id="moveText">Tap a shelf</span><button class="btn btn-xs" id="moveCancel">Cancel</button></div>
+      <div class="movebanner hidden" id="moveBanner" role="region" aria-label="Move"><span class="mv-ic" aria-hidden="true">⇄</span><span id="moveText">Tap a shelf</span><select id="moveTarget" aria-label="Destination"></select><button class="btn btn-xs btn-primary" id="moveGo" title="Move to the chosen destination (asks to confirm)">Move here</button><button class="btn btn-xs" id="moveCancel" title="Stop moving (nothing is changed)">Cancel</button></div>
       <div class="savebar hidden" id="saveBar"><span class="sb-dot"></span><span>Unsaved edits</span><button class="btn btn-primary btn-xs" id="sbSave">Save to server</button><button class="btn btn-xs" id="sbDownload">Download JSON</button><button class="btn btn-xs" id="sbDiscard">Discard</button></div>
       <div class="envpanel hidden" id="envPanel"></div>
       <div class="rackbar" id="rackBar"></div>
-      <div class="zoombar"><button class="zb" id="zIn" title="Zoom in">＋</button><button class="zb" id="zOut" title="Zoom out">−</button><button class="zb" id="zL" title="Rotate left">⟲</button><button class="zb" id="zR" title="Rotate right">⟳</button><span class="zb-sep"></span><button class="zb" id="pL" title="Move left (←)">◀</button><button class="zb" id="pR" title="Move right (→)">▶</button><button class="zb" id="pF" title="Move forward (↑)">▲</button><button class="zb" id="pB" title="Move back (↓)">▼</button></div>
-      <div class="hint" id="hint">Drag to rotate around what you touch · two fingers / right-drag to slide the floor · pinch / wheel to zoom there · tap a rack to go there · tap a rack to go there · Edit: drag a device onto a shelf</div>
+      <div class="zoombar"><button class="zb" id="zIn" title="Zoom in">＋</button><button class="zb" id="zOut" title="Zoom out">−</button><button class="zb" id="zL" title="Rotate left">⟲</button><button class="zb" id="zR" title="Rotate right">⟳</button><span class="zb-sep"></span><button class="zb" id="pL" title="Pan left (←)">◀</button><button class="zb" id="pR" title="Pan right (→)">▶</button><button class="zb" id="pF" title="Pan forward (↑)">▲</button><button class="zb" id="pB" title="Pan back (↓)">▼</button></div>
+      <div class="hint" id="hint" dir="rtl" lang="he">שמאל + גרירה: סיבוב · ימין + גרירה: הזזת מבט · גלגלת: זום · הזזת ציוד: עריכה ← Move ← בחירת יעד</div>
       <div class="compass" id="compass">ENTRANCE ↓</div>
     </section>
 
@@ -161,10 +164,31 @@
     </div>
   </div>
 
-  <div id="toasts" class="toasts"></div>
+  <!-- ─── Confirmation for risky actions (power, move) — filled by askChoice() in app.js ─────────── -->
+  <div class="modal hidden" id="confirmModal" role="dialog" aria-modal="true" aria-labelledby="cfTitle" aria-describedby="cfBody">
+    <div class="modal-card confirm-card">
+      <div class="modal-h" id="cfTitle">Confirm</div>
+      <div class="modal-b" id="cfBody"></div>
+      <div class="modal-f" id="cfActions"></div>
+    </div>
+  </div>
+
+  <!-- ─── KVM console inside the twin when the browser blocks a new tab (like the Lab Manager UI) ─── -->
+  <div class="kvm-inline hidden" id="kvmInline" role="dialog" aria-modal="true" aria-label="KVM console">
+    <div class="kvm-inline-h">
+      <div><strong id="kvmInlineTitle">KVM console</strong>
+        <div class="small muted">The browser blocked a new tab, so the console opened here. Closing it frees the KVM port.</div>
+      </div>
+      <button class="btn" type="button" id="kvmInlineClose" aria-label="Close KVM console">Close ✕</button>
+    </div>
+    <iframe id="kvmInlineFrame" title="KVM console viewer" src="about:blank" referrerpolicy="no-referrer" allowfullscreen></iframe>
+  </div>
+
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
   <script src="vendor/three.min.js"></script>
   <script src="vendor/OrbitControls.js"></script>
+  <script src="account-access.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

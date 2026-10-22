@@ -1,45 +1,207 @@
 #!/usr/bin/env python3
-"""Install Ping Monitor on the existing Linux VM using its existing Python venv.
+"""Install a reviewed Lab Manager release using the Linux VM's existing venv.
 
-No sudo, package installation, database seeding, or remote Git write is performed.
+No sudo, system package installation, database seeding, or remote Git write is performed.
+Before the smoke test, packages that the reviewed backend/requirements.txt needs and the
+existing venv lacks are added with pip. The check only reads the venv's package metadata; pip
+runs only when a package is missing, and never reads a pip configuration file. Installed versions
+are never changed, and a pip problem is only a warning: the update continues and a feature
+whose package is missing reports that it is not installed.
 The checkout must be clean except for live twin data and the deployment version.
 Use --backup-frontend-lock to preserve a locally modified npm lockfile in the
 backup and install the reviewed lockfile alongside the prebuilt frontend.
+Use --enable-accounts to activate real users with the existing login password.
+Use --finish-stuck-shutdown to back up live SQLite data and finish stopping this
+project's backend if it does not exit after a normal shutdown request.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import secrets
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.request
+from http.cookiejar import CookieJar
 
 REPOSITORY = "https://github.com/aizyaguev-bot/DCIM-204.git"
 LIVE_TRACKED = {"lab-twin/lab-data.json", "backend/version.txt"}
 FRONTEND_LOCK = "frontend/package-lock.json"
 
+# Backend Python dependencies of the reviewed tree (security review M6/M7). The step only ADDS
+# missing packages: the check reads the venv's metadata (REQUIREMENT_STATUS, never `pip install`),
+# every installed package is pinned by a constraints file, `pip download` from a fixed index (wheels
+# only) is the dry run whose files are inspected before anything changes, and only those new wheels
+# are then installed offline with --no-deps. It is never fatal: a feature whose package is missing
+# (such as the SSH terminal or the AI assistant) reports "not installed" and the update goes on.
+# pip never reads configuration (Codex SSH-CX-2): --isolated alone still loads the global and the
+# venv's pip.conf, whose find-links / extra-index-url would add package sources. Every pip child
+# therefore also gets PIP_CONFIG_FILE=os.devnull, which makes pip skip ALL configuration files, and
+# no other PIP_* variable (see pip_child_environment).
+REQUIREMENTS = "backend/requirements.txt"
+PIP_INDEX_URL = "https://pypi.org/simple"  # fixed; pip reads no pip.conf and no PIP_* variable
+PIP_OPTIONS = ["--isolated", "--disable-pip-version-check", "--no-input", "-q"]
+# Worst case 10 + 3 minutes of pip plus four 1-minute metadata reads stays well inside
+# vm-auto-update.py's 25-minute installer limit.
+PIP_DOWNLOAD_TIMEOUT = 10 * 60
+PIP_INSTALL_TIMEOUT = 3 * 60
+PIP_STOP_GRACE = 10
+PACKAGES_TIMEOUT = 60
+PACKAGES_BEFORE = "python-packages-before.txt"  # also the constraints file that pins installed versions
+PIP_LOG = "pip.log"
+PIP_WHEELS = "pip-wheels"
+# Saved by `scripts/vm-auto-update.py install` for the cron job (it never saves a value that may
+# hold credentials). The cron job starts this installer without them so the backend never sends
+# lab-device traffic through a proxy; only the pip child process receives them, as environment
+# variables (never --proxy on a command line).
+AUTO_UPDATE_STATE = Path(".monitor-backups") / "auto-update" / "state.json"
+PIP_NETWORK_VARIABLES = ("https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY",
+                         "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO")
+
+# Installed distributions of the venv as {normalized name: version}; read-only, no network.
+VENV_PACKAGES = r'''
+import importlib.metadata as metadata, json, re
+found = {}
+for dist in metadata.distributions():
+    try:
+        name, version = dist.metadata["Name"], dist.version
+    except Exception:
+        continue
+    if isinstance(name, str) and name and isinstance(version, str) and version:
+        found.setdefault(re.sub(r"[-_.]+", "-", name).lower(), version)
+print(json.dumps(found, sort_keys=True))
+'''
+
+# Classify each line of a requirements file against the venv: missing, installed with another
+# version (never changed automatically) or not a plain requirement. Read-only, no network.
+REQUIREMENT_STATUS = r'''
+import importlib.metadata as metadata, json, re, sys
+try:
+    from packaging.requirements import Requirement
+except ImportError:
+    from pip._vendor.packaging.requirements import Requirement
+result = {"missing": [], "conflicts": [], "unsupported": []}
+def text(requirement):
+    extras = "[" + ",".join(sorted(requirement.extras)) + "]" if requirement.extras else ""
+    return requirement.name + extras + str(requirement.specifier)
+def check(requirement, depth=0):
+    try:
+        version = metadata.version(requirement.name)
+    except metadata.PackageNotFoundError:
+        if text(requirement) not in result["missing"]:
+            result["missing"].append(text(requirement))
+        return
+    try:
+        ok = requirement.specifier.contains(version, prereleases=True)
+    except Exception:
+        ok = False
+    if not ok:
+        result["conflicts"].append({"name": requirement.name, "installed": version, "wanted": str(requirement.specifier)})
+        return
+    for extra in sorted(requirement.extras) if depth < 3 else ():
+        for line in metadata.requires(requirement.name) or []:
+            dependency = Requirement(line)
+            marker = dependency.marker
+            if marker is not None and marker.evaluate({"extra": extra}) and not marker.evaluate({"extra": ""}):
+                check(Requirement(text(dependency)), depth + 1)
+for raw in open(sys.argv[1], encoding="utf-8").read().splitlines():
+    line = re.sub(r"(^|\s)#.*$", "", raw).strip()
+    if not line:
+        continue
+    try:
+        requirement = None if line.startswith("-") else Requirement(line)
+    except Exception:
+        requirement = None
+    if requirement is None or requirement.url:
+        result["unsupported"].append(line[:200])
+        continue
+    if requirement.marker is None or requirement.marker.evaluate({"extra": ""}):
+        check(requirement)
+print(json.dumps(result))
+'''
+
 # Read credentials in the application environment without exposing them in argv,
 # stdout, shell history or logs. The only HTTP destination is the local backend.
-MONITOR_HEALTH = r'''
-import base64, json, urllib.request
+AUTHENTICATED_HEALTH = r'''
+import asyncio, base64, hashlib, json, secrets, time, urllib.request
+from app.config import get_settings
+
+async def authenticated_health(check):
+    settings = get_settings()
+    headers, digest = {}, None
+    accounts = getattr(settings, "accounts_enabled", False)
+    if accounts:
+        from sqlalchemy import select, delete
+        from app.database import AsyncSessionLocal, engine
+        from app.models import User, UserSession
+        # This local OS-level health check never prints a cookie or changes users.
+        # Its short-lived session is deleted even if an HTTP check fails.
+        async with AsyncSessionLocal() as db:
+            user = await db.scalar(select(User).where(User.enabled.is_(True), User.role == "Admin", User.must_change_password.is_(False)))
+            if not user: raise RuntimeError("No active administrator is ready for account sign-in")
+            token = secrets.token_urlsafe(32)
+            digest = hashlib.sha256(token.encode()).hexdigest()
+            db.add(UserSession(token_hash=digest, user_id=user.id, csrf_token=secrets.token_urlsafe(32), expires_at=time.time()+60))
+            await db.commit()
+        headers["Cookie"] = "dcim_session=" + token
+    elif settings.lab_manager_password:
+        token = base64.b64encode((":" + settings.lab_manager_password).encode()).decode()
+        headers["Authorization"] = "Basic " + token
+    try:
+        return check(headers, accounts)
+    finally:
+        if digest:
+            async with AsyncSessionLocal() as db:
+                await db.execute(delete(UserSession).where(UserSession.token_hash == digest))
+                await db.commit()
+            await engine.dispose()
+'''
+
+MONITOR_HEALTH = AUTHENTICATED_HEALTH + r'''
+def check(headers, accounts):
+    request = urllib.request.Request("http://127.0.0.1:8000/api/monitoring", headers=headers)
+    with urllib.request.urlopen(request, timeout=5) as response:
+        data = json.load(response)
+    return {**{key: data.get(key) for key in ("service", "timezone", "last_started_at", "error")}, "accounts_enabled": accounts}
+print(json.dumps(asyncio.run(authenticated_health(check))))
+'''
+
+READY_HEALTH = AUTHENTICATED_HEALTH + r'''
+import sys
+options = json.load(sys.stdin)
+def check(headers, accounts):
+    base = "http://127.0.0.1:" + str(options["port"])
+    request = urllib.request.Request(base + "/api/version", headers=headers)
+    with urllib.request.urlopen(request, timeout=3) as response:
+        version = json.load(response).get("version")
+    if options.get("expected_version") is not None and version != options["expected_version"]:
+        raise RuntimeError("Another application is answering on the selected port")
+    request = urllib.request.Request(base + "/api/rack-items", headers=headers)
+    with urllib.request.urlopen(request, timeout=3) as response:
+        if options.get("inventory") and not response.headers.get("ETag"):
+            raise RuntimeError("The inventory update is not active")
+        json.load(response)
+    if options.get("expected_accounts") is not None and accounts != options["expected_accounts"]:
+        raise RuntimeError("The requested account mode is not active")
+    return {"version": version, "accounts_enabled": accounts}
+print(json.dumps(asyncio.run(authenticated_health(check))))
+'''
+
+ACCOUNT_PREFLIGHT = r'''
+import json
 from app.config import get_settings
 settings = get_settings()
-headers = {}
-if settings.lab_manager_password:
-    token = base64.b64encode((":" + settings.lab_manager_password).encode()).decode()
-    headers["Authorization"] = "Basic " + token
-request = urllib.request.Request("http://127.0.0.1:8000/api/monitoring", headers=headers)
-with urllib.request.urlopen(request, timeout=5) as response:
-    data = json.load(response)
-print(json.dumps({key: data.get(key) for key in ("service", "timezone", "last_started_at", "error")}))
+print(json.dumps({"has_password":bool(settings.lab_manager_password), "accounts_enabled":getattr(settings, "accounts_enabled", False)}))
 '''
 
 PROBE_ENVIRONMENT = r'''
@@ -54,7 +216,7 @@ print("Local ICMP and Israel timezone checks passed")
 '''
 
 
-def verify_monitoring(root, python):
+def verify_monitoring(root, python, expected_accounts=None):
     last = "Monitoring has not started yet"
     for _ in range(20):
         try:
@@ -62,6 +224,8 @@ def verify_monitoring(root, python):
                 [str(python), "-c", MONITOR_HEALTH], cwd=root / "backend",
                 text=True, stderr=subprocess.PIPE, timeout=10,
             ))
+            if expected_accounts is not None and data.get("accounts_enabled") != expected_accounts:
+                raise RuntimeError("The requested account mode is not active")
             if data.get("timezone") != "Asia/Jerusalem":
                 raise RuntimeError("PING_MONITOR_TIMEZONE must be Asia/Jerusalem for the requested schedule")
             if data.get("service") == "disabled":
@@ -98,11 +262,17 @@ def safe_extract(archive, destination):
                     shutil.copyfileobj(incoming, out)
 
 
-def wait_ready(port, process=None, expected_version=None, inventory=False):
-    for _ in range(40):
+def wait_ready(port, process=None, expected_version=None, inventory=False, root=None, python=None, env=None, expected_accounts=None):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
             raise RuntimeError("The backend exited during startup")
         try:
+            if root is not None:
+                subprocess.check_output([str(python), "-c", READY_HEALTH], cwd=root / "backend", env=env,
+                    input=json.dumps({"port":port, "expected_version":expected_version, "inventory":inventory, "expected_accounts":expected_accounts}),
+                    text=True, stderr=subprocess.PIPE, timeout=12)
+                return
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/version", timeout=1) as r:
                 version = json.load(r).get("version")
             if expected_version is not None and version != expected_version:
@@ -112,24 +282,26 @@ def wait_ready(port, process=None, expected_version=None, inventory=False):
                     raise RuntimeError("The inventory update is not active")
                 json.load(r)
             return
-        except (OSError, ValueError):
+        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             time.sleep(.5)
-    raise RuntimeError("The backend did not become ready within 20 seconds")
+    raise RuntimeError("The backend did not become ready within 30 seconds")
 
 
 def start(root, python, log_path, port=8000, env=None):
     with log_path.open("ab") as log:
         return subprocess.Popen(
-            [str(python), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1" if env else "0.0.0.0", "--port", str(port)],
+            [str(python), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1" if env else "0.0.0.0", "--port", str(port),
+             "--timeout-graceful-shutdown", "10"],
             cwd=root / "backend", stdin=subprocess.DEVNULL, stdout=log, stderr=log,
             start_new_session=True, env=env,
         )
 
 
-def smoke_test(source, python, backup):
+def smoke_test(source, python, backup, enable_accounts=False):
     # All checks happen against the extracted source before stopping the live app.
     env = {**os.environ, "DATABASE_URL": "sqlite+aiosqlite:///:memory:", "LAB_MANAGER_PASSWORD": "",
-           "PING_MONITOR_ENABLED": "true", "PING_MONITOR_TIMEZONE": "Asia/Jerusalem"}
+           "PING_MONITOR_ENABLED": "true", "PING_MONITOR_TIMEZONE": "Asia/Jerusalem",
+           "ACCOUNTS_ENABLED": "false", "ACCOUNTS_REGISTRATION_ENABLED": "false", "EMAIL_ALERTS_ENABLED": "false"}
     probe = subprocess.run([str(python), "-c", PROBE_ENVIRONMENT], cwd=source / "backend",
                            env=env, text=True, capture_output=True, timeout=20)
     if probe.returncode:
@@ -155,6 +327,27 @@ def smoke_test(source, python, backup):
             raise RuntimeError("The reviewed commit has no built frontend")
         for asset in assets:
             urllib.request.urlopen(f"http://127.0.0.1:{port}{asset}", timeout=3).close()
+        if enable_accounts:
+            process.terminate()
+            process.wait(timeout=8)
+            env.update(ACCOUNTS_ENABLED="true", LAB_MANAGER_PASSWORD=secrets.token_urlsafe(24),
+                       ACCOUNTS_SECURE_COOKIE="false", DATABASE_URL="sqlite+aiosqlite:///" + str(backup / "preflight-accounts.db"))
+            process = start(source, python, backup / "preflight-accounts.log", port, env)
+            wait_ready(port, process=process, inventory=True, root=source, python=python, env=env, expected_accounts=True)
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+            credentials = {"username":env.get("ACCOUNTS_ADMIN_USERNAME", "admin"), "password":env["LAB_MANAGER_PASSWORD"]}
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/api/auth/login", data=json.dumps(credentials).encode(),
+                                             headers={"Content-Type":"application/json"})
+            with opener.open(request, timeout=5) as response:
+                account = json.load(response)
+            if account.get("user", {}).get("role") != "Admin":
+                raise RuntimeError("Account preflight did not initialize an administrator")
+            with opener.open(f"http://127.0.0.1:{port}/api/users", timeout=3) as response:
+                if len(json.load(response)) != 1:
+                    raise RuntimeError("Account preflight must use only an isolated administrator")
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/api/auth/logout", method="POST",
+                                             headers={"X-DCIM-CSRF":account["csrf_token"]})
+            opener.open(request, timeout=3).close()
     finally:
         process.terminate()
         try:
@@ -162,6 +355,276 @@ def smoke_test(source, python, backup):
         except subprocess.TimeoutExpired:
             process.kill()  # Only the isolated child started above.
             process.wait()
+
+
+def saved_network_settings(root):
+    """Proxy/CA settings saved for the auto-update cron job, re-checked like vm-auto-update.py does."""
+    path = root / AUTO_UPDATE_STATE
+    try:
+        if path.is_symlink() or not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    raw = data.get("environment") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {name: raw[name] for name in PIP_NETWORK_VARIABLES
+            if isinstance(raw.get(name), str) and raw[name] and not any(mark in raw[name] for mark in "@\n\r\0")}
+
+
+def pip_environment(root, environ=None):
+    """(environment, CA file) for pip's download only: own settings win, saved cron settings fill the gaps."""
+    env = dict(os.environ if environ is None else environ)
+    for name, value in saved_network_settings(root).items():
+        if not env.get(name):
+            env[name] = value
+    cafile = env.get("SSL_CERT_FILE") or env.get("GIT_SSL_CAINFO")
+    return env, (cafile if cafile and os.path.isfile(cafile) else None)
+
+
+def mask_secrets(text, env=None):
+    """Hide URL credentials and any proxy/pip setting that may hold them before text is logged or printed."""
+    text = str(text or "")
+    for name, value in (env or {}).items():
+        upper = name.upper()
+        if value and "@" in value and len(value) >= 4 and (upper.endswith("_PROXY") or upper.startswith("PIP_")):
+            text = text.replace(value, "***")
+    return re.sub(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]*@", r"\1***@", text)
+
+
+def output_tail(text, lines=6, limit=1200):
+    kept = [line.rstrip()[:300] for line in str(text or "").splitlines() if line.strip()][-lines:]
+    return "\n".join(kept)[-limit:]
+
+
+def exited_unreaped(pid):
+    """True once our child has exited, without reaping it, so its process group ID stays reserved."""
+    try:
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
+def stop_process_group(process, grace=PIP_STOP_GRACE):
+    """TERM, then KILL, pip's own process group; the leader is reaped only afterwards."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:  # not Linux: only the child itself can be stopped
+        process.kill()
+    else:
+        try:
+            killpg(process.pid, signal.SIGTERM)
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline and not exited_unreaped(process.pid):
+                time.sleep(.2)
+            killpg(process.pid, signal.SIGKILL)  # members that ignored TERM or outlived the leader
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass  # stuck in uninterruptible I/O; the warning line names the limit
+
+
+@contextmanager
+def stop_on_termination(process):
+    """If this installer is told to stop (the auto-update's own limit), stop pip's process group first."""
+    def handler(number, frame):
+        stop_process_group(process)
+        raise SystemExit(128 + number)
+    try:
+        previous = signal.signal(signal.SIGTERM, handler)
+    except ValueError:  # not the main thread: nothing can be forwarded
+        previous = False
+    try:
+        yield
+    finally:
+        if previous is not False:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
+
+
+def pip_child_environment(env=None):
+    """pip's environment: `env` (default: this process's) without any PIP_* variable, plus PIP_CONFIG_FILE=os.devnull.
+
+    pip's Configuration skips every configuration file (global, user, venv) when PIP_CONFIG_FILE is
+    os.devnull, whether or not --isolated is given; --isolated in PIP_OPTIONS also makes it ignore
+    PIP_* variables, which are removed here as well. Proxy and CA variables are kept unchanged.
+    """
+    child = {name: value for name, value in (os.environ if env is None else env).items()
+             if not name.upper().startswith(("PIP_", "_PIP_"))}
+    child["PIP_CONFIG_FILE"] = os.devnull
+    return child
+
+
+def run_pip(python, arguments, backup, timeout, env=None):
+    """Run the venv's pip in its own process group; return (exit code, or None after the time limit, masked output).
+
+    pip reads no configuration file and no PIP_* variable (pip_child_environment). The masked output
+    is appended to the private backup folder; nothing is printed here.
+    """
+    argv = [str(python), "-I", "-m", "pip", *arguments]
+    secrets_env = dict(os.environ if env is None else env)  # masking also covers what the child does not get
+    try:
+        process = subprocess.Popen(argv, cwd=str(backup), env=pip_child_environment(env), stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                                   start_new_session=True)
+    except OSError as exc:
+        code, output = -1, "pip could not start: " + type(exc).__name__
+    else:
+        with stop_on_termination(process):
+            try:
+                output, _ = process.communicate(timeout=timeout)
+                code = process.returncode
+            except subprocess.TimeoutExpired:
+                stop_process_group(process)
+                try:
+                    output = process.communicate(timeout=PIP_STOP_GRACE)[0] or ""
+                except (subprocess.TimeoutExpired, ValueError, OSError):
+                    output = ""
+                code, output = None, output + "\n[stopped after " + str(timeout) + " seconds]"
+    output = mask_secrets(output, secrets_env)
+    descriptor = os.open(backup / PIP_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "a", encoding="utf-8") as log:
+        log.write("$ pip " + mask_secrets(" ".join(arguments), secrets_env) + "\n" + (output or "").rstrip() + "\n"
+                  + "exit: " + ("timeout" if code is None else str(code)) + "\n\n")
+    return code, output or ""
+
+
+def venv_python_json(python, backup, script, *arguments):
+    try:
+        result = subprocess.run([str(python), "-I", "-c", script, *arguments], cwd=str(backup), stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=PACKAGES_TIMEOUT)
+        data = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        data = None
+    if not isinstance(data, dict):
+        raise RuntimeError("the Python packages in backend/.venv cannot be read")
+    return data
+
+
+def venv_packages(python, backup):
+    return {str(name): str(version) for name, version in venv_python_json(python, backup, VENV_PACKAGES).items()}
+
+
+def requirement_status(python, backup, requirements):
+    """(missing, conflicts, unsupported) of a requirements file against the venv: read-only, never runs pip."""
+    status = venv_python_json(python, backup, REQUIREMENT_STATUS, str(requirements))
+    def items(key):
+        value = status.get(key)
+        return value if isinstance(value, list) else []
+    return ([str(item) for item in items("missing")], [item for item in items("conflicts") if isinstance(item, dict)],
+            [str(item) for item in items("unsupported")])
+
+
+def wheel_plan(directory, installed):
+    """Verdict of the dry run: {name: (version, wheel)} to add. Any change to an installed version is refused."""
+    plan, changes = {}, []
+    for path in sorted(directory.iterdir()) if directory.is_dir() else []:
+        parts = path.name[:-4].split("-") if path.name.endswith(".whl") else []
+        if len(parts) not in (5, 6) or path.is_symlink() or not path.is_file():
+            raise RuntimeError("the dry run downloaded an unexpected file (" + path.name[:80] + "); nothing was installed")
+        name, version = re.sub(r"[-_.]+", "-", parts[0]).lower(), parts[1]
+        if name in installed:
+            if installed[name] != version:
+                changes.append(name + " " + installed[name] + " -> " + version)
+            continue
+        if name in plan:
+            raise RuntimeError("the dry run downloaded two versions of " + name + "; nothing was installed")
+        plan[name] = (version, path)
+    if changes:
+        raise RuntimeError("the dry run would change installed packages (" + ", ".join(changes) + "); nothing was installed")
+    return plan
+
+
+def pip_warning(reason, backup, output=""):
+    log = backup / PIP_LOG
+    print("WARNING: backend Python packages were not added: " + reason + ". The update continues; a feature whose "
+          "package is missing (such as the SSH terminal or the AI assistant) reports that it is not installed."
+          + (" pip log: " + str(log) if log.exists() else ""), flush=True)
+    tail = output_tail(output)  # already masked by run_pip
+    if tail:
+        print("  pip: " + tail.replace("\n", "\n  pip: "), flush=True)
+
+
+def install_requirements(root, source, python, backup):
+    """Add the reviewed tree's missing backend packages to the venv while the old site keeps running.
+
+    Never fatal and never changes an installed version. Returns the added {name: version}, or None.
+    """
+    requirements = source / REQUIREMENTS
+    if not requirements.is_file():
+        print("This release has no " + REQUIREMENTS + "; Python packages were left unchanged.", flush=True)
+        return None
+    print("Checking the backend Python packages…", flush=True)
+    try:
+        return add_missing_packages(root, requirements, python, backup)
+    except Exception as exc:  # pip must never block a release
+        pip_warning(mask_secrets(str(exc)) or type(exc).__name__, backup)
+        return None
+    finally:
+        shutil.rmtree(backup / PIP_WHEELS, ignore_errors=True)
+
+
+def add_missing_packages(root, requirements, python, backup):
+    # The check only reads the venv's package metadata: pip is not run (a `pip install` used as a
+    # check could install from a find-links source in a pip configuration file).
+    missing, conflicts, unsupported = requirement_status(python, backup, requirements)
+    if not (missing or conflicts or unsupported):
+        print("Backend Python packages already match " + REQUIREMENTS + ".", flush=True)
+        return None
+    if conflicts:
+        print("NOTE: installed versions are never changed automatically; these stay as they are: " + "; ".join(
+            str(item.get("name")) + " " + str(item.get("installed")) + " (release asks " + str(item.get("wanted")) + ")"
+            for item in conflicts), flush=True)
+    if unsupported:
+        print("NOTE: requirement lines that are not plain packages are skipped: "
+              + mask_secrets(", ".join(unsupported)), flush=True)
+    if not missing:
+        return None
+    installed = venv_packages(python, backup)
+    constraints = backup / PACKAGES_BEFORE
+    constraints.write_text("".join(name + "==" + installed[name] + "\n" for name in sorted(installed)), encoding="utf-8")
+    os.chmod(constraints, 0o600)
+    env, cafile = pip_environment(root)
+    wheels = backup / PIP_WHEELS
+    print("Downloading missing backend Python packages: " + ", ".join(missing) + " (time limit "
+          + str(PIP_DOWNLOAD_TIMEOUT // 60) + " minutes)…", flush=True)
+    download = ["download", *PIP_OPTIONS, "--only-binary=:all:", "--index-url", PIP_INDEX_URL,
+                "-c", str(constraints), "-d", str(wheels)] + (["--cert", cafile] if cafile else [])
+    code, output = run_pip(python, download + missing, backup, PIP_DOWNLOAD_TIMEOUT, env)
+    if code != 0:
+        reason = ("the download did not finish within " + str(PIP_DOWNLOAD_TIMEOUT // 60) + " minutes" if code is None
+                  else "the download failed (pip exit " + str(code) + ")")
+        pip_warning(reason, backup, output)
+        return None
+    plan = wheel_plan(wheels, installed)
+    if not plan:
+        pip_warning("the download brought no new package", backup)
+        return None
+    print("Adding " + ", ".join(name + " " + plan[name][0] for name in sorted(plan)) + "…", flush=True)
+    add = ["install", *PIP_OPTIONS, "--no-index", "--no-deps", "--only-binary=:all:"]
+    code, output = run_pip(python, add + [str(plan[name][1]) for name in sorted(plan)], backup, PIP_INSTALL_TIMEOUT)
+    after = venv_packages(python, backup)
+    changed = [name for name in sorted(installed) if after.get(name) != installed[name]]
+    if changed:
+        print("WARNING: installed packages changed unexpectedly (" + ", ".join(changed) + "); restore them with: "
+              "backend/.venv/bin/python -m pip install --no-deps -r " + str(constraints), flush=True)
+    if code != 0:
+        reason = "adding the downloaded packages " + ("timed out" if code is None else "failed (pip exit " + str(code) + ")")
+        pip_warning(reason, backup, output)
+        return None
+    added = {name: after[name] for name in sorted(after) if name not in installed}
+    print("Backend Python packages added: " + (", ".join(name + " " + version for name, version in added.items())
+                                               or "none") + ".", flush=True)
+    try:
+        still_missing = requirement_status(python, backup, requirements)[0]
+    except RuntimeError:
+        still_missing = ["(the venv could not be re-checked)"]
+    if still_missing:
+        print("NOTE: " + REQUIREMENTS + " is still not fully satisfied (" + ", ".join(still_missing)
+              + "); see the pip log: " + str(backup / PIP_LOG), flush=True)
+    return added
 
 
 def service_pids(root, proc_root=Path("/proc")):
@@ -205,7 +668,7 @@ def port_occupied(port=8000):
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
-def stop_existing(pid):
+def stop_existing(pid, *, force=False, root=None):
     started = active_process(pid)
     if started is None:
         return
@@ -218,7 +681,56 @@ def stop_existing(pid):
             return  # Exited, zombie, or a different process now has this PID.
         time.sleep(.25)
     if active_process(pid) == started:
-        raise RuntimeError("The old backend has not stopped; no application files were changed")
+        if not force:
+            raise RuntimeError("The old backend has not stopped; no application files were changed. "
+                               "Use --finish-stuck-shutdown to take a live database backup and finish stopping this project's backend")
+        # Recheck ownership, directory, command and process identity after waiting.
+        # A reused PID or another project's process must never receive SIGKILL.
+        if root is None or pid not in service_pids(root):
+            raise RuntimeError("The stuck process no longer matches this project; it was not force-stopped")
+        if active_process(pid) != started:
+            return
+        print("Finishing shutdown of the verified project backend; a live database snapshot was saved before stopping…", flush=True)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        for _ in range(40):
+            if active_process(pid) != started:
+                return
+            time.sleep(.25)
+        raise RuntimeError("The verified backend could not be stopped; no application files were changed")
+
+
+def snapshot_before_shutdown(root, backup):
+    """Save a coherent SQLite snapshot while the old application is still alive."""
+    destination = backup / "before-stop"
+    destination.mkdir(mode=0o700)
+    runtime = [root / ".env", root / "backend" / "version.txt", root / "lab-twin" / "lab-data.json"]
+    runtime += list((root / "backend").glob("*.json"))
+    for path in runtime:
+        if path.is_file():
+            saved = destination / path.relative_to(root)
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, saved)
+    for path in (root / "backend").glob("*.db"):
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError("Live database backup requires a regular SQLite database file")
+        saved = destination / path.relative_to(root)
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 15
+        def progress(status, remaining, total):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Live database backup timed out; the running backend was not stopped")
+        try:
+            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as source:
+                with closing(sqlite3.connect(saved)) as target:
+                    source.backup(target, pages=256, progress=progress, sleep=.05)
+                    if target.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                        raise RuntimeError("The live database snapshot failed its integrity check")
+        except sqlite3.Error as exc:
+            raise RuntimeError("Live database backup failed; the running backend was not stopped") from exc
+    print("Live data snapshot saved to: " + str(destination), flush=True)
 
 
 def restore_live(root, backup):
@@ -228,6 +740,41 @@ def restore_live(root, backup):
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(saved, target)
+
+
+def check_account_activation(root, python):
+    if (root / ".env").is_symlink():
+        raise RuntimeError("Account activation requires a regular project .env file")
+    override = os.environ.get("ACCOUNTS_ENABLED")
+    if override is not None and override.strip().lower() not in {"true", "1", "yes", "on"}:
+        raise RuntimeError("The shell's ACCOUNTS_ENABLED override prevents activation; unset it before installing")
+    result = json.loads(subprocess.check_output([str(python), "-c", ACCOUNT_PREFLIGHT], cwd=root / "backend", text=True, stderr=subprocess.PIPE, timeout=10))
+    if not result["accounts_enabled"] and not result["has_password"]:
+        raise RuntimeError("Set the existing LAB_MANAGER_PASSWORD before enabling accounts; no default password is created")
+
+
+def enable_account_mode(root, backup):
+    path = root / ".env"
+    saved = backup / "runtime" / ".env"
+    original = saved.read_bytes() if saved.exists() else b""
+    if (path.read_bytes() if path.exists() else b"") != original:
+        raise RuntimeError("The .env changed during installation; account settings were left untouched")
+    lines = original.decode("utf-8").splitlines(keepends=True)
+    newline = "\r\n" if b"\r\n" in original else "\n"
+    lines = [line for line in lines if not re.match(r"\s*(?:export\s+)?ACCOUNTS_ENABLED\s*=", line)]
+    text = "".join(lines)
+    if text and not text.endswith(("\n", "\r")): text += newline
+    contents = (text + "ACCOUNTS_ENABLED=true" + newline).encode("utf-8")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=root, prefix=".env-install-", delete=False) as out:
+            temporary = Path(out.name)
+            out.write(contents)
+        if path.exists(): shutil.copymode(path, temporary)
+        else: os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists(): temporary.unlink()
 
 
 @contextmanager
@@ -242,7 +789,7 @@ def install_lock(root):
         yield
 
 
-def install(root, commit, backup_frontend_lock=False):
+def install(root, commit, backup_frontend_lock=False, enable_accounts=False, finish_stuck_shutdown=False):
     root = root.resolve()
     if Path(git(root, "rev-parse", "--show-toplevel")).resolve() != root:
         raise RuntimeError("Choose the DCIM-204 Git repository itself")
@@ -258,6 +805,8 @@ def install(root, commit, backup_frontend_lock=False):
         dirty -= local_source
         if dirty:
             raise RuntimeError("Local source edits need review before installing: " + ", ".join(sorted(dirty)))
+        if enable_accounts:
+            check_account_activation(root, python)
         for relative in local_source:
             path = root / relative
             if path.is_symlink() or not path.is_file():
@@ -301,8 +850,11 @@ def install(root, commit, backup_frontend_lock=False):
         source = backup / "source"
         source.mkdir()
         safe_extract(archive, source)
+        # Missing dependencies are added to the shared venv while the old site keeps running (never
+        # fatal, never a version change), so the smoke test runs the new tree with the final packages.
+        packages = install_requirements(root, source, python, backup)
         print("Checking startup with the VM's Python environment…", flush=True)
-        smoke_test(source, python, backup)
+        smoke_test(source, python, backup, enable_accounts)
         for relative in local_source:
             path = root / relative
             original = path.read_bytes()
@@ -313,16 +865,22 @@ def install(root, commit, backup_frontend_lock=False):
                 raise RuntimeError("The local lockfile changed during backup; installation stopped")
             print("Local npm lockfile saved to: " + str(saved), flush=True)
         print("Preflight passed. Saving the current inventory and updating…", flush=True)
+        if finish_stuck_shutdown and pids:
+            snapshot_before_shutdown(root, backup)
 
         stopped = False
         stop_attempted = False
         updated = False
         new_process = None
         cleared_source = set()
+        accounts_config_changed = False
         try:
             if pids:
                 stop_attempted = True
-                stop_existing(pids[0])
+                if finish_stuck_shutdown:
+                    stop_existing(pids[0], force=True, root=root)
+                else:
+                    stop_existing(pids[0])
                 stopped = True
             if port_occupied():
                 raise RuntimeError("Port 8000 is still occupied; no application files were changed")
@@ -347,9 +905,14 @@ def install(root, commit, backup_frontend_lock=False):
             updated = True
             restore_live(root, backup)
             (root / "backend" / "version.txt").write_text(commit[:7] + "\n")
+            if enable_accounts:
+                enable_account_mode(root, backup)
+                accounts_config_changed = True
             new_process = start(root, python, root / "backend" / "server.log")
-            wait_ready(8000, new_process, expected_version=commit[:7], inventory=True)
-            verify_monitoring(root, python)
+            wait_ready(8000, new_process, expected_version=commit[:7], inventory=True, root=root, python=python,
+                       expected_accounts=True if enable_accounts else None)
+            if enable_accounts: verify_monitoring(root, python, expected_accounts=True)
+            else: verify_monitoring(root, python)
         except Exception:
             if new_process is not None and new_process.poll() is None:
                 new_process.terminate()
@@ -361,6 +924,10 @@ def install(root, commit, backup_frontend_lock=False):
                     raise RuntimeError("New local source edits prevent automatic rollback. Backup: " + str(backup))
                 git(root, "reset", "--hard", old)
             restore_live(root, backup)
+            if accounts_config_changed:
+                saved = backup / "runtime" / ".env"
+                if saved.exists(): shutil.copy2(saved, root / ".env")
+                else: (root / ".env").unlink(missing_ok=True)
             for relative in cleared_source:
                 shutil.copy2(backup / "local-source" / relative, root / relative)
             # A shutdown can finish as an error is raised. Recover the old site
@@ -369,11 +936,16 @@ def install(root, commit, backup_frontend_lock=False):
                 stopped = active_process(pids[0]) is None
             if stopped and not port_occupied():
                 previous = start(root, python, root / "backend" / "server.log")
-                wait_ready(8000, previous)
+                wait_ready(8000, previous, root=root, python=python)
             print("Update failed. Original source and live twin data restored. Backup: " + str(backup), file=sys.stderr)
             raise
         print("Installed " + commit[:7] + ". Inventory preserved. Backup: " + str(backup))
-        print("Open the site with ?tab=monitoring and refresh existing DCIM / 3D Twin tabs.")
+        if packages:
+            print("Python packages added: " + ", ".join(packages) + " (earlier package list: "
+                  + str(backup / PACKAGES_BEFORE) + ")")
+        print("Open the site with ?tab=dashboard and refresh existing DCIM / 3D Twin tabs.")
+        if enable_accounts:
+            print("Accounts enabled. First administrator: ACCOUNTS_ADMIN_USERNAME (admin by default), using the existing site password.")
         print("Ping Monitor: every 5 minutes 07:00-20:00; every 30 minutes overnight; Asia/Jerusalem.")
         print("Check imported server names/IPs in Ping Monitor. DNS and lab reachability need verification there.")
         print("The backend is running in the background. VM boot startup remains unchanged.")
@@ -387,6 +959,8 @@ def main():
         "--backup-frontend-lock", action="store_true",
         help="Back up local frontend/package-lock.json edits and replace them with the reviewed version",
     )
+    parser.add_argument("--enable-accounts", action="store_true", help="Enable real users after testing account-mode startup; preserve existing credentials and back up .env")
+    parser.add_argument("--finish-stuck-shutdown", action="store_true", help="Take a live database snapshot and finish stopping only this project's backend if graceful shutdown times out")
     args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("Run this installer inside the Linux VM")
@@ -394,7 +968,8 @@ def main():
         parser.error("Use the application's backend/.venv/bin/python (Python 3.10+), not the old system Python")
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("Pass a full 40-character commit SHA")
-    install(args.project, args.commit, backup_frontend_lock=args.backup_frontend_lock)
+    install(args.project, args.commit, backup_frontend_lock=args.backup_frontend_lock, enable_accounts=args.enable_accounts,
+            finish_stuck_shutdown=args.finish_stuck_shutdown)
 
 
 if __name__ == "__main__":
