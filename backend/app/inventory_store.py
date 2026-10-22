@@ -13,6 +13,8 @@ from fastapi import HTTPException
 ITEMS_FILE = Path(__file__).resolve().parent.parent / "rack_items.json"
 HISTORY_LIMIT = 100
 TRACKING_FIELDS = ("tracking_history", "last_seen_at")
+MAX_U = 42
+U_SLOT_INVALID = "U slot must be a whole number from 0 to 42."
 LAYOUT_CONFLICT = "This layout was changed in another session. Reload and try again."
 LAYOUT_SAVE_FAILED = "The layout could not be saved. Please retry."
 
@@ -132,8 +134,22 @@ def record(item, action, before, after, note=""):
     return event
 
 
+def valid_u(value):
+    """A U slot is a JSON whole number 0..MAX_U; booleans, floats, strings and null are not."""
+    return type(value) is int and 0 <= value <= MAX_U
+
+
+def _same_u(old, item):
+    # Type-strict: JSON 1.0 or true must not pass as an unchanged legacy 1.
+    a, b = old.get("u"), item.get("u")
+    return type(a) is type(b) and a == b
+
+
 def replace_items(payload, expected):
-    """Existing DCIM/Twin editors participate in version checks and movement history."""
+    """Existing DCIM/Twin editors participate in version checks and movement history.
+
+    Refusal order: revision (428/409), then shape and U slot (422), then barcode/serial uniqueness (409).
+    Nothing is written when any of them fails."""
     with locked_items() as current:
         check_revision(current, expected)
         incoming = deepcopy(payload)
@@ -147,6 +163,15 @@ def replace_items(payload, expected):
                 if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"] or item["id"] in seen:
                     raise HTTPException(422, "Every equipment item needs a unique ID.")
                 seen.add(item["id"])
+                # New items and changed U values must be valid; an untouched legacy value is kept as it is.
+                _, old = previous.get(item["id"], (None, None))
+                if not valid_u(item.get("u")) and (old is None or not _same_u(old, item)):
+                    raise HTTPException(422, U_SLOT_INVALID)
+                # Like the scanner's link step, a whole-list save never drops or replaces a linked barcode:
+                # a stale DCIM/Twin copy that omits, blanks or changes it keeps the stored one. Restored here,
+                # before any uniqueness check, so a new item cannot take that barcode in the same save.
+                if old is not None and old.get("barcode") and item.get("barcode") != old["barcode"]:
+                    item["barcode"] = old["barcode"]
         for rack, items in incoming.items():
             for item in items:
                 old_rack, old = previous.get(item["id"], (None, {}))
