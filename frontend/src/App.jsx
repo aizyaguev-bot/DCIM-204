@@ -34,6 +34,7 @@ function linkedAdminSection(search) {
   const section = new URLSearchParams(search).get("section");
   return ADMIN_SECTIONS.includes(section) ? section : "devices";
 }
+import { dashboardStats } from "./dashboardStats";
 
 export default function App() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
@@ -54,8 +55,13 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [deviceError, setDeviceError] = useState("");
   const [kvmOpenError, setKvmOpenError] = useState("");
-  const [inlineConsole, setInlineConsole] = useState(null);
+  const [inlineConsole, setInlineConsole] = useState(null);   // { deviceId, port, url, name, leaseP }
+  const inlineConsoleRef = useRef(null);   // the same console, for the history and pagehide listeners
   const kvmTimers = useRef(new Set());
+  const devicesSeq = useRef(0);    // a newer load or a removal makes an older device list response stale
+  const devicesJson = useRef("");  // unchanged lists keep their array, so status polling is not restarted
+  // Rack detail shown on Racks (?rack=); DcimView reads it and reports changes through selectRack.
+  const [rackParam, setRackParam] = useState(() => new URLSearchParams(window.location.search).get("rack"));
   const [rackItems, setRackItems] = useState(null);
   const [rackItemsError, setRackItemsError] = useState("");
   const [maintenance, setMaintenance] = useState(null);
@@ -85,6 +91,23 @@ export default function App() {
     history.pushState({ view: newView, tab: mainTab }, "");
     setView(newView);
   }
+  // navigate() plus the rack it wrote to the URL (Header tabs, storage cards, What's new, the assistant).
+  // Admin sub-pages keep navigateAdmin(): rackParam is only read on Racks, and every way back there sets it.
+  function goTo(tab, rack) {
+    navigate(tab, rack);
+    setRackParam(rack || null);
+  }
+  // Opening or leaving a rack detail on Racks: its own history entry, Edit mode stays as it is.
+  function selectRack(rack) {
+    const next = rack || null;
+    if (next === rackParam) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "racks");
+    if (next) url.searchParams.set("rack", next);
+    else url.searchParams.delete("rack");
+    history.pushState({ tab: "racks", view: { kind: "dashboard" }, adminSection }, "", url);
+    setRackParam(next);
+  }
 
   useEffect(() => {
     const onPop = event => {
@@ -109,13 +132,17 @@ export default function App() {
   const subnavRef = useRef(null);
   useTabStripCue(subnavRef, [loading, mainTab, view.kind, adminSection, accountMode, canAdmin]);
 
-  // Returns "popup" | "inline" | "denied" (the assistant's console button shows it); other callers ignore it.
+  // Returns "popup" | "inline" | "denied" | "cancelled" (the assistant's console button shows it); other callers ignore it.
   function openKvmConsole(deviceId, portNumber) {
     setKvmOpenError("");
     if (!canOperate) {
       setKvmOpenError("פתיחת KVM דורשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.");
       return "denied";
     }
+    const name = devices.find(device => device.id === deviceId)?.name || "KVM";
+    // Advisory only: someone else may be working on this port. Cancel opens nothing and marks nothing.
+    const port = kvmStatuses[deviceId]?.ports?.find(p => String(p.number) === String(portNumber));
+    if (port?.in_use && !window.confirm(`הפורט ${port.label?.trim() || `Port ${portNumber}`} ב-${name} מסומן כבשימוש. ייתכן שמישהו אחר עובד עליו כרגע.\nלפתוח את הקונסול בכל זאת?`)) return "cancelled";
     const base = `/api/kvms/${encodeURIComponent(deviceId)}`;
     const url = `${base}/autologin?port=${encodeURIComponent(portNumber)}`;
     // Keep window.open in the click handler, before any asynchronous request.
@@ -124,25 +151,64 @@ export default function App() {
     try { popup = window.open(url, "_blank"); } catch {}
     // The console page must not be able to navigate this tab (SEC-ACT-18).
     if (popup) { try { popup.opener = null; } catch {} }
-    if (!popup) {
-      setInlineConsole({ deviceId, port: portNumber, url,
-        name: devices.find(device => device.id === deviceId)?.name || "KVM" });
-    }
-    fetch(`${base}/ports/${portNumber}/mark-in-use`, { method: "POST" })
-      .then(response => { if (!response.ok) throw new Error(); })
-      .catch(() => setKvmOpenError("הקונסול נפתח, אבל סימון הפורט כבשימוש נכשל. בדוק שההתחברות לאתר עדיין בתוקף."));
+    // Resolves to this session's lease ("" from a server without leases), or null when marking failed.
+    const leaseP = fetch(`${base}/ports/${encodeURIComponent(portNumber)}/mark-in-use`, { method: "POST" })
+      .then(async response => {
+        if (!response.ok) throw new Error();
+        const data = await response.json().catch(() => null);
+        loadKvmStatus(deviceId);   // show IN USE now, not at the next poll
+        return typeof data?.lease === "string" ? data.lease : "";
+      })
+      .catch(() => {
+        setKvmOpenError("הקונסול נפתח, אבל סימון הפורט כבשימוש נכשל. בדוק שההתחברות לאתר עדיין בתוקף.");
+        return null;
+      });
     if (popup) {
       const t = setInterval(() => {
         if (popup.closed) {
           clearInterval(t);
           kvmTimers.current.delete(t);
-          fetch(`${base}/ports/${portNumber}/mark-free`, { method: "POST" })
-            .then(() => loadKvmStatus(deviceId)).catch(() => {});
+          releasePort(deviceId, portNumber, leaseP);
         }
       }, 2000);
       kvmTimers.current.add(t);
+      return "popup";
     }
-    return popup ? "popup" : "inline";
+    const prev = inlineConsoleRef.current;
+    if (prev) {
+      // The new console replaces the open one: free the port it held. Without a lease, the same port
+      // is left alone, because a lease-less mark-free would also clear the mark that was just made.
+      const samePort = prev.deviceId === deviceId && String(prev.port) === String(portNumber);
+      releasePort(prev.deviceId, prev.port, prev.leaseP, { leaseOnly: samePort });
+    }
+    showInlineConsole({ deviceId, port: portNumber, url, name, leaseP });
+    // Back (or a phone's back gesture) closes the console instead of leaving the page.
+    if (!prev) {
+      // A first page load (start page from preferences, no ?tab=) has no history state, which onPop
+      // reads as Dashboard: record the current page first, so closing the console returns to it.
+      if (!history.state?.tab) history.replaceState({ ...history.state, tab: mainTab, view, adminSection }, "");
+      history.pushState({ ...history.state, kvmConsole: true }, "");
+    }
+    return "inline";
+  }
+
+  function showInlineConsole(value) {
+    inlineConsoleRef.current = value;
+    setInlineConsole(value);
+  }
+
+  // Frees one console's port once its mark-in-use has answered: with its lease, so another session's
+  // mark on the same port stays; without a body when the server gave no lease; not at all if marking failed.
+  async function releasePort(deviceId, port, leaseP, { keepalive = false, leaseOnly = false } = {}) {
+    const lease = await leaseP;
+    if (lease == null || (leaseOnly && !lease)) return;
+    const init = lease
+      ? { method: "POST", keepalive, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lease }) }
+      : { method: "POST", keepalive };
+    try {
+      await fetch(`/api/kvms/${encodeURIComponent(deviceId)}/ports/${encodeURIComponent(port)}/mark-free`, init);
+    } catch {}
+    if (!keepalive) loadKvmStatus(deviceId);
   }
 
   useEffect(() => () => { for (const timer of kvmTimers.current) clearInterval(timer); }, []);
@@ -157,13 +223,32 @@ export default function App() {
     return () => { active = false; };
   }, [canOperate]);
 
-  function closeInlineConsole() {
-    if (!inlineConsole) return;
-    const { deviceId, port } = inlineConsole;
-    setInlineConsole(null);
-    fetch(`/api/kvms/${encodeURIComponent(deviceId)}/ports/${port}/mark-free`, { method: "POST" })
-      .then(() => loadKvmStatus(deviceId)).catch(() => {});
+  // fromHistory: Back already left the console's history entry. keepalive: the page is going away.
+  function closeInlineConsole({ fromHistory = false, keepalive = false } = {}) {
+    const current = inlineConsoleRef.current;
+    if (!current) return;
+    showInlineConsole(null);
+    releasePort(current.deviceId, current.port, current.leaseP, { keepalive });
+    if (!fromHistory && !keepalive && history.state?.kvmConsole) history.back();
   }
+  const closeConsoleRef = useRef(closeInlineConsole);
+  closeConsoleRef.current = closeInlineConsole;
+
+  // History listeners kept apart from onPop: Back closes the inline console and re-reads ?rack=;
+  // leaving the page frees the inline console's port (fetch keepalive carries the CSRF header, sendBeacon cannot).
+  useEffect(() => {
+    const onHistory = () => {
+      if (!history.state?.kvmConsole) closeConsoleRef.current({ fromHistory: true });
+      setRackParam(new URLSearchParams(window.location.search).get("rack"));
+    };
+    const onPageHide = () => closeConsoleRef.current({ fromHistory: true, keepalive: true });
+    window.addEventListener("popstate", onHistory);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("popstate", onHistory);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }, []);
 
   const pdus = devices.filter(d => d.kind === "pdu");
   const kvms = devices.filter(d => d.kind === "kvm");
@@ -192,11 +277,12 @@ export default function App() {
     fetch("/api/version").then(r => r.json()).then(d => setVersion(d.version)).catch(() => {});
   }, []);
 
-  // Port labels saved in another session, by the assistant or in Locations reach every page (Racks included) on the
-  // same interval as the device statuses.
+  // Devices added or removed, and port labels saved, in another session, by the assistant or in Locations reach every
+  // page (Racks included) without a reload, on the same interval as the device statuses. Kept out of the [devices]
+  // effect below: that one restarts whenever the list changes, so polling the list there would loop.
   useEffect(() => {
-    const t = setInterval(() => { if (!document.hidden) loadDevices(); }, preferences.refresh_seconds * 1000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => { if (!document.hidden) loadDevices(); }, preferences.refresh_seconds * 1000);
+    return () => clearInterval(timer);
   }, [preferences.refresh_seconds]);
 
   useEffect(() => {
@@ -211,14 +297,21 @@ export default function App() {
     return () => clearInterval(t);
   }, [devices, preferences.refresh_seconds]);
 
+  // Returns the fetched list, or undefined when the request failed.
   async function loadDevices() {
+    const seq = ++devicesSeq.current;
     try {
       const data = await api.getDevices();
       // Polling: keep the same list object when nothing changed, so pages and status polling do not restart.
-      setDevices(prev => JSON.stringify(prev) === JSON.stringify(data) ? prev : data);
-      setDeviceError("");
+      if (seq === devicesSeq.current) {
+        const json = JSON.stringify(data);
+        if (json !== devicesJson.current) { devicesJson.current = json; setDevices(data); }
+        setDeviceError("");
+      }
+      return data;
     } catch (e) {
-      setDeviceError(errorMessage(e));
+      if (seq === devicesSeq.current) setDeviceError(errorMessage(e));
+      return undefined;
     } finally {
       setLoading(false);
     }
@@ -265,14 +358,19 @@ export default function App() {
     ]);
   }
 
-  // Errors are rethrown for the caller to show; a 409 (labels changed elsewhere) reloads first.
+  // Errors are rethrown for the caller to show; a 409 (labels changed elsewhere) reloads first and
+  // attaches the fresh device as e.latest (undefined if the reload failed) so the editor can keep its draft.
   // The response is returned so pages can show whether the names were sent to the device (device_names).
   async function saveLabels(id, labels, revision) {
     let saved;
     try {
       saved = await api.updateLabels(id, labels, revision);
     } catch (e) {
-      if (e.status === 409) { await loadDevices(); await refreshAllStatuses(); }
+      if (e.status === 409) {
+        const list = await loadDevices();
+        e.latest = list?.find(d => d.id === id);
+        await refreshAllStatuses();
+      }
       throw e;
     }
     await loadDevices();
@@ -280,7 +378,12 @@ export default function App() {
     return saved;
   }
 
+  // The X clears every port's IN USE mark on this KVM, including other people's: ask first and name them.
   async function handleMarkKvmFree(id) {
+    const name = devices.find(d => d.id === id)?.name || "KVM";
+    const ports = (kvmStatuses[id]?.ports || []).filter(p => p.in_use)
+      .map(p => p.label?.trim() ? `${p.label.trim()} (P${p.number})` : `P${p.number}`);
+    if (!window.confirm(`לסמן את ${name} כפנוי?\nסימון "בשימוש" יוסר מכל הפורטים: ${ports.join(", ") || "—"}.\nמי שמחובר לקונסול לא ינותק, אבל הפורט יוצג כפנוי.`)) return;
     try {
       await api.markKvmFree(id);
       await loadKvmStatus(id);
@@ -327,12 +430,17 @@ export default function App() {
     if (!confirm(`Remove ${name}? This cannot be undone.`)) return false;
     try {
       await api.deleteDevice(id);
-      setDevices(d => d.filter(x => x.id !== id));
-      return true;
     } catch (e) {
-      alert(`Could not remove ${name}: ${errorMessage(e)}`);
-      return false;
+      // 404: someone else already removed it, which is the result that was asked for.
+      if (e.status !== 404) {
+        alert(`Could not remove ${name}: ${errorMessage(e)}`);
+        return false;
+      }
     }
+    devicesSeq.current++;      // a list fetched before the removal must not bring the device back
+    devicesJson.current = "";
+    setDevices(d => d.filter(x => x.id !== id));
+    return true;
   }
 
   const match = (d) => {
@@ -346,37 +454,7 @@ export default function App() {
     return d.name.toLowerCase().includes(s) || (d.ip || "").includes(s) || (d.rack || "").toLowerCase().includes(s) || outletMatch || portMatch || itemMatch;
   };
 
-  const stats = useMemo(() => {
-    let outletsOn = 0, outletsTotal = 0, watts = 0, wattsKnown = 0, wattsComplete = true, portsMapped = 0, portsTotal = 0, alerts = 0;
-    const temps = [], humids = [];
-    let leakDetected = false;
-    pdus.forEach(p => {
-      const s = pduStatuses[p.id];
-      if (s?.outlets) {
-        outletsOn    += s.outlets.filter(o => o.state === "on").length;
-        outletsTotal += s.outlets.length;
-        if (s.reachable && s.total_watts != null) { watts += s.total_watts; wattsKnown++; }
-      }
-      if (!s?.reachable || s.total_watts == null || s.watts_complete !== true) wattsComplete = false;
-      if (deviceState(s) === "offline") alerts++;
-      if (s?.temperature != null) temps.push(s.temperature);
-      if (s?.humidity    != null) humids.push(s.humidity);
-      if (s?.leak_detected)       leakDetected = true;
-    });
-    kvms.forEach(k => {
-      const s = kvmStatuses[k.id];
-      if (s?.ports) {
-        portsMapped += s.ports.filter(p => p.label?.trim() && !/^port\s*\d+$/i.test(p.label.trim())).length;
-        portsTotal  += s.ports.length;
-      }
-    });
-    const tempMin = temps.length ? Math.min(...temps) : null;
-    const tempMax = temps.length ? Math.max(...temps) : null;
-    const humMin  = humids.length ? Math.min(...humids) : null;
-    const humMax  = humids.length ? Math.max(...humids) : null;
-    return { deviceCount: pdus.length + kvms.length, outletsOn, outletsTotal, watts: wattsKnown ? watts : null, wattsComplete, portsMapped, portsTotal, alerts,
-             tempMin, tempMax, humMin, humMax, leakDetected, hasSensors: temps.length > 0 || humids.length > 0 };
-  }, [devices, pduStatuses, kvmStatuses]);
+  const stats = useMemo(() => dashboardStats(pdus, kvms, pduStatuses, kvmStatuses), [devices, pduStatuses, kvmStatuses]);
 
   if (loading) {
     return (
@@ -409,8 +487,8 @@ export default function App() {
 
   return (
     <div className={sshPage ? "h-[100dvh] flex flex-col overflow-hidden" : "min-h-screen flex flex-col"}>
-      <Header activeTab={mainTab} onNavigate={navigate} summary={summary} editMode={editMode} onEditChange={value => setEditMode(canOperate && value)} onHome={() => navigate("dashboard")}
-        onAccount={() => navigate("account")} onUsers={() => navigateAdmin("users")} remoteInstall={pxeConfig?.enabled === true} />
+      <Header activeTab={mainTab} onNavigate={goTo} summary={summary} editMode={editMode} onEditChange={value => setEditMode(canOperate && value)} onHome={() => goTo("dashboard")}
+        onAccount={() => goTo("account")} onUsers={() => navigateAdmin("users")} remoteInstall={pxeConfig?.enabled === true} />
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
       {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
       {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canOperate?[["ssh","SSH"]]:[]),...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
@@ -418,6 +496,7 @@ export default function App() {
       {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
       {view.kind === "dashboard" && ["racks", "inventory", "power", "changelog"].includes(mainTab) && (
         <DcimView section={mainTab} editMode={editMode} onSummary={setSummary}
+          rack={rackParam} onRackChange={selectRack}
           devices={devices}
           pduStatuses={pduStatuses}
           kvmStatuses={kvmStatuses}
@@ -452,7 +531,7 @@ export default function App() {
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "ssh" && <SshAdmin />}
       {sshPage && (
         <Suspense fallback={<main className="device-page"><p role="status" className="text-sm text-zinc-400">Loading the terminal…</p></main>}>
-          <SshTerminal serverKey={new URLSearchParams(location.search).get("server") || ""} onExit={() => navigate("inventory")} />
+          <SshTerminal serverKey={new URLSearchParams(location.search).get("server") || ""} onExit={() => goTo("inventory")} />
         </Suspense>
       )}
 
@@ -498,7 +577,7 @@ export default function App() {
             )}
             {mainTab === "dashboard" && (filter === "all" || filter === "racks") && visibleInventoryRacks.map(rack =>
               <InventoryRackCard key={rack.rack} rack={rack} items={rackItems ? rackItems[rack.rack] || [] : null} error={rackItemsError}
-                onOpen={() => navigate("racks", rack.rack)} />
+                onOpen={() => goTo("racks", rack.rack)} />
             )}
             {shownCount === 0 && filtersActive && pdus.length + kvms.length + inventoryRacks.length > 0 && (
               <div role="status" className="col-span-full text-center text-zinc-500 py-12">
@@ -536,8 +615,12 @@ export default function App() {
         <p>Access continues to use the VM's existing authentication. Version: <span className="font-mono">{version || "Unknown"}</span>.</p>
       </main>}
 
-      {view.kind === "pdu" && (
-        <PduDetail
+      {(view.kind === "pdu" || view.kind === "kvm") && !deviceError && !devices.some(d => d.id === view.id && d.kind === view.kind) && (
+        <RemovedDevice from={detailFrom} onBack={() => history.back()} />
+      )}
+
+      {view.kind === "pdu" && pdus.some(p => p.id === view.id) && (
+        <PduDetail key={`pdu:${view.id}`}
           device={pdus.find(p => p.id === view.id)}
           status={pduStatuses[view.id]}
           maintenance={maintenanceStateFor(maintenance, view.id)}
@@ -553,8 +636,8 @@ export default function App() {
         />
       )}
 
-      {view.kind === "kvm" && (
-        <KvmDetail
+      {view.kind === "kvm" && kvms.some(k => k.id === view.id) && (
+        <KvmDetail key={`kvm:${view.id}`}
           device={kvms.find(k => k.id === view.id)}
           status={kvmStatuses[view.id]}
           onBack={() => history.back()}
@@ -568,7 +651,7 @@ export default function App() {
       )}
 
       {addOpen && <AddDeviceModal racks={racks} onClose={() => setAddOpen(false)} onAdd={handleAddDevice} />}
-      {inlineConsole && <InlineKvmConsole console={inlineConsole} onClose={closeInlineConsole} />}
+      {inlineConsole && <InlineKvmConsole key={`${inlineConsole.deviceId}:${inlineConsole.port}`} console={inlineConsole} onClose={() => closeInlineConsole()} />}
       {maintenanceDialog && (
         <MaintenanceDialog key={`${maintenanceDialog.mode}-${maintenanceDialog.pduId}`}
           mode={maintenanceDialog.mode}
@@ -580,10 +663,24 @@ export default function App() {
           onChanged={() => { loadMaintenance(); loadPduStatus(maintenanceDialog.pduId); }} />
       )}
 
-      <WhatsNew version={version} onOpenChangelog={() => navigate("changelog")} />
-      {!sshPage && <AssistantPanel context={{tab: mainTab, rack: new URLSearchParams(location.search).get("rack"), detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={navigate} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />}
+      <WhatsNew version={version} onOpenChangelog={() => goTo("changelog")} />
+      {!sshPage && <AssistantPanel context={{tab: mainTab, rack: mainTab === "racks" ? rackParam : null, detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={goTo} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />}
       {!sshPage && <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>}
     </div>
+  );
+}
+
+// A PDU or KVM detail page whose device was removed, here or in another session.
+function RemovedDevice({ from, onBack }) {
+  return (
+    <main className="device-page">
+      <div className="flex items-center gap-3 text-sm">
+        <button onClick={onBack} className="text-zinc-400 hover:text-nv-400"><span aria-hidden="true">← </span>Back</button>
+        <span className="text-zinc-600">/</span>
+        <span className="text-zinc-500">{from}</span>
+      </div>
+      <p role="status" className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 text-sm text-zinc-300">This device was removed.</p>
+    </main>
   );
 }
 

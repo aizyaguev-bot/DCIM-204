@@ -91,7 +91,7 @@ function ChatIcon() {
 const subtle = "rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 disabled:opacity-40";
 
 // onOpenConsole(deviceId, port) is App's openKvmConsole: it must run inside a click handler and returns
-// "popup" | "inline" | "denied". onDataChanged() (optional) reloads the site's device tables after an assistant
+// "popup" | "inline" | "denied" | "cancelled". onDataChanged() (optional) reloads the site's device tables after an assistant
 // location change (server_swap / server_move / server_clear) finished.
 export default function AssistantPanel({ context, navigate, openDetail, devices = [], onOpenConsole, onDataChanged }) {
   const { mode: accountMode, user, canOperate, canAdmin } = useAccounts();
@@ -486,7 +486,7 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
     const target = consoleTarget(entry, devices);
     if (!target || !onOpenConsole) return "invalid";
     const outcome = onOpenConsole(target.deviceId, target.port);
-    return ["popup", "inline", "denied"].includes(outcome) ? outcome : "popup";
+    return ["popup", "inline", "denied", "cancelled"].includes(outcome) ? outcome : "popup";
   }
 
   // A history row was opened. Its results show inside the row (ActionHistory); a proposal that still waits for a

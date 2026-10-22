@@ -769,6 +769,8 @@ export const CONSOLE_NOTES = {
   popup: "הקונסול נפתח בלשונית חדשה.",
   inline: "הדפדפן חסם חלון חדש, ולכן הקונסול נפתח בתוך האתר.",
   denied: "פתיחת KVM דורשת הרשאת Operator.",
+  // The port was marked in use and the user chose not to open it (App's advisory confirm, KVM-1).
+  cancelled: "הקונסול לא נפתח: הפורט מסומן כבשימוש.",
   invalid: "כתובת הקונסול שהתקבלה אינה תקינה. פתח את ה-KVM מעמוד Consoles.",
 };
 export const AFTER_CYCLE_NOTE = "השרת עולה מחדש; ייתכן שהמסך יהיה שחור עד כדקה.";
