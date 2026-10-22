@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
 import ExportCsvButton from "../components/ExportCsvButton";
+import SshButton from "../components/SshButton";
 
 export function connectionRacks(servers = []) {
   return [...new Set(servers.flatMap(server => [server.rack, ...(server.pdu || []).map(link => link.rack)]).filter(Boolean))]
@@ -119,7 +120,7 @@ export default function ConnectionsView() {
         <table className="w-full text-sm text-left"><caption className="sr-only">Server power and console connections</caption>
           <thead className="bg-zinc-900 text-zinc-400"><tr>{["Server", "Rack", "U slot", "Server IP", "Owner", "Ping", "PDU outlets", "KVM ports"].map(label => <th scope="col" key={label} className="p-3 font-medium whitespace-nowrap">{label}</th>)}</tr></thead>
           <tbody>{visible.map(server => <tr key={server.key} className="border-t border-zinc-800 align-top">
-            <th scope="row" className="p-3 font-medium text-white">{server.name}</th><td className="p-3">{server.rack || "—"}</td><td className="p-3 font-mono whitespace-nowrap">{server.slot != null && server.slot !== "" ? `U${server.slot}` : "—"}</td><td className="p-3 font-mono whitespace-nowrap">{server.server_ip || "—"}</td><td className="p-3">{server.owner || "—"}</td><td className="p-3"><PingStatus status={server.ping_status} /></td><td className="p-3"><ConnectionList links={server.pdu} power /></td><td className="p-3"><ConnectionList links={server.kvm} /></td>
+            <th scope="row" className="p-3 font-medium text-white"><span className="inline-flex items-center gap-2">{server.name}<SshButton name={server.name} /></span></th><td className="p-3">{server.rack || "—"}</td><td className="p-3 font-mono whitespace-nowrap">{server.slot != null && server.slot !== "" ? `U${server.slot}` : "—"}</td><td className="p-3 font-mono whitespace-nowrap">{server.server_ip || "—"}</td><td className="p-3">{server.owner || "—"}</td><td className="p-3"><PingStatus status={server.ping_status} /></td><td className="p-3"><ConnectionList links={server.pdu} power /></td><td className="p-3"><ConnectionList links={server.kvm} /></td>
           </tr>)}</tbody>
         </table>
       </div>
