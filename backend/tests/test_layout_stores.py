@@ -70,8 +70,9 @@ async def test_put_with_the_current_etag_saves_and_returns_the_new_one(layout, u
     assert r.headers["etag"] == inventory_store.revision(body)
     assert json.loads(store_file(url).read_text()) == body
     assert (await client.get(url)).headers["etag"] == r.headers["etag"]
-    # Any lock or temporary file stays next to its store (the preview fixture redirects stores to a temp folder).
-    assert {p.name for p in folder.iterdir()} <= {store_file(url).name, store_file(url).with_suffix(".lock").name}
+    # Any lock, temporary or history file stays next to its store (the preview fixture redirects stores to a temp folder).
+    beside = {store_file(url).name, store_file(url).with_suffix(".lock").name, inventory_store.history_path(store_file(url)).name}
+    assert {p.name for p in folder.iterdir()} <= beside
 
 
 @pytest.mark.parametrize("url", STORES)

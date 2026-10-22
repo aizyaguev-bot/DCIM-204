@@ -99,6 +99,9 @@ def required_role(path, method):
     # Device names: the live compare contacts the PDU/KVM, so even its GET is Operator; the push POST keeps the Operator
     # default below; /api/devices/name-sync/status reads the database only and stays Viewer like any GET.
     if re.fullmatch(r"/api/devices/[^/]+/device-names", path): return "Operator"
+    # Cooling unit history names who saved each version, so its read is Operator too; restoring is an Operator write.
+    if path == "/api/chillers/history": return "Operator"
+    if path == "/api/chillers/restore": return "Operator"
     if method in ("GET", "HEAD", "OPTIONS"): return "Viewer"
     if path in ("/api/auth/logout", "/api/me", "/api/me/password", "/api/me/preferences"): return "Viewer"
     if path == "/api/devices" or re.fullmatch(r"/api/devices/[^/]+", path):
