@@ -2,6 +2,22 @@
 
 ---
 
+## v2.41.0 — 2026-10-22 — SSH to every server from the browser
+
+### Added
+- **SSH terminal in the browser.** An **SSH** button next to every server (Racks,
+  Inventory, Locations, Connections and the PDU–KVM mapping) opens a terminal to that
+  server in a new tab, using one SSH key that lives on the VM. Operators and Admins
+  only. **Admin → SSH**: create the VM key, see the exact `authorized_keys` line for
+  each approved server (it only accepts the VM's address), approve servers, confirm
+  each server's host key once, replace the key, and end open sessions. Every session
+  is recorded (who, which server, when; never what was typed). See
+  docs/ssh-terminal.md. Off until `SSH_ALLOW_INSECURE_TRANSPORT=true` is set in
+  `.env`, because the site runs over plain HTTP.
+- **Racks:** each server now has KVM and SSH buttons together.
+
+---
+
 ## v2.40.1 — 2026-10-22 — Racks follow the dashboard, KVM button on every server
 
 ### Fixed

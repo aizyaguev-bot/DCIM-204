@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
 import ExportCsvButton from "../components/ExportCsvButton";
+import SshButton from "../components/SshButton";
 import {
   applyBody, buildMoveRequest, clearAsResult, clearFailureText, clearPorts, clearSummary, filterServers, formatLocation, groupByDevice, kindNoun,
   locationClearPlan, moveErrorText, moveResultIsEmpty, normalizeLocations, normalizeMoveResult, parsePortInUse, portKey, portOptions,
@@ -221,6 +222,7 @@ function RowActions({ server, clearing, tall, onMove, onClear }) {
   const noPorts = server.pdu.length + server.kvm.length === 0;
   return (
     <div className="flex gap-2 justify-end">
+      <SshButton name={server.name} size="md" className={tall ? "h-9" : ""} />
       <button type="button" onClick={onMove} disabled={clearing === server.key} aria-label={`Move ${server.name}`}
         className={`px-3 ${size} text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded whitespace-nowrap disabled:opacity-50`}>
         Move…

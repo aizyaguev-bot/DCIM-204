@@ -322,7 +322,8 @@ test("Connections polls on the account refresh interval and isolates Hebrew text
   assert.match(view, /loader\.stop\(\)/);
   assert.match(view, /\}, \[canOperate, refresh, preferences\.refresh_seconds\]\);/);
   assert.match(view, /isHidden: \(\) => document\.hidden/);
-  assert.match(view, /<th scope="row" dir="auto"[^>]*>\{server\.name\}<\/th>/);
+  // v2.41.0 wraps the name with its SSH button; the direction stays on the row header, taken from the name first.
+  assert.match(view, /<th scope="row" dir="auto"[^>]*><span className="inline-flex items-center gap-2">\{server\.name\}<SshButton name=\{server\.name\} \/><\/span><\/th>/);
   assert.match(view, /<h2 dir="auto"[^>]*>\{server\.name\}<\/h2>/);
   assert.match(view, /<td className="p-3" dir="auto">\{server\.owner \|\| "—"\}<\/td>/);
   assert.match(view, /<dd dir="auto">\{server\.owner \|\| "—"\}<\/dd>/);

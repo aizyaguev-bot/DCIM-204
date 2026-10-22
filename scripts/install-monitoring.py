@@ -43,7 +43,7 @@ FRONTEND_LOCK = "frontend/package-lock.json"
 # every installed package is pinned by a constraints file, `pip download` from a fixed index (wheels
 # only) is the dry run whose files are inspected before anything changes, and only those new wheels
 # are then installed offline with --no-deps. It is never fatal: a feature whose package is missing
-# (such as the AI assistant) reports "not installed" and the update goes on.
+# (such as the SSH terminal or the AI assistant) reports "not installed" and the update goes on.
 # pip never reads configuration (Codex SSH-CX-2): --isolated alone still loads the global and the
 # venv's pip.conf, whose find-links / extra-index-url would add package sources. Every pip child
 # therefore also gets PIP_CONFIG_FILE=os.devnull, which makes pip skip ALL configuration files, and
@@ -540,7 +540,7 @@ def wheel_plan(directory, installed):
 def pip_warning(reason, backup, output=""):
     log = backup / PIP_LOG
     print("WARNING: backend Python packages were not added: " + reason + ". The update continues; a feature whose "
-          "package is missing (such as the AI assistant) reports that it is not installed."
+          "package is missing (such as the SSH terminal or the AI assistant) reports that it is not installed."
           + (" pip log: " + str(log) if log.exists() else ""), flush=True)
     tail = output_tail(output)  # already masked by run_pip
     if tail:
