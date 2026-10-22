@@ -2,6 +2,32 @@
 
 ---
 
+## v2.41.1 — 2026-10-22 — 26 fixes from the full site check
+
+### Fixed
+- **KVM:** two people on the same KVM port no longer free it for each other — each
+  console holds its own lease and the port stays IN USE until the last one closes.
+  The inline console behaves like a dialog, and a console replaced by another one
+  frees its port. The LX II banner text is accurate.
+- **PDU and KVM pages:** your unsaved label edits survive a "changed in another
+  session" conflict (merged with the latest labels), the port IN USE mark shows at
+  once, a Viewer sees why buttons are disabled, and "Turn on all" no longer does
+  nothing silently.
+- **Add device:** a double click creates one device, not two; only lab racks are
+  offered; blank or space-padded names are refused or trimmed.
+- **Locations:** "Clear location" says exactly what is kept, the swap boxes of the
+  move and the place dialogs are separate, a same-rack move without a slot keeps
+  the U, and a move that changes nothing is not counted as an update.
+- **Lab assistant panel:** fits short phone screens in landscape, closes when a link
+  opens a page on a tablet, a Viewer's draft is read-only, and the phone sheet is a
+  proper dialog (the action confirm dialog keeps keyboard focus).
+- **Remote install:** search no longer hides an armed selection, an abandoned draft
+  is released, the run limit is shown, and failure texts say what really happened.
+- **Connections:** refreshes on its own, searches only the columns you can see, and
+  shows Hebrew names in the right direction.
+
+---
+
 ## v2.41.0 — 2026-10-22 — SSH to every server from the browser
 
 ### Added
