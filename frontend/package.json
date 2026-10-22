@@ -14,6 +14,7 @@
     "test:connections": "node --test src/__tests__/connections.test.js",
     "test:rack-rows": "node --test src/__tests__/rack-rows.test.js",
     "test:assistant-key": "node --test src/__tests__/assistant-key.test.js",
+    "test:racks": "node --test src/__tests__/racks-view.test.js src/__tests__/racks-chillers.test.js src/__tests__/racks-power.test.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
