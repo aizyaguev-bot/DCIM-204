@@ -1,30 +1,39 @@
 import { useState, useMemo } from "react";
-import { api, errorMessage } from "../api/client";
+import { api } from "../api/client";
 import {useAccounts} from "../accounts";
 import { syncClearPlan, clearPorts, clearFailureText, serverIdentity } from "../api/locations";
 import SshButton from "../components/SshButton";
+import {
+  syncKvmIndex, syncKvmPorts, syncKvmUnavailable, syncPduUnavailable, syncPduRows, syncPduSummary,
+  syncKvmChanged, syncKvmConflict, syncSaveWrites, runSyncWrites, syncSaveFailureText,
+} from "../api/sync";
 
-function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, onCancel }) {
-  const [label,       setLabel]       = useState(row.assigned ? row.label : "");
-  const [kvmDeviceId, setKvmDeviceId] = useState(row.kvm?.device_id || "");
-  const [kvmPort,     setKvmPort]     = useState(row.kvm?.port       || "");
+function EditRow({ row, kvms, kvmStatuses, saving, onSave, onCancel }) {
+  // The row as it was shown when editing began. Every write sends these labels as `expected`, so a port that another
+  // session changed meanwhile is refused instead of silently overwritten with a later poll's values.
+  const [shown] = useState(row);
+  const [label,       setLabel]       = useState(shown.assigned ? shown.label : "");
+  const [kvmDeviceId, setKvmDeviceId] = useState(shown.kvm?.device_id || "");
+  const [kvmPort,     setKvmPort]     = useState(shown.kvm?.port       || "");
 
-  const kvmPorts = kvmDeviceId && kvmStatuses[kvmDeviceId]?.ports
-    ? kvmStatuses[kvmDeviceId].ports.map(p => ({ number: String(p.number), label: p.label }))
-    : [];
+  const kvm = kvms.find(k => k.id === kvmDeviceId);
+  const kvmPorts = kvm ? syncKvmPorts(kvm, kvmStatuses[kvmDeviceId]) : [];
+  // The label the list shows for the chosen port; undefined when the port number was typed by hand.
+  const targetShown = kvmPorts.find(p => p.number === String(kvmPort))?.label;
 
   const sel = "bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200";
   const inp = "bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200";
 
   return (
-    <tr className="bg-zinc-800/40">
+    <tr className="bg-zinc-800/40" onKeyDown={e => { if (e.key === "Escape" && !saving) { e.preventDefault(); onCancel(); } }}>
       <td className="px-3 py-2 text-zinc-500 text-sm font-mono">{row.outlet_number}</td>
       <td className="px-3 py-2">
         <div className={`w-1.5 h-1.5 rounded-full inline-block ${row.outlet_state === "on" ? "bg-emerald-400" : "bg-zinc-600"}`} />
       </td>
-      <td className="px-3 py-2 text-zinc-500 text-xs">{row.outlet_watts != null ? `${row.outlet_watts.toFixed(0)}W` : "\u2014"}</td>
+      <td className="px-3 py-2 text-zinc-500 text-xs">{row.outlet_watts != null ? `${row.outlet_watts.toFixed(0)}W` : "—"}</td>
       <td className="px-3 py-2">
         <input
+          autoFocus
           value={label}
           onChange={e => setLabel(e.target.value)}
           placeholder="— empty —"
@@ -39,7 +48,7 @@ function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, on
             {kvms.map(k => <option key={k.id} value={k.id}>{k.name}</option>)}
           </select>
           {kvmDeviceId && kvmPorts.length > 0 ? (
-            <select value={kvmPort} onChange={e => setKvmPort(e.target.value)} aria-label={`KVM port for outlet ${row.outlet_number}`} className={`${sel} w-24`}>
+            <select value={kvmPort} onChange={e => setKvmPort(e.target.value)} aria-label={`KVM port for outlet ${row.outlet_number}`} className={`${sel} min-w-[8rem]`}>
               <option value="">port…</option>
               {kvmPorts.map(p => (
                 <option key={p.number} value={p.number}>
@@ -54,11 +63,11 @@ function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, on
       </td>
       <td className="px-3 py-2">
         <div className="flex gap-2 justify-end">
-          <button onClick={() => onSave({ label: label.trim(), kvmDeviceId, kvmPort })} disabled={saving}
+          <button onClick={() => onSave(shown, { label: label.trim(), kvmDeviceId, kvmPort: String(kvmPort).trim() }, targetShown)} disabled={saving}
             className="px-3 py-1 bg-nv-400 hover:bg-nv-300 text-zinc-950 rounded text-xs font-medium disabled:opacity-50">
             {saving ? "…" : "Save"}
           </button>
-          <button onClick={onCancel} className="px-3 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-200 rounded text-xs">
+          <button onClick={onCancel} disabled={saving} className="px-3 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-200 rounded text-xs disabled:opacity-50">
             Cancel
           </button>
         </div>
@@ -66,6 +75,8 @@ function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, on
     </tr>
   );
 }
+
+const nameList = devices => devices.map((d, i) => <span key={d.id}>{i > 0 && ", "}<bdi>{d.name || d.id}</bdi></span>);
 
 export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged }) {
   const {canOperate} = useAccounts();
@@ -75,59 +86,16 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
   const [search,  setSearch]  = useState("");
   const [filter,  setFilter]  = useState("all"); // "all" | "assigned" | "empty"
 
-  const pdus = devices.filter(d => d.kind === "pdu");
-  const kvms = devices.filter(d => d.kind === "kvm");
+  const pdus = useMemo(() => devices.filter(d => d.kind === "pdu"), [devices]);
+  const kvms = useMemo(() => devices.filter(d => d.kind === "kvm"), [devices]);
 
-  // Build KVM lookup: label_lower → { device_id, device_name, port }
-  const kvmByLabel = useMemo(() => {
-    const map = {};
-    kvms.forEach(kvm => {
-      const status = kvmStatuses[kvm.id];
-      if (!status?.ports) return;
-      status.ports.forEach(p => {
-        if (serverIdentity(p.label)) map[p.label.toLowerCase()] = { device_id: kvm.id, device_name: kvm.name, port: String(p.number), label: p.label };
-      });
-    });
-    return map;
-  }, [kvms, kvmStatuses]);
+  // label_lower → { device_id, device_name, port, label }; saved labels keep the links while a KVM cannot be read.
+  const kvmByLabel = useMemo(() => syncKvmIndex(kvms, kvmStatuses), [kvms, kvmStatuses]);
 
-  // Build full table: every outlet from every PDU (including PDUs with no status yet)
-  const allRows = useMemo(() => {
-    const rows = [];
-    pdus.forEach(pdu => {
-      const status = pduStatuses[pdu.id];
-      if (!status?.outlets?.length) {
-        // PDU exists but no status yet — add a placeholder row so the group appears
-        rows.push({
-          pdu_id:        pdu.id,
-          pdu_name:      pdu.name,
-          outlet_number: null,
-          outlet_state:  null,
-          outlet_watts:  null,
-          label:         "",
-          kvm:           null,
-          noStatus:      true,
-        });
-        return;
-      }
-      status.outlets.forEach(outlet => {
-        const label = outlet.label || "";
-        rows.push({
-          pdu_id:        pdu.id,
-          pdu_name:      pdu.name,
-          outlet_number: outlet.number,
-          outlet_state:  outlet.state,
-          outlet_watts:  outlet.watts ?? null,
-          label,
-          // A default "Outlet N" (or blank) label means no server is assigned.
-          assigned:      !!serverIdentity(label),
-          kvm: serverIdentity(label) ? (kvmByLabel[label.toLowerCase()] || null) : null,
-          noStatus:      false,
-        });
-      });
-    });
-    return rows;
-  }, [pdus, pduStatuses, kvmByLabel]);
+  // Every outlet of every PDU: live outlets, saved labels for a PDU that cannot be read, a placeholder otherwise.
+  const allRows = useMemo(
+    () => pdus.flatMap(pdu => syncPduRows(pdu, pduStatuses[pdu.id], kvmByLabel)),
+    [pdus, pduStatuses, kvmByLabel]);
 
   const filtered = useMemo(() => {
     let result = allRows;
@@ -145,45 +113,39 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
     return result;
   }, [allRows, search, filter]);
 
-  const totalAssigned = allRows.filter(r => !r.noStatus && r.assigned).length;
-  const totalEmpty    = allRows.filter(r => !r.noStatus && !r.assigned).length;
+  const outletRows    = allRows.filter(r => !r.noStatus);
+  const totalAssigned = outletRows.filter(r => r.assigned).length;
+  const totalEmpty    = outletRows.length - totalAssigned;
 
   const editKey = (pdu_id, outlet_number) => `${pdu_id}:${outlet_number}`;
 
-  async function handleSave(row, draft) {
+  // `row` is the snapshot the edit row took when it opened; `targetShown` is the chosen KVM port's listed label.
+  async function handleSave(row, draft, targetShown) {
     const oldLabel = row.assigned ? row.label : "";
     const newLabel = draft.label;
-    const labelChanged = oldLabel !== newLabel;
-    const kvmChanged = row.kvm?.device_id !== draft.kvmDeviceId || row.kvm?.port !== draft.kvmPort;
     // Linking a KVM port writes the server name to it; without a name it would wipe whatever that port holds.
-    if (kvmChanged && draft.kvmDeviceId && draft.kvmPort && !(newLabel || oldLabel)) {
+    if (syncKvmChanged(row, draft) && draft.kvmDeviceId && draft.kvmPort && !(newLabel || oldLabel)) {
       alert("Enter the server name for this outlet before linking a KVM port.");
       return;
     }
+    const kvmName = kvms.find(k => k.id === draft.kvmDeviceId)?.name || draft.kvmDeviceId;
+    // Asked before any write, so Cancel leaves every port as it was.
+    const conflict = syncKvmConflict(row, draft, kvmName, targetShown);
+    if (conflict && !confirm(conflict)) return;
+    const writes = syncSaveWrites(row, draft, kvmName, targetShown);
+    if (!writes.length) { setEditing(null); return; }
     setSaving(true);
     try {
-      // Update PDU outlet label (no cascade)
-      if (labelChanged) {
-        await api.setDirectLabel(row.pdu_id, String(row.outlet_number), newLabel);
+      const { done, failed } = await runSyncWrites(writes, api.setDirectLabel);
+      if (failed) {
+        // After a partial save, or a port changed in another session (409), the draft no longer matches what is
+        // saved: close the row so the refreshed table shows the server's labels.
+        if (done.length || failed.error?.status === 409) setEditing(null);
+        alert(syncSaveFailureText(done, failed));
+      } else {
+        setEditing(null);
       }
-
-      // Update KVM assignment
-      const origKvm   = row.kvm;
-      if (kvmChanged) {
-        if (origKvm) await api.setDirectLabel(origKvm.device_id, origKvm.port, "");
-        if (draft.kvmDeviceId && draft.kvmPort) {
-          await api.setDirectLabel(draft.kvmDeviceId, draft.kvmPort, newLabel || oldLabel);
-        }
-      } else if (labelChanged && origKvm) {
-        // label renamed but KVM stayed same — update KVM port label too (no cascade)
-        await api.setDirectLabel(origKvm.device_id, origKvm.port, newLabel);
-      }
-
-      setEditing(null);
-      await onChanged?.();
-    } catch (e) {
-      alert(`Save failed: ${errorMessage(e)}`);
-      onChanged?.();
+      try { await onChanged?.(); } catch {}
     } finally {
       setSaving(false);
     }
@@ -203,10 +165,13 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
     }
   }
 
-  const pdusWithNoStatus = pdus.filter(p => !pduStatuses[p.id]);
+  const waiting = [...pdus.filter(p => !pduStatuses[p.id]), ...kvms.filter(k => !kvmStatuses[k.id])];
+  const unavailablePdus = syncPduUnavailable(pdus, pduStatuses);
+  const unavailablePduIds = new Set(unavailablePdus.map(p => p.id));
+  const unavailableKvms = syncKvmUnavailable(kvms, kvmStatuses);
 
   return (
-    <div className="max-w-[1400px] mx-auto px-4 sm:px-6 py-5">
+    <div className="w-full max-w-[1400px] mx-auto px-4 sm:px-6 py-5">
       <div className="flex items-start justify-between mb-5 gap-4 flex-wrap">
         <div>
           <h2 className="text-lg font-semibold text-zinc-100">PDU ↔ KVM Sync Map</h2>
@@ -214,9 +179,21 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
         </div>
       </div>
 
-      {pdusWithNoStatus.length > 0 && (
-        <div dir="rtl" className="mb-4 text-xs text-amber-400 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2">
-          ממתין לסטטוס: {pdusWithNoStatus.map(p => p.name).join(", ")}
+      {waiting.length > 0 && (
+        <div dir="rtl" role="status" className="mb-4 text-xs text-amber-400 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2">
+          ממתין לסטטוס: {nameList(waiting)}
+        </div>
+      )}
+
+      {unavailablePdus.length > 0 && (
+        <div dir="rtl" role="alert" className="mb-4 text-xs text-rose-300 bg-rose-950/30 border border-rose-900 rounded-lg px-3 py-2 break-words">
+          PDU לא זמין: {nameList(unavailablePdus)}. מצב השקעים וההספק לא ידוע; מוצגות התוויות השמורות{canOperate ? " וניתן לערוך אותן" : ""}.
+        </div>
+      )}
+
+      {unavailableKvms.length > 0 && (
+        <div dir="rtl" role="status" className="mb-4 text-xs text-amber-400 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2 break-words">
+          סטטוס KVM לא זמין: {nameList(unavailableKvms)}. הקישורים מוצגים מתוויות שמורות.
         </div>
       )}
 
@@ -228,11 +205,11 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
           placeholder="חיפוש לפי OPT, PDU, outlet…"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-nv-400/60 w-64"
+          className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-nv-400/60 w-64 max-w-full"
         />
         <div className="flex gap-1">
           {[
-            { id: "all",      label: `הכל (${allRows.length})` },
+            { id: "all",      label: `הכל (${outletRows.length})` },
             { id: "assigned", label: `מוקצה (${totalAssigned})` },
             { id: "empty",    label: `ריק (${totalEmpty})` },
           ].map(f => (
@@ -248,7 +225,8 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
         </div>
       </div>
 
-      <div className="rounded-xl border border-zinc-800/60 overflow-x-auto">
+      {/* relative: keeps the sr-only "Actions" text inside this scroll box instead of widening the page. */}
+      <div className="relative rounded-xl border border-zinc-800/60 overflow-x-auto">
         <table className="w-full text-sm border-collapse">
           <thead>
             <tr className="bg-zinc-900/60 border-b border-zinc-800">
@@ -266,16 +244,14 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
               let lastPdu = null;
               return filtered.flatMap(row => {
                 const elements = [];
-                if (row.pdu_name !== lastPdu) {
-                  lastPdu = row.pdu_name;
-                  const pduStatus = pduStatuses[row.pdu_id];
-                  const onCount  = pduStatus?.outlets?.filter(o => o.state === "on").length ?? "?";
-                  const totalW   = pduStatus?.reachable ? pduStatus.total_watts : null;
+                if (row.pdu_id !== lastPdu) {
+                  lastPdu = row.pdu_id;
+                  const down = unavailablePduIds.has(row.pdu_id);
                   elements.push(
-                    <tr key={`g-${row.pdu_name}`} className="bg-zinc-900/80">
+                    <tr key={`g-${row.pdu_id}`} className="bg-zinc-900/80">
                       <td colSpan={7} className="px-4 py-1.5">
                         <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-widest">{row.pdu_name}</span>
-                        <span className="ml-3 text-[10px] text-zinc-500">{onCount} on · {totalW != null ? `${totalW.toFixed(0)}W${pduStatus.watts_complete === false ? " (partial)" : ""}` : "\u2014"}</span>
+                        <span className={`ml-3 text-[10px] ${down ? "text-rose-300" : "text-zinc-500"}`}>{syncPduSummary(pduStatuses[row.pdu_id])}</span>
                       </td>
                     </tr>
                   );
@@ -283,8 +259,10 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
 
                 if (row.noStatus) {
                   elements.push(
-                    <tr key={`ns-${row.pdu_id}`} className="opacity-40">
-                      <td colSpan={7} dir="rtl" className="px-4 py-2 text-xs text-zinc-500 italic">לא נטען עדיין…</td>
+                    <tr key={`ns-${row.pdu_id}`} className={row.pending ? "opacity-40" : ""}>
+                      <td colSpan={7} dir="rtl" className={`px-4 py-2 text-xs italic ${row.pending ? "text-zinc-500" : "text-rose-300"}`}>
+                        {row.pending ? "לא נטען עדיין…" : "ה-PDU לא זמין ואין לו תוויות שמורות להצגה."}
+                      </td>
                     </tr>
                   );
                   return elements;
@@ -293,10 +271,10 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
                 const key = editKey(row.pdu_id, row.outlet_number);
                 if (editing === key) {
                   elements.push(
-                    <EditRow key={key} row={row} pdus={pdus} kvms={kvms}
-                      pduStatuses={pduStatuses} kvmStatuses={kvmStatuses}
+                    <EditRow key={key} row={row} kvms={kvms}
+                      kvmStatuses={kvmStatuses}
                       saving={saving}
-                      onSave={draft => handleSave(row, draft)}
+                      onSave={handleSave}
                       onCancel={() => setEditing(null)} />
                   );
                   return elements;
@@ -309,7 +287,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
                       <div className={`w-1.5 h-1.5 rounded-full ${row.outlet_state === "on" ? "bg-emerald-400" : "bg-zinc-700"}`} />
                     </td>
                     <td className="px-3 py-2.5 text-zinc-500 text-xs">
-                      {row.outlet_watts != null ? `${row.outlet_watts.toFixed(0)}W` : "\u2014"}
+                      {row.outlet_watts != null ? `${row.outlet_watts.toFixed(0)}W` : "—"}
                     </td>
                     <td className="px-3 py-2.5 font-mono text-sm text-zinc-100">
                       {row.assigned ? row.label : <span className="text-zinc-600 text-xs">{row.label || "—"}</span>}
