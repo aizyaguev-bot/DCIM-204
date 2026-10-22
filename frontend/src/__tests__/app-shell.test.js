@@ -87,7 +87,7 @@ function consoleHarness({ inUse = false, confirmAnswer = true, popup = null, mar
 
 test("an in-use port asks first; Cancel opens and marks nothing", () => {
   const h = consoleHarness({ inUse: true, confirmAnswer: false });
-  h.open("kvm1", 1);
+  assert.equal(h.open("kvm1", 1), "cancelled", "the assistant's console button can say that nothing opened");
   assert.equal(h.calls.confirm.length, 1);
   assert.match(h.calls.confirm[0], /OPT11/);
   assert.match(h.calls.confirm[0], /בשימוש/);

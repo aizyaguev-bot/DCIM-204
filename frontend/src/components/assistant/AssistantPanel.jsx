@@ -144,6 +144,8 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   conversationRef.current = conversationId;
   const launcherRef = useRef(null);
   const panelRef = useRef(null);
+  // The history entry under an inline KVM console opened from here (App pushes its own entry over it, JSON).
+  const consoleBaseRef = useRef(null);
   const inputRef = useRef(null);
   const logRef = useRef(null);
   const tabRefs = useRef({});
@@ -203,7 +205,14 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
     const root = document.documentElement;
     const previousOverflow = root.style.overflow;
     root.style.overflow = "hidden";                       // the page under the sheet does not scroll
-    const onPop = () => setOpen(false);                   // phone Back: the page changes, so the sheet closes
+    const onPop = () => {                                 // phone Back: the page changes, so the sheet closes
+      // Back from (or the X on) an inline KVM console opened from the sheet only returns to the page entry under it:
+      // the page did not change, so the sheet stays.
+      const base = consoleBaseRef.current;
+      consoleBaseRef.current = null;
+      if (base && JSON.stringify(window.history.state ?? null) === base) return;
+      setOpen(false);
+    };
     const onKey = e => {
       if (e.key !== "Tab" || e.defaultPrevented || draftRef.current || !panelRef.current) return;
       // A modal above the sheet (an action confirmation, the inline KVM console) traps Tab itself; this listener
@@ -486,6 +495,10 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
     const target = consoleTarget(entry, devices);
     if (!target || !onOpenConsole) return "invalid";
     const outcome = onOpenConsole(target.deviceId, target.port);
+    if (outcome === "inline" && window.history.state?.kvmConsole) {
+      const { kvmConsole, ...base } = window.history.state;
+      consoleBaseRef.current = JSON.stringify(base);
+    }
     return ["popup", "inline", "denied", "cancelled"].includes(outcome) ? outcome : "popup";
   }
 
