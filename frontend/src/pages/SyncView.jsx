@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { api, errorMessage } from "../api/client";
 import {useAccounts} from "../accounts";
 import { syncClearPlan, clearPorts, clearFailureText, serverIdentity } from "../api/locations";
+import SshButton from "../components/SshButton";
 
 function EditRow({ row, pdus, kvms, pduStatuses, kvmStatuses, saving, onSave, onCancel }) {
   const [label,       setLabel]       = useState(row.assigned ? row.label : "");
@@ -329,6 +330,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
                           className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded transition">
                           Edit
                         </button>
+                        {serverIdentity(row.label) && <SshButton name={row.label} size="md" />}
                       </div>
                     </td>
                   </tr>

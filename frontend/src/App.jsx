@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, Fragment } from "react";
+import { useState, useEffect, useMemo, useRef, Fragment, lazy, Suspense } from "react";
 import { api, deviceState, errorMessage } from "./api/client";
 import Header, { useTabStripCue } from "./components/Header";
 import StatsBar from "./components/StatsBar";
@@ -25,6 +25,10 @@ import WhatsNew from "./components/WhatsNew";
 import RemoteInstallView from "./pages/RemoteInstallView";
 import { pxeApi, errorText as pxeErrorText } from "./api/pxe";
 import AssistantPanel from "./components/assistant/AssistantPanel";
+import SshAdmin from "./pages/SshAdmin";
+// The terminal page (and xterm) loads only when an SSH tab is opened.
+const SshTerminal = lazy(() => import("./pages/SshTerminal"));
+const ADMIN_SECTIONS = ["devices", "users", "engineers", "mapping", "locations", "connections", "assistant", "ssh", "help"];
 
 export default function App() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
@@ -34,7 +38,7 @@ export default function App() {
   const [view, setView] = useState({ kind: "dashboard" });
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "dcim" ? "racks" : ["sync", "locations", "connections", "assistant"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account"].includes(tab) ? tab : preferences.start_page;
+    return tab === "dcim" ? "racks" : ["sync", "locations", "connections", "assistant"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
   });
   const [pxeConfig, setPxeConfig] = useState(undefined);   // undefined: loading, null: unavailable
   const [pxeConfigError, setPxeConfigError] = useState("");
@@ -53,13 +57,20 @@ export default function App() {
   const [maintenanceError, setMaintenanceError] = useState("");
   const [maintenanceDialog, setMaintenanceDialog] = useState(null);   // { mode: "shutdown" | "restore", pduId }
   const maintenanceSeq = useRef(0);
-  // Admin sub-pages with their own shareable ?tab= link.
-  const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[new URLSearchParams(location.search).get("tab")] || "devices");
+  // Admin sub-pages with their own shareable ?tab= link; other sub-pages can be deep-linked with ?tab=admin&section=<id> (Admin -> SSH).
+  const [adminSection, setAdminSection] = useState(() => {
+    const params = new URLSearchParams(location.search);
+    const fromTab = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[params.get("tab")];
+    if (fromTab) return fromTab;
+    return ADMIN_SECTIONS.includes(params.get("section")) ? params.get("section") : "devices";
+  });
   function navigate(tab, rack) {
     const url = new URL(window.location.href);
     url.searchParams.set("tab", tab);
     if (rack) url.searchParams.set("rack", rack);
     else url.searchParams.delete("rack");
+    if (tab !== "ssh") url.searchParams.delete("server");
+    url.searchParams.delete("section");
     const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
     history.pushState({ tab, view: {kind:"dashboard"}, adminSection: section || adminSection }, "", url);
     setView({kind:"dashboard"}); setMainTab(section ? "admin" : tab); setEditMode(false);
@@ -81,7 +92,8 @@ export default function App() {
       const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
       setView(event.state?.view || { kind: "dashboard" });
       setMainTab(tab === "dcim" ? "racks" : section ? "admin" : tab);
-      setAdminSection(event.state?.adminSection || section || "devices");
+      const linked = new URLSearchParams(location.search).get("section");
+      setAdminSection(event.state?.adminSection || section || (ADMIN_SECTIONS.includes(linked) ? linked : "devices"));
       setEditMode(false);
     };
     window.addEventListener("popstate", onPop);
@@ -385,14 +397,16 @@ export default function App() {
     : (filter === "all" || filter === "pdus" ? visiblePdus.length : 0) + (filter === "all" || filter === "kvms" ? visibleKvms.length : 0) + (filter === "all" || filter === "racks" ? visibleInventoryRacks.length : 0);
   const filtersActive = !!search.trim() || rackFilter !== "all" || (mainTab === "dashboard" && filter !== "all");
   const detailFrom = { power: "Power", consoles: "Consoles", admin: "Admin" }[mainTab] || "Dashboard";
+  // Full-height terminal: no footer or assistant panel over it, and terminal text never reaches the assistant.
+  const sshPage = view.kind === "dashboard" && mainTab === "ssh";
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className={sshPage ? "h-[100dvh] flex flex-col overflow-hidden" : "min-h-screen flex flex-col"}>
       <Header activeTab={mainTab} onNavigate={navigate} summary={summary} editMode={editMode} onEditChange={value => setEditMode(canOperate && value)} onHome={() => navigate("dashboard")}
         onAccount={() => navigate("account")} onUsers={() => navigateAdmin("users")} remoteInstall={pxeConfig?.enabled === true} />
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
       {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
-      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
+      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canOperate?[["ssh","SSH"]]:[]),...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
       {view.kind === "dashboard" && pageInfo && <div className="page-intro"><h1>{pageInfo[0]}</h1><p>{pageInfo[1]} {updatedText}</p></div>}
       {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
       {view.kind === "dashboard" && ["racks", "inventory", "power", "changelog"].includes(mainTab) && (
@@ -427,6 +441,12 @@ export default function App() {
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "connections" && <ConnectionsView />}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "assistant" && <AssistantKeyView />}
       {view.kind === "dashboard" && mainTab === "monitoring" && <MonitoringView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "ssh" && <SshAdmin />}
+      {sshPage && (
+        <Suspense fallback={<main className="device-page"><p role="status" className="text-sm text-zinc-400">Loading the terminal…</p></main>}>
+          <SshTerminal serverKey={new URLSearchParams(location.search).get("server") || ""} onExit={() => navigate("inventory")} />
+        </Suspense>
+      )}
 
       {view.kind === "dashboard" && mainTab === "twin" && (
         <iframe title="3D Digital Twin" src="/twin/index.html?embed=1" className="w-full flex-1 border-0"
@@ -553,8 +573,8 @@ export default function App() {
       )}
 
       <WhatsNew version={version} onOpenChangelog={() => navigate("changelog")} />
-      <AssistantPanel context={{tab: mainTab, rack: new URLSearchParams(location.search).get("rack"), detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={navigate} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />
-      <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>
+      {!sshPage && <AssistantPanel context={{tab: mainTab, rack: new URLSearchParams(location.search).get("rack"), detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={navigate} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />}
+      {!sshPage && <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>}
     </div>
   );
 }
