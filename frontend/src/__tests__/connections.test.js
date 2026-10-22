@@ -6,7 +6,7 @@ import { api } from "../api/client.js";
 // Run the view's exported pure helpers without a JSX loader or browser globals.
 const source = readFileSync(new URL("../pages/ConnectionsView.jsx", import.meta.url), "utf8");
 const helpers = source.slice(source.indexOf("export function connectionRacks"), source.indexOf("\nfunction ConnectionList"));
-const { connectionRacks, filterConnections } = await import(`data:text/javascript;base64,${Buffer.from(helpers).toString("base64")}`);
+const { connectionRacks, filterConnections, connectionsLoader } = await import(`data:text/javascript;base64,${Buffer.from(helpers).toString("base64")}`);
 const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
 const navigationSource = appSource.slice(appSource.indexOf("  function navigate("), appSource.indexOf("  function openDetail("));
 const popSource = appSource.slice(appSource.indexOf("    const onPop ="), appSource.indexOf('    window.addEventListener("popstate"'));
@@ -212,4 +212,121 @@ test("Locations has its own shareable query and Back restores it", () => {
   app.actions().navigate("sync");
   assert.equal(app.state.mainTab, "admin");
   assert.equal(app.state.adminSection, "mapping");
+});
+
+test("search ignores hidden device ids such as pdu3 or a uuid (CONN-3)", () => {
+  const hidden = [
+    { key: "opt7", name: "OPT7", server_ip: "192.0.2.7", rack: "Rack-1", owner: "Ada", ping_status: "up",
+      pdu: [{ device_id: "pdu3", device_name: "PDU-Left", device_ip: "192.0.2.40", rack: "Rack-1", port: 5, label: "OPT7 PSU", state: "on" }],
+      kvm: [{ device_id: "9c1e7f02-5b6d-4e1a-9a55-0d3f1c2b7e41", device_name: "Console-Left", device_ip: "192.0.2.41", port: 6, label: "OPT7" }] },
+  ];
+  assert.deepEqual(filterConnections(hidden, { search: "U3" }), [], "pdu3 has no slot, so U3 must not match its id");
+  assert.deepEqual(filterConnections(hidden, { search: "9c1e" }), [], "the KVM uuid is not shown, so it must not match");
+  assert.deepEqual(filterConnections(hidden, { search: "pdu3" }), []);
+  assert.deepEqual(keys(filterConnections(hidden, { search: "PDU-Left" })), ["opt7"], "the shown device name still matches");
+  assert.deepEqual(keys(filterConnections(hidden, { search: "opt7" })), ["opt7"], "the server key still matches");
+  const placed = [...hidden, { key: "opt3", name: "OPT3", slot: 3, pdu: [], kvm: [] }];
+  assert.deepEqual(keys(filterConnections(placed, { search: "U3" })), ["opt3"], "a real U3 server is still found");
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function loaderHarness({ hidden = false } = {}) {
+  const events = [];
+  const requests = [];
+  const state = { hidden };
+  const fetchConnections = () => { const call = deferred(); requests.push(call); return call.promise; };
+  const loader = connectionsLoader(fetchConnections, {
+    onStart: () => events.push("start"),
+    onData: result => events.push(["data", result]),
+    onError: (e, background) => events.push(["error", e.message, background]),
+    onDenied: () => events.push("denied"),
+    onDone: () => events.push("done"),
+    isHidden: () => state.hidden,
+  });
+  return { events, requests, state, loader };
+}
+
+test("background refresh replaces the data without a visible loading state (CONN-1)", async () => {
+  const { events, requests, loader } = loaderHarness();
+  const first = loader.load(false);
+  requests[0].resolve({ generated_at: "1" });
+  await first;
+  const second = loader.load(true);
+  requests[1].resolve({ generated_at: "2" });
+  assert.equal(await second, true);
+  assert.deepEqual(events, ["start", ["data", { generated_at: "1" }], "done", ["data", { generated_at: "2" }]]);
+});
+
+test("background refresh is skipped while the tab is hidden or a load is still running", async () => {
+  const { events, requests, state, loader } = loaderHarness({ hidden: true });
+  assert.equal(await loader.load(true), false, "hidden tab: no request");
+  assert.equal(requests.length, 0);
+  const visible = loader.load(false);   // a visible load still runs in a hidden tab (first open)
+  assert.equal(requests.length, 1);
+  state.hidden = false;
+  assert.equal(await loader.load(true), false, "pending guard: no overlapping request");
+  assert.equal(requests.length, 1);
+  requests[0].resolve({ servers: [] });
+  await visible;
+  assert.equal(await Promise.race([loader.load(true), Promise.resolve("pending")]), "pending");
+  assert.equal(requests.length, 2, "the guard is released after the first load");
+  requests[1].resolve({ servers: [] });
+  assert.deepEqual(events.filter(event => event === "start"), ["start"]);
+});
+
+test("a failed background refresh reports the error but never clears the data; a 403 stops the cycle", async () => {
+  const { events, requests, loader } = loaderHarness();
+  const first = loader.load(false);
+  requests[0].resolve({ servers: ["kept"] });
+  await first;
+  const failed = loader.load(true);
+  requests[1].reject(Object.assign(new Error("502: Bad gateway"), { status: 502 }));
+  await failed;
+  assert.deepEqual(events.at(-1), ["error", "502: Bad gateway", true]);
+  assert.ok(!events.some(event => Array.isArray(event) && event[0] === "data" && event[1] == null), "no data reset on error");
+  const denied = loader.load(true);
+  requests[2].reject(Object.assign(new Error("Operator role needed"), { status: 403 }));
+  await denied;
+  assert.equal(events.at(-1), "denied");
+  assert.equal(await loader.load(true), false, "no more requests after a 403");
+  assert.equal(await loader.load(false), false);
+  assert.equal(requests.length, 3);
+});
+
+test("a response that arrives after stop() is ignored, so a slow old request never overwrites newer data", async () => {
+  const { events, requests, loader } = loaderHarness();
+  const old = loader.load(false);
+  loader.stop();
+  requests[0].resolve({ generated_at: "old" });
+  await old;
+  assert.deepEqual(events, ["start"], "no data and no done after stop");
+  const failed = loaderHarness();
+  const late = failed.loader.load(true);
+  failed.loader.stop();
+  failed.requests[0].reject(Object.assign(new Error("Forbidden"), { status: 403 }));
+  await late;
+  assert.deepEqual(failed.events, [], "no late error or denial after stop");
+  assert.equal(await loader.load(true), false, "a stopped loader sends nothing");
+});
+
+test("Connections polls on the account refresh interval and isolates Hebrew text direction (CONN-1, CONN-6)", () => {
+  const view = source.slice(source.indexOf("export default function ConnectionsView"));
+  assert.match(view, /const \{ canOperate, preferences \} = useAccounts\(\);/);
+  assert.match(view, /setInterval\(\(\) => loader\.load\(true\), preferences\.refresh_seconds \* 1000\)/);
+  assert.match(view, /clearInterval\(timer\)/);
+  assert.match(view, /loader\.stop\(\)/);
+  assert.match(view, /\}, \[canOperate, refresh, preferences\.refresh_seconds\]\);/);
+  assert.match(view, /isHidden: \(\) => document\.hidden/);
+  assert.match(view, /<th scope="row" dir="auto"[^>]*>\{server\.name\}<\/th>/);
+  assert.match(view, /<h2 dir="auto"[^>]*>\{server\.name\}<\/h2>/);
+  assert.match(view, /<td className="p-3" dir="auto">\{server\.owner \|\| "—"\}<\/td>/);
+  assert.match(view, /<dd dir="auto">\{server\.owner \|\| "—"\}<\/dd>/);
+  assert.match(source, /<span className="text-zinc-200" dir="auto">\{link\.device_name\}<\/span>/);
+  assert.match(source, /<div className="text-xs text-zinc-500 break-words" dir="auto">\{link\.label\}<\/div>/);
+  assert.doesNotMatch(view, /setData\(null\);\s*\n?\s*if \(e\.status === 403\)/, "a failed refresh no longer drops the rows");
 });
