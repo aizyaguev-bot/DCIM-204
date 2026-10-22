@@ -112,7 +112,7 @@ cd ~/DCIM-204 && backend/.venv/bin/python scripts/vm-auto-update.py install
 
 Run it as `aizyaguev`, never as root, from a shell that exports no `LAB_MANAGER_*`, `ACCOUNTS_*`, `DATABASE_URL`, `PDU_*`, `KVM_*`, `SMTP_*`, `EMAIL_*` or `PING_MONITOR_*` (they belong in `.env`; `install` names them and stops). It adds one crontab line marked `# DCIM-204 auto-update (managed)` that runs every 2 minutes; the `@reboot` line from section 7 and all other lines stay. It saves `PATH` and credential-free proxy/CA settings for the cron job (git 2.31 or newer is needed when a proxy or CA file is saved); a proxy setting that contains credentials is not saved. Running it again changes nothing.
 
-Each run compares the branch commit on `github.com/aizyaguev-bot/DCIM-204` with `git rev-parse HEAD`. For a newer commit it downloads that commit's `lab-service.py` and `install-monitoring.py` and runs the installer exactly as in sections 1-2, with `--enable-accounts` only when accounts are on now. Every install restarts the site once. A commit counts as installed only when the installer exits 0, `HEAD` is that commit and a site that was up answers again; otherwise its installer runs again. A failed commit is retried after 30 minutes, at most 3 times, then skipped until a newer commit appears. If another installation is running, the next try waits 10 minutes. Nothing is installed in the first 5 minutes after a boot or with less than 1 GiB free. If a failed or stopped attempt leaves down a site that was up before, it runs `scripts/lab-service.py start`. An installer that is still running when its update run ends (the run was stopped, or the installer survived TERM and KILL) is never signalled by a later run: once it is past its 25-minute limit, `status` and `cron.log` report its PID and how late it is, so it can be stopped by hand.
+Each run compares the branch commit on `github.com/aizyaguev-bot/DCIM-204` with `git rev-parse HEAD`. For a newer commit it downloads that commit's `lab-service.py` and `install-monitoring.py` and runs the installer exactly as in sections 1-2, with `--enable-accounts` only when accounts are on now. Every install restarts the site once. A commit counts as installed only when the installer exits 0, `HEAD` is that commit and a site that was up answers again; otherwise its installer runs again. A failed commit is retried after 30 minutes, at most 3 times, then skipped until a newer commit appears. If another installation is running, the next try waits 10 minutes. Nothing is installed in the first 5 minutes after a boot, or while less than 1 GiB is free after old backups are pruned (see Backup retention below). If a failed or stopped attempt leaves down a site that was up before, it runs `scripts/lab-service.py start`. An installer that is still running when its update run ends (the run was stopped, or the installer survived TERM and KILL) is never signalled by a later run: once it is past its 25-minute limit, `status` and `cron.log` report its PID and how late it is, so it can be stopped by hand.
 
 ```bash
 backend/.venv/bin/python scripts/vm-auto-update.py status   # --json for all fields
@@ -124,11 +124,15 @@ From the laptop, `http://ftlab.nvidia.com:8000/api/version` (public for GET, no 
 
 Trust boundary: anyone who can push to this branch runs code on this VM within minutes. Keep GitHub branch protection on `feat/lab-manager-v3-accounts` (owner action).
 
-Installer backups in `.monitor-backups/` (source, database and `.env` copies) are never deleted automatically; `status` shows their count and size and `paused` when free space is low. To prune by hand, review the list, then keep the newest five:
+### Backup retention
+
+Each install leaves an installer backup in `.monitor-backups/` (source, database and `.env` copies; about 36 MiB each in October 2026). Before and after every automatic install, `run` prunes them: the newest 8 always stay, and so does every backup younger than 7 days, up to 12 in all (beyond 12 the oldest go first). With less than 1 GiB free it keeps only the newest 8. If that still leaves less than 1 GiB, updates pause as before (`status` shows `paused`). The backups of the deployed commit and of the commit being installed are never deleted. The crontab backups made by `vm-auto-update.py install`/`remove` follow the same rule, counted separately. Only folders named exactly `YYYYMMDD-HHMMSS-ffffff-<commit7>` or `<UTC time>-crontab-<8 characters>` are deleted. `auto-update/`, links, files, and other tools' `-env`, `-restart` and `-crontab` folders are never touched. `cron.log` records the name and size of each deleted folder; `status` shows the last `pruned N backups (X MiB)`.
 
 ```bash
-ls -1dt .monitor-backups/20*/ | tail -n +6
-ls -1dt .monitor-backups/20*/ | tail -n +6 | xargs -r rm -rf --
+backend/.venv/bin/python scripts/vm-auto-update.py prune --dry-run   # lists what would be deleted; deletes nothing
+backend/.venv/bin/python scripts/vm-auto-update.py prune             # applies the same rule now (logged in cron.log)
 ```
+
+Do not prune with `rm -rf .monitor-backups/20*`: that glob also matches the `.env` and database snapshots that other tools keep there.
 
 Accepted risk: if an installer is stopped after 25 minutes, the temporary preflight server it started on a random local port can keep running until the next reboot. It never uses port 8000 or the live database.

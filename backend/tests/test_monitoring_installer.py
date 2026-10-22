@@ -95,6 +95,22 @@ def test_installer_preserves_inventory_env_and_live_twin(deployment):
     assert events == ["preflight", "stop", "start"]
 
 
+def test_backup_folder_name_is_the_one_auto_update_retention_prunes(deployment):
+    # scripts/vm-auto-update.py deletes only exact names; a renamed backup folder would silently end the pruning.
+    from datetime import datetime, timedelta, timezone
+    spec = importlib.util.spec_from_file_location("auto_update_for_installer", Path(installer.__file__).with_name("vm-auto-update.py"))
+    auto_update = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(auto_update)
+    target, commit, old, events = deployment
+    installer.install(target, commit)
+    backup, = (target / ".monitor-backups").iterdir()
+    match = auto_update.INSTALLER_BACKUP.fullmatch(backup.name)
+    assert match and match.group(2) == commit[:7]
+    found, = auto_update.backup_folders(auto_update.backups_parent(target))
+    assert (found.name, found.kind, found.commit) == (backup.name, "installer", commit[:7])
+    assert abs(found.when - datetime.now(timezone.utc)) < timedelta(minutes=10)
+
+
 def test_failed_startup_restores_previous_commit_and_version(deployment, monkeypatch):
     target, commit, old, events = deployment
     def readiness(*args, **kwargs):
