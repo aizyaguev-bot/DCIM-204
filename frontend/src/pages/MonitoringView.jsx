@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {useAccounts} from "../accounts";
 
 const input = "w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:border-nv-400";
@@ -22,9 +22,16 @@ async function request(path = "", method = "GET", body, signal) {
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     const detail = typeof data.detail === "string" ? data.detail : data.detail?.map(e => e.msg).join("; ");
-    throw new Error(detail || `Request failed (${response.status})`);
+    const error = new Error(detail || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
+}
+
+// An overdue check hides the last ping result from the status; keep a failed reply visible.
+function lastKnown(target) {
+  return target.status === "stale" && target.last_result === "down" ? `Last known: ${states.down[0]}` : "";
 }
 
 function Badge({ status }) {
@@ -72,34 +79,97 @@ function Connections({ links = [], kind, timezone, expanded = false }) {
   })}</div>;
 }
 
+const settingsOf = t => ({ name: t.name, syncName: t.name_synced !== false, host: t.host, enabled: t.enabled });
+const sameSettings = (a, b) => a.name === b.name && a.syncName === b.syncName && a.host === b.host && a.enabled === b.enabled;
+
 function TargetSettings({ target, onSaved }) {
-  const [name,setName] = useState(target.name);
-  const [syncName,setSyncName] = useState(target.name_synced !== false);
-  const [host, setHost] = useState(target.host);
-  const [enabled, setEnabled] = useState(target.enabled);
+  // base = the server version being edited, draft = what the user typed. Polls never replace a draft:
+  // a clean form follows the server, a dirty one keeps the typed values until saved or discarded.
+  const [base, setBase] = useState(target);
+  const [draft, setDraft] = useState(() => settingsOf(target));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [rejected, setRejected] = useState(false);
+  const hostRef = useRef(null);
+  const saveRef = useRef(null);
+  const loadRef = useRef(null);
+  const pendingFocus = useRef(null);
+  const dirty = !sameSettings(draft, settingsOf(base));
+  // A poll that started before the last save must not move a clean form back to older values.
+  const live = target.revision >= base.revision ? target : base;
+  const current = dirty ? base : live;
+  const value = dirty ? draft : settingsOf(live);
+  const conflict = dirty && (rejected || target.revision > base.revision);
+  const synced = value.syncName && target.source === "inventory";
+
+  // Disabled controls and removed buttons drop focus to BODY; put it back once the form settles.
+  useEffect(() => {
+    if (!pendingFocus.current || busy) return;
+    const next = typeof pendingFocus.current === "function" ? pendingFocus.current() : pendingFocus.current;
+    pendingFocus.current = null;
+    const active = document.activeElement;
+    if (next?.isConnected && !next.disabled && (!active || active === document.body)) next.focus();
+  });
+
+  function edit(patch) {
+    if (!dirty) { setBase(live); setRejected(false); }
+    setDraft({ ...value, ...patch });
+  }
+  function loadCurrent() {
+    setBase(target); setDraft(settingsOf(target)); setRejected(false); setError("");
+    pendingFocus.current = hostRef.current;
+  }
+  function keepMine() {
+    setBase(target); setRejected(false); setError("");
+    pendingFocus.current = () => saveRef.current;
+  }
   async function save(event) {
-    event.preventDefault(); setBusy(true); setError("");
+    event.preventDefault();
+    if (busy || conflict) return;
+    const sent = value;
+    pendingFocus.current = document.activeElement;
+    setBusy(true); setError("");
+    let saved;
     try {
-      await request(`/targets/${target.id}`, "PUT", { host, enabled, name, sync_name:syncName, revision: target.revision });
-      await onSaved();
-    } catch (e) { setError(e.message); }
+      saved = await request(`/targets/${target.id}`, "PUT", { host: sent.host, enabled: sent.enabled, name: sent.name, sync_name: sent.syncName, revision: current.revision });
+    } catch (e) {
+      if (e.status === 409) {
+        // Load the server's current values for the conflict notice; the draft stays as typed.
+        try { await onSaved(); } catch { /* the notice still offers both choices */ }
+        setRejected(true);
+        if (!dirty) setError("Someone else changed this server. The form now shows the current values.");
+        pendingFocus.current = () => loadRef.current || saveRef.current;
+      } else setError(e.message);
+      setBusy(false);
+      return;
+    }
+    const next = { ...current, ...saved, name: saved.name_synced && target.source === "inventory" ? current.inventory_name : saved.name, inventory_name: current.inventory_name };
+    setBase(next); setDraft(settingsOf(next)); setRejected(false);
+    try { await onSaved(); }
+    catch (e) { setError(`Saved. The server list could not refresh: ${e.message}`); }
     finally { setBusy(false); }
   }
   return <form onSubmit={save} className="space-y-3 border-b border-zinc-800 pb-5 mb-5">
     <label className="block text-xs text-zinc-400"><span dir="rtl">שם השרת לתצוגה</span>
-      <input aria-label="שם השרת לתצוגה" className={`${input} mt-2`} value={syncName&&target.source==="inventory"?target.inventory_name:name} onChange={e=>setName(e.target.value)} readOnly={syncName&&target.source==="inventory"} required maxLength={160} disabled={busy}/>
+      <input aria-label="שם השרת לתצוגה" className={`${input} mt-2`} value={synced ? target.inventory_name : value.name} onChange={e => edit({ name: e.target.value })} readOnly={synced} required maxLength={160} disabled={busy}/>
     </label>
-    {target.source==="inventory"&&<label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={syncName} onChange={e=>{setSyncName(e.target.checked);setName(target.name);}} disabled={busy}/><span dir="rtl">סנכרון שם אוטומטי מהמלאי</span></label>}
+    {target.source==="inventory"&&<label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={value.syncName} onChange={e => edit({ syncName: e.target.checked, name: current.name })} disabled={busy}/><span dir="rtl">סנכרון שם אוטומטי מהמלאי</span></label>}
     <p dir="rtl" className="text-xs text-zinc-500">שם התצוגה לא משנה את כתובת הבדיקה או את חיבורי ה־PDU וה־KVM.</p>
     <label className="block text-xs text-zinc-400">IP address or DNS hostname
-      <input aria-label={`Address for ${target.name}`} className={`${input} mt-2`} value={host} onChange={e => setHost(e.target.value)} maxLength={253} placeholder="e.g. opt133 or 10.7.30.25" disabled={busy} />
+      <input ref={hostRef} aria-label={`Address for ${target.name}`} className={`${input} mt-2`} value={value.host} onChange={e => edit({ host: e.target.value })} maxLength={253} placeholder="e.g. opt133 or 10.7.30.25" disabled={busy} />
     </label>
     <div className="flex items-center justify-between gap-3">
-      <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} disabled={busy} />Monitor this server</label>
-      <button className={button} disabled={busy}>{busy ? "Saving…" : "Save settings"}</button>
+      <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={value.enabled} onChange={e => edit({ enabled: e.target.checked })} disabled={busy} />Monitor this server</label>
+      <button ref={saveRef} className={button} disabled={busy || conflict}>{busy ? "Saving…" : "Save settings"}</button>
     </div>
+    {conflict && <div role="alert" className="rounded-lg border border-amber-900 bg-amber-950/30 p-3 space-y-2">
+      <p className="text-sm text-amber-300">Someone else changed this server while you were editing. Your changes are not saved yet.</p>
+      <p className="text-xs text-zinc-300 break-words">Current server values: {target.name} · <span className="font-mono">{target.host || "no address"}</span> · {target.enabled ? "monitored" : "paused"}</p>
+      <div className="flex flex-wrap gap-2">
+        <button ref={loadRef} type="button" className={button} onClick={loadCurrent}>Load current values</button>
+        <button type="button" className={button} onClick={keepMine}>Keep my changes</button>
+      </div>
+    </div>}
     {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
   </form>;
 }
@@ -127,10 +197,12 @@ function AddServer({ onSaved, onClose }) {
   </form>;
 }
 
-function ServerHistory({ target, timezone, onSaved, onClose }) {
+function ServerHistory({ target, timezone, onSaved, onClose, panelRef }) {
   const {canOperate,preferences} = useAccounts();
   const [history, setHistory] = useState(null);
   const [error, setError] = useState("");
+  const headingId = useId();
+  const known = lastKnown(target);
   useEffect(() => {
     const controller = new AbortController();
     let pending = false;
@@ -144,14 +216,14 @@ function ServerHistory({ target, timezone, onSaved, onClose }) {
     load(); const timer = setInterval(load, preferences.refresh_seconds * 1000);
     return () => { controller.abort(); clearInterval(timer); };
   }, [target.id, preferences.refresh_seconds]);
-  return <aside className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5 min-w-0">
+  return <aside ref={panelRef} aria-labelledby={headingId} onKeyDown={e => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); onClose(); } }} className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5 min-w-0 scroll-mt-4">
     <div className="flex justify-between items-start mb-4 gap-3">
-      <div><h2 className="font-semibold text-lg break-words">{target.name}</h2><p className="text-xs text-zinc-500 mt-1">{target.rack || "No rack"} · <span className="font-mono">{target.host || "Address needed"}</span></p></div>
+      <div className="min-w-0"><h2 id={headingId} tabIndex={-1} data-panel-heading className="font-semibold text-lg break-words rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-nv-400/60">{target.name}</h2><p className="text-xs text-zinc-500 mt-1">{target.rack || "No rack"} · <span className="font-mono">{target.host || "Address needed"}</span></p></div>
       <button className={button} onClick={onClose} aria-label="Close server details">×</button>
     </div>
-    <div className="mb-4"><Badge status={target.status} />{target.detail && <p className="text-xs text-zinc-400 mt-2 break-words">{target.detail}</p>}</div>
+    <div className="mb-4"><Badge status={target.status} />{known && <p className="text-xs text-rose-300 mt-2">{known}</p>}{target.detail && <p className="text-xs text-zinc-400 mt-2 break-words">{target.detail}</p>}</div>
     <div className="space-y-4 mb-5 border-b border-zinc-800 pb-5">{["pdu", "kvm"].map(kind => <section key={kind} aria-label={`${kind.toUpperCase()} connections for ${target.name}`}><h3 className="text-sm font-semibold mb-2">{kind.toUpperCase()}</h3><Connections links={target[kind]} kind={kind} timezone={timezone} expanded /></section>)}</div>
-    {canOperate && <TargetSettings key={`${target.id}-${target.revision}`} target={target} onSaved={onSaved} />}
+    {canOperate && <TargetSettings key={target.id} target={target} onSaved={onSaved} />}
     <h3 className="text-sm font-semibold">Recent checks</h3>
     <p className="text-xs text-zinc-500 mt-1">Latest 200 checks · stored for 30 days</p>
     {error && <p role="alert" className="text-sm text-rose-300 mt-3">History could not refresh: {error}</p>}
@@ -181,11 +253,41 @@ export default function MonitoringView() {
   const [selectedId, setSelectedId] = useState(null);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reveal, setReveal] = useState(0);
+  const panelRef = useRef(null);
+  const openerRef = useRef(null);
+  const searchRef = useRef(null);
+  const latestRefresh = useRef(0);
 
   async function refresh(signal) {
+    // Polls and post-save refreshes overlap; only the most recently started one may update the page.
+    const id = ++latestRefresh.current;
     const [next, events] = await Promise.all([request("", "GET", undefined, signal), request("/incidents", "GET", undefined, signal)]);
-    if (!signal?.aborted) { setData(next); setIncidents(events); setError(""); }
+    if (!signal?.aborted && id === latestRefresh.current) { setData(next); setIncidents(events); setError(""); }
   }
+
+  function openDetails(id, event) {
+    openerRef.current = event?.currentTarget || null;
+    setSelectedId(id);
+    setReveal(n => n + 1);
+  }
+  function closeDetails() {
+    const opener = openerRef.current;
+    openerRef.current = null;
+    setSelectedId(null);
+    (opener?.isConnected ? opener : searchRef.current)?.focus();
+  }
+  // The panel sits beside the table on wide screens and below it otherwise: bring it into view and move focus to it.
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!reveal || !panel) return;
+    const top = panel.getBoundingClientRect().top;
+    if (top < 0 || top > window.innerHeight / 3) {
+      const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      panel.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
+    }
+    panel.querySelector("[data-panel-heading]")?.focus({ preventScroll: true });
+  }, [reveal]);
   useEffect(() => {
     const controller = new AbortController();
     let pending = false;
@@ -243,18 +345,18 @@ export default function MonitoringView() {
     </div>
     <div className={`grid gap-5 items-start ${selected ? "xl:grid-cols-[minmax(0,1fr)_390px]" : ""}`}>
       <section className="rounded-xl border border-zinc-800 overflow-hidden min-w-0">
-        <div className="p-4 flex flex-wrap items-center gap-3 border-b border-zinc-800"><h2 className="font-semibold mr-auto">Servers <span className="text-zinc-500 font-normal text-sm">{visible.length}</span></h2><input aria-label="Search monitored servers" placeholder="Search name, IP, rack…" value={query} onChange={e => setQuery(e.target.value)} className={`${input} sm:!w-60`} /><select aria-label="Filter server status" value={filter} onChange={e => setFilter(e.target.value)} className={`${input} !w-auto`}><option value="all">All statuses</option><option value="up">Reachable</option><option value="down">No reply</option><option value="attention">Needs attention</option><option value="paused">Paused</option></select></div>
+        <div className="p-4 flex flex-wrap items-center gap-3 border-b border-zinc-800"><h2 className="font-semibold mr-auto">Servers <span className="text-zinc-500 font-normal text-sm">{visible.length}</span></h2><input ref={searchRef} aria-label="Search monitored servers" placeholder="Search name, IP, rack…" value={query} onChange={e => setQuery(e.target.value)} className={`${input} sm:!w-60`} /><select aria-label="Filter server status" value={filter} onChange={e => setFilter(e.target.value)} className={`${input} !w-auto`}><option value="all">All statuses</option><option value="up">Reachable</option><option value="down">No reply</option><option value="attention">Needs attention</option><option value="paused">Paused</option></select></div>
         <div className="relative overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-zinc-900/60 text-xs text-zinc-500"><tr>{["Server / address", "Rack", "Ping", "PDU", "KVM", "Last ping", "RTT", ""].map((h, i) => <th key={i} scope="col" className="px-4 py-3 font-medium">{h || <span className="sr-only">Details</span>}</th>)}</tr></thead><tbody>
-          {visible.map(t => <tr key={t.id} className={`border-t border-zinc-800/60 ${selectedId === t.id ? "bg-nv-400/5" : "hover:bg-zinc-900/50"}`}><td className="px-4 py-3"><button onClick={() => setSelectedId(t.id)} className="font-medium text-zinc-100 hover:text-nv-400 text-left" aria-label={`View history for ${t.name}`}>{t.name}</button><div className="font-mono text-xs text-zinc-500 mt-1">{t.host || "Set an address →"}</div></td><td className="px-4 py-3 text-zinc-400 whitespace-nowrap">{t.rack || "—"}</td><td className="px-4 py-3"><Badge status={t.status} /></td>{["pdu", "kvm"].map(kind => <td key={kind} className="px-4 py-3 align-top"><Connections links={t[kind]} kind={kind} timezone={timezone} /></td>)}<td className="px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">{when(t.checked_at, timezone)}</td><td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{t.rtt_ms != null ? `${t.rtt_ms} ms` : "—"}</td><td className="px-4 py-3"><button className="text-xs text-nv-400 hover:underline" onClick={() => setSelectedId(t.id)} aria-label={`Configure ${t.name}`}>Details</button></td></tr>)}
+          {visible.map(t => <tr key={t.id} className={`border-t border-zinc-800/60 ${selectedId === t.id ? "bg-nv-400/5" : "hover:bg-zinc-900/50"}`}><td className="px-4 py-3"><button onClick={e => openDetails(t.id, e)} className="font-medium text-zinc-100 hover:text-nv-400 text-left" aria-label={`View history for ${t.name}`}>{t.name}</button><div className="font-mono text-xs text-zinc-500 mt-1">{t.host || "Set an address →"}</div></td><td className="px-4 py-3 text-zinc-400 whitespace-nowrap">{t.rack || "—"}</td><td className="px-4 py-3"><Badge status={t.status} />{lastKnown(t) && <div className="text-xs text-rose-300 mt-1 whitespace-nowrap">{lastKnown(t)}</div>}</td>{["pdu", "kvm"].map(kind => <td key={kind} className="px-4 py-3 align-top"><Connections links={t[kind]} kind={kind} timezone={timezone} /></td>)}<td className="px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">{when(t.checked_at, timezone)}</td><td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{t.rtt_ms != null ? `${t.rtt_ms} ms` : "—"}</td><td className="px-4 py-3"><button className="text-xs text-nv-400 hover:underline" onClick={e => openDetails(t.id, e)} aria-label={`Configure ${t.name}`}>Details</button></td></tr>)}
           {!visible.length && <tr><td colSpan={8} className="px-5 py-10 text-center text-zinc-500">{!data ? "Loading monitor…" : targets.length ? "No servers match this filter." : "Servers are imported from PDU/KVM labels and computer inventory during a check. You can also add a server here."}</td></tr>}
         </tbody></table></div>
         <p className="px-4 py-3 text-xs text-zinc-500 border-t border-zinc-800">Select a server to edit its address, pause checks or inspect its history. All matching outlets and ports are listed. Not linked means no matching port label; configured or unverified KVM ports have no confirmed live state. Details show each device check time.</p>
       </section>
-      {selected && <ServerHistory key={selected.id} target={selected} timezone={timezone} onSaved={refresh} onClose={() => setSelectedId(null)} />}
+      {selected && <ServerHistory key={selected.id} panelRef={panelRef} target={selected} timezone={timezone} onSaved={refresh} onClose={closeDetails} />}
     </div>
     <section className="rounded-xl border border-zinc-800 overflow-hidden">
       <div className="p-4 border-b border-zinc-800 flex flex-wrap justify-between items-center gap-3"><div><h2 className="font-semibold">Ping failure & recovery log</h2><p className="text-xs text-zinc-500 mt-1">Latest 200 incidents across all servers · closed incidents retained for 90 days</p></div><a href="/api/monitoring/incidents.csv" className={button} download>Export CSV</a></div>
-      <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="text-xs text-zinc-500 bg-zinc-900/60"><tr>{["Server", "First failed check", "Last failed check", "First reply / closed", "Observed window", "Failed checks"].map(h => <th key={h} scope="col" className="px-4 py-3 font-medium">{h}</th>)}</tr></thead><tbody>{incidents.map(i => <tr key={i.id} className="border-t border-zinc-800/60"><td className="px-4 py-3"><button onClick={() => setSelectedId(i.target_id)} className="font-medium hover:text-nv-400">{i.name}</button><div className="text-xs font-mono text-zinc-500 mt-1">{i.host}</div></td><td className="px-4 py-3 text-xs whitespace-nowrap text-rose-300">{when(i.first_failed_at, timezone)}</td><td className="px-4 py-3 text-xs whitespace-nowrap text-zinc-400">{when(i.last_failed_at, timezone)}</td><td className="px-4 py-3 text-xs whitespace-nowrap">{i.ended_at ? <><span className={i.end_reason === "recovered" ? "text-emerald-300" : "text-zinc-400"}>{when(i.ended_at, timezone)}</span><div className="text-zinc-500 mt-1">{i.end_reason === "recovered" ? "Reply received" : i.end_reason?.replaceAll("_", " ")}</div></> : <span className="text-rose-300">No recovery observed</span>}</td><td className="px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">{elapsed(i.observed_seconds)}</td><td className="px-4 py-3 text-zinc-400 tabular-nums">{i.failed_checks}</td></tr>)}{!incidents.length && <tr><td colSpan={6} className="text-center text-zinc-500 px-5 py-8">{data ? "No failed ICMP checks recorded yet." : "Loading incidents…"}</td></tr>}</tbody></table></div>
+      <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="text-xs text-zinc-500 bg-zinc-900/60"><tr>{["Server", "First failed check", "Last failed check", "First reply / closed", "Observed window", "Failed checks"].map(h => <th key={h} scope="col" className="px-4 py-3 font-medium">{h}</th>)}</tr></thead><tbody>{incidents.map(i => <tr key={i.id} className="border-t border-zinc-800/60"><td className="px-4 py-3"><button onClick={e => openDetails(i.target_id, e)} className="font-medium hover:text-nv-400">{i.name}</button><div className="text-xs font-mono text-zinc-500 mt-1">{i.host}</div></td><td className="px-4 py-3 text-xs whitespace-nowrap text-rose-300">{when(i.first_failed_at, timezone)}</td><td className="px-4 py-3 text-xs whitespace-nowrap text-zinc-400">{when(i.last_failed_at, timezone)}</td><td className="px-4 py-3 text-xs whitespace-nowrap">{i.ended_at ? <><span className={i.end_reason === "recovered" ? "text-emerald-300" : "text-zinc-400"}>{when(i.ended_at, timezone)}</span><div className="text-zinc-500 mt-1">{i.end_reason === "recovered" ? "Reply received" : i.end_reason?.replaceAll("_", " ")}</div></> : <span className="text-rose-300">No recovery observed</span>}</td><td className="px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">{elapsed(i.observed_seconds)}</td><td className="px-4 py-3 text-zinc-400 tabular-nums">{i.failed_checks}</td></tr>)}{!incidents.length && <tr><td colSpan={6} className="text-center text-zinc-500 px-5 py-8">{data ? "No failed ICMP checks recorded yet." : "Loading incidents…"}</td></tr>}</tbody></table></div>
     </section>
     <p className="text-xs text-zinc-500 leading-relaxed max-w-4xl">PDU power and KVM observations do not verify the operating system, applications or a working remote console session. A missing ICMP reply indicates a reachability problem, not necessarily a server crash. Brief failures between checks may be missed. Incident windows show observations at check times; they do not establish continuous downtime or the exact failure time. DNS or local probe errors appear separately. Monitoring continues while the backend is running, even with this page closed.</p>
   </main>;
