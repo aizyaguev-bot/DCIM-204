@@ -78,7 +78,8 @@ def person_view(person):
 class EngineerEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=120)
-    active: bool = True
+    # None means "leave unchanged" on PUT (a rename must not reactivate) and "active" on POST.
+    active: bool | None = None
 
     @field_validator("name")
     @classmethod
@@ -102,7 +103,8 @@ async def list_engineers(db: AsyncSession = Depends(get_db)):
 
 @router.post("/engineers", status_code=201)
 async def add_engineer(body: EngineerEdit, db: AsyncSession = Depends(get_db)):
-    person = Engineer(id=uuid4().hex, name=body.name, name_key=name_key(body.name), active=body.active)
+    person = Engineer(id=uuid4().hex, name=body.name, name_key=name_key(body.name),
+                      active=True if body.active is None else body.active)
     db.add(person)
     try:
         await db.commit()
@@ -117,7 +119,9 @@ async def edit_engineer(engineer_id: str, body: EngineerEdit, db: AsyncSession =
     person = await db.get(Engineer, engineer_id)
     if not person:
         raise HTTPException(404, "Engineer not found")
-    person.name, person.name_key, person.active = body.name, name_key(body.name), body.active
+    person.name, person.name_key = body.name, name_key(body.name)
+    if body.active is not None:
+        person.active = body.active
     try:
         await db.commit()
     except IntegrityError as exc:

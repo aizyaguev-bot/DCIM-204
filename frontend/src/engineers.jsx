@@ -60,7 +60,7 @@ export function EngineersView() {
   if(!canAdmin) return <p role="alert">ניהול מהנדסים זמין למנהל בלבד.</p>;
   return <main className="account-page max-w-none" dir="rtl" lang="he">
     <div className="mb-5"><h1 className="text-2xl font-bold text-white">מהנדסים</h1><p className="text-sm text-zinc-400 mt-2">בחר מהרשימה בשדה Owner בציוד. מהנדס לא חייב להיות משתמש באתר.</p></div>
-    <form className="flex flex-wrap gap-3 items-end mb-5" onSubmit={e=>{e.preventDefault();action(async()=>{await accountRequest(editing?`/engineers/${editing.id}`:"/engineers",editing?"PUT":"POST",{name,active:editing?.active??true});setName("");setEditing(null);});}}>
+    <form className="flex flex-wrap gap-3 items-end mb-5" onSubmit={e=>{e.preventDefault();action(async()=>{await accountRequest(editing?`/engineers/${editing.id}`:"/engineers",editing?"PUT":"POST",{name});setName("");setEditing(null);});}}>
       <label className="account-fields flex-1 min-w-48">שם המהנדס<input required maxLength={120} value={name} onChange={e=>setName(e.target.value)} disabled={busy} autoComplete="off"/></label>
       <button className="account-primary" disabled={busy}>{editing?"שמור שם":"הוסף מהנדס"}</button>
       {editing&&<button type="button" className="account-secondary" disabled={busy} onClick={()=>{setEditing(null);setName("");}}>ביטול</button>}

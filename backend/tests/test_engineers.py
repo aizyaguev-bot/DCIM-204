@@ -89,6 +89,30 @@ async def test_assign_rename_disable_and_unassign_do_not_erase_other_owners(dire
         assert json.loads(directory.saved.read_text())["opt11"] == "Roy Mendelson"
 
 
+async def test_rename_without_active_keeps_a_deactivated_engineer_inactive(directory):
+    # MON-2: the edit form sends only the name, so a rename must not reactivate the engineer.
+    async with client(directory) as c:
+        await login(c)
+        r = await c.post("/api/engineers", json={"name":"Temp Engineer"})
+        assert r.status_code == 201 and r.json()["active"] is True
+        person = r.json()
+        r = await c.put(f"/api/engineers/{person['id']}", json={"name":"Temp Engineer", "active":False})
+        assert r.status_code == 200 and r.json()["active"] is False
+        r = await c.put(f"/api/engineers/{person['id']}", json={"name":"Temp Renamed"})
+        assert r.status_code == 200 and r.json() == {"id":person["id"], "name":"Temp Renamed", "active":False}
+        listed = next(p for p in (await c.get("/api/engineers")).json() if p["id"] == person["id"])
+        assert listed == {"id":person["id"], "name":"Temp Renamed", "active":False}
+        assert (await c.put("/api/opt-owners/opt13", json={"engineer_id":person["id"]})).status_code == 409
+        assert "opt13" not in (await c.get("/api/opt-owners")).json()
+        # An explicit active flag still toggles, and a later name-only rename keeps it active.
+        r = await c.put(f"/api/engineers/{person['id']}", json={"name":"Temp Renamed", "active":True})
+        assert r.status_code == 200 and r.json()["active"] is True
+        r = await c.put(f"/api/engineers/{person['id']}", json={"name":"Temp Again"})
+        assert r.status_code == 200 and r.json()["active"] is True
+        assert (await c.put("/api/opt-owners/opt13", json={"engineer_id":person["id"]})).status_code == 200
+        assert (await c.put(f"/api/engineers/{person['id']}", json={"name":"Temp Again", "active":None})).json()["active"] is True
+
+
 @pytest.mark.parametrize("role,assignment,manage",[("viewer",403,403),("operator",200,403),("admin",200,201)])
 async def test_engineer_roles_and_csrf(directory, role, assignment, manage):
     async with client(directory) as c:
