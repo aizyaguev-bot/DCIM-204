@@ -356,14 +356,32 @@ async def configure(request: Request, response: Response, db: AsyncSession = Dep
         host = checked_host(value)
         if host != checked_host(servers[key]["host"]):
             raise HTTPException(400, "Approved SSH host must match the saved server host")
-        await resolve_target(host)
         targets[key] = host
+    # A server whose host the VM cannot resolve to a usable address is left unapproved, and named in `skipped`,
+    # instead of failing the whole save: one name-only server must not block approving every other server.
+    skipped = []
+    for key, host in list(targets.items()):
+        try:
+            await resolve_target(host)
+        except HTTPException as error:
+            del targets[key]
+            skipped.append({"key": key, "name": servers[key]["name"], "host": host, "reason": skip_reason(error.detail, host)})
     await ssh_store.run_file_op(ssh_store.write_config, default, overrides, targets, request.headers.get("if-match"))
     await event(db, request, "config_updated")
     config = await ssh_store.run_file_op(ssh_store.read_config)
     response.headers["ETag"] = ssh_store.config_etag(config)
     response.headers["Cache-Control"] = "no-store"
-    return config
+    return {**config, "skipped": skipped} if skipped else config
+
+
+def skip_reason(detail, host):
+    """Owner-facing reason a server was left unapproved; fixed texts only (no resolver output)."""
+    if detail == "SSH target could not be resolved safely":
+        return (f"The VM cannot find an IP address for {host}. Give this server its IP address in Ping Monitor "
+                "(or fix its name in DNS), then approve it again.")
+    if detail == "SSH target resolves to a prohibited address":
+        return f"{host} points to a loopback, link-local, multicast or VM address, which SSH may not use."
+    return f"{host} could not be checked as a safe SSH target from the VM."
 
 
 @router.post("/hosts/{key}/accept")

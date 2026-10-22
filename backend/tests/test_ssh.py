@@ -512,6 +512,23 @@ def test_assistant_cannot_import_ssh_modules():
     assert logging.getLogger("asyncssh").getEffectiveLevel() >= logging.WARNING
 
 
+async def test_config_skips_a_server_the_vm_cannot_resolve_instead_of_failing_the_save(api, monkeypatch):
+    async def no_dns(host):
+        raise HTTPException(403, "SSH target could not be resolved safely")
+    monkeypatch.setattr(ssh, "resolve_target", no_dns)
+    with browser(api) as client:
+        etag = client.get("/api/ssh/config").headers["etag"]
+        body = {"default_user": "deployer", "per_server_user": {}, "targets": {"local": "127.0.0.1"}}
+        saved = client.put("/api/ssh/config", json=body, headers={"If-Match": etag})
+        assert saved.status_code == 200
+        data = saved.json()
+        assert data["default_user"] == "deployer" and data["targets"] == {}
+        assert [item["key"] for item in data["skipped"]] == ["local"]
+        assert "cannot find an IP address" in data["skipped"][0]["reason"]
+        assert ssh_store.read_config()["targets"] == {}
+        assert not client.get("/api/ssh/status").json()["servers"][0]["approved"]
+
+
 async def test_config_etag_and_explicit_target_approval(api, monkeypatch):
     async def fake_resolution(host):
         assert host == "127.0.0.1"

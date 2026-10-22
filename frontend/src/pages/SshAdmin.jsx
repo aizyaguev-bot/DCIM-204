@@ -318,10 +318,12 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, on
     if (!ok) { setResult({ error: "Fix the highlighted fields." }); return; }
     setBusy(true); setResult({});
     try {
-      await sshApi.saveConfig(payload, status?.config_revision);
+      const saved = await sshApi.saveConfig(payload, status?.config_revision);
       await onSaved();
       setForm(null); setErrors({});
-      setResult({ message: "SSH settings saved." });
+      const skipped = Array.isArray(saved?.skipped) ? saved.skipped : [];
+      setResult({ message: "SSH settings saved.",
+        skipped: skipped.map(s => `${String(s?.name || s?.key || "")}: ${String(s?.reason || "")}`.slice(0, 400)) });
     } catch (err) {
       // Someone else saved first: their values win; reload them instead of overwriting.
       if (err.status === 409 || err.status === 412) { setForm(null); setErrors({}); await onSaved(); }
@@ -378,6 +380,10 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, on
       </div>
       {result.error && <p role="alert" className="account-error">{result.error}</p>}
       {result.message && <p role="status" className="text-sm text-nv-300">{result.message}</p>}
+      {result.skipped?.length > 0 && <div role="alert" className="rounded border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">
+        <p className="font-semibold">Not approved ({result.skipped.length}): these servers have no address the VM can reach.</p>
+        <ul className="mt-1 list-disc pl-5 space-y-0.5">{result.skipped.map((line, i) => <li key={i}>{line}</li>)}</ul>
+      </div>}
       {canAdmin ? <div className="flex flex-wrap gap-2">
         <button className="account-primary" disabled={!dirty || busy}>{busy ? "Saving…" : "Save changes"}</button>
         <button type="button" className="account-secondary" disabled={!dirty || busy} onClick={() => { setForm(null); setErrors({}); setResult({}); }}>Discard changes</button>
