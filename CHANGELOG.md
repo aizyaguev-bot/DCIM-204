@@ -2,6 +2,23 @@
 
 ---
 
+## v2.40.1 — 2026-10-22 — Racks follow the dashboard, KVM button on every server
+
+### Fixed
+- **Racks now follow the dashboard.** The Racks page used the outlet names it had
+  loaded when the page opened, and could keep showing a server where it used to be.
+  It now uses the same live names as the dashboard, and reloads names and the rack
+  layout on the dashboard's refresh interval (and when you come back to the tab),
+  so moves and renames made in Locations, the 3D Twin, the assistant or another
+  session appear without reloading the page. Nothing reloads while you are editing.
+
+### Added
+- **KVM button on every server in Racks.** Each server row in the rack diagram and
+  in the rack's table has a **KVM** button that opens that server's console
+  directly (Operator and Admin).
+
+---
+
 ## v2.40.0 — 2026-10-22 — Active lab assistant, port names written to the PDUs, API key page
 
 ### Added
