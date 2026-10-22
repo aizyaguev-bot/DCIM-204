@@ -1955,6 +1955,9 @@ async def confirm_data(c, proposal_id, body=None):
     return await c.post(f"{B}/proposals/{proposal_id}/execute", json={} if body is None else body)
 
 
+# After the swap: OPT12 and OPT13 exchange their saved U; sweep B01 (contract C6) also pins the automatic U numbers the
+# DCIM view showed in the rack the swap touched (OPT11 PSU1/PSU2, OPT31, SW-CORE at U1-U4), so nothing there renumbers.
+R1_AFTER_SWAP = {"opt13": 10, "opt12": 12, "opt11 (psu1)": 1, "opt11 (psu2)": 2, "opt31": 3, "sw-core": 4}
 SWAP_CHANGES = sorted([("kvm1", "2", "OPT12", "OPT13"), ("kvm2", "3", "OPT12", "OPT13"),
                        ("pdu1", "2", "OPT12", "OPT13"), ("pdu1", "3", "OPT13", "OPT12")])
 
@@ -1999,7 +2002,7 @@ async def test_n1_swap_previews_every_change_and_runs_on_one_click_without_a_pas
         expect_error(await confirm_data(c, p["id"]), 409, "not_pending")
     assert (await labels_of(env, "pdu1"))["2"] == "OPT13" and (await labels_of(env, "pdu1"))["3"] == "OPT12"
     assert (await labels_of(env, "kvm1"))["2"] == "OPT13" and (await labels_of(env, "kvm2"))["3"] == "OPT13"
-    assert read_layout(env)["R1"] == {"opt13": 10, "opt12": 12}
+    assert read_layout(env)["R1"] == R1_AFTER_SWAP
     in_order(names(await events(env, p["id"])), ["proposed", "confirmed", "finished"])
     assert env.fleet.created == 0 and env.fleet.calls == [] and await throttle_attempts(env) == 0
     no_secrets(r.text)
@@ -2012,7 +2015,7 @@ async def test_n1b_two_concurrent_confirmations_swap_once(env, real_planner):
         first, second = await asyncio.gather(confirm_data(c, p["id"]), confirm_data(c, p["id"]))
     assert sorted([first.status_code, second.status_code]) == [200, 409], (first.text, second.text)
     assert (await labels_of(env, "pdu1"))["2"] == "OPT13"           # swapped exactly once, never swapped back
-    assert read_layout(env)["R1"] == {"opt13": 10, "opt12": 12}
+    assert read_layout(env)["R1"] == R1_AFTER_SWAP
 
 
 async def test_n1c_a_location_confirmation_body_is_still_allowlisted(env, real_planner):
