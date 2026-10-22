@@ -293,7 +293,8 @@ async def test_restore_empty_or_manually_restored_batch_has_no_targets(lab):
 
 
 async def test_kvm_and_pxe_warnings_use_active_keys_and_monotonic_ttl(lab):
-    kvms._in_use["kvm a/b"] = {1: time.monotonic() + 60}
+    # The marker as the lease endpoint stores it (one lease per console launch).
+    await kvms.mark_port_in_use("kvm a/b", 1)
     lab.db.add(PxeJob(id="job", computer_key="opt11", computer_name="OPT11", kvm_device_id="kvm a/b",
                       kvm_port=1, reboot_method="manual", driver="simulated", state="failed",
                       state_entered_at=NOW, deadline_at=NOW, active_key="opt11", active_port_key="kvm a/b:1",
@@ -306,7 +307,7 @@ async def test_kvm_and_pxe_warnings_use_active_keys_and_monotonic_ttl(lab):
 
 
 async def test_expired_in_use_marker_does_not_warn(lab):
-    kvms._in_use["kvm a/b"] = {1: time.monotonic() - 1}
+    kvms._in_use["kvm a/b"] = {1: {"0" * 32: time.monotonic() - 1}}
     assert not (await impact(lab, "open_console", server="OPT11")).warnings_he
 
 

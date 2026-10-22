@@ -220,7 +220,9 @@ async def _pxe_held(db, server_names, consoles):
 
 
 async def _warnings(db, impact, server_names, consoles):
-    if any(kvms._in_use.get(c.kvm_id, {}).get(c.port, 0) > time.monotonic() for c in consoles):
+    # kvms._in_use holds one lease per console launch: {kvm_id: {port: {lease: expires_at}}}.
+    now = time.monotonic()
+    if any(any(exp > now for exp in (kvms._in_use.get(c.kvm_id, {}).get(c.port) or {}).values()) for c in consoles):
         impact.warnings_he.append("קונסולת KVM של שרת ביעד מסומנת כעת בשימוש; ייתכן שמישהו עובד עליו.")
     if await _pxe_held(db, server_names, consoles):
         impact.warnings_he.append("שרת ביעד מוחזק בידי עבודת PXE פעילה; שינוי חשמל עלול להפסיק את ההתקנה.")
