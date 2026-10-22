@@ -2,6 +2,7 @@
 import csv
 import io
 import json
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from sqlalchemy import event
 
 from app import accounts, engineers, inventory_store
 from app.database import get_db
-from app.models import AssetOwner, Device, Engineer, PingTarget
+from app.models import AssetOwner, Device, Engineer, MonitorDeviceSnapshot, PingTarget
 from app.routers import devices, kvms, mapping_export, pdus
 from app.schemas import KvmPort, KvmStatus, OutletState, PduStatus
 
@@ -64,6 +65,30 @@ def device(device_id, kind, labels, **kwargs):
                   ip=kwargs.pop("ip", "192.0.2.10"), labels_json=json.dumps(labels),
                   username_enc="synthetic-user-ciphertext", password_enc="synthetic-password-ciphertext",
                   **kwargs)
+
+
+def snapshot(device_id, kind, ports, ip="192.0.2.10", **kwargs):
+    """A persisted monitor observation, as monitor_links.refresh_devices stores it."""
+    return MonitorDeviceSnapshot(device_id=device_id, kind=kind, ip=ip, checked_at=kwargs.pop("checked_at", time.time()),
+                                 reachable=kwargs.pop("reachable", True), ports_json=json.dumps(ports), **kwargs)
+
+
+def kvm_ports(names):
+    return [KvmPort(number=number, label=label, status="idle", status_source="live").model_dump()
+            for number, label in names.items()]
+
+
+@pytest.fixture
+def cold_caches():
+    """Unique device ids with no in-memory status, as right after an API restart; removed again afterwards."""
+    ids = ("b17-kvm", "b17-pdu")
+    for device_id in ids:
+        kvms._cache.pop(device_id, None)
+        pdus._cache.pop(device_id, None)
+    yield ids
+    for device_id in ids:
+        kvms._cache.pop(device_id, None)
+        pdus._cache.pop(device_id, None)
 
 
 def csv_rows(response):
@@ -325,3 +350,124 @@ async def test_rack_and_u_slot_match_locations_and_servers_without_ports_are_lis
     assert by_name["OPTN45"] == ["OPTN45", "Rack-01", "7", "", "", "unknown", "PDU-A (192.0.2.11) #2",
                                  "KVM-A (192.0.2.12) #4"]
     assert by_name["OPTN44"][:3] == ["OPTN44", "Rack-02", ""]
+
+
+async def test_cold_cache_uses_the_persisted_monitor_snapshot_read_only(export_client, db_session, cold_caches):
+    kvm_id, pdu_id = cold_caches
+    db_session.add_all([
+        device(kvm_id, "kvm", {}, name="KVM-B17", ip="192.0.2.31"),
+        device(pdu_id, "pdu", {"12": "OPT12", "13": "OPT13", "14": "OPT14", "15": "OPT15"},
+               name="PDU-B17", rack="Rack-01", ip="192.0.2.32"),
+        # Ports 2-4 were learned from the KVM itself (no saved labels); port 5 is no longer reported but its
+        # learned name is retained, exactly as the monitor keeps it.
+        snapshot(kvm_id, "kvm", kvm_ports({1: "Port 1", 2: "OPT12", 3: "OPT13", 4: "OPT14 (console)"})
+                 + [{**kvm_ports({5: "OPT16"})[0], "missing": True}], ip="192.0.2.31"),
+        # A persisted outlet state may be old: a snapshot-only outlet name is exported with state "unknown".
+        snapshot(pdu_id, "pdu", [OutletState(number=20, label="OPT17", state="on").model_dump()],
+                 ip="192.0.2.32"),
+    ])
+    await db_session.commit()
+    statements = []
+
+    def record_query(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    engine = db_session.bind.sync_engine
+    event.listen(engine, "before_cursor_execute", record_query)
+    try:
+        response = await export_client.get(PATHS[0])
+        csv_response = await export_client.get(PATHS[1])
+    finally:
+        event.remove(engine, "before_cursor_execute", record_query)
+    assert response.status_code == csv_response.status_code == 200
+    assert statements and all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
+    assert kvm_id not in kvms._cache and pdu_id not in pdus._cache  # No status was fetched or cached.
+
+    servers = {server["key"]: server for server in response.json()["servers"]}
+    assert set(servers) == {"opt12", "opt13", "opt14", "opt15", "opt16", "opt17"}
+    for number, key, label in ((2, "opt12", "OPT12"), (3, "opt13", "OPT13"), (4, "opt14", "OPT14 (console)")):
+        assert servers[key]["kvm"] == [{"device_id": kvm_id, "device_name": "KVM-B17", "device_ip": "192.0.2.31",
+                                        "port": number, "label": label}]
+    assert servers["opt16"]["kvm"][0]["port"] == 5
+    assert servers["opt17"]["pdu"] == [{"device_id": pdu_id, "device_name": "PDU-B17", "device_ip": "192.0.2.32",
+                                        "rack": "Rack-01", "port": 20, "label": "OPT17", "state": "unknown"}]
+    # The Connections page's "Missing KVM" filter lists servers with no KVM port: OPT12-14 are not among them.
+    assert sorted(key for key, server in servers.items() if not server["kvm"]) == ["opt15", "opt17"]
+
+    by_name = {row[0]: row for row in csv_rows(csv_response)[1:]}
+    assert by_name["OPT12"][6:] == ["PDU-B17 (192.0.2.32) #12", "KVM-B17 (192.0.2.31) #2"]
+    assert by_name["OPT13"][7] == "KVM-B17 (192.0.2.31) #3"
+    assert by_name["OPT14"][7] == "KVM-B17 (192.0.2.31) #4"
+    assert by_name["OPT15"][7] == ""
+
+
+@pytest.mark.parametrize("kind,ip", [("kvm", "192.0.2.99"), ("pdu", "192.0.2.31")])
+async def test_snapshot_of_a_reconfigured_device_is_ignored(export_client, db_session, cold_caches, kind, ip):
+    kvm_id = cold_caches[0]
+    db_session.add_all([
+        device(kvm_id, "kvm", {}, name="KVM-B17", ip="192.0.2.31"),
+        snapshot(kvm_id, kind, kvm_ports({2: "OPT12"}), ip=ip),
+    ])
+    await db_session.commit()
+    response = await export_client.get(PATHS[0])
+    assert response.status_code == 200
+    assert response.json()["servers"] == []
+
+
+async def test_live_cache_wins_over_the_snapshot(export_client, db_session, cold_caches):
+    kvm_id = cold_caches[0]
+    db_session.add_all([
+        device(kvm_id, "kvm", {}, name="KVM-B17", ip="192.0.2.31"),
+        snapshot(kvm_id, "kvm", kvm_ports({2: "OPT21", 5: "OPT22"}), ip="192.0.2.31"),
+    ])
+    await db_session.commit()
+    kvms._cache[kvm_id] = (-10**12, KvmStatus(device_id=kvm_id, reachable=True, ports=[
+        KvmPort(number=2, label="OPT20", status="active"),
+    ]))
+    response = await export_client.get(PATHS[0])
+    servers = {server["key"]: server for server in response.json()["servers"]}
+    assert set(servers) == {"opt20"}
+    assert servers["opt20"]["kvm"][0]["port"] == 2
+
+
+async def test_unreachable_cache_with_no_ports_falls_back_to_the_snapshot(export_client, db_session, cold_caches):
+    kvm_id = cold_caches[0]
+    db_session.add_all([
+        device(kvm_id, "kvm", {}, name="KVM-B17", ip="192.0.2.31"),
+        snapshot(kvm_id, "kvm", kvm_ports({3: "OPT23"}), ip="192.0.2.31", reachable=False),
+    ])
+    await db_session.commit()
+    kvms._cache[kvm_id] = (-10**12, KvmStatus(device_id=kvm_id, reachable=False, error="timeout"))
+    response = await export_client.get(PATHS[0])
+    servers = {server["key"]: server for server in response.json()["servers"]}
+    assert set(servers) == {"opt23"}
+    assert servers["opt23"]["kvm"][0]["port"] == 3
+
+
+async def test_saved_labels_win_over_the_snapshot(export_client, db_session, cold_caches):
+    kvm_id = cold_caches[0]
+    db_session.add_all([
+        device(kvm_id, "kvm", {"2": "OPT30", "3": ""}, name="KVM-B17", ip="192.0.2.31"),
+        snapshot(kvm_id, "kvm", kvm_ports({2: "OPT31", 3: "OPT32", 4: "OPT33"}), ip="192.0.2.31"),
+    ])
+    await db_session.commit()
+    response = await export_client.get(PATHS[0])
+    servers = {server["key"]: server for server in response.json()["servers"]}
+    # A saved name replaces the observed one and a saved blank clears it; unsaved ports keep the observed name.
+    assert set(servers) == {"opt30", "opt33"}
+    assert (servers["opt30"]["kvm"][0]["port"], servers["opt30"]["kvm"][0]["label"]) == (2, "OPT30")
+    assert servers["opt33"]["kvm"][0]["port"] == 4
+
+
+@pytest.mark.parametrize("ports_json", ["not json", "{}", "null", json.dumps([{"label": "OPT40"}, "OPT41", None])])
+async def test_unreadable_snapshot_ports_are_skipped(export_client, db_session, cold_caches, ports_json):
+    kvm_id = cold_caches[0]
+    db_session.add_all([
+        device(kvm_id, "kvm", {"1": "OPT42"}, name="KVM-B17", ip="192.0.2.31"),
+        MonitorDeviceSnapshot(device_id=kvm_id, kind="kvm", ip="192.0.2.31", checked_at=time.time(),
+                              reachable=True, ports_json=ports_json),
+    ])
+    await db_session.commit()
+    response = await export_client.get(PATHS[0])
+    assert response.status_code == 200
+    assert [server["key"] for server in response.json()["servers"]] == ["opt42"]
