@@ -99,7 +99,8 @@ function TargetSettings({ target, onSaved }) {
   const live = target.revision >= base.revision ? target : base;
   const current = dirty ? base : live;
   const value = dirty ? draft : settingsOf(live);
-  const conflict = dirty && (rejected || target.revision > base.revision);
+  // While a save is running, a poll may already carry the revision this save wrote: that is not someone else's change.
+  const conflict = !busy && dirty && (rejected || target.revision > base.revision);
   const synced = value.syncName && target.source === "inventory";
 
   // Disabled controls and removed buttons drop focus to BODY; put it back once the form settles.
@@ -112,7 +113,8 @@ function TargetSettings({ target, onSaved }) {
   });
 
   function edit(patch) {
-    if (!dirty) { setBase(live); setRejected(false); }
+    // A new edit starts from the values on screen; a notice about the last save of a clean form no longer applies.
+    if (!dirty) { setBase(live); setRejected(false); setError(""); }
     setDraft({ ...value, ...patch });
   }
   function loadCurrent() {

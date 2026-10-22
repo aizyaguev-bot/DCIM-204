@@ -86,24 +86,26 @@ const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
    await ctx.close();checks.push('overdue server keeps "Last known: No reply"');
   }
   // MON-4: two operators edit one server; polls never replace a typed address and a conflict offers both choices.
+  // Polls run every 15 s; a tick is skipped while a slow response is still pending, so allow two intervals.
+  const POLL=35000;
   {
    const A=await monitorPage({viewport:{width:1440,height:1000}});const Bc=await browser.newContext({viewport:{width:1440,height:1000}});await Bc.addInitScript(seen);await Bc.route('**/*',r=>r.request().url().startsWith(origin+'/')?r.continue():r.abort());
    const b=await Bc.newPage();b.on('pageerror',e=>errors.push(e.message));await login(b,'operator');await nav(b,'Ping Monitor');
    const a=A.page;await a.getByRole('button',{name:'View history for OPT13',exact:true}).click();await b.getByRole('button',{name:'View history for OPT13',exact:true}).click();
    const addrA=a.getByLabel('Address for OPT13',{exact:true}),addrB=b.getByLabel('Address for OPT13',{exact:true});
-   const isPut=r=>r.request().method()==='PUT'&&r.url()===origin+'/api/monitoring/targets/t13';
-   async function saveB(host){await addrB.fill(host);const [res]=await Promise.all([b.waitForResponse(isPut),b.getByRole('button',{name:'Save settings',exact:true}).click()]);assert.equal(res.status(),200);await b.getByRole('button',{name:'Save settings',exact:true}).waitFor();}
+   const putOf=id=>r=>r.request().method()==='PUT'&&r.url()===`${origin}/api/monitoring/targets/${id}`;const isPut=putOf('t13');
+   async function saveB(host,field=addrB,id='t13'){await field.fill(host);const [res]=await Promise.all([b.waitForResponse(putOf(id)),b.getByRole('button',{name:'Save settings',exact:true}).click()]);assert.equal(res.status(),200);await b.getByRole('button',{name:'Save settings',exact:true}).waitFor();}
    const alertA=a.getByRole('alert').filter({hasText:'Someone else changed this server'});
-   await saveB('opt13-b1');await a.waitForFunction(()=>document.querySelector('input[aria-label="Address for OPT13"]')?.value==='opt13-b1',null,{timeout:20000});
+   await saveB('opt13-b1');await a.waitForFunction(()=>document.querySelector('input[aria-label="Address for OPT13"]')?.value==='opt13-b1',null,{timeout:POLL});
    assert.equal(await alertA.count(),0);checks.push('a clean form follows the server');
-   await addrA.fill('opt13-a1');await saveB('opt13-b2');await alertA.waitFor({timeout:20000});
+   await addrA.fill('opt13-a1');await saveB('opt13-b2');await alertA.waitFor({timeout:POLL});
    assert.equal(await addrA.inputValue(),'opt13-a1');await alertA.getByText('opt13-b2',{exact:true}).waitFor();
    assert.equal(await alertA.getByRole('button',{name:'Load current values',exact:true}).count(),1);assert.equal(await alertA.getByRole('button',{name:'Keep my changes',exact:true}).count(),1);
    assert.equal(await a.getByRole('button',{name:'Save settings',exact:true}).isDisabled(),true);checks.push('a poll keeps the typed address and shows the conflict with both choices');
    await alertA.getByRole('button',{name:'Load current values',exact:true}).click();await alertA.waitFor({state:'detached'});
    assert.equal(await addrA.inputValue(),'opt13-b2');assert.equal(await addrA.evaluate(el=>el===document.activeElement),true);checks.push('Load current values reverts the draft');
    // Right after A's poll, so the next one is ~15 s away and the save meets the server's 409.
-   await a.waitForResponse(r=>r.request().method()==='GET'&&r.url()===origin+'/api/monitoring',{timeout:20000});
+   await a.waitForResponse(r=>r.request().method()==='GET'&&r.url()===origin+'/api/monitoring',{timeout:POLL});
    await addrA.fill('opt13-a3');await saveB('opt13-b3');
    const [rejected]=await Promise.all([a.waitForResponse(isPut),addrA.press('Enter')]);assert.equal(rejected.status(),409);
    await alertA.waitFor();assert.equal(await addrA.inputValue(),'opt13-a3');await alertA.getByText('opt13-b3',{exact:true}).waitFor();
@@ -114,6 +116,29 @@ const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
    await a.getByRole('button',{name:'Save settings',exact:true}).waitFor();await a.waitForFunction(()=>document.activeElement&&document.activeElement!==document.body);
    assert.equal((await(await c.request.get(origin+'/api/monitoring')).json()).targets.find(t=>t.id==='t13').host,'opt13-a3');assert.equal(await addrA.inputValue(),'opt13-a3');
    checks.push('Keep my changes then Save returns 200 and focus stays in the form');
+   // A poll that already carries the revision written by A's own running save is not someone else's change.
+   await a.getByRole('button',{name:'View history for OPT23',exact:true}).click();const addr23=a.getByLabel('Address for OPT23',{exact:true});await addr23.fill('opt23-self');
+   const otherNotice=a.getByRole('alert').filter({hasText:'Someone else changed this server'});assert.equal(await otherNotice.count(),0);
+   await a.evaluate(()=>{window.__otherNotice=false;new MutationObserver(()=>{if([...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent.includes('Someone else changed this server')))window.__otherNotice=true;}).observe(document.body,{subtree:true,childList:true,characterData:true});});
+   const row23=a.getByRole('row').filter({has:a.getByRole('button',{name:'View history for OPT23',exact:true})});let savingWhenPolled=-1;
+   await a.route(origin+'/api/monitoring/targets/t23',async r=>{if(r.request().method()!=='PUT')return r.continue();const res=await r.fetch();
+    // Hold the committed response until a poll has put the new address in the table while the form still says Saving.
+    await row23.getByText('opt23-self',{exact:true}).waitFor({timeout:POLL});savingWhenPolled=await a.getByRole('button',{name:'Saving…',exact:true}).count();await r.fulfill({response:res});});
+   const [own]=await Promise.all([a.waitForResponse(putOf('t23'),{timeout:POLL+5000}),a.getByRole('button',{name:'Save settings',exact:true}).click()]);assert.equal(own.status(),200);
+   await a.getByRole('button',{name:'Save settings',exact:true}).waitFor();await a.unroute(origin+'/api/monitoring/targets/t23');
+   assert.equal(savingWhenPolled,1);assert.equal(await a.evaluate(()=>window.__otherNotice),false);assert.equal(await otherNotice.count(),0);assert.equal(await addr23.inputValue(),'opt23-self');
+   checks.push('a poll during the own save shows no "someone else" notice');
+   // A clean form's save that meets a 409 explains the reload; typing a new value removes that notice.
+   await a.getByRole('button',{name:'View history for OPT31',exact:true}).click();await b.getByRole('button',{name:'View history for OPT31',exact:true}).click();
+   const addr31=a.getByLabel('Address for OPT31',{exact:true});await addr31.waitFor();
+   // Right after A's poll, so A still holds the old revision when it saves.
+   await a.waitForResponse(r=>r.request().method()==='GET'&&r.url()===origin+'/api/monitoring',{timeout:POLL});
+   await saveB('opt31-b',b.getByLabel('Address for OPT31',{exact:true}),'t31');
+   const [stale]=await Promise.all([a.waitForResponse(putOf('t31')),a.getByRole('button',{name:'Save settings',exact:true}).click()]);assert.equal(stale.status(),409);
+   const reloaded=a.getByRole('alert').filter({hasText:'The form now shows the current values.'});await reloaded.waitFor();
+   await a.waitForFunction(()=>document.querySelector('input[aria-label="Address for OPT31"]')?.value==='opt31-b');
+   await addr31.fill('opt31-a-typing');await reloaded.waitFor({state:'detached',timeout:3000});assert.equal(await otherNotice.count(),0);assert.equal(await addr31.inputValue(),'opt31-a-typing');
+   checks.push('typing after a clean-form 409 removes the reload notice');
    await A.ctx.close();await Bc.close();
   }
   assert.deepEqual(errors,[]);console.log(JSON.stringify({passed:checks,errors}));
