@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
-export default function AddDeviceModal({ onClose, onAdd, racks }) {
+export default function AddDeviceModal({ onClose, onAdd, racks = [] }) {
   const panelRef = useRef(null);
   const nameRef = useRef(null);
+  const submitRef = useRef(null);
+  // Synchronous guard: a double click fires twice before React re-renders the disabled button.
+  const savingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const [saving, setSaving] = useState(false);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
@@ -32,11 +37,34 @@ export default function AddDeviceModal({ onClose, onAdd, racks }) {
     port_count: 16,
   });
   const upd = k => e => setForm({ ...form, [k]: e.target.value });
+  // If the lab's rack list changes while the dialog is open, keep the chosen rack listed so the select shows what will be sent.
+  const rackOptions = form.rack && !racks.includes(form.rack) ? [...racks, form.rack] : racks;
   const inp = "w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-nv-400/60";
 
-  const submit = () => {
-    if (!form.name || !form.ip) { alert("Name and IP are required."); return; }
-    onAdd({ kind, ...form, port_count: Number(form.port_count) });
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  // A failed add keeps the dialog open; the disabled button dropped focus, so bring it back.
+  const wasSaving = useRef(false);
+  useEffect(() => {
+    if (wasSaving.current && !saving && panelRef.current && !panelRef.current.contains(document.activeElement)) submitRef.current?.focus();
+    wasSaving.current = saving;
+  }, [saving]);
+
+  const submit = async () => {
+    if (savingRef.current) return;
+    const name = form.name.trim();
+    if (!name || !form.ip) { alert("Name and IP are required."); return; }
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onAdd({ kind, ...form, name, port_count: Number(form.port_count) });
+    } finally {
+      savingRef.current = false;
+      if (mountedRef.current) setSaving(false);
+    }
   };
 
   return (
@@ -72,8 +100,8 @@ export default function AddDeviceModal({ onClose, onAdd, racks }) {
           <label className="block mb-3">
             <div className="text-xs text-zinc-400 mb-1">Rack</div>
             <select className={inp} value={form.rack} onChange={upd("rack")}>
-              {racks.map(r => <option key={r}>{r}</option>)}
-              <option>Rack-07</option><option>Rack-08</option>
+              <option value="">No rack</option>
+              {rackOptions.map(r => <option key={r} value={r}>{r}</option>)}
             </select>
           </label>
           {kind === "kvm" && (
@@ -96,7 +124,10 @@ export default function AddDeviceModal({ onClose, onAdd, racks }) {
         </div>
         <div className="px-5 py-3 border-t border-zinc-800 flex justify-end gap-2">
           <button onClick={onClose} className="text-sm px-3 py-1.5 rounded hover:bg-zinc-800 text-zinc-300">Cancel</button>
-          <button onClick={submit} className="text-sm px-3.5 py-1.5 rounded bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium">Add device</button>
+          <button ref={submitRef} onClick={submit} disabled={saving} aria-busy={saving}
+            className="text-sm px-3.5 py-1.5 rounded bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium disabled:opacity-60 disabled:cursor-wait disabled:hover:bg-nv-400">
+            {saving ? "Adding…" : "Add device"}
+          </button>
         </div>
       </div>
     </div>
