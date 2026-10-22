@@ -1,7 +1,7 @@
 // Digital Twin safety and usability regression (isolated fixture only: tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1).
 // Covers: power only from live DCIM mappings, one confirmation for On/Off/Cycle, fly-to framing inside the room,
 // mirrored label anchors, live warnings kept out of notes, move confirmation + swap without shifting other servers,
-// search ranking / keyboard / owners, blocked KVM popup, viewer card, rack bar, reduced motion, focus and disposal.
+// search ranking / keyboard / owners, blocked KVM popup, KVM in-use question and per-console leases, viewer card, rack bar, reduced motion, focus and disposal.
 // Writes only fixture data: one power cycle + one power on (simulated PDU), KVM port marks, rack-slot swaps and
 // two saves of the fixture's temporary lab-data.json (only meta.modified changes).
 const { chromium } = require('playwright');
@@ -178,18 +178,117 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     pass('search: exact match first, arrow keys + Enter, owner names');
 
     // 8 — a blocked KVM popup opens the console inline and always frees the port again
+    const port1 = () => page.evaluate(() => !!__twin.S.live.kvm.kvm1?.ports?.find(p => p.number === 1)?.in_use);
+    const port1Is = (v, timeout = 2000) => page.waitForFunction(v => !!__twin.S.live.kvm.kvm1?.ports?.find(p => p.number === 1)?.in_use === v, v, { timeout });
+    // the lease this console must free: from the server's own mark-in-use answer ('' = server without leases → no body)
+    const leaseOf = async res => { const j = await res.json().catch(() => ({})); return typeof j?.lease === 'string' ? j.lease : ''; };
+    const freeBody = req => { const b = req.postData(); return b ? JSON.parse(b) : null; };
+    const isPortCall = (r, kind, n = 1) => { const u = new URL(r.url()); return u.pathname === `/api/kvms/kvm1/ports/${n}/${kind}` && u.search === '' && r.method() === 'POST'; };
+    const serverInUse = async () => !!(await (await ctx.request.get(origin + '/api/kvms/kvm1/status')).json()).ports?.find(p => p.number === 1)?.in_use;
+    assert.equal(await port1(), false, 'KVM port 1 starts free (restart the fixture after an aborted run)');
     await page.evaluate(() => { window.open = () => null; __twin.select('LIVE-opt11', { keepCamera: true }); });
-    const inUse = page.waitForRequest(r => /\/api\/kvms\/kvm1\/ports\/1\/mark-in-use$/.test(r.url()));
-    await page.locator('#dBody [data-kvm]').first().click(); await inUse;
+    const marked = page.waitForResponse(r => isPortCall(r.request(), 'mark-in-use'));
+    await page.locator('#dBody [data-kvm]').first().click();
+    const lease1 = await leaseOf(await marked);
     await page.locator('#kvmInline:not(.hidden)').waitFor();
     await page.frameLocator('#kvmInlineFrame').getByRole('heading', { name: 'Console preview' }).waitFor();
-    const free = page.waitForRequest(r => /\/api\/kvms\/kvm1\/ports\/1\/mark-free$/.test(r.url()));
-    await page.keyboard.press('Escape'); await free;
+    await port1Is(true);   // KVM-4: IN USE shows right after mark-in-use, not at the next 15 s poll
+    const free = page.waitForRequest(r => isPortCall(r, 'mark-free'));
+    await page.keyboard.press('Escape');
+    assert.deepEqual(freeBody(await free), lease1 ? { lease: lease1 } : null, 'mark-free frees exactly this console\'s lease');
     assert.equal(await page.locator('#kvmInline').isHidden(), true);
+    await port1Is(false);
     await page.evaluate(() => { window.open = () => { throw new Error('Popup refused'); }; });
     await page.locator('#dBody [data-kvm]').first().click(); await page.locator('#kvmInline:not(.hidden)').waitFor();
-    const free2 = page.waitForRequest(r => /mark-free$/.test(r.url())); await page.locator('#kvmInlineClose').click(); await free2;
-    pass('KVM: blocked or throwing popup opens an inline console; closing it marks the port free');
+    await port1Is(true);
+    const free2 = page.waitForRequest(r => isPortCall(r, 'mark-free')); await page.locator('#kvmInlineClose').click(); await free2;
+    await port1Is(false);
+    pass(`KVM: blocked or throwing popup opens an inline console; IN USE shows at once; closing frees the port (${lease1 ? 'own lease in the body' : 'server without leases: no body'})`);
+
+    // 8b — a port someone else uses asks first (advisory Hebrew dialog); Cancel opens and marks nothing
+    await page.evaluate(() => { window.__opened = []; window.open = url => { const w = { closed: false, url }; window.__opened.push(w); return w; }; });
+    const otherMarked = page.waitForResponse(r => isPortCall(r.request(), 'mark-in-use'));
+    await page.locator('#dBody [data-kvm]').first().click(); await otherMarked;   // "another session": a console tab that stays open
+    await port1Is(true);
+    assert.equal(await dialogOpen(page).count(), 0, 'a free port opens without a question');
+    const beforeAsk = posts.length;
+    await page.locator('#dBody [data-kvm]').first().click(); await dialogOpen(page).waitFor();
+    assert.equal(await page.locator('#cfTitle').innerText(), 'הפורט כבר בשימוש');
+    assert.match(await page.locator('#cfBody').innerText(), /KVM 01 · Port 1 · OPT11/);
+    assert.equal(await page.evaluate(() => document.activeElement?.dataset.choice), 'cancel', 'Cancel has the focus');
+    assert.deepEqual(await page.locator('#cfActions [data-choice]').allInnerTexts(), ['ביטול', 'פתח בכל זאת']);
+    await page.locator('#cfActions [data-choice="cancel"]').click(); await page.waitForTimeout(300);
+    assert.equal(await dialogOpen(page).count(), 0);
+    assert.equal(await page.evaluate(() => window.__opened.length), 1, 'Cancel opens no console');
+    assert.deepEqual(posts.slice(beforeAsk), [], 'Cancel sends no mark-in-use');
+    await page.locator('#dBody [data-kvm]').first().click(); await dialogOpen(page).waitFor();
+    await page.keyboard.press('Escape'); await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.__opened.length), 1, 'Escape opens no console'); assert.deepEqual(posts.slice(beforeAsk), [], 'Escape sends no mark-in-use');
+    const secondMarked = page.waitForResponse(r => isPortCall(r.request(), 'mark-in-use'));
+    await page.locator('#dBody [data-kvm]').first().click(); await dialogOpen(page).waitFor();
+    await page.locator('#cfActions [data-choice="go"]').click(); await secondMarked;
+    assert.equal(await page.evaluate(() => window.__opened.length), 2, '"פתח בכל זאת" opens the console');
+    assert.match(await page.evaluate(() => window.__opened[1].url), /\/api\/kvms\/kvm1\/autologin\?port=1$/);
+    const bothFreed = [], onFree = r => { if (isPortCall(r, 'mark-free')) bothFreed.push(r); };
+    page.on('request', onFree);
+    const firstFreed = page.waitForResponse(r => isPortCall(r.request(), 'mark-free'));
+    await page.evaluate(() => { window.__opened[0].closed = true; });   // the twin checks closed tabs every 2 s
+    await firstFreed;
+    // KVM-1: with per-console leases, closing one console never frees the port while the other one is still open
+    if (lease1) { assert.equal(await serverInUse(), true, 'the second console keeps the port IN USE'); await port1Is(true, 4000); }
+    await page.evaluate(() => { window.__opened[1].closed = true; });
+    for (let i = 0; i < 60 && bothFreed.length < 2; i++) await page.waitForTimeout(100);
+    await page.waitForTimeout(2500);   // a third mark-free would come at the next check
+    page.off('request', onFree);
+    assert.equal(bothFreed.length, 2, 'each closed console tab frees its own lease once');
+    await port1Is(false, 4000);
+    pass(`KVM: an in-use port asks first (Cancel focused); Cancel / Escape open and mark nothing; "פתח בכל זאת" opens; each tab frees once${lease1 ? '; one closed console keeps the port IN USE for the other' : ''}`);
+
+    // 8c — the mark-free body carries the lease from mark-in-use and the URL still ends in mark-free (no query string)
+    const LEASE = '0123456789abcdef0123456789abcdef';
+    const fakeLease = route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, lease: LEASE, sessions: 1 }) });
+    await page.route(/\/api\/kvms\/kvm1\/ports\/1\/mark-in-use$/, fakeLease);
+    await page.evaluate(() => { window.open = () => null; });
+    const leased = page.waitForResponse(r => isPortCall(r.request(), 'mark-in-use'));
+    await page.locator('#dBody [data-kvm]').first().click(); await leased; await page.locator('#kvmInline:not(.hidden)').waitFor();
+    const leaseFree = page.waitForRequest(r => /mark-free$/.test(r.url()));
+    await page.locator('#kvmInlineClose').click();
+    const lf = await leaseFree;
+    assert.equal(new URL(lf.url()).pathname, '/api/kvms/kvm1/ports/1/mark-free'); assert.equal(new URL(lf.url()).search, '', 'the lease never goes in the URL');
+    assert.deepEqual(freeBody(lf), { lease: LEASE }); assert.match(lf.headers()['content-type'] || '', /application\/json/);
+    await page.unroute(/\/api\/kvms\/kvm1\/ports\/1\/mark-in-use$/, fakeLease);
+    pass('KVM: mark-free sends {lease} in the JSON body to …/mark-free');
+
+    // 8d — a failed mark-in-use sends no mark-free (it would clear someone else's marker)
+    const refuse = route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Fixture: mark-in-use refused' }) });
+    await page.route(/\/api\/kvms\/kvm1\/ports\/1\/mark-in-use$/, refuse);
+    await port1Is(false, 20000);
+    const failed = page.waitForResponse(r => isPortCall(r.request(), 'mark-in-use'));
+    const beforeFail = posts.length;
+    await page.locator('#dBody [data-kvm]').first().click(); await failed; await page.locator('#kvmInline:not(.hidden)').waitFor();
+    await page.getByText('marking the port as in use failed').first().waitFor();
+    await page.locator('#kvmInlineClose').click(); await page.waitForTimeout(800);
+    assert.equal(await page.locator('#kvmInline').isHidden(), true);
+    assert.deepEqual(posts.slice(beforeFail).map(p => p.path), ['/api/kvms/kvm1/ports/1/mark-in-use'], 'no mark-free after a failed mark-in-use');
+    await page.unroute(/\/api\/kvms\/kvm1\/ports\/1\/mark-in-use$/, refuse);
+    pass('KVM: a failed mark-in-use sends no mark-free');
+
+    // 8e — leaving the twin with an inline console open still frees its port (keepalive mark-free on pagehide)
+    assert.equal(await serverInUse(), false);
+    const leave = await ctx.newPage();
+    leave.on('pageerror', e => errors.push('admin (2nd tab): ' + e.message));
+    leave.on('dialog', d => { errors.push('native dialog: ' + d.message()); d.dismiss(); });
+    await leave.goto(origin + '/twin/');
+    await leave.waitForFunction(() => window.__twin?.S.live.connected && window.__twin.S.live.kvm.kvm1, null, { timeout: 60000 });
+    await leave.evaluate(() => { window.open = () => null; __twin.select('LIVE-opt11', { keepCamera: true }); });
+    const leaveMarked = leave.waitForResponse(r => isPortCall(r.request(), 'mark-in-use'));
+    await leave.locator('#dBody [data-kvm]').first().click(); await leaveMarked; await leave.locator('#kvmInline:not(.hidden)').waitFor();
+    assert.equal(await serverInUse(), true);
+    await leave.goto('about:blank');
+    for (let i = 0; i < 40 && await serverInUse(); i++) await page.waitForTimeout(100);
+    assert.equal(await serverInUse(), false, 'pagehide frees the inline console\'s port');
+    await leave.close();
+    pass('KVM: leaving the page frees the inline console\'s port (keepalive)');
 
     // 9 / 10 — rack bar, focus rings, tooltips, selection-box disposal
     await page.evaluate(() => __twin.select('SETUP-003', { keepCamera: true }));
