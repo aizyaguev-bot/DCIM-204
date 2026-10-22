@@ -398,8 +398,12 @@ def fake_server(client, monkeypatch, library, *, host_key=None, reject_auth=Fals
     finally:
         monkeypatch.setattr(library, "connect", real_connect)
         monkeypatch.setattr(ssh_store, "pin_host", real_pin)
-        listener.close()
-        client.portal.call(listener.wait_closed)
+        # Close on the server's own event loop: asyncio.Server is not thread-safe, and closing it from the
+        # test thread raced the loop's wake-up (TypeError in Server._wakeup, seen in SSH-INT under load).
+        async def stop():
+            listener.close()
+            await listener.wait_closed()
+        client.portal.call(stop)
 
 
 async def test_key_generation_rotation_and_install_instructions(api, library, monkeypatch):
