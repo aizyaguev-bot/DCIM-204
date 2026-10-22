@@ -3,7 +3,8 @@
 
 No sudo, system package installation, database seeding, or remote Git write is performed.
 Before the smoke test, packages that the reviewed backend/requirements.txt needs and the
-existing venv lacks are added with pip (skipped when already satisfied). Installed versions
+existing venv lacks are added with pip. The check only reads the venv's package metadata; pip
+runs only when a package is missing, and never reads a pip configuration file. Installed versions
 are never changed, and a pip problem is only a warning: the update continues and a feature
 whose package is missing reports that it is not installed.
 The checkout must be clean except for live twin data and the deployment version.
@@ -38,15 +39,20 @@ LIVE_TRACKED = {"lab-twin/lab-data.json", "backend/version.txt"}
 FRONTEND_LOCK = "frontend/package-lock.json"
 
 # Backend Python dependencies of the reviewed tree (security review M6/M7). The step only ADDS
-# missing packages: every installed package is pinned by a constraints file, `pip download` from a
-# fixed index (wheels only) is the dry run whose files are inspected before anything changes, and
-# only those new wheels are then installed offline with --no-deps. It is never fatal: a feature
-# whose package is missing (such as the AI assistant) reports "not installed" and the update goes on.
+# missing packages: the check reads the venv's metadata (REQUIREMENT_STATUS, never `pip install`),
+# every installed package is pinned by a constraints file, `pip download` from a fixed index (wheels
+# only) is the dry run whose files are inspected before anything changes, and only those new wheels
+# are then installed offline with --no-deps. It is never fatal: a feature whose package is missing
+# (such as the AI assistant) reports "not installed" and the update goes on.
+# pip never reads configuration (Codex SSH-CX-2): --isolated alone still loads the global and the
+# venv's pip.conf, whose find-links / extra-index-url would add package sources. Every pip child
+# therefore also gets PIP_CONFIG_FILE=os.devnull, which makes pip skip ALL configuration files, and
+# no other PIP_* variable (see pip_child_environment).
 REQUIREMENTS = "backend/requirements.txt"
-PIP_INDEX_URL = "https://pypi.org/simple"  # fixed; --isolated ignores pip.conf and PIP_* variables
+PIP_INDEX_URL = "https://pypi.org/simple"  # fixed; pip reads no pip.conf and no PIP_* variable
 PIP_OPTIONS = ["--isolated", "--disable-pip-version-check", "--no-input", "-q"]
-# Worst case 1.5 + 10 + 3 + 1.5 minutes stays well inside vm-auto-update.py's 25-minute installer limit.
-PIP_CHECK_TIMEOUT = 90
+# Worst case 10 + 3 minutes of pip plus four 1-minute metadata reads stays well inside
+# vm-auto-update.py's 25-minute installer limit.
 PIP_DOWNLOAD_TIMEOUT = 10 * 60
 PIP_INSTALL_TIMEOUT = 3 * 60
 PIP_STOP_GRACE = 10
@@ -437,14 +443,30 @@ def stop_on_termination(process):
             signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
 
 
+def pip_child_environment(env=None):
+    """pip's environment: `env` (default: this process's) without any PIP_* variable, plus PIP_CONFIG_FILE=os.devnull.
+
+    pip's Configuration skips every configuration file (global, user, venv) when PIP_CONFIG_FILE is
+    os.devnull, whether or not --isolated is given; --isolated in PIP_OPTIONS also makes it ignore
+    PIP_* variables, which are removed here as well. Proxy and CA variables are kept unchanged.
+    """
+    child = {name: value for name, value in (os.environ if env is None else env).items()
+             if not name.upper().startswith(("PIP_", "_PIP_"))}
+    child["PIP_CONFIG_FILE"] = os.devnull
+    return child
+
+
 def run_pip(python, arguments, backup, timeout, env=None):
     """Run the venv's pip in its own process group; return (exit code, or None after the time limit, masked output).
 
-    The masked output is appended to the private backup folder; nothing is printed here.
+    pip reads no configuration file and no PIP_* variable (pip_child_environment). The masked output
+    is appended to the private backup folder; nothing is printed here.
     """
     argv = [str(python), "-I", "-m", "pip", *arguments]
+    secrets_env = dict(os.environ if env is None else env)  # masking also covers what the child does not get
     try:
-        process = subprocess.Popen(argv, cwd=str(backup), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        process = subprocess.Popen(argv, cwd=str(backup), env=pip_child_environment(env), stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                                    start_new_session=True)
     except OSError as exc:
@@ -461,10 +483,10 @@ def run_pip(python, arguments, backup, timeout, env=None):
                 except (subprocess.TimeoutExpired, ValueError, OSError):
                     output = ""
                 code, output = None, output + "\n[stopped after " + str(timeout) + " seconds]"
-    output = mask_secrets(output, env)
+    output = mask_secrets(output, secrets_env)
     descriptor = os.open(backup / PIP_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(descriptor, "a", encoding="utf-8") as log:
-        log.write("$ pip " + mask_secrets(" ".join(arguments), env) + "\n" + (output or "").rstrip() + "\n"
+        log.write("$ pip " + mask_secrets(" ".join(arguments), secrets_env) + "\n" + (output or "").rstrip() + "\n"
                   + "exit: " + ("timeout" if code is None else str(code)) + "\n\n")
     return code, output or ""
 
@@ -483,6 +505,16 @@ def venv_python_json(python, backup, script, *arguments):
 
 def venv_packages(python, backup):
     return {str(name): str(version) for name, version in venv_python_json(python, backup, VENV_PACKAGES).items()}
+
+
+def requirement_status(python, backup, requirements):
+    """(missing, conflicts, unsupported) of a requirements file against the venv: read-only, never runs pip."""
+    status = venv_python_json(python, backup, REQUIREMENT_STATUS, str(requirements))
+    def items(key):
+        value = status.get(key)
+        return value if isinstance(value, list) else []
+    return ([str(item) for item in items("missing")], [item for item in items("conflicts") if isinstance(item, dict)],
+            [str(item) for item in items("unsupported")])
 
 
 def wheel_plan(directory, installed):
@@ -506,9 +538,10 @@ def wheel_plan(directory, installed):
 
 
 def pip_warning(reason, backup, output=""):
+    log = backup / PIP_LOG
     print("WARNING: backend Python packages were not added: " + reason + ". The update continues; a feature whose "
-          "package is missing (such as the AI assistant) reports that it is not installed. pip log: "
-          + str(backup / PIP_LOG), flush=True)
+          "package is missing (such as the AI assistant) reports that it is not installed."
+          + (" pip log: " + str(log) if log.exists() else ""), flush=True)
     tail = output_tail(output)  # already masked by run_pip
     if tail:
         print("  pip: " + tail.replace("\n", "\n  pip: "), flush=True)
@@ -534,25 +567,20 @@ def install_requirements(root, source, python, backup):
 
 
 def add_missing_packages(root, requirements, python, backup):
-    # Local only: --no-index (and --isolated: no pip configuration) cannot reach any index.
-    check = ["install", *PIP_OPTIONS, "--no-index", "-r", str(requirements)]
-    if run_pip(python, check, backup, PIP_CHECK_TIMEOUT)[0] == 0:
+    # The check only reads the venv's package metadata: pip is not run (a `pip install` used as a
+    # check could install from a find-links source in a pip configuration file).
+    missing, conflicts, unsupported = requirement_status(python, backup, requirements)
+    if not (missing or conflicts or unsupported):
         print("Backend Python packages already match " + REQUIREMENTS + ".", flush=True)
         return None
-    status = venv_python_json(python, backup, REQUIREMENT_STATUS, str(requirements))
-    conflicts = [item for item in status.get("conflicts", []) if isinstance(item, dict)]
     if conflicts:
         print("NOTE: installed versions are never changed automatically; these stay as they are: " + "; ".join(
             str(item.get("name")) + " " + str(item.get("installed")) + " (release asks " + str(item.get("wanted")) + ")"
             for item in conflicts), flush=True)
-    if status.get("unsupported"):
+    if unsupported:
         print("NOTE: requirement lines that are not plain packages are skipped: "
-              + mask_secrets(", ".join(map(str, status["unsupported"]))), flush=True)
-    missing = [str(item) for item in status.get("missing", [])]
+              + mask_secrets(", ".join(unsupported)), flush=True)
     if not missing:
-        if not conflicts:
-            pip_warning("pip reports unmet requirements but no package is missing; check them with "
-                        "backend/.venv/bin/python -m pip check", backup)
         return None
     installed = venv_packages(python, backup)
     constraints = backup / PACKAGES_BEFORE
@@ -589,8 +617,13 @@ def add_missing_packages(root, requirements, python, backup):
     added = {name: after[name] for name in sorted(after) if name not in installed}
     print("Backend Python packages added: " + (", ".join(name + " " + version for name, version in added.items())
                                                or "none") + ".", flush=True)
-    if run_pip(python, check, backup, PIP_CHECK_TIMEOUT)[0] != 0:
-        print("NOTE: " + REQUIREMENTS + " is still not fully satisfied; see the pip log: " + str(backup / PIP_LOG), flush=True)
+    try:
+        still_missing = requirement_status(python, backup, requirements)[0]
+    except RuntimeError:
+        still_missing = ["(the venv could not be re-checked)"]
+    if still_missing:
+        print("NOTE: " + REQUIREMENTS + " is still not fully satisfied (" + ", ".join(still_missing)
+              + "); see the pip log: " + str(backup / PIP_LOG), flush=True)
     return added
 
 

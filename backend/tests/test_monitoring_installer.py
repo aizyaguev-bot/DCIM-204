@@ -651,6 +651,10 @@ def test_real_health_probe_authenticates_and_cleans_up_temporary_session(tmp_pat
 SAVED_PROXY = "http://proxy.example.invalid:3128"
 PIP_SECRET = "hunter2-test-only-secret"
 ASYNCSSH_WHEEL = "asyncssh-2.17.0-py3-none-any.whl"
+# Codex SSH-CX-2: package sources a pip configuration could add. None may ever reach pip.
+HOSTILE_LINKS = "/srv/hostile-wheels"
+HOSTILE_INDEX = "https://hostile-extra.example.invalid/simple"
+HOSTILE_PIP_CONF = "[global]\nfind-links = " + HOSTILE_LINKS + "\nextra-index-url = " + HOSTILE_INDEX + "\n"
 
 
 class FakePipProcess:
@@ -682,7 +686,7 @@ class FakePip:
     """Stands in for the installer's `subprocess` module: answers the venv's pip and package queries."""
 
     def __init__(self, events):
-        self.events, self.calls = events, []
+        self.events, self.calls, self.violations = events, [], []
         self.packages = {"fastapi": "0.115.5", "pip": "24.0", "cryptography": "43.0.3"}
         self.status = {"missing": ["asyncssh==2.17.0"], "conflicts": [], "unsupported": []}
         self.satisfied = False
@@ -698,13 +702,42 @@ class FakePip:
             return subprocess.run(argv, **kwargs)
         assert argv[1:3] == ["-I", "-c"], argv
         self.calls.append((list(argv), kwargs))
-        data = self.packages if argv[3] == installer.VENV_PACKAGES else self.status
+        if argv[3] == installer.VENV_PACKAGES:
+            data = self.packages
+        else:
+            self.events.append("package status")
+            data = dict(self.status, missing=[]) if self.satisfied else self.status
         return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
 
     def Popen(self, argv, **kwargs):
         assert argv[1:4] == ["-I", "-m", "pip"], argv
         self.calls.append((list(argv), kwargs))
+        self.inspect(argv, kwargs)
         return FakePipProcess(self, argv, kwargs)
+
+    def inspect(self, argv, kwargs):
+        """Record (an assertion here would only become a pip warning) every pip call that could use a source
+        outside the fixed index or install anything but the downloaded wheels."""
+        env, args = kwargs.get("env"), argv[4:]
+        if env is None or env.get("PIP_CONFIG_FILE") != os.devnull:
+            self.violations.append(("pip could read a configuration file", argv))
+        elif [name for name in env if name.upper().startswith(("PIP_", "_PIP_"))] != ["PIP_CONFIG_FILE"]:
+            self.violations.append(("pip received PIP_* variables", argv))
+        if "--isolated" not in args or any(HOSTILE_LINKS in item or HOSTILE_INDEX in item for item in argv):
+            self.violations.append(("pip may use another package source", argv))
+        if any(item.startswith(("--find-links", "-f", "--extra-index-url", "--trusted-host", "-r", "--requirement"))
+               for item in args):
+            self.violations.append(("pip received a source or requirements-file option", argv))
+        if args[0] == "download":
+            if args.count("--index-url") != 1 or args[args.index("--index-url") + 1] != installer.PIP_INDEX_URL:
+                self.violations.append(("download is not limited to the fixed index", argv))
+        elif args[0] == "install":
+            positional = [item for item in args[1:] if not item.startswith("-")]
+            if not ({"--no-deps", "--no-index"} <= set(args) and positional
+                    and all(item.endswith(".whl") and Path(item).is_file() for item in positional)):
+                self.violations.append(("pip install other than --no-deps on downloaded wheel files", argv))
+        else:
+            self.violations.append(("unexpected pip command", argv))
 
     def answer(self, argv, kwargs):
         args = argv[4:]
@@ -716,7 +749,7 @@ class FakePip:
                 for name in self.downloads:
                     (folder / name).write_bytes(b"wheel")
             return self.download_code, self.download_output, self.download_hangs
-        if "--no-deps" in args:
+        if args[0] == "install" and "--no-deps" in args:
             self.events.append("pip add")
             if self.add_code == 0:
                 for wheel in (Path(item).name for item in args if item.endswith(".whl")):
@@ -724,20 +757,23 @@ class FakePip:
                     self.packages[name] = version
                 self.satisfied = True
             return self.add_code, "", False
-        assert "--no-index" in args and "-r" in args, args
-        self.events.append("pip check")
-        return (0, "", False) if self.satisfied else (1, "ERROR: No matching distribution found for asyncssh\n", False)
+        self.events.append("UNEXPECTED pip " + args[0])
+        return 0, "", False
 
-    def pip_calls(self, kind):
+    def pip_calls(self, kind=None):
         found = []
         for argv, kwargs in self.calls:
             if argv[1:4] != ["-I", "-m", "pip"]:
                 continue
             args = argv[4:]
-            name = "download" if args[0] == "download" else "add" if "--no-deps" in args else "check"
-            if name == kind:
+            name = "download" if args[0] == "download" else "add" if "--no-deps" in args else "other"
+            if kind is None or name == kind:
                 found.append((argv, kwargs))
         return found
+
+    def status_calls(self):
+        return [(argv, kwargs) for argv, kwargs in self.calls if argv[1:3] == ["-I", "-c"]
+                and argv[3] == installer.REQUIREMENT_STATUS]
 
 
 @pytest.fixture
@@ -750,9 +786,18 @@ def pip_release(deployment, monkeypatch):
     release = git(upstream, "rev-parse", "HEAD")
     for name in installer.PIP_NETWORK_VARIABLES + ("PIP_CERT", "PIP_INDEX_URL", "REQUESTS_CA_BUNDLE"):
         monkeypatch.delenv(name, raising=False)
+    # A hostile venv pip.conf and PIP_* variables are present in every pip test; no pip call may use them.
+    hostile = target / "backend" / ".venv" / "pip.conf"
+    hostile.write_text(HOSTILE_PIP_CONF)
+    monkeypatch.setenv("PIP_CONFIG_FILE", str(hostile))
+    monkeypatch.setenv("PIP_FIND_LINKS", HOSTILE_LINKS)
+    monkeypatch.setenv("PIP_EXTRA_INDEX_URL", HOSTILE_INDEX)
+    monkeypatch.setenv("_PIP_USE_IMPORTLIB_METADATA", "0")
     fake = FakePip(events)
     monkeypatch.setattr(installer, "subprocess", fake)
-    return target, release, old, events, fake
+    yield target, release, old, events, fake
+    assert fake.violations == []
+    assert not [event for event in events if event.startswith("UNEXPECTED")]
 
 
 def save_cron_settings(target, environment):
@@ -774,22 +819,21 @@ def test_release_without_requirements_file_leaves_packages_alone(deployment, cap
     assert events == ["preflight", "stop", "start"]
 
 
-def test_satisfied_requirements_are_checked_locally_and_nothing_is_downloaded(pip_release, capsys):
+def test_satisfied_requirements_are_read_from_venv_metadata_and_pip_never_runs(pip_release, capsys):
     target, release, old, events, fake = pip_release
     fake.satisfied = True
     installer.install(target, release)
-    assert events == ["pip check", "preflight", "stop", "start"]
+    assert events == ["package status", "preflight", "stop", "start"]
     assert git(target, "rev-parse", "HEAD") == release
-    [(argv, kwargs)] = fake.pip_calls("check")
+    assert fake.pip_calls() == []  # no `pip install` (or any pip) is used as the check
+    [(argv, kwargs)] = fake.status_calls()
     backup = only_backup(target)
     requirements = backup / "source" / "backend" / "requirements.txt"
     python = str(target.resolve() / "backend" / ".venv" / "bin" / "python")
-    assert argv == [python, "-I", "-m", "pip", "install", "--isolated", "--disable-pip-version-check", "--no-input",
-                    "-q", "--no-index", "-r", str(requirements)]
+    assert argv == [python, "-I", "-c", installer.REQUIREMENT_STATUS, str(requirements)]
     assert requirements.read_text() == "fastapi==0.115.5\nasyncssh==2.17.0\n"
-    assert kwargs["env"] is None and kwargs["cwd"] == str(backup) and kwargs["start_new_session"] is True
-    assert kwargs["stdin"] == subprocess.DEVNULL and kwargs["stderr"] == subprocess.STDOUT
-    assert fake.pip_calls("download") == [] and not (backup / installer.PACKAGES_BEFORE).exists()
+    assert kwargs["cwd"] == str(backup) and kwargs["stdin"] == subprocess.DEVNULL
+    assert not (backup / installer.PACKAGES_BEFORE).exists() and not (backup / installer.PIP_LOG).exists()
     assert "already match backend/requirements.txt" in capsys.readouterr().out
 
 
@@ -802,11 +846,12 @@ def test_missing_package_is_added_from_fixed_index_with_saved_proxy_only_in_pips
                                 "HTTP_PROXY": "http://user:" + PIP_SECRET + "@proxy.example.invalid:8080",
                                 "LAB_MANAGER_PASSWORD": PIP_SECRET})
     installer.install(target, release)
-    assert events == ["pip check", "pip download", "pip add", "pip check", "preflight", "stop", "start"]
+    assert events == ["package status", "pip download", "pip add", "package status", "preflight", "stop", "start"]
     assert git(target, "rev-parse", "HEAD") == release
     backup = only_backup(target)
     constraints = backup / installer.PACKAGES_BEFORE
     assert constraints.read_text() == "cryptography==43.0.3\nfastapi==0.115.5\npip==24.0\n"
+    assert [kind for kind in ("download", "add", "other") for _ in fake.pip_calls(kind)] == ["download", "add"]
     [(argv, kwargs)] = fake.pip_calls("download")
     wheels = backup / installer.PIP_WHEELS
     assert argv[4:] == ["download", "--isolated", "--disable-pip-version-check", "--no-input", "-q", "--only-binary=:all:",
@@ -815,15 +860,15 @@ def test_missing_package_is_added_from_fixed_index_with_saved_proxy_only_in_pips
     assert not any(item.startswith(("--proxy", "--trusted-host", "--extra-index-url")) for item in argv)
     env = kwargs["env"]
     assert env["https_proxy"] == SAVED_PROXY and env["no_proxy"] == "localhost,127.0.0.1"
+    assert env["SSL_CERT_FILE"] == str(cafile)
     assert "HTTP_PROXY" not in env  # a saved value that may carry credentials is never used
     assert env.get("LAB_MANAGER_PASSWORD") == os.environ.get("LAB_MANAGER_PASSWORD")  # never from the state file
     assert env.get("PATH") == os.environ.get("PATH")
+    assert env["PIP_CONFIG_FILE"] == os.devnull and "PIP_FIND_LINKS" not in env and "PIP_EXTRA_INDEX_URL" not in env
     [(argv, kwargs)] = fake.pip_calls("add")
     assert argv[4:] == ["install", "--isolated", "--disable-pip-version-check", "--no-input", "-q", "--no-index", "--no-deps",
                         "--only-binary=:all:", str(wheels / ASYNCSSH_WHEEL)]  # cryptography 43.0.3 is already installed
-    assert kwargs["env"] is None
-    for call_argv, call_kwargs in fake.pip_calls("check"):
-        assert call_kwargs["env"] is None
+    assert kwargs["env"]["PIP_CONFIG_FILE"] == os.devnull and "https_proxy" not in kwargs["env"]
     assert "https_proxy" not in os.environ  # the backend never sees the proxy
     assert fake.packages["asyncssh"] == "2.17.0" and fake.packages["cryptography"] == "43.0.3"
     assert not wheels.exists()  # downloaded wheels are not kept in the backup
@@ -841,15 +886,14 @@ def test_time_limits_are_applied_to_every_pip_step(pip_release, monkeypatch):
         return original(self, timeout)
     monkeypatch.setattr(FakePipProcess, "communicate", communicate)
     installer.install(target, release)
-    assert seen == [("install", False, installer.PIP_CHECK_TIMEOUT), ("download", False, 600),
-                    ("install", True, installer.PIP_INSTALL_TIMEOUT), ("install", False, installer.PIP_CHECK_TIMEOUT)]
+    assert seen == [("download", False, 600), ("install", True, installer.PIP_INSTALL_TIMEOUT)]
 
 
 def test_dry_run_guard_refuses_any_version_change_and_the_release_continues(pip_release, capsys):
     target, release, old, events, fake = pip_release
     fake.downloads = [ASYNCSSH_WHEEL, "cryptography-44.0.0-cp39-abi3-manylinux_2_28_x86_64.whl"]
     installer.install(target, release)
-    assert events == ["pip check", "pip download", "preflight", "stop", "start"]
+    assert events == ["package status", "pip download", "preflight", "stop", "start"]
     assert git(target, "rev-parse", "HEAD") == release
     assert "asyncssh" not in fake.packages and fake.packages["cryptography"] == "43.0.3"
     out = capsys.readouterr().out
@@ -873,7 +917,7 @@ def test_failed_download_is_only_a_warning_and_hides_credentials(pip_release, ca
     fake.download_output = ("Looking in indexes: https://deploy:" + PIP_SECRET + "@pypi.example.invalid/simple\n"
                             "ERROR: Could not find a version that satisfies the requirement asyncssh==2.17.0\n")
     installer.install(target, release)
-    assert events == ["pip check", "pip download", "preflight", "stop", "start"]
+    assert events == ["package status", "pip download", "preflight", "stop", "start"]
     assert git(target, "rev-parse", "HEAD") == release
     out = capsys.readouterr().out
     assert "WARNING: backend Python packages were not added: the download failed (pip exit 1)" in out
@@ -891,7 +935,7 @@ def test_download_time_limit_stops_pips_process_group_and_the_release_continues(
     monkeypatch.setattr(installer, "exited_unreaped", lambda pid: True)
     installer.install(target, release)
     assert signals == [(4321, installer.signal.SIGTERM), (4321, 9)]
-    assert events == ["pip check", "pip download", "preflight", "stop", "start"]
+    assert events == ["package status", "pip download", "preflight", "stop", "start"]
     out = capsys.readouterr().out
     assert "the download did not finish within 10 minutes" in out
     assert "stopped after 600 seconds" in (only_backup(target) / installer.PIP_LOG).read_text()
@@ -901,7 +945,7 @@ def test_failed_local_add_is_only_a_warning(pip_release, capsys):
     target, release, old, events, fake = pip_release
     fake.add_code = 1
     installer.install(target, release)
-    assert events == ["pip check", "pip download", "pip add", "preflight", "stop", "start"]
+    assert events == ["package status", "pip download", "pip add", "preflight", "stop", "start"]
     assert "adding the downloaded packages failed (pip exit 1)" in capsys.readouterr().out
 
 
@@ -910,10 +954,12 @@ def test_version_conflicts_are_reported_but_never_changed(pip_release, capsys):
     fake.status = {"missing": [], "conflicts": [{"name": "fastapi", "installed": "0.115.5", "wanted": "==0.116.0"}],
                    "unsupported": ["-r https://reader:" + PIP_SECRET + "@example.invalid/extra.txt"]}
     installer.install(target, release)
-    assert events == ["pip check", "preflight", "stop", "start"]
+    assert events == ["package status", "preflight", "stop", "start"]
+    assert fake.pip_calls() == []  # nothing is missing: pip never runs, so no version can change
     out = capsys.readouterr().out
     assert "these stay as they are: fastapi 0.115.5 (release asks ==0.116.0)" in out
     assert "not plain packages are skipped" in out and PIP_SECRET not in out
+    assert "already match" not in out and "WARNING" not in out
 
 
 def test_unreadable_venv_is_only_a_warning(pip_release, monkeypatch, capsys):
@@ -924,8 +970,48 @@ def test_unreadable_venv_is_only_a_warning(pip_release, monkeypatch, capsys):
         return subprocess.CompletedProcess(argv, 1, "", "Traceback")
     monkeypatch.setattr(fake, "run", broken)
     installer.install(target, release)
-    assert events == ["pip check", "preflight", "stop", "start"]
-    assert "cannot be read" in capsys.readouterr().out
+    assert events == ["preflight", "stop", "start"]
+    assert fake.pip_calls() == []
+    out = capsys.readouterr().out
+    assert "cannot be read" in out and "The update continues" in out
+    assert "pip log:" not in out  # pip never ran, so there is no pip log to point at
+
+
+def test_package_still_missing_after_the_add_is_only_a_note(pip_release, monkeypatch, capsys):
+    target, release, old, events, fake = pip_release
+    original = fake.run
+    def still_missing(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[0] != "git" and argv[3] == installer.REQUIREMENT_STATUS:
+            result.stdout = json.dumps(fake.status)  # the add did not make the requirement visible
+        return result
+    monkeypatch.setattr(fake, "run", still_missing)
+    installer.install(target, release)
+    assert events == ["package status", "pip download", "pip add", "package status", "preflight", "stop", "start"]
+    out = capsys.readouterr().out
+    assert "Backend Python packages added: asyncssh 2.17.0." in out
+    assert "NOTE: backend/requirements.txt is still not fully satisfied (asyncssh==2.17.0)" in out
+    assert "WARNING" not in out
+
+
+def test_pip_child_environment_drops_every_pip_variable_and_keeps_proxy_and_ca():
+    env = {"https_proxy": SAVED_PROXY, "NO_PROXY": "localhost", "SSL_CERT_FILE": "/etc/ssl/ca.pem", "PATH": "/usr/bin",
+           "PIP_CONFIG_FILE": "/srv/hostile/pip.conf", "PIP_INDEX_URL": HOSTILE_INDEX, "PIP_FIND_LINKS": HOSTILE_LINKS,
+           "pip_extra_index_url": HOSTILE_INDEX, "_PIP_USE_IMPORTLIB_METADATA": "0", "PIP_BUILD_TRACKER": "/tmp/x"}
+    before = dict(env)
+    child = installer.pip_child_environment(env)
+    assert child == {"https_proxy": SAVED_PROXY, "NO_PROXY": "localhost", "SSL_CERT_FILE": "/etc/ssl/ca.pem",
+                     "PATH": "/usr/bin", "PIP_CONFIG_FILE": os.devnull}
+    assert env == before  # the caller's environment is not modified
+
+
+def test_pip_child_environment_defaults_to_this_process(monkeypatch):
+    monkeypatch.setenv("PIP_FIND_LINKS", HOSTILE_LINKS)
+    monkeypatch.setenv("PIP_CONFIG_FILE", "/srv/hostile/pip.conf")
+    child = installer.pip_child_environment()
+    assert child["PIP_CONFIG_FILE"] == os.devnull and "PIP_FIND_LINKS" not in child
+    assert child.get("PATH") == os.environ.get("PATH")
+    assert os.environ["PIP_CONFIG_FILE"] == "/srv/hostile/pip.conf"
 
 
 def test_termination_signal_stops_pips_process_group_first(monkeypatch):
@@ -1005,13 +1091,54 @@ def test_real_requirement_status_classifies_lines_without_network(tmp_path):
     assert status["unsupported"] == ["-r other.txt"]
 
 
-def test_real_pip_check_is_local_and_detects_missing_packages(tmp_path):
-    pytest.importorskip("pip")
-    present, missing = tmp_path / "present.txt", tmp_path / "missing.txt"
-    present.write_text("pytest\n")
-    missing.write_text("pytest\nzz-dcim-test-not-installed==0.0.1\n")
-    check = ["install", *installer.PIP_OPTIONS, "--no-index", "-r"]
-    assert installer.run_pip(sys.executable, check + [str(present)], tmp_path, 120)[0] == 0
-    code, output = installer.run_pip(sys.executable, check + [str(missing)], tmp_path, 120)
-    assert code == 1 and "zz-dcim-test-not-installed" in output
-    assert (tmp_path / installer.PIP_LOG).read_text().count("$ pip install --isolated") == 2
+def probe_wheel(folder):
+    """A minimal valid wheel that only a configured find-links source can offer."""
+    import zipfile
+    folder.mkdir()
+    info = "zz_dcim_probe-1.0.dist-info/"
+    files = {info + "METADATA": "Metadata-Version: 2.1\nName: zz-dcim-probe\nVersion: 1.0\n",
+             info + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"}
+    with zipfile.ZipFile(folder / "zz_dcim_probe-1.0-py3-none-any.whl", "w") as wheel:
+        for name, text in files.items():
+            wheel.writestr(name, text)
+        wheel.writestr(info + "RECORD", "".join(name + ",,\n" for name in files) + info + "RECORD,,\n")
+
+
+def test_real_pip_reads_no_venv_configuration_file(tmp_path, monkeypatch):
+    """Codex SSH-CX-2 against real pip: a venv pip.conf with find-links + extra-index-url is a real package
+    source under --isolated alone, and is never read by the installer's pip runner."""
+    import venv
+    pip = pytest.importorskip("pip")
+    environment = tmp_path / "venv"
+    venv.create(environment, with_pip=False)
+    python = next(path for path in (environment / "bin" / "python", environment / "Scripts" / "python.exe") if path.exists())
+    purelib = subprocess.check_output([str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                                      text=True).strip()
+    Path(purelib, "zz_dcim_pip.pth").write_text(str(Path(pip.__file__).resolve().parents[1]) + "\n")  # this test run's pip
+    links = tmp_path / "hostile-wheels"
+    probe_wheel(links)
+    conf = "[global]\nfind-links = " + links.as_posix() + "\nextra-index-url = " + HOSTILE_INDEX + "\n"
+    for name in ("pip.conf", "pip.ini"):  # the venv (site) configuration file on Linux / Windows
+        (environment / name).write_text(conf)
+    for name in [name for name in os.environ if name.upper().startswith(("PIP_", "_PIP_"))]:
+        monkeypatch.delenv(name)
+    download = ["download", *installer.PIP_OPTIONS, "--no-index", "--only-binary=:all:", "-d"]
+
+    # Control: --isolated alone (the released installer) loads the venv file, and its find-links is used.
+    loaded = subprocess.run([str(python), "-I", "-m", "pip", "config", "list", "--isolated"],
+                            capture_output=True, text=True, timeout=120)
+    assert links.as_posix() in loaded.stdout and HOSTILE_INDEX in loaded.stdout, loaded.stdout + loaded.stderr
+    found = subprocess.run([str(python), "-I", "-m", "pip", *download, str(tmp_path / "control"), "zz-dcim-probe"],
+                           capture_output=True, text=True, timeout=120)
+    assert found.returncode == 0 and list((tmp_path / "control").iterdir()), found.stdout + found.stderr
+
+    # The installer's runner: no configuration at all, even with hostile PIP_* variables set.
+    monkeypatch.setenv("PIP_FIND_LINKS", links.as_posix())
+    monkeypatch.setenv("PIP_EXTRA_INDEX_URL", HOSTILE_INDEX)
+    monkeypatch.setenv("PIP_CONFIG_FILE", str(environment / "pip.conf"))
+    code, output = installer.run_pip(python, ["config", "list", "--isolated"], tmp_path, 120)
+    assert (code, output.strip()) == (0, "")
+    code, output = installer.run_pip(python, download + [str(tmp_path / "blocked"), "zz-dcim-probe"], tmp_path, 120)
+    assert code != 0 and "zz-dcim-probe" in output
+    assert not (tmp_path / "blocked").exists() or not list((tmp_path / "blocked").iterdir())
+    assert links.as_posix() not in (tmp_path / installer.PIP_LOG).read_text()
