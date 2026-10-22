@@ -66,15 +66,24 @@ const ITEM_TYPES = {
 export function isDefaultOutletLabel(label) {
   return !label || /^(outlet\s*\d+|port\s*\d+|\s*)$/i.test(label.trim());
 }
+// Outlet labels that are not computers ("empty", "KVM Power", placeholders) are not OPTs: they never take a U slot
+// and are not counted. The 3D Twin (lab-twin/app.js NON_SERVER_LABEL) uses the same text, so both show the same shelves.
+const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
+export function isServerLabel(label) {
+  return !isDefaultOutletLabel(label) && !NON_SERVER_LABEL.test(String(label).trim());
+}
+// A U slot an operator may enter for equipment: a whole number from 0 (whole rack) to 42.
+export const U_SLOT_ERROR = "U slot must be a whole number from 0 to 42.";
+export function parseUSlot(text) {
+  const value = String(text ?? "").trim();
+  return /^\d{1,2}$/.test(value) && Number(value) <= 42 ? Number(value) : null;
+}
 function genId() { return `ci-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`; }
 
 export function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
   const order  = rackOrder[rackName] || [];
   const slots  = rackSlots[rackName] || {};
   const custom = customItems[rackName] || [];
-  // Outlet labels that are not computers ("empty", "KVM Power", placeholders) never take a U slot. The 3D Twin
-  // (lab-twin/app.js NON_SERVER_LABEL) drops the same labels before its U assignment, so both show the same shelves.
-  const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
 
   const sorted = servers.filter(s => !NON_SERVER_LABEL.test(String(s.name || "").trim())).sort((a, b) => {
     const ai = order.indexOf(a.id), bi = order.indexOf(b.id);
@@ -102,20 +111,30 @@ export function buildRackRows(servers, rackName, rackOrder, rackSlots, customIte
     groups.get(u).push({ kind: "server", data: s });
   });
 
-  // Equipment belongs on its recorded shelf, including shelves without an OPT.
+  // Equipment belongs on its recorded shelf, including shelves without an OPT. A U that is not a whole number
+  // from 0 to 42 (old or hand-edited data) is listed with the whole-rack equipment instead of stretching the rack.
   custom.forEach(item => {
-    const u = Number(item.u) || 0;
+    const n = typeof item.u === "string" && item.u.trim() ? Number(item.u) : item.u;
+    const u = Number.isInteger(n) && n >= 0 && n <= 42 ? n : 0;
     if (!groups.has(u)) groups.set(u, []);
     groups.get(u).push({ kind: "custom", data: item });
   });
 
-  const maxU   = groups.size ? Math.max(...groups.keys()) : 0;
-  const totalU = rackName === MAIN_STORAGE ? 0 : Math.max(maxU + 2, 8);
-  const rows   = [];
-  for (let u = 1; u <= totalU; u++) {
-    rows.push({ u, items: groups.get(u) || [] });
+  // auto: the shelf shows an OPT whose U nobody saved; it was placed on the next free shelf.
+  const row = u => {
+    const items = groups.get(u) || [];
+    return { u, items, auto: items.some(i => i.kind === "server" && slots[i.data.id] == null) };
+  };
+  const rows = [];
+  if (rackName === MAIN_STORAGE) {
+    // Main storage has no empty shelves to draw: its occupied shelves in order, then the whole-unit equipment.
+    [...groups.keys()].filter(u => u > 0).sort((a, b) => a - b).forEach(u => rows.push(row(u)));
+  } else {
+    const maxU   = groups.size ? Math.max(...groups.keys()) : 0;
+    const totalU = Math.max(maxU + 2, 8);
+    for (let u = 1; u <= totalU; u++) rows.push(row(u));
   }
-  if (groups.has(0)) rows.push({ u: 0, items: groups.get(0) });
+  if (groups.has(0)) rows.push(row(0));
   return { rows, uMap, sorted };
 }
 
@@ -236,12 +255,12 @@ function EquipCell({ item, onSelect, onRename }) {
 }
 
 // One U row — server + equipment side by side, or just equipment, or empty
-function USlotGroup({ u, items, switchAssignments, optOwners, chillerAtU, onChillerUnassign, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, dragHandleProps }) {
+function USlotGroup({ u, items, auto, switchAssignments, optOwners, chillerAtU, onChillerUnassign, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, dragHandleProps }) {
   const editMode = useContext(EditContext);
   const servers = items.filter(i => i.kind === "server");
   if (!items.length) return <div data-u-slot={u} className="shelf-empty"><span className="shelf-index">{String(u).padStart(2, "0")}</span><span className="shelf-empty-line"/>{chillerAtU && <span className="shelf-chiller">❄ {chillerAtU.name}</span>}</div>;
-  return <div data-u-slot={u} className="shelf-row">
-    <span className="shelf-index" title={u ? `Shelf ${u}` : "Shelf unassigned"}>{u ? String(u).padStart(2, "0") : "—"}</span>
+  return <div data-u-slot={u} data-auto={auto ? "" : undefined} className="shelf-row">
+    <span className="shelf-index" title={auto ? `Auto-placed — no saved U for this OPT; it is shown on the next free shelf (${u}). Set its U in Edit mode to keep it here.` : u ? `Shelf ${u}` : "Shelf unassigned"}>{u ? String(u).padStart(2, "0") : "—"}</span>
     {editMode && servers.length > 0 && <div {...(dragHandleProps || {})} className="shelf-grip" aria-label={`Move shelf ${u}`} onClick={e => e.stopPropagation()}>{Icon.grip}</div>}
     <div className="shelf-content">
       {servers.map(({data}) => <ServerCell key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]} onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)}/>)}
@@ -252,7 +271,7 @@ function USlotGroup({ u, items, switchAssignments, optOwners, chillerAtU, onChil
 }
 
 // Sortable wrapper — applies DnD to the server in a U group
-function SortableURow({ u, items, switchAssignments, optOwners, chillerAtU, onChillerUnassign, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, isDragging }) {
+function SortableURow({ u, items, auto, switchAssignments, optOwners, chillerAtU, onChillerUnassign, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, isDragging }) {
   const editMode = useContext(EditContext);
   const serverId = items.find(i => i.kind === "server")?.data.id;
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: serverId || "noop", disabled: !editMode });
@@ -262,7 +281,7 @@ function SortableURow({ u, items, switchAssignments, optOwners, chillerAtU, onCh
     <div ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={isDragging ? "opacity-30" : ""}>
-      <USlotGroup u={u} items={items} switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU} onChillerUnassign={onChillerUnassign}
+      <USlotGroup u={u} items={items} auto={auto} switchAssignments={switchAssignments} optOwners={optOwners} chillerAtU={chillerAtU} onChillerUnassign={onChillerUnassign}
         onSelectServer={onSelectServer} onSelectCustom={onSelectCustom}
         onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
         dragHandleProps={dragHandleProps}/>
@@ -349,8 +368,8 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
     if (from >= 0 && to >= 0) onReorder(r.rack, arrayMove(ids, from, to));
   }
   const content = <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-    {rows.filter(({u,items}) => !(preferences.compact_racks && !editMode && u >= 5 && u <= 8 && !items.length)).map(({u, items}) => {
-      const props = {u, items, switchAssignments, optOwners, chillerAtU: chillerByU[u], onChillerUnassign, onSelectServer: onSelect, onSelectCustom, onRenameServer, onRenameCustom};
+    {rows.filter(({u,items}) => !(preferences.compact_racks && !editMode && u >= 5 && u <= 8 && !items.length)).map(({u, items, auto}) => {
+      const props = {u, items, auto, switchAssignments, optOwners, chillerAtU: chillerByU[u], onChillerUnassign, onSelectServer: onSelect, onSelectCustom, onRenameServer, onRenameCustom};
       return items.some(i => i.kind === "server") ? <SortableURow key={u} {...props} isDragging={editMode && items.some(i => i.data.id === activeId)}/> : <USlotGroup key={u} {...props}/>;
     })}
     {!rows.length && <p className="text-xs text-zinc-500 py-12 text-center">No equipment stored here</p>}
@@ -440,11 +459,13 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
   const [u,     setU]     = useState(rackName === MAIN_STORAGE ? "0" : "");
   const [notes, setNotes] = useState("");
   const [busy,  setBusy]  = useState(false);
+  const slot = parseUSlot(u);
+  const uError = u.trim() !== "" && slot === null ? U_SLOT_ERROR : "";
 
   async function submit() {
-    if (!name.trim() || !u) return;
+    if (!name.trim() || slot === null || busy) return;
     setBusy(true);
-    try { await onSave({ id: genId(), name: name.trim(), type, u: parseInt(u, 10), notes: notes.trim() }); }
+    try { await onSave({ id: genId(), name: name.trim(), type, u: slot, notes: notes.trim() }); }
     catch { /* the save already told the user why */ }
     finally { setBusy(false); }
   }
@@ -471,9 +492,11 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
             </select>
           </div>
           <div><SL>{rackName === MAIN_STORAGE ? "Whole storage unit" : "U slot (0 = whole rack)"}</SL>
-            <input type="number" min="0" max="42" value={u} disabled={rackName === MAIN_STORAGE} onChange={e => setU(e.target.value)}
-              placeholder="e.g. 7"
-              className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
+            <input type="number" min="0" max="42" step="1" value={u} disabled={rackName === MAIN_STORAGE} onChange={e => setU(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && submit()}
+              placeholder="e.g. 7" aria-label="U slot" aria-invalid={uError ? true : undefined} aria-describedby={uError ? "add-equipment-u-error" : undefined}
+              className={`w-full bg-zinc-800 border rounded-lg px-3 py-2 text-sm focus:outline-none placeholder:text-zinc-700 ${uError ? "border-rose-700 focus:border-rose-500" : "border-zinc-700/50 focus:border-nv-400/50"}`}/>
+            {uError && <div id="add-equipment-u-error" role="alert" className="mt-1 text-[11px] text-rose-400">{uError}</div>}
           </div>
           <div><SL>Notes (optional)</SL>
             <input value={notes} onChange={e => setNotes(e.target.value)}
@@ -483,7 +506,7 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
         </div>
         <div className="px-5 pb-4 flex gap-2">
           <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-500 border border-zinc-700/40 rounded-lg hover:text-zinc-300 transition">Cancel</button>
-          <button onClick={submit} disabled={!name.trim() || !u || busy}
+          <button onClick={submit} disabled={!name.trim() || slot === null || busy}
             className="flex-1 py-2 text-sm font-bold bg-nv-400 text-zinc-950 rounded-lg disabled:opacity-40 flex items-center justify-center gap-2">
             {busy && <Spinner/>}Add
           </button>
@@ -494,20 +517,38 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
 }
 
 // ─── EDIT EQUIPMENT PANEL (custom items) ──────────────────────────────────────
-function EditEquipmentPanel({ item, rackName, allRacks, owner, ownersLoaded, onOwnerChange, onClose, onSave, onDelete, onMove }) {
+// `item` is always the latest saved record. After another session changed it (a rejected save reloads the list) the
+// panel is opened again on the fresh record; `draft` then refills the fields this person had changed.
+function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, ownersLoaded, onOwnerChange, onClose, onSave, onDelete, onMove }) {
   useEscClose(onClose);
-  const [name,      setName]      = useState(item.name);
-  const [type,      setType]      = useState(item.type || "other");
-  const [u,         setU]         = useState(String(item.u ?? 0));
-  const [notes,     setNotes]     = useState(item.notes || "");
+  const [name,      setName]      = useState(draft?.name ?? item.name);
+  const [type,      setType]      = useState(draft?.type ?? (item.type || "other"));
+  const [u,         setU]         = useState(String(draft?.u ?? item.u ?? 0));
+  const [notes,     setNotes]     = useState(draft?.notes ?? (item.notes || ""));
   const [busy,      setBusy]      = useState(false);
   const [saved,     setSaved]     = useState(false);
   const [moveRack,  setMoveRack]  = useState("");
   const [moving,    setMoving]    = useState(false);
+  const [unchanged, setUnchanged] = useState(false);
+
+  // Only the fields changed here are saved, so a barcode, shelf position or move saved meanwhile elsewhere is kept.
+  // An old U outside 0-42 that nobody touches is left as it is.
+  const storage = rackName === MAIN_STORAGE;
+  const slot = parseUSlot(u);
+  const uChanged = !storage && u.trim() !== String(item.u ?? 0);
+  const uError = uChanged && slot === null ? U_SLOT_ERROR : "";
+  const changes = {};
+  if (name.trim() && name.trim() !== item.name) changes.name = name.trim();
+  if (type !== (item.type || "other")) changes.type = type;
+  if (uChanged && slot !== null && slot !== (item.u ?? 0)) changes.u = slot;
+  if (notes.trim() !== (item.notes || "")) changes.notes = notes.trim();
+  const dirty = Object.keys(changes).length > 0;
 
   async function submit() {
-    setBusy(true);
-    try { await onSave({ ...item, name: name.trim(), type, u: u === "" ? item.u : parseInt(u,10), notes: notes.trim() }); setSaved(true); setTimeout(()=>setSaved(false),2000); }
+    if (busy || uError || !name.trim()) return;
+    if (!dirty) { setUnchanged(true); return; }
+    setBusy(true); setUnchanged(false);
+    try { await onSave(item.id, changes); setSaved(true); setTimeout(()=>setSaved(false),2000); }
     catch { /* the save already told the user why */ }
     finally { setBusy(false); }
   }
@@ -532,6 +573,9 @@ function EditEquipmentPanel({ item, rackName, allRacks, owner, ownersLoaded, onO
           <CloseBtn onClose={onClose}/>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {reloaded && <div role="status" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+            This equipment was changed in another session. The panel now shows the saved values{draft ? " with your edits kept" : ""}. Review them and save again.
+          </div>}
           <div><SL>Owner / Engineer</SL><OwnerSelect owner={owner} disabled={!ownersLoaded} label={`Owner for ${item.name}`} onChange={id=>onOwnerChange(`item:${item.id}`,id)}/></div>
           <div><SL>Name</SL>
             <input value={name} onChange={e=>setName(e.target.value)}
@@ -544,8 +588,11 @@ function EditEquipmentPanel({ item, rackName, allRacks, owner, ownersLoaded, onO
             </select>
           </div>
           <div><SL>{rackName === MAIN_STORAGE ? "Whole storage unit" : "U slot (0 = whole rack)"}</SL>
-            <input type="number" min="0" max="42" value={u} disabled={rackName === MAIN_STORAGE} onChange={e=>setU(e.target.value)}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
+            <input type="number" min="0" max="42" step="1" value={u} disabled={storage} onChange={e=>setU(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&submit()}
+              aria-label="U slot" aria-invalid={uError ? true : undefined} aria-describedby={uError ? "edit-equipment-u-error" : undefined}
+              className={`w-full bg-zinc-900 border rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none ${uError ? "border-rose-700 focus:border-rose-500" : "border-zinc-800 focus:border-nv-400/50"}`}/>
+            {uError && <div id="edit-equipment-u-error" role="alert" className="mt-1 text-[11px] text-rose-400">{uError}</div>}
           </div>
           <div><SL>Notes</SL>
             <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}
@@ -572,11 +619,12 @@ function EditEquipmentPanel({ item, rackName, allRacks, owner, ownersLoaded, onO
               </div>
             </div>
           )}
-          <button onClick={submit} disabled={busy || !name.trim()}
+          <button onClick={submit} disabled={busy || !name.trim() || !!uError}
             className={`w-full py-2 text-sm font-bold rounded-lg transition flex items-center justify-center gap-2
               ${saved?"bg-emerald-900/50 text-emerald-400 border border-emerald-800/50":"bg-nv-400 text-zinc-950 disabled:opacity-40"}`}>
             {busy?<Spinner/>:saved?Icon.check:null}{saved?"Saved":"Save changes"}
           </button>
+          {unchanged && !dirty && <div role="status" className="text-[11px] text-zinc-400 text-center">No changes to save.</div>}
         </div>
         <div className="px-5 py-4 border-t border-zinc-800/40">
           <button onClick={async()=>{ if(!confirm(`Delete "${item.name}"?`))return; try { await onDelete(item); onClose(); } catch { /* the save already told the user why */ } }}
@@ -870,8 +918,8 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
           onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
           width={480} fixed/>
 
-        {/* Right panel */}
-        <div className="flex-1 min-w-0 space-y-4">
+        {/* Right panel: full width in the phone column, so its table scrolls inside instead of widening the page */}
+        <div className="w-full flex-1 min-w-0 space-y-4">
           {/* Action buttons */}
           {editMode && <div className="flex gap-2">
             <button onClick={() => onRequestAddEquip(r.rack)}
@@ -932,12 +980,12 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                 <tbody className="divide-y divide-zinc-800/30">
                   {/* PDU servers */}
                   {sorted.map(s=>{
-                    const u=uMap[s.id],sw=switchAssignments[s.id];
+                    const u=uMap[s.id],sw=switchAssignments[s.id],auto=(rackSlots[r.rack]||{})[s.id]==null;
                     const isOn=s.state==="on",isOff=s.state==="off";
                     return (
                       <tr key={s.id} onClick={()=>onSelect(s)}
                         className={`cursor-pointer hover:bg-zinc-800/30 transition-colors ${isOn?"hover:bg-nv-400/5":""}`}>
-                        <td className="px-3 py-2 font-mono text-xs text-zinc-600">U{u}</td>
+                        <td className={`px-3 py-2 font-mono text-xs text-zinc-600 ${auto?"italic":""}`} title={auto?"Auto-placed — no saved U for this OPT":undefined}>U{u}{auto?" (auto)":""}</td>
                         <td className="px-3 py-2">
                           <div className="flex items-center gap-2">
                             <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isOn?"bg-nv-400 shadow-[0_0_4px_#76b900]":isOff?"bg-red-700":"bg-zinc-700"}`}/>
@@ -1351,9 +1399,13 @@ function CrossRackMoveModal({ server, targetRackStat, pdus, onLabelChange, onClo
 }
 
 // ─── RACKS VIEW ───────────────────────────────────────────────────────────────
-function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onSaveItems, onRefresh, pdus, rackDevices, chillers, chillersLoaded, onChillersChange, optOwners }) {
+function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onSaveItems, onRefresh, pdus, rackDevices, chillers, chillersLoaded, onChillersChange, optOwners }) {
   const {canAdmin} = useAccounts();
-  const [selectedRack,   setSelectedRack]   = useState(() => new URLSearchParams(location.search).get("rack"));
+  // With onSelectRack the App owns the open rack (?rack= in the address, so Back and Forward work);
+  // without it the open rack is local state that starts from ?rack=, as before.
+  const [localRack,      setLocalRack]      = useState(() => onSelectRack ? null : new URLSearchParams(location.search).get("rack"));
+  const selectedRack    = onSelectRack ? (rackProp || null) : localRack;
+  const setSelectedRack = onSelectRack || setLocalRack;
   const [addOptFor,      setAddOptFor]      = useState(null);
   const [addEquipFor,    setAddEquipFor]    = useState(null);
   const [addRackOpen,    setAddRackOpen]    = useState(false);
@@ -1505,7 +1557,7 @@ function RacksView({ rackStats, rackSlots, rackOrder, switchAssignments, customI
               rackType={rs.rackType}
               rackDevs={devs}
               onClose={() => setEditRackTarget(null)}
-              onSave={async () => { await onRefresh?.(); setSelectedRack(null); }}/>
+              onSave={async () => { await onRefresh?.(); if (selectedRack) setSelectedRack(null); }}/>
           </Portal>
         ) : null;
       })()}
@@ -1696,8 +1748,9 @@ function ReadOnlyAsset({ item, owner, onClose }) {
 }
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, section: controlledSection, editMode = false, onSummary}) {
+export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, section: controlledSection, editMode = false, onSummary, rack, onRackChange}) {
   const {revision: engineerRevision} = useEngineers();
+  const {preferences} = useAccounts();
   const [localSection, setSection] = useState("racks");
   const section = controlledSection || localSection;
   const [rackOrder,         setRackOrder]         = useState({});
@@ -1710,22 +1763,41 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [chillers,          setChillers]          = useState({units:[],connections:[]});
   const [chillersLoaded,    setChillersLoaded]    = useState(false);
   const [selectedServerId,  setSelectedServerId]  = useState(null);
-  const [selectedCustom,    setSelectedCustom]    = useState(null);
+  const [selectedCustomId,  setSelectedCustomId]  = useState(null);
+  // epoch reopens the equipment panel on the fresh record after another session's change was reloaded;
+  // draft: the fields this person had changed in it; notice: the panel says why it was reopened.
+  const [customPanel,       setCustomPanel]       = useState({epoch:0, draft:null, notice:false});
   const [layoutError,       setLayoutError]       = useState("");
+  const selectCustom = useCallback(item => { setSelectedCustomId(item?.id ?? null); setCustomPanel({epoch:0, draft:null, notice:false}); }, []);
 
   useEffect(()=>{
     Promise.all([
       fetch("/api/rack-positions").then(r=>r.json()).catch(()=>({})),
       fetch("/api/rack-slots").then(r=>r.json()).catch(()=>({})),
       fetch("/api/switch-assignments").then(r=>r.json()).catch(()=>({})),
-      loadRackItems().catch(()=>({})),
       fetch("/api/rack-overrides").then(r=>r.json()).catch(()=>({})),
       fetch("/api/opt-owners").then(r=>r.ok?r.json():null).catch(()=>null),
       fetch("/api/chillers").then(r=>r.json()).catch(()=>({units:[],connections:[]})),
-    ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
-      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});if(owners){setOptOwners(owners);setOwnersLoaded(true);}setChillers(chill||{units:[],connections:[]});setChillersLoaded(true);
+    ]).then(([order,slots,sw,overrides,owners,chill])=>{
+      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setRackOverrides(overrides||{});if(owners){setOptOwners(owners);setOwnersLoaded(true);}setChillers(chill||{units:[],connections:[]});setChillersLoaded(true);
     });
   },[]);
+
+  // Equipment is reloaded on every auto-refresh and when the DCIM tab changes, so a scan, a Twin edit or another
+  // session shows up here. Not while an equipment panel is open: its form is based on the record it opened with.
+  // itemsSeq drops a reload answer that a save, or a newer reload, overtook. A failed reload keeps the last list.
+  const itemsSeq = useRef(0);
+  const holdItems = selectedCustomId != null;
+  const reloadItems = useCallback(() => {
+    const seq = ++itemsSeq.current;
+    loadRackItems().then(items => { if (seq === itemsSeq.current) setCustomItems(items || {}); }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (holdItems) return undefined;
+    reloadItems();
+    const timer = setInterval(reloadItems, Math.max(5, Number(preferences.refresh_seconds) || 15) * 1000);
+    return () => { clearInterval(timer); itemsSeq.current++; };
+  }, [section, holdItems, preferences.refresh_seconds, reloadItems]);
 
   // One layout edit: saved against the server's current document; on failure the optimistic
   // state is undone, the store reloaded, and the error rethrown for the caller to show.
@@ -1768,15 +1840,22 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     return persistLayout("/api/rack-overrides", edit, setRackOverrides, previous);
   }, [rackOverrides, persistLayout]);
 
-  // inventory.js reports a rejected equipment save; a stale list is replaced by the reloaded one.
+  // inventory.js reports a rejected equipment save; a stale list is replaced by the reloaded one, and an open
+  // equipment panel is reopened on its fresh record (it closes if the item was deleted meanwhile).
   const saveItems = useCallback(async (updated) => {
+    itemsSeq.current++;
     try {
       const saved = await saveRackItems(updated, customItems);
       setCustomItems(saved);
       return saved;
     } catch (e) {
-      if (e.reloaded) setCustomItems(e.reloaded);
+      if (e.reloaded) {
+        setCustomItems(e.reloaded);
+        setCustomPanel(p => ({epoch: p.epoch + 1, draft: null, notice: true}));
+      }
       throw e;
+    } finally {
+      itemsSeq.current++;
     }
   }, [customItems]);
 
@@ -1796,11 +1875,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       const stored=pdu.labels||{},live=pduStatuses[pdu.id]?.outlets||[];
       const liveByN=Object.fromEntries((pduStatuses[pdu.id]?.reachable ? live : []).map(o=>[String(o.number),o]));
       Object.entries(stored).forEach(([num,label])=>{
-        if(isDefaultOutletLabel(label))return;const key=label.trim().toLowerCase();if(map.has(key))return;
+        if(!isServerLabel(label))return;const key=label.trim().toLowerCase();if(map.has(key))return;
         const lo=liveByN[num];map.set(key,{id:key,name:label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:lo?.state??"unknown",watts:lo?.watts??null});
       });
       (pduStatuses[pdu.id]?.reachable ? live : []).forEach(o=>{
-        if(isDefaultOutletLabel(o.label))return;const key=o.label.trim().toLowerCase();
+        if(!isServerLabel(o.label))return;const key=o.label.trim().toLowerCase();
         if(map.has(key)){const e=map.get(key);e.state=o.state;e.watts=o.watts??null;return;}
         map.set(key,{id:key,name:o.label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts??null});
       });
@@ -1898,14 +1977,18 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     await saveItems(updated).catch(() => {});
   }, [customItems, saveItems]);
 
-  // Save custom item edits
-  const handleSaveCustom = useCallback(async (item) => {
-    const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
+  // Save custom item edits: only the changed fields, merged into the latest record
+  const handleSaveCustom = useCallback(async (id, changes) => {
+    const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === id));
     if (!rackName) return;
-    const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===item.id ? item : i) };
-    const saved = await saveItems(updated);
-    // update selectedCustom so panel reflects changes
-    setSelectedCustom(saved[rackName].find(i => i.id === item.id));
+    const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===id ? {...i, ...changes} : i) };
+    try {
+      await saveItems(updated);
+      setCustomPanel(p => ({...p, draft: null, notice: false}));
+    } catch (e) {
+      if (e.reloaded) setCustomPanel(p => ({...p, draft: changes}));
+      throw e;
+    }
   }, [customItems, saveItems]);
 
   // Delete custom item
@@ -1920,10 +2003,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const handleMoveCustom = useCallback(async (item, targetRack) => {
     const srcRack = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
     if (!srcRack || srcRack === targetRack) return;
+    const latest = customItems[srcRack].find(i => i.id === item.id);
     const updated = {
       ...customItems,
       [srcRack]: customItems[srcRack].filter(i => i.id !== item.id),
-      [targetRack]: [...(customItems[targetRack] || []), { ...item, u: 0, shelf_position: "" }],
+      [targetRack]: [...(customItems[targetRack] || []), { ...latest, u: 0, shelf_position: "" }],
     };
     await saveItems(updated);
   }, [customItems, saveItems]);
@@ -1938,10 +2022,13 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     {id:"changelog",label:"Changelog", icon:Icon.log},
   ];
 
-  // The rackName for selected custom item
-  const selectedCustomRack = selectedCustom
-    ? Object.keys(customItems).find(r => customItems[r].some(i => i.id === selectedCustom.id))
+  // The selected equipment and its rack, always from the latest list (no stale copy is ever edited or saved)
+  const selectedCustomRack = selectedCustomId
+    ? Object.keys(customItems).find(r => customItems[r].some(i => i.id === selectedCustomId)) ?? null
     : null;
+  const selectedCustom = selectedCustomRack ? customItems[selectedCustomRack].find(i => i.id === selectedCustomId) : null;
+  // Deleted in another session (seen in a reloaded list): its panel is gone, so equipment reloads resume.
+  useEffect(() => { if (selectedCustomId != null && !selectedCustom) setSelectedCustomId(null); }, [selectedCustomId, selectedCustom]);
 
   return (
     <EditContext.Provider value={editMode}><main className="flex-1 px-4 pb-5 w-full mx-auto">
@@ -1961,10 +2048,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       )}
 
       {section==="racks"&&(
-        <RacksView rackStats={rackStats} rackSlots={rackSlots} rackOrder={rackOrder}
+        <RacksView selectedRack={rack} onSelectRack={onRackChange}
+          rackStats={rackStats} rackSlots={rackSlots} rackOrder={rackOrder}
           switchAssignments={switchAssignments} customItems={customItems}
           onReorder={handleReorder}
-          onSelect={s => setSelectedServerId(s.id)} onSelectCustom={setSelectedCustom}
+          onSelect={s => setSelectedServerId(s.id)} onSelectCustom={selectCustom}
           onLabelChange={handleLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
           onSaveItems={saveItems} onRefresh={onRefresh}
@@ -1986,12 +2074,13 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         </Portal>
       )}
 
-      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={optOwners[`item:${selectedCustom.id}`]} onClose={()=>setSelectedCustom(null)}/></Portal>}
+      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={optOwners[`item:${selectedCustom.id}`]} onClose={()=>selectCustom(null)}/></Portal>}
       {selectedCustom&&selectedCustomRack&&editMode&&(
         <Portal>
-          <EditEquipmentPanel item={selectedCustom} rackName={selectedCustomRack}
+          <EditEquipmentPanel key={`${selectedCustom.id}:${customPanel.epoch}`} item={selectedCustom} rackName={selectedCustomRack}
+            draft={customPanel.draft} reloaded={customPanel.notice}
             owner={optOwners[`item:${selectedCustom.id}`]||""} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}
-            allRacks={racks} onClose={()=>setSelectedCustom(null)}
+            allRacks={racks} onClose={()=>selectCustom(null)}
             onSave={handleSaveCustom} onDelete={handleDeleteCustom} onMove={handleMoveCustom}/>
         </Portal>
       )}

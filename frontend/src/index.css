@@ -115,6 +115,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .shelf-index { display: flex; align-items: center; flex: 0 0 16px; font-size: 11px; color: #a7a7a7; }
 .shelf-grip { width: 12px; display: flex; align-items: center; color: #757575; cursor: grab; touch-action: none; }
 .shelf-content { display: flex; gap: 6px; flex: 1; min-width: 0; flex-wrap: wrap; }
+/* An OPT without a saved U sits on the next free shelf; its shelf number is dimmed so it does not read as saved. */
+.shelf-row[data-auto] .shelf-index { opacity: .55; font-style: italic; }
 .shelf-empty { height: 18px; display: flex; gap: 8px; margin: 6px 0; align-items: center; }
 .shelf-empty .shelf-index { color: #8a8a8a; }
 .shelf-empty-line { flex: 1; height: 1px; background: #1a1a1a; }
