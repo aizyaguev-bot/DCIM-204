@@ -1,4 +1,5 @@
-"""Cooling units (chillers.json): every save keeps the document it replaces, a version can be restored, nothing is lost."""
+"""Cooling units (chillers.json): every save keeps the document it replaces, a version can be restored, nothing is lost:
+a save that leaves a unit out is refused, and a restore keeps the units added since."""
 import json
 import time
 from types import SimpleNamespace
@@ -18,10 +19,20 @@ OTHER = [{"id": "ch-Rack-05-1", "name": "Chiller-1", "rack": "Rack-05", "u": Non
          {"id": "ch-spare", "name": "Spare", "rack": None, "u": None}]
 CONNECTIONS = [{"from": "ch-Rack-04-1", "to": "Rack-04", "legacy": True}]
 DOC = {"units": RACK04 + OTHER, "connections": CONNECTIONS, "note": "kept"}
+DELETE = "Cooling units cannot be deleted. Move the unit to another rack or leave it unassigned instead."
 
 
 def doc(units):
     return {**DOC, "units": units}
+
+
+def moved(u):
+    """DOC with Rack-05's unit on shelf u (an ordinary move that keeps every unit)."""
+    return doc([*RACK04, {**OTHER[0], "u": u}, OTHER[1]])
+
+
+def places(document):
+    return [{key: unit.get(key) for key in ("id", "name", "rack", "u")} for unit in document["units"]]
 
 
 @pytest.fixture
@@ -65,43 +76,82 @@ async def test_a_save_keeps_the_document_it_replaces_newest_first(chillers):
     assert [v["units"] for v in versions] == [4, 4]
     assert all(v["by"] is None and v["action"] == "save" and v["removed"] == [] and v["at"] for v in versions)
     assert all("document" not in v for v in versions)  # the list stays light; restore uses the stored document
+    assert [v["places"] for v in versions] == [places(moved), places(DOC)]  # each version's units, for a diff
     stored = json.loads(chillers.history.read_text())
     assert [v["document"] for v in stored["versions"]] == [DOC, moved]
     assert stored["last_revision"] == 2
 
 
-async def test_a_save_that_drops_units_still_works_and_the_history_names_and_restores_them(chillers):
+async def test_a_save_that_leaves_units_out_is_refused_and_changes_nothing(chillers):
     c = chillers.client
     chillers.file.write_text(json.dumps(DOC))
-    without = doc(OTHER)  # an old page sends the units without the two Rack-04 chillers
-    r = await put(c, without, await etag(c))
-    assert r.status_code == 200 and json.loads(chillers.file.read_text()) == without
-    [version] = await history(c)
-    assert version["revision"] == 1 and version["units"] == 4
-    assert version["removed"] == [{"id": "ch-Rack-04-1", "name": "Chiller-1", "rack": "Rack-04", "u": 3},
-                                  {"id": "ch-Rack-04-2", "name": "Chiller-2", "rack": "Rack-04", "u": 3}]
+    before = chillers.file.read_bytes()
+    for body in (doc(OTHER), doc([]), {"connections": []}, {**DOC, "units": "none"}):  # an old page, a script, a bad body
+        r = await put(c, body, await etag(c))
+        assert r.status_code == 422, body
+        assert r.json()["detail"].startswith(DELETE)
+    r = await put(c, doc(OTHER))
+    assert r.json()["detail"] == f"{DELETE} Left out: Chiller-1, Chiller-2."
+    assert chillers.file.read_bytes() == before and not chillers.history.exists()
+    # a stale If-Match is still 409 first, and keeping every unit (with extra ones) saves
+    assert (await put(c, doc(OTHER), "stale")).status_code == 409
+    added = doc([*DOC["units"], {"id": "ch-new", "name": "New", "rack": None, "u": None}])
+    assert (await put(c, added, await etag(c))).status_code == 200
 
-    current = await etag(c)
-    r = await c.post("/api/chillers/restore", json={"revision": 1}, headers={"If-Match": current})
+
+async def test_a_restore_puts_the_places_back_and_keeps_units_added_since(chillers):
+    c = chillers.client
+    chillers.file.write_text(json.dumps(DOC))
+    assert (await put(c, moved(7), await etag(c))).status_code == 200            # version 1 = DOC
+    new = {"id": "ch-new", "name": "Chiller-New", "rack": "Rack-05", "u": 9}
+    with_new = doc([*moved(7)["units"], new])
+    assert (await put(c, with_new, await etag(c))).status_code == 200            # version 2 = moved(7)
+
+    r = await c.post("/api/chillers/restore", json={"revision": 1}, headers={"If-Match": await etag(c)})
     assert r.status_code == 200, r.text
-    assert r.json() == DOC  # extra unit fields, top-level keys and legacy connections come back verbatim
-    assert r.headers["etag"] == inventory_store.revision(DOC) == await etag(c)
-    assert json.loads(chillers.file.read_text()) == DOC
+    assert r.json() == {**DOC, "units": [*DOC["units"], new]}  # DOC verbatim (fields, connections) + the unit added since
+    assert r.headers["etag"] == inventory_store.revision(r.json()) == await etag(c)
+    assert json.loads(chillers.file.read_text()) == r.json()
 
     # The restore is itself a version: the document it replaced can be brought back (undo the restore).
     versions = await history(c)
     assert [(v["revision"], v["action"], v.get("restored_from"), v["units"]) for v in versions] == [
-        (2, "restore", 1, 2), (1, "save", None, 4)]
-    assert versions[0]["removed"] == []
-    r = await c.post("/api/chillers/restore", json={"revision": 2}, headers={"If-Match": r.headers["etag"]})
-    assert r.status_code == 200 and r.json() == without
+        (3, "restore", 1, 5), (2, "save", None, 4), (1, "save", None, 4)]
+    assert all(v["removed"] == [] for v in versions)
+    r = await c.post("/api/chillers/restore", json={"revision": 3}, headers={"If-Match": r.headers["etag"]})
+    assert r.status_code == 200 and r.json() == with_new
+
+
+async def test_units_an_older_server_left_out_are_listed_and_a_restore_brings_them_back(chillers):
+    """History written before saves were refused can name removed units; restoring that version brings them back
+    and keeps the units the version does not hold."""
+    c = chillers.client
+    current = doc([*OTHER, {"id": "ch-later", "name": "Later", "rack": None, "u": None}])
+    chillers.file.write_text(json.dumps(current))
+    removed = [{"id": u["id"], "name": u["name"], "rack": u["rack"], "u": u["u"]} for u in RACK04]
+    chillers.history.write_text(json.dumps({"last_revision": 1, "versions": [
+        {"revision": 1, "at": "2026-10-01T00:00:00+00:00", "by": None, "action": "save", "units": 4,
+         "removed": removed, "document": DOC}]}))
+    [version] = await history(c)
+    assert version["removed"] == removed and version["places"] == places(DOC)
+    r = await c.post("/api/chillers/restore", json={"revision": 1}, headers={"If-Match": await etag(c)})
+    assert r.status_code == 200 and r.json() == {**DOC, "units": [*DOC["units"], current["units"][-1]]}
+
+
+def test_merge_restore_keeps_every_current_unit():
+    version = {"units": [{"id": "a", "rack": "R1", "u": 1}, {"id": "b", "rack": "R1", "u": 2}], "connections": [1]}
+    current = {"units": [{"id": "b", "rack": "R2", "u": None}, {"id": "c", "rack": None, "u": None}, "junk"]}
+    merged = inventory_store.merge_restore(version, current)
+    assert merged == {"units": [*version["units"], {"id": "c", "rack": None, "u": None}], "connections": [1]}
+    assert merged["units"][0] is not version["units"][0]  # a copy; the stored version is not changed
+    assert inventory_store.merge_restore("broken", current) == {"units": [current["units"][0], current["units"][1]]}
 
 
 async def test_restore_needs_the_current_etag_and_a_known_revision_and_changes_nothing_otherwise(chillers):
     c = chillers.client
     chillers.file.write_text(json.dumps(DOC))
     stale = await etag(c)
-    assert (await put(c, doc(OTHER), stale)).status_code == 200
+    assert (await put(c, moved(5), stale)).status_code == 200
     before = chillers.file.read_bytes(), chillers.history.read_bytes()
 
     r = await c.post("/api/chillers/restore", json={"revision": 1}, headers={"If-Match": stale})
@@ -120,14 +170,14 @@ async def test_put_keeps_the_layout_store_contract(chillers):
     c = chillers.client
     chillers.file.write_text(json.dumps(DOC))
     stale = await etag(c)
-    assert (await put(c, doc(RACK04), stale)).status_code == 200
+    assert (await put(c, moved(4), stale)).status_code == 200
     before = chillers.file.read_bytes(), chillers.history.read_bytes()
     r = await put(c, doc([]), stale)
     assert r.status_code == 409 and r.json() == {"detail": CONFLICT}
     assert (chillers.file.read_bytes(), chillers.history.read_bytes()) == before
     # If-Match stays optional for old pages, and a save without it is kept in the history as well.
-    r = await put(c, doc(OTHER))
-    assert r.status_code == 200 and r.headers["etag"] == inventory_store.revision(doc(OTHER))
+    r = await put(c, moved(6))
+    assert r.status_code == 200 and r.headers["etag"] == inventory_store.revision(moved(6))
     assert [v["revision"] for v in await history(c)] == [2, 1]
 
 
@@ -141,8 +191,11 @@ async def test_saving_the_same_document_or_a_first_file_adds_no_version(chillers
 
 async def test_history_keeps_twenty_versions_and_keeps_removals_longest(chillers):
     c = chillers.client
-    chillers.file.write_text(json.dumps(DOC))
-    assert (await put(c, doc(OTHER))).status_code == 200  # version 1: the two Rack-04 units were removed
+    # version 1 comes from an older server that let a save leave the two Rack-04 units out
+    chillers.file.write_text(json.dumps(doc(OTHER)))
+    chillers.history.write_text(json.dumps({"last_revision": 1, "versions": [
+        {"revision": 1, "at": "2026-10-01T00:00:00+00:00", "by": None, "action": "save", "units": 4,
+         "removed": [{"id": u["id"], "name": u["name"], "rack": u["rack"], "u": u["u"]} for u in RACK04], "document": DOC}]}))
     for n in range(2, 27):  # 25 ordinary moves
         assert (await put(c, doc([{**OTHER[0], "u": n % 40 + 1}, OTHER[1]]))).status_code == 200
     versions = await history(c)
@@ -176,7 +229,7 @@ async def test_an_unreadable_chillers_file_is_never_overwritten(chillers):
 async def test_a_failed_store_write_puts_the_history_back(chillers, monkeypatch):
     c = chillers.client
     chillers.file.write_text(json.dumps(DOC))
-    assert (await put(c, doc(OTHER))).status_code == 200
+    assert (await put(c, moved(8))).status_code == 200
     before = chillers.file.read_bytes(), chillers.history.read_bytes()
     real = inventory_store.write_json
 
@@ -185,7 +238,7 @@ async def test_a_failed_store_write_puts_the_history_back(chillers, monkeypatch)
             raise OSError("disk full")
         return real(path, data, *args, **kwargs)
     monkeypatch.setattr(inventory_store, "write_json", failing)
-    r = await put(c, doc(RACK04))
+    r = await put(c, moved(9))
     assert r.status_code == 503 and r.json()["detail"]
     r = await c.post("/api/chillers/restore", json={"revision": 1}, headers={"If-Match": await etag(c)})
     assert r.status_code == 503
@@ -199,7 +252,7 @@ async def test_a_damaged_history_is_set_aside_not_lost_and_saving_continues(chil
     chillers.history.write_text("not json")
     r = await c.get("/api/chillers/history")
     assert r.status_code == 503
-    assert (await put(c, doc(OTHER))).status_code == 200
+    assert (await put(c, moved(10))).status_code == 200
     [aside] = chillers.folder.glob("chillers_history.unreadable-*.json")
     assert aside.read_text() == "not json"
     assert [(v["revision"], v["units"]) for v in await history(c)] == [(1, 4)]
@@ -247,9 +300,9 @@ async def test_operator_history_and_restore_record_the_username_viewer_is_refuse
         assert (await viewer.get("/api/chillers/history")).status_code == 403
         assert (await viewer.post("/api/chillers/restore", json={"revision": 1},
                                   headers={"If-Match": await etag(viewer)})).status_code == 403
-        assert (await put(viewer, doc(OTHER))).status_code == 403
+        assert (await put(viewer, moved(11))).status_code == 403
 
-        assert (await put(operator, doc(OTHER), await etag(operator))).status_code == 200
+        assert (await put(operator, moved(11), await etag(operator))).status_code == 200
         [version] = await history(operator)
         assert version["by"] == "operator" and version["units"] == 4
         r = await operator.post("/api/chillers/restore", json={"revision": 1}, headers={"If-Match": await etag(operator)})

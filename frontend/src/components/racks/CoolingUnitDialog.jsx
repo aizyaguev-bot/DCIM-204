@@ -4,7 +4,8 @@ import { validShelf, describeShelf } from "./chillers.js";
 
 // View, edit or add one cooling unit. Units are never deleted: "Take off shelf" keeps the rack, "No rack" keeps the
 // unit unassigned. onSave({ name, rack, u }) and onTakeOffShelf() throw Error(message) for this dialog to show.
-export default function CoolingUnitDialog({ mode, unit, rackNames, shelfOptionsFor, canOperate, onSave, onTakeOffShelf, onClose }) {
+// onRequestEdit (view mode, Operator and up): "Move…" / "Place…" turns Edit on and reopens this unit to be edited.
+export default function CoolingUnitDialog({ mode, unit, rackNames, shelfOptionsFor, canOperate, onRequestEdit = null, onSave, onTakeOffShelf, onClose }) {
   const editing = mode === "edit" || mode === "create";
   const initialRack = unit?.rack ?? "";
   const initialShelf = validShelf(unit?.u) ? String(unit.u) : "";
@@ -18,8 +19,9 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, shelfOptionsF
   const panelRef = useRef(null);
   const rackRef = useRef(null);
   const closeRef = useRef(null);
+  const moveRef = useRef(null);
   const errorRef = useRef(null);
-  useDialogFocus(panelRef, { initialRef: editing ? rackRef : closeRef, busyRef, onEscape: onClose });
+  useDialogFocus(panelRef, { initialRef: editing ? rackRef : onRequestEdit ? moveRef : closeRef, busyRef, onEscape: onClose });
 
   const knownRack = !initialRack || rackNames.includes(initialRack);
   const options = useMemo(() => (rack ? shelfOptionsFor(rack) : [{ value: "", label: "Not on a shelf (rack level)" }]), [rack, shelfOptionsFor]);
@@ -58,8 +60,12 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, shelfOptionsF
           <div><dt>Shelf</dt><dd>{describeShelf(unit)}</dd></div>
           <div><dt>Id</dt><dd className="racks-mono">{unit.id}</dd></div>
         </dl>
-        <p className="racks-dialog-note">{canOperate ? "Turn on Edit to move this unit." : "Viewer · read only"}</p>
-        <div className="racks-dialog-actions"><button ref={closeRef} type="button" className="racks-btn" onClick={onClose}>Close</button></div>
+        <p className="racks-dialog-note">{onRequestEdit ? "This turns on Edit mode, where changes save immediately." : canOperate ? "Turn on Edit to move this unit." : "Viewer · read only"}</p>
+        <div className="racks-dialog-actions racks-dialog-actions-primary-first">
+          {onRequestEdit && <button ref={moveRef} type="button" className="racks-btn racks-btn-primary" onClick={onRequestEdit}>
+            {unit.rack && validShelf(unit.u) && knownRack ? "Move…" : "Place…"}</button>}
+          <button ref={closeRef} type="button" className="racks-btn" onClick={onClose}>Close</button>
+        </div>
       </> : <form onSubmit={save} noValidate>
         <div className="racks-field">
           <label htmlFor="cooling-name">Name</label>

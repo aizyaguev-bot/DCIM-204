@@ -115,8 +115,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .shelf-index { display: flex; align-items: center; flex: 0 0 16px; font-size: 11px; color: #a7a7a7; }
 .shelf-grip { width: 12px; display: flex; align-items: center; color: #757575; cursor: grab; touch-action: none; }
 .shelf-content { display: flex; gap: 6px; flex: 1; min-width: 0; flex-wrap: wrap; }
-/* An OPT without a saved U sits on the next free shelf; its shelf number is dimmed so it does not read as saved. */
-.shelf-row[data-auto] .shelf-index { opacity: .55; font-style: italic; }
+/* An OPT without a saved U sits on the next free shelf; its shelf number is italic so it does not read as saved. */
+.shelf-row[data-auto] .shelf-index { color: #a7a7a7; font-style: italic; }
 .shelf-empty { height: 18px; display: flex; gap: 8px; margin: 6px 0; align-items: center; }
 .shelf-empty .shelf-index { color: #8a8a8a; }
 .shelf-empty-line { flex: 1; height: 1px; background: #1a1a1a; }
@@ -234,9 +234,14 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ── Racks v4 (RACKS-UI-SPEC §14): text at least 11 px, no opacity on text, #757575 only for borders and icons ── */
 .racks-main { padding-bottom: 96px; }
-.racks-view { --racks-sticky: 112px; }
+.racks-view { --racks-sticky: 168px; }
 .rack-kpi small { color: #a7a7a7; }
-.rack-kpi-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.rack-kpis { align-items: stretch; }
+.rack-attention-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -8px 0 16px; }
+.rack-attention-row .racks-chip { white-space: nowrap; }
+.rack-attention-row .racks-chip[data-attention="pdu-offline"], .rack-attention-row .racks-chip[data-attention="servers-off"] { border-color: #7a1e1e; color: #ffc4c4; }
+.rack-attention-row .racks-chip[data-attention="maintenance"], .rack-attention-row .racks-chip[data-attention="cooling"] { border-color: #756122; color: #f0c060; }
+.racks-chip-static { cursor: default; }
 .skeleton { display: inline-block; width: 64px; height: 22px; vertical-align: middle; background: #222; border-radius: 2px; animation: racks-pulse 1.2s ease-in-out infinite; }
 @keyframes racks-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 @keyframes racks-spin { to { transform: rotate(360deg); } }
@@ -253,7 +258,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .racks-search input::placeholder { color: #8f8f8f; }
 .racks-count { font-size: 12px; color: #a7a7a7; white-space: nowrap; }
 .racks-filter, .racks-options { display: flex; flex-wrap: wrap; gap: 6px; }
-.racks-jump { display: flex; gap: 6px; flex: 1 1 280px; min-width: 0; overflow-x: auto; scrollbar-width: thin; padding-bottom: 2px; }
+.racks-toolbar-wrap { justify-content: space-between; }
+.racks-jump { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; overflow: visible; }
 .racks-chip { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; height: 32px; padding: 0 10px; border: 1px solid #333; border-radius: 2px; background: #161616; color: #ccc; font-size: 12px; white-space: nowrap; }
 .racks-chip:hover { border-color: #4b4b4b; color: #fff; }
 .racks-chip small { font: 11px "JetBrains Mono", Consolas, monospace; color: #a7a7a7; }
@@ -264,7 +270,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .racks-chip[data-status="online"] .dot { background: #76b900; }
 .racks-chip[data-status="offline"] .dot, .racks-chip[data-status="unavailable"] .dot { background: #fe3f3f; }
 .racks-chip[data-status="storage"] .dot { background: #7dd3fc; }
-.rack-kpi-chips .racks-chip { height: auto; min-height: 32px; max-width: 100%; padding-top: 4px; padding-bottom: 4px; white-space: normal; text-align: start; }
+.racks-chip[data-status="loading"] .dot { background: #a7a7a7; animation: racks-pulse 1.2s ease-in-out infinite; }
 .badge-amber { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; border: 1px solid #756122; border-radius: 2px; background: #2a1c08; color: #f0c060; font-size: 11px; }
 .racks-select { height: 36px; min-width: 0; max-width: 30vw; padding: 0 6px; background: #161616; border: 1px solid #333; border-radius: 2px; color: #fff; font-size: 13px; }
 .racks-phone-options { display: flex; gap: 8px; margin: -8px 0 12px; }
@@ -395,7 +401,14 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .cooling-add { min-height: 32px; padding: 0 8px; border: 1px dashed #1f4050; border-radius: 2px; color: #7dd3fc; font-size: 11px; }
 #cooling-panel { margin-bottom: 16px; padding: 12px 16px 16px; border: 1px solid #1f4050; border-radius: 2px; background: #0f1417; scroll-margin-top: var(--racks-sticky); }
 .cooling-panel-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
-.cooling-panel-header h2 { font-size: 15px; font-weight: 700; color: #fff; }
+.cooling-panel-header h2 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; color: #fff; }
+.cooling-panel-body { display: flex; flex-direction: column; gap: 10px; }
+#cooling-panel[data-folded] .cooling-panel-header { margin-bottom: 0; }
+.cooling-on-shelf { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 13px; color: #ccc; }
+.cooling-on-shelf ul { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.cooling-on-shelf li { padding: 2px 6px; border: 1px solid #1f2a30; border-radius: 2px; background: #0c1114; white-space: nowrap; }
+.cooling-panel-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
+.cooling-show-all { min-height: 32px; font-size: 13px; }
 .cooling-panel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .cooling-panel-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px 24px; }
 .cooling-group h3 { margin: 4px 0; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #a7a7a7; }
@@ -407,8 +420,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .cooling-place { font-size: 12px; color: #a7a7a7; white-space: nowrap; }
 .cooling-list { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .cooling-list ul { width: 100%; }
-.cooling-history { margin-top: 12px; padding-top: 8px; border-top: 1px solid #1f2a30; font-size: 13px; color: #ccc; }
-.cooling-history summary { display: flex; align-items: center; min-height: 32px; font-weight: 600; color: #fff; cursor: pointer; }
+.cooling-history { margin-top: 2px; padding-top: 8px; border-top: 1px solid #1f2a30; font-size: 13px; color: #ccc; }
+.cooling-history summary { display: flex; align-items: center; gap: 6px; min-height: 32px; font-weight: 600; color: #fff; cursor: pointer; list-style: none; }
+.cooling-history summary::-webkit-details-marker { display: none; }
+.cooling-history summary:hover span { text-decoration: underline; text-underline-offset: 3px; }
+.cooling-history-chevron { flex-shrink: 0; color: #a7a7a7; transition: transform .15s; }
+.cooling-history[open] .cooling-history-chevron { transform: rotate(90deg); }
+.cooling-history-tag { padding: 0 6px; border: 1px solid #4b4b4b; border-radius: 2px; font-size: 11px; font-weight: 600; color: #fff; }
+.cooling-history-changes { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.cooling-history-changes ul { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; color: #ddd; }
+.cooling-history-list .cooling-history-changes li { padding: 0; border: 0; }
 .cooling-history-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .cooling-history-list li { padding: 6px 8px; border: 1px solid #2a2a2a; border-radius: 2px; }
 .cooling-history-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
@@ -453,7 +474,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .power-consequence { margin-top: 12px; font-size: 13px; color: #ff8181; }
 .power-scope { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 13px; }
 .power-scope label { display: flex; align-items: center; gap: 8px; min-height: 32px; }
-.power-warning { font-size: 12px; color: #f0c060; }
+.power-warning { margin-top: 12px; font-size: 13px; color: #f0c060; }
+.power-noop { margin-top: 8px; font-size: 13px; color: #a7a7a7; }
+.power-confirm[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.equipment-delete-confirm { border: 1px solid #7a1e1e; background: #7a1e1e; }
+.equipment-delete-confirm:hover:not(:disabled) { background: #9b2424; }
 .power-plan-title { margin-top: 12px; font-size: 13px; font-weight: 700; color: #fff; }
 .power-result-title { margin-top: 8px; font-size: 14px; font-weight: 700; color: #ff8181; }
 .power-confirm[data-action="off"] { border-color: #7a1e1e; background: #7a1e1e; color: #fff; }
@@ -515,17 +540,30 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   .power-toggle { min-width: 56px; height: 40px; }
   .kvm-open, .racks-chip, .cooling-chip, .cooling-add, .racks-btn, .racks-btn-sm, .power-btn, .toast-undo { min-height: 40px; }
   .racks-chip { height: 40px; }
-  .rack-kpi-chips .racks-chip { height: auto; min-height: 40px; }
   .icon-btn, .toast-close { width: 40px; height: 40px; }
 }
+@media (min-width: 641px) {
+  /* The panel never pushes the racks off the first screen: its list scrolls inside. */
+  .cooling-panel-body { max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+}
 @media (max-width: 640px) {
-  .racks-view { --racks-sticky: 72px; }
-  .racks-toolbar { padding: 8px 16px; }
-  .racks-toolbar { gap: 4px; }
-  .racks-search { flex: 1 1 0; height: 40px; padding: 0 8px; }
+  .racks-view { --racks-sticky: 112px; }
+  .racks-toolbar { padding: 8px 16px; gap: 6px; }
+  .racks-search { flex: 1 1 auto; width: 100%; height: 40px; padding: 0 8px; }
+  .racks-search .racks-count { flex-shrink: 0; font-size: 11px; }
   .racks-count:empty { display: none; }
-  .racks-select { flex: 0 0 auto; width: 21vw; max-width: 96px; height: 40px; padding: 0 2px; font-size: 12px; }
-  .racks-cooling-toggle { padding: 0 8px; }
+  .racks-toolbar-phone > .racks-select { flex: 1 1 0; width: auto; max-width: none; height: 40px; padding: 0 4px; font-size: 13px; }
+  .racks-toolbar-phone > .racks-cooling-toggle { flex: 0 0 auto; justify-content: center; min-width: 40px; height: 40px; padding: 0 8px; }
+  .rack-kpis { margin-bottom: 12px; }
+  /* One row of attention chips that scrolls sideways, with a fade on the right edge as the "more" cue. */
+  .rack-attention-row { flex-wrap: nowrap; margin: -4px -16px 12px 0; padding-right: 24px; overflow-x: auto; scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+  .rack-attention-row::-webkit-scrollbar { display: none; }
+  .rack-attention-row .racks-chip { flex-shrink: 0; }
+  /* The folded cooling panel is one header row: its badge wraps under the title, Show and × stay on the right. */
+  #cooling-panel[data-folded] .cooling-panel-header { flex-wrap: nowrap; align-items: flex-start; }
+  #cooling-panel[data-folded] .cooling-panel-header h2 { flex: 1 1 auto; min-width: 0; row-gap: 4px; }
+  #cooling-panel[data-folded] .cooling-panel-actions { flex-wrap: nowrap; }
   .rack-card { padding: 10px; }
   .server-cell, .equipment-cell { flex-basis: 100%; }
   .toast-region { bottom: 72px; }
@@ -535,8 +573,10 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   .racks-dialog-actions { flex-direction: column-reverse; }
   .racks-dialog-actions-primary-first { flex-direction: column; }
   .racks-dialog-actions .racks-btn { width: 100%; }
+  /* Confirmations: Cancel on top, where a second tap on the row switch lands (the action button is also armed). */
+  [role="alertdialog"] .racks-dialog-actions { flex-direction: column; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .is-flash, .skeleton, .server-cell[data-state="loading"] > .server-led, .power-spin { animation: none; }
-  .rack-collapse svg, .power-knob, .rack-load > div { transition: none; }
+  .is-flash, .skeleton, .server-cell[data-state="loading"] > .server-led, .power-spin, .racks-chip[data-status="loading"] .dot { animation: none; }
+  .rack-collapse svg, .power-knob, .rack-load > div, .cooling-history-chevron { transition: none; }
 }

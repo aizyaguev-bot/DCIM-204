@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { BLOCK, serverPowerGroup, planServerPower, sameTargets, powerErrorText, actionBlock } from "../components/racks/serverPower.js";
+import { BLOCK, serverPowerGroup, planServerPower, sameTargets, powerErrorText, actionBlock, serverDisplayName, otherFeeds } from "../components/racks/serverPower.js";
 
 const pdu = (id, rack, labels = {}, extra = {}) => ({ id, kind: "pdu", name: `PDU ${id.slice(3)}`, rack, labels, ...extra });
 const status = (outlets, reachable = true) => ({ reachable, outlets: outlets.map(([number, label, state]) => ({ number, label, state, watts: 10 })) });
@@ -116,4 +116,46 @@ test("the non-server label rule is the same text as DcimView's", () => {
   assert.equal(rule(power), rule(dcim));
   assert.match(dcim, /\/\^\(outlet\\s\*\\d\+\|port\\s\*\\d\+\|\\s\*\)\$\/i/);
   assert.match(power, /\/\^\(outlet\\s\*\\d\+\|port\\s\*\\d\+\|\\s\*\)\$\/i/);
+});
+
+test("a plan with nothing to switch is a no-op, not a block; a blocked plan is not a no-op", () => {
+  const g = serverPowerGroup("OPT99", world());
+  const already = planServerPower(g, "on", "feed", "pdu1:3");
+  assert.equal(already.noop, true);
+  assert.equal(already.disabledReason, "OPT99 (PSU1) is already on");
+  assert.equal(planServerPower(g, "off", "server").noop, false);
+  const w = world();
+  w.maintenance = { pdus: { pdu2: {} } };
+  const blocked = planServerPower(serverPowerGroup("OPT99", w), "on", "server");
+  assert.equal(blocked.noop, false);
+  assert.match(blocked.disabledReason, /maintenance/);
+});
+
+test("protected outlets from GET /api/pdus/maintenance block Off up front; an invalid list blocks every Off", () => {
+  const w = world();
+  w.maintenance = { pdus: {}, protection: "ok", protected: { pdu1: [4] } };
+  const g14 = serverPowerGroup("OPT14", w);
+  assert.equal(g14.feeds[0].protected, true);
+  assert.equal(planServerPower(g14, "off", "server").disabledReason, `PDU 1 outlet 4: ${BLOCK.protected}`);
+  assert.equal(planServerPower(g14, "cycle", "feed", "pdu1:4").disabledReason, `PDU 1 outlet 4: ${BLOCK.protected}`);
+  // whole-server Off of a two-feed server with one protected feed is refused before any outlet is switched
+  w.maintenance = { pdus: {}, protection: "ok", protected: { pdu2: [3] } };
+  w.pduStatuses.pdu2.outlets[0].state = "on";
+  const off = planServerPower(serverPowerGroup("OPT99", w), "off", "server");
+  assert.equal(off.disabledReason, `PDU 2 outlet 3: ${BLOCK.protected}`);
+  w.maintenance = { pdus: {}, protection: "invalid", protected: {} };
+  assert.equal(planServerPower(serverPowerGroup("OPT12", w), "off", "server").disabledReason, `PDU 1 outlet 2: ${BLOCK.protectionInvalid}`);
+  assert.equal(planServerPower(serverPowerGroup("OPT12", w), "on", "server").noop, true);
+});
+
+test("titles name the server, not the feed; otherFeeds counts only feeds that are on as power", () => {
+  assert.equal(serverDisplayName("OPT99 (PSU1)"), "OPT99");
+  assert.equal(serverDisplayName("optn45 (psu2)"), "optn45");
+  assert.equal(serverDisplayName("  OPT12 "), "OPT12");
+  assert.equal(serverDisplayName("שרת בדיקה 44"), "שרת בדיקה 44");
+  const g = serverPowerGroup("OPT99", world());           // PSU1 on, PSU2 off
+  const fromPsu1 = otherFeeds(g, "pdu1:3");
+  assert.deepEqual(fromPsu1.others.map(f => f.id), ["pdu2:3"]);
+  assert.deepEqual(fromPsu1.powered, []);                 // switching PSU1 off removes the last power
+  assert.deepEqual(otherFeeds(g, "pdu2:3").powered.map(f => f.id), ["pdu1:3"]);
 });

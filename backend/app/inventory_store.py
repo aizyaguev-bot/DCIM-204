@@ -245,6 +245,7 @@ VERSIONS_LIMIT = 20
 STORE_UNREADABLE = "The cooling units file cannot be read, so it was not changed. No changes were saved."
 HISTORY_UNREADABLE = "The cooling unit history cannot be read."
 UNKNOWN_VERSION = "This cooling unit version is not in the history any more. Reload the history and try again."
+UNITS_KEPT = "Cooling units cannot be deleted. Move the unit to another rack or leave it unassigned instead."
 
 
 def history_path(path):
@@ -315,10 +316,18 @@ def _prune(versions, limit=VERSIONS_LIMIT):
     return versions
 
 
+def _places(document):
+    return [{key: unit.get(key) for key in ("id", "name", "rack", "u")} for unit in _units(document)]
+
+
 def public_version(version):
-    """A history entry without its stored document."""
-    return {key: deepcopy(version[key]) for key in ("revision", "at", "by", "units", "action", "removed", "restored_from")
-            if key in version}
+    """A history entry without its stored document. `places` lists each unit of that document ({id, name, rack, u}),
+    so a page can show what changed between versions and which units a restore keeps."""
+    public = {key: deepcopy(version[key]) for key in ("revision", "at", "by", "units", "action", "removed", "restored_from")
+              if key in version}
+    if "document" in version:
+        public["places"] = _places(version["document"])
+    return public
 
 
 def _commit_version(path, current, existed, payload, by, action, restored_from=None):
@@ -349,19 +358,33 @@ def _commit_version(path, current, existed, payload, by, action, restored_from=N
         raise
 
 
+def _dropped_units(current, payload):
+    """The units of `current` (with an id) that `payload` leaves out."""
+    kept = {u.get("id") for u in _units(payload)}
+    return [unit for unit in _units(current) if unit.get("id") is not None and unit.get("id") not in kept]
+
+
 def save_versioned(path, payload, expected, default, by=None):
-    """save_layout with history: If-Match stays optional (409 when stale); the document it replaces is kept."""
+    """save_layout with history: If-Match stays optional (409 when stale); the document it replaces is kept.
+    Units are never deleted: a payload that leaves out a unit id of the current document is 422 and changes nothing
+    (422, not 409, because the pages retry a 409 once)."""
     with locked_file(path, LAYOUT_SAVE_FAILED):
         current, existed = _read_store(path, default)
         if expected and expected != revision(current):
             raise HTTPException(409, LAYOUT_CONFLICT)
+        dropped = _dropped_units(current, payload) if existed else []
+        if dropped:
+            names = ", ".join(str(u.get("name") or u.get("id")) for u in dropped[:5])
+            more = f" and {len(dropped) - 5} more" if len(dropped) > 5 else ""
+            raise HTTPException(422, f"{UNITS_KEPT} Left out: {names}{more}.")
         _commit_version(path, current, existed, payload, by, "save")
     return revision(payload)
 
 
 def restore_version(path, number, expected, default, by=None):
-    """Write history version `number` as the current document; the document it replaces becomes a new version.
-    Needs the current revision (428 without, 409 when stale); 404 for a revision the history does not hold."""
+    """Write history version `number` as the current document (merged with merge_restore, so units added since are
+    kept); the document it replaces becomes a new version. Needs the current revision (428 without, 409 when stale);
+    404 for a revision the history does not hold."""
     with locked_file(path, LAYOUT_SAVE_FAILED):
         current, existed = _read_store(path, default)
         if not expected:
@@ -371,6 +394,17 @@ def restore_version(path, number, expected, default, by=None):
         version = next((v for v in read_history(path)["versions"] if v["revision"] == number), None)
         if version is None or "document" not in version:
             raise HTTPException(404, UNKNOWN_VERSION)
-        document = deepcopy(version["document"])
+        document = merge_restore(version["document"], current)
         _commit_version(path, current, existed, document, by, "restore", restored_from=number)
     return document, revision(document)
+
+
+def merge_restore(version_document, current):
+    """A restore never deletes a unit: the version's document (its units, places, extra fields and connections) plus
+    every current unit the version does not hold, kept where it is now."""
+    document = deepcopy(version_document) if isinstance(version_document, dict) else {}
+    units = document.get("units") if isinstance(document.get("units"), list) else []
+    known = {u.get("id") for u in units if isinstance(u, dict) and u.get("id") is not None}
+    added = [deepcopy(u) for u in _units(current) if u.get("id") is not None and u.get("id") not in known]
+    document["units"] = [*units, *added]
+    return document

@@ -303,18 +303,19 @@ async def get_chillers(response: Response):
 
 @app.put("/api/chillers")
 async def save_chillers(payload: dict, request: Request, response: Response, if_match: str | None = Header(default=None)):
-    """Same contract as the other layout stores (optional If-Match, 409 when stale). The document it replaces is kept in
-    chillers_history.json, so a unit a save leaves out (removed) can be restored; a chillers.json that exists but cannot
-    be read is 503 and is never overwritten."""
+    """Same contract as the other layout stores (optional If-Match, 409 when stale). Units are never deleted: a payload
+    that leaves out a unit id of the current document is 422 and changes nothing. The document it replaces is kept in
+    chillers_history.json; a chillers.json that exists but cannot be read is 503 and is never overwritten."""
     response.headers["ETag"] = inventory_store.save_versioned(_CHILLERS_FILE, payload, if_match, _CHILLERS_EMPTY,
                                                               _account_username(request))
     return {"ok": True}
 
 @app.get("/api/chillers/history")
 async def get_chillers_history(response: Response):
-    """Operator (it names who saved). Newest first: {versions: [{revision, at, by, units, action, removed[, restored_from]}]}
-    where each version is a document a save or restore replaced; `units` is its unit count, `removed` the units
-    ({id, name, rack, u}) that the replacing write left out."""
+    """Operator (it names who saved). Newest first: {versions: [{revision, at, by, units, action, removed, places
+    [, restored_from]}]} where each version is a document a save or restore replaced; `units` is its unit count,
+    `places` its units ({id, name, rack, u}) and `removed` the units that the replacing write left out (only older
+    servers left units out)."""
     response.headers["Cache-Control"] = "no-store"
     history = inventory_store.read_history(_CHILLERS_FILE)
     return {"versions": [inventory_store.public_version(v) for v in reversed(history["versions"])]}
@@ -323,8 +324,9 @@ async def get_chillers_history(response: Response):
 async def restore_chillers(body: ChillerRestore, request: Request, response: Response,
                            if_match: str | None = Header(default=None)):
     """Operator. If-Match is the current ETag of GET /api/chillers (428 without it, 409 when stale, 404 unknown revision).
-    Writes that version as the current document (the replaced one becomes a new history version, so a restore can be
-    undone) and returns it with the new ETag."""
+    Writes that version as the current document, keeping every current unit the version does not hold where it is now
+    (a restore never deletes a unit); the replaced document becomes a new history version, so a restore can be undone.
+    Returns the written document with the new ETag."""
     document, etag = inventory_store.restore_version(_CHILLERS_FILE, body.revision, if_match, _CHILLERS_EMPTY,
                                                      _account_username(request))
     response.headers["ETag"] = etag

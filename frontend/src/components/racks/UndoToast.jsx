@@ -17,7 +17,8 @@ export default function UndoToast({ toast, onDismiss }) {
     {toast && <div className="toast" data-tone={toast.tone || "ok"}
       onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)} onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget)) setPaused(false); }}>
-      <span className="toast-text" dir="auto">{toast.text}</span>
+      {/* English messages: names inside them are <bdi>, so a message that starts with a Hebrew name still reads left to right. */}
+      <span className="toast-text">{toast.text}</span>
       {toast.onUndo && <button type="button" className="toast-undo" disabled={busy}
         onClick={async () => { setBusy(true); try { await toast.onUndo(); } finally { setBusy(false); } }}>{busy ? "Undoing…" : "Undo"}</button>}
       <button type="button" className="toast-close" aria-label="Dismiss message" onClick={() => onDismiss(toast.id)}>×</button>

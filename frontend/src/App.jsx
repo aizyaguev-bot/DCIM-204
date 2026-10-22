@@ -40,6 +40,10 @@ export default function App() {
   const [pxeConfigError, setPxeConfigError] = useState("");
 
   const [editMode, setEditMode] = useState(false);
+  // The rack open on the Racks tab (?rack=): opening one is a history entry, so Back closes it and a rack can be linked.
+  const [openRack, setOpenRack] = useState(() => new URLSearchParams(window.location.search).get("rack"));
+  const mainTabRef = useRef(null);
+  mainTabRef.current = mainTab;
   const [summary, setSummary] = useState("");
   const [version, setVersion] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -61,9 +65,18 @@ export default function App() {
     if (rack) url.searchParams.set("rack", rack);
     else url.searchParams.delete("rack");
     const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
-    history.pushState({ tab, view: {kind:"dashboard"}, adminSection: section || adminSection }, "", url);
-    setView({kind:"dashboard"}); setMainTab(section ? "admin" : tab); setEditMode(false);
+    history.pushState({ tab, view: {kind:"dashboard"}, adminSection: section || adminSection, rack: rack || null }, "", url);
+    setView({kind:"dashboard"}); setMainTab(section ? "admin" : tab); setEditMode(false); setOpenRack(rack || null);
     if (section) setAdminSection(section);
+  }
+  // Racks: open a rack (or go back to all racks, rack null) without leaving Edit mode.
+  function changeRack(rack) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "racks");
+    if (rack) url.searchParams.set("rack", rack);
+    else url.searchParams.delete("rack");
+    history.pushState({ ...(history.state || {}), tab: "racks", view: {kind:"dashboard"}, rack: rack || null }, "", url);
+    setOpenRack(rack || null);
   }
   function navigateAdmin(section) {
     navigate(["locations", "connections", "assistant"].includes(section) ? section : "admin");
@@ -79,10 +92,15 @@ export default function App() {
     const onPop = event => {
       const tab = event.state?.tab || new URLSearchParams(location.search).get("tab") || "dashboard";
       const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
-      setView(event.state?.view || { kind: "dashboard" });
-      setMainTab(tab === "dcim" ? "racks" : section ? "admin" : tab);
+      const nextTab = tab === "dcim" ? "racks" : section ? "admin" : tab;
+      const view = event.state?.view || { kind: "dashboard" };
+      // Back / Forward between a rack and all racks stays in Edit mode; anything else leaves it.
+      const sameRacks = nextTab === "racks" && mainTabRef.current === "racks" && view.kind === "dashboard";
+      setView(view);
+      setMainTab(nextTab);
       setAdminSection(event.state?.adminSection || section || "devices");
-      setEditMode(false);
+      setOpenRack(new URLSearchParams(location.search).get("rack"));
+      if (!sameRacks) setEditMode(false);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -226,7 +244,10 @@ export default function App() {
     try {
       const data = await api.maintenanceList();
       if (seq !== maintenanceSeq.current) return;
-      setMaintenance({ password_mode: data?.password_mode || "unavailable", pdus: data?.pdus || {}, log: data?.log || [] });
+      // protection / protected (outlet numbers per PDU): Racks blocks Off of a protected outlet before anything is sent.
+      setMaintenance({ password_mode: data?.password_mode || "unavailable", pdus: data?.pdus || {}, log: data?.log || [],
+        protection: typeof data?.protection === "string" ? data.protection : null,
+        protected: data?.protected && typeof data.protected === "object" ? data.protected : {} });
       setMaintenanceError("");
     } catch (e) {
       if (seq === maintenanceSeq.current) setMaintenanceError(e.detail || (e.status ? `HTTP ${e.status}` : e.message));
@@ -433,6 +454,8 @@ export default function App() {
           onOpenConsole={openKvmConsole}
           maintenance={maintenance}
           onSwitchFeeds={switchFeeds}
+          rack={openRack} onRackChange={changeRack}
+          onRequestEdit={canOperate ? () => setEditMode(true) : null}
         />
       )}
 

@@ -19,9 +19,10 @@ function navigationHarness(adminSection = "devices") {
     pushState(value, title, url) { this.state = value; window.location.href = String(url); window.location.search = new URL(url).search; },
     replaceState(value) { this.state = value; },
   };
-  const setters = ["view", "mainTab", "editMode", "adminSection"].map(key => value => { state[key] = value; });
-  const actions = () => new Function("window", "history", "setView", "setMainTab", "setEditMode", "setAdminSection", "adminSection", `${navigationSource}; return { navigate, navigateAdmin };`)(window, history, ...setters, state.adminSection);
-  const pop = new Function("location", "setView", "setMainTab", "setEditMode", "setAdminSection", `${popSource}; return onPop;`)(window.location, ...setters);
+  const setters = ["view", "mainTab", "editMode", "adminSection", "openRack"].map(key => value => { state[key] = value; });
+  const mainTabRef = { get current() { return state.mainTab; } };
+  const actions = () => new Function("window", "history", "setView", "setMainTab", "setEditMode", "setAdminSection", "setOpenRack", "adminSection", `${navigationSource}; return { navigate, navigateAdmin };`)(window, history, ...setters, state.adminSection);
+  const pop = new Function("location", "setView", "setMainTab", "setEditMode", "setAdminSection", "setOpenRack", "mainTabRef", `${popSource}; return onPop;`)(window.location, ...setters, mainTabRef);
   return { state, window, history, actions, pop };
 }
 
@@ -212,4 +213,21 @@ test("Locations has its own shareable query and Back restores it", () => {
   app.actions().navigate("sync");
   assert.equal(app.state.mainTab, "admin");
   assert.equal(app.state.adminSection, "mapping");
+});
+
+test("Racks: ?rack= opens a rack; Back between a rack and all racks keeps Edit mode, other Back leaves it", () => {
+  const h = navigationHarness();
+  const { navigate } = h.actions();
+  navigate("racks", "Rack-04");
+  assert.equal(h.state.openRack, "Rack-04");
+  assert.match(h.window.location.search, /[?&]rack=Rack-04/);
+  h.state.editMode = true;
+  h.window.location.search = "?tab=racks";
+  h.pop({ state: { tab: "racks", view: { kind: "dashboard" }, rack: null } });
+  assert.equal(h.state.openRack, null);
+  assert.equal(h.state.mainTab, "racks");
+  assert.equal(h.state.editMode, true, "closing the rack with Back stays in Edit mode");
+  h.window.location.search = "?tab=dashboard";
+  h.pop({ state: { tab: "dashboard", view: { kind: "dashboard" } } });
+  assert.equal(h.state.editMode, false, "leaving Racks with Back leaves Edit mode");
 });

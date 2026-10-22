@@ -80,8 +80,9 @@ const word = action => (action === "on" ? "on" : "off");
 
 // The outlets one request switches. Server scope switches every feed that is not already in the target state; a
 // blocked feed refuses the whole request (no partial execution). Cycle works on one feed only.
+// noop: nothing to switch because every feed is already in that state (a fact to show, not an error).
 export function planServerPower(group, action, scope = "server", feedId = null) {
-  const plan = { targets: [], skipped: [], disabledReason: null };
+  const plan = { targets: [], skipped: [], disabledReason: null, noop: false };
   if (!group) return { ...plan, disabledReason: "This server has no PDU outlet" };
   if (action === "cycle" && scope !== "feed") return { ...plan, disabledReason: "Cycle works on one feed" };
   const feeds = scope === "feed" ? group.feeds.filter(f => f.id === feedId) : group.feeds;
@@ -92,8 +93,24 @@ export function planServerPower(group, action, scope = "server", feedId = null) 
   }
   const blocked = plan.targets.find(f => f.blocked?.[action]);
   if (blocked) plan.disabledReason = `${blocked.pduName} outlet ${blocked.outlet}: ${blocked.blocked[action]}`;
-  else if (!plan.targets.length) plan.disabledReason = `${scope === "feed" ? feeds[0].label : group.name} is already ${word(action)}`;
+  else if (!plan.targets.length) {
+    plan.disabledReason = `${scope === "feed" ? feeds[0].label : group.name} is already ${word(action)}`;
+    plan.noop = true;
+  }
   return plan;
+}
+
+// The server's own name for titles: "OPT99 (PSU1)" -> "OPT99" (the serverIdentity rule, keeping the case).
+export function serverDisplayName(name) {
+  const text = String(name ?? "").trim();
+  const match = /^(optn?\d+)(?:\s*\([^)]*\))?$/i.exec(text);
+  return match ? match[1] : text;
+}
+
+// The other feeds of a multi-feed server and what a feed-only request leaves: the feeds that stay powered (state on).
+export function otherFeeds(group, feedId) {
+  const others = (group?.feeds || []).filter(f => f.id !== feedId);
+  return { others, powered: others.filter(f => f.state === "on"), unpowered: others.filter(f => f.state !== "on") };
 }
 
 // The control's own reason for a blocked action (null when it may be requested).

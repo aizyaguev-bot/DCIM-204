@@ -113,3 +113,24 @@ test("an undo restores the unit, and is refused when it was changed again since"
   assert.throws(() => undoCoolingChange(changedAgain, change), /changed in another session after your change; nothing was undone/);
   assert.equal(coolingChange(unit, { rack: null, u: 5 }).after.u, null);
 });
+
+test("sameDocument ignores key order and missing empty lists", () => {
+  assert.equal(mod.sameDocument({ units: [{ id: "a", rack: "R", u: 1 }] }, { connections: [], units: [{ u: 1, rack: "R", id: "a" }] }), true);
+  assert.equal(mod.sameDocument({ units: [{ id: "a", rack: "R", u: 1 }] }, { units: [{ id: "a", rack: "R", u: 2 }] }), false);
+  assert.equal(mod.sameDocument(doc(), structuredClone(doc())), true);
+});
+
+test("placeChanges lists moves, renames, additions and units left out, for the change history", () => {
+  const before = [{ id: "c3", name: "Chiller-3", rack: "Rack-04", u: 5 }, { id: "c1", name: "Cooling", rack: "Rack-01", u: 2 },
+    { id: "c9", name: "Old", rack: null, u: null }, { id: "c7", name: "Same", rack: "Rack-02", u: 1 }];
+  const after = [{ id: "c3", name: "Chiller-3", rack: "Rack-04", u: null }, { id: "c1", name: "Cooling-A", rack: "Rack-01", u: 2 },
+    { id: "c7", name: "Same", rack: "Rack-02", u: 1 }, { id: "cn", name: "New", rack: "Rack-05", u: 9 }];
+  assert.deepEqual(mod.placeChanges(before, after), [
+    { id: "c3", name: "Chiller-3", from: "Rack-04 · U05", to: "Rack-04 · not on a shelf", renamedFrom: null },
+    { id: "c1", name: "Cooling-A", from: "Rack-01 · U02", to: "Rack-01 · U02", renamedFrom: "Cooling" },
+    { id: "c9", name: "Old", from: "No rack", to: null, renamedFrom: null },
+    { id: "cn", name: "New", from: null, to: "Rack-05 · U09", renamedFrom: null },
+  ]);
+  assert.deepEqual(mod.placeChanges(before, before), []);
+  assert.deepEqual(mod.placeChanges(null, undefined), []);
+});

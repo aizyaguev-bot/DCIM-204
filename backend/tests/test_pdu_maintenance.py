@@ -576,3 +576,19 @@ async def test_successful_actions_do_not_consume_budget(accounts_app, fake):
         for n in range(1, 7):
             assert (await shutdown(c, f"pdu{n}", password=ACCOUNT_PASSWORD)).status_code == 200
             assert (await restore(c, f"pdu{n}", password=ACCOUNT_PASSWORD)).status_code == 200
+
+
+async def test_listing_reports_protection_state_and_protected_outlet_numbers_only(mclient, pdu_id, fake, settings):
+    """The Racks page blocks Off up front from this: "unconfigured" | "ok" | "invalid" and outlet numbers per PDU id."""
+    listing = (await mclient.get("/api/pdus/maintenance")).json()
+    assert listing["protection"] == "unconfigured" and listing["protected"] == {}
+    settings.power_protected_outlets = f"{pdu_id}:4,PDU-M:1"
+    listing = (await mclient.get("/api/pdus/maintenance")).json()
+    assert listing["protection"] == "ok" and listing["protected"] == {pdu_id: [1, 4]}
+    assert "pdu.example.invalid" not in str(listing) and SHARED not in str(listing)
+    settings.power_protected_outlets = "none"
+    assert (await mclient.get("/api/pdus/maintenance")).json()["protection"] == "ok"
+    settings.power_protected_outlets = f"{pdu_id}:4,PDU-Renamed:7"   # a stale entry makes the whole list invalid
+    listing = (await mclient.get("/api/pdus/maintenance")).json()
+    assert listing["protection"] == "invalid" and listing["protected"] == {pdu_id: [4]}
+    assert fake.calls == []

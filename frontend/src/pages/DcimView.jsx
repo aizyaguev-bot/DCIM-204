@@ -10,8 +10,8 @@ import {OwnerSelect, useEngineers} from "../engineers";
 import { serverIdentity } from "../api/locations";
 import { deviceState } from "../api/client";
 import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, buildSearchIndex, searchIndex, matchesFilter, shelfOptions } from "../components/racks/rackView.js";
-import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, shelfLabel } from "../components/racks/chillers.js";
-import { BLOCK, serverPowerGroup, planServerPower, sameTargets, powerErrorText } from "../components/racks/serverPower.js";
+import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, shelfLabel, sameDocument } from "../components/racks/chillers.js";
+import { BLOCK, serverPowerGroup, planServerPower, sameTargets, serverDisplayName } from "../components/racks/serverPower.js";
 import ServerPowerControl, { PowerActionButtons } from "../components/racks/ServerPowerControl.jsx";
 import PowerConfirmDialog from "../components/racks/PowerConfirmDialog.jsx";
 import CoolingUnitDialog from "../components/racks/CoolingUnitDialog.jsx";
@@ -260,8 +260,8 @@ function InlineName({ value, onRename, onOpen, className }) {
 const RackViewContext = createContext({
   visualFor: () => ({ state: "unknown", maintenance: false, word: "Unknown", title: "" }),
   summaryFor: null, matchKeys: null, rowKeep: null, showEmpty: false,
-  coolingByRack: {}, coolingDrop: false, coolingDraggable: false, coolingEditable: false,
-  onOpenCooling: null, onAddCooling: null, itemsError: false,
+  coolingByRack: {}, coolingDrop: false, coolingDraggable: false, coolingEditable: false, coolingCanPlace: false,
+  onOpenCooling: null, onPlaceCooling: null, onAddCooling: null, itemsError: false,
 });
 
 // SSH slot: empty (and taking no space) until the SSH release sets renderSsh on ServerActionsContext.
@@ -347,10 +347,12 @@ function EquipCell({ item, onSelect, onRename }) {
 
 // A cooling unit on a shelf or in a rack's strip; in Edit mode on the overview it can also be dragged (pointer only).
 function RackCoolingChip({ unit, variant }) {
-  const { coolingDraggable, onOpenCooling, matchKeys } = useContext(RackViewContext);
+  const editMode = useContext(EditContext);
+  const { coolingDraggable, onOpenCooling, onPlaceCooling, matchKeys } = useContext(RackViewContext);
   const drag = useDraggable({ id: `cooling:${unit.id}`, disabled: !coolingDraggable, data: { unit } });
-  return <CoolingChip unit={unit} variant={variant} onOpen={onOpenCooling} highlighted={!!matchKeys?.has(`c:${unit.id}`)}
-    dragHandle={coolingDraggable ? drag : null}/>;
+  const place = variant === "strip" && !editMode && onPlaceCooling;
+  return <CoolingChip unit={unit} variant={variant} onOpen={place || onOpenCooling} actionLabel={place ? "Place…" : null}
+    highlighted={!!matchKeys?.has(`c:${unit.id}`)} dragHandle={coolingDraggable ? drag : null}/>;
 }
 
 // One U row — server + equipment side by side, or just equipment, or empty; cooling units on that shelf at the end
@@ -651,6 +653,20 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   const [moveRack,  setMoveRack]  = useState("");
   const [moving,    setMoving]    = useState(false);
   const [unchanged, setUnchanged] = useState(false);
+  // Delete is asked in the panel itself (never window.confirm), the same two steps as "Remove from DCIM".
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const deleteCancelRef = useRef(null);
+  const deleteOpenRef = useRef(null);
+  useEffect(() => { if (confirmDelete) deleteCancelRef.current?.focus(); }, [confirmDelete]);
+  function cancelDelete() { setConfirmDelete(false); requestAnimationFrame(() => deleteOpenRef.current?.focus()); }
+  async function doDelete() {
+    if (deleting) return;
+    setDeleting(true);
+    try { await onDelete(item); onClose(); }
+    catch { /* the save already told the user why */ }
+    finally { setDeleting(false); }
+  }
 
   // Only the fields changed here are saved, so a barcode, shelf position or move saved meanwhile elsewhere is kept.
   // An old U outside 0-42 that nobody touches is left as it is.
@@ -748,10 +764,17 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
           {unchanged && !dirty && <div role="status" className="text-[11px] text-zinc-400 text-center">No changes to save.</div>}
         </div>
         <div className="px-5 py-4 border-t border-zinc-800/40">
-          <button onClick={async()=>{ if(!confirm(`Delete "${item.name}"?`))return; try { await onDelete(item); onClose(); } catch { /* the save already told the user why */ } }}
-            className="w-full py-2 text-xs font-medium text-rose-600 hover:text-rose-400 border border-rose-900/40 hover:border-rose-800/60 rounded-lg transition">
+          {confirmDelete ? <div role="group" aria-label={`Delete ${item.name} from ${rackName}`} className="space-y-2"
+            onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); cancelDelete(); } }}>
+            <p className="text-xs text-rose-300" dir="auto">Delete <bdi>{item.name}</bdi> from <bdi>{rackName}</bdi>? This removes it from the rack layout.</p>
+            <div className="flex gap-2">
+              <button ref={deleteCancelRef} type="button" onClick={cancelDelete} disabled={deleting} className="flex-1 py-2 text-xs font-medium text-zinc-300 border border-zinc-700 rounded-lg">Cancel</button>
+              <button type="button" onClick={doDelete} disabled={deleting} className="equipment-delete-confirm flex-1 py-2 text-xs font-bold text-white rounded-lg">{deleting ? "Deleting…" : "Delete"}</button>
+            </div>
+          </div> : <button ref={deleteOpenRef} type="button" onClick={() => setConfirmDelete(true)}
+            className="w-full py-2 text-xs font-medium text-rose-400 hover:text-rose-300 border border-rose-900/40 hover:border-rose-800/60 rounded-lg transition">
             Delete from rack
-          </button>
+          </button>}
         </div>
       </div>
     </div>
@@ -1138,8 +1161,9 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
           </ul>}
           <section className="rack-detail-cooling" aria-labelledby="rack-detail-cooling-title">
             <h3 id="rack-detail-cooling-title">Cooling units in <bdi>{r.rack}</bdi></h3>
-            <CoolingStrip list rack={r.rack} units={cooling} canEdit={editMode && view.coolingEditable} editMode={editMode}
-              onOpen={view.onOpenCooling} onAdd={view.onAddCooling}/>
+            <CoolingStrip list rack={r.rack} units={cooling} canEdit={editMode ? view.coolingEditable : !!view.onPlaceCooling}
+              canAdd={editMode && view.coolingEditable} editMode={editMode}
+              onOpen={!editMode && view.onPlaceCooling ? view.onPlaceCooling : view.onOpenCooling} onAdd={view.onAddCooling}/>
           </section>
         </div>
       </div>
@@ -1547,6 +1571,8 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
   const [detailView, setDetailView] = useStoredState("dcim.racks.detailView", "list");
   const [panelPref, setPanelPref] = useStoredState("dcim.racks.coolingPanel", null);
   const [panelOpen, setPanelOpen] = useState(panelPref === "open");
+  // Phones: the panel starts folded to its header (also when it opens by itself); opening it on purpose unfolds it.
+  const [panelExpanded, setPanelExpanded] = useState(!phone);
   const searchRef = useRef(null);
   const matchAt = useRef(-1);
 
@@ -1625,7 +1651,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
       : entry.kind === "equipment" ? document.querySelector(`.equipment-cell[data-item-id="${id}"]`)
       : document.querySelector(`[data-rack-id] .cooling-chip[data-unit-id="${id}"]`);
     if (!el && entry.kind === "cooling") {
-      setPanelOpen(true);
+      setPanelOpen(true); setPanelExpanded(true);
       requestAnimationFrame(() => { const row = document.querySelector(`#cooling-panel li[data-unit-id="${id}"] button`); row?.scrollIntoView({ block: "center" }); row?.focus({ preventScroll: true }); flash(row?.closest("li")); });
       return;
     }
@@ -1665,9 +1691,12 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
     if (cooling.groups.unassigned.length > 0 && panelPref !== "closed") setPanelOpen(true);
   }, [cooling.loaded, cooling.groups, panelPref]);
   const looseCoolingHit = searching && cooling.groups.unassigned.some(({ unit }) => search.keys.has(`c:${unit.id}`));
-  const showPanel = panelOpen || looseCoolingHit;
+  // With a search the panel lists only the units it matches, and is hidden when it matches none.
+  const coolingHits = searching ? cooling.units.filter(u => search.keys.has(`c:${u.id}`)).length : null;
+  const showPanel = (panelOpen || looseCoolingHit) && (!searching || coolingHits > 0);
   function toggleCooling(open = !showPanel) {
     setPanelOpen(open); setPanelPref(open ? "open" : "closed");
+    if (open) setPanelExpanded(true);
     if (open) requestAnimationFrame(() => { const panel = document.getElementById("cooling-panel"); panel?.scrollIntoView({ block: "start", behavior: prefersReducedMotion() ? "auto" : "smooth" }); panel?.querySelector("h2")?.focus({ preventScroll: true }); });
   }
   const coolingTotal = cooling.units.length;
@@ -1792,7 +1821,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
   const viewCtx = useMemo(() => ({
     ...base, matchKeys: searching ? search.keys : null, rowKeep, showEmpty,
     coolingByRack: cooling.groups.byRack, coolingDrop: overviewEdit, coolingDraggable: overviewEdit, coolingEditable: cooling.editable,
-    onOpenCooling: cooling.open, onAddCooling: cooling.add,
+    coolingCanPlace: cooling.canPlace, onOpenCooling: cooling.open, onPlaceCooling: cooling.canPlace ? cooling.edit : null, onAddCooling: cooling.add,
   }), [base, searching, search, rowKeep, showEmpty, cooling, overviewEdit]);
 
   const countText = searching ? `${search.total} ${search.total === 1 ? "match" : "matches"} in ${search.racks.size} ${search.racks.size === 1 ? "rack" : "racks"}` : "";
@@ -1818,7 +1847,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
             {canAdmin && <button type="button" onClick={() => setAddRackOpen(true)} className="racks-btn racks-btn-accent">{Icon.plus} Add Rack</button>}
           </div>}
           <RackKpis {...kpis}/>
-          <RacksToolbar phone={phone} searchRef={searchRef} query={query} onQuery={setQuery} onSearchKey={onSearchKey} count={countText}
+          <RacksToolbar phone={phone} loading={kpis.loading} searchRef={searchRef} query={query} onQuery={setQuery} onSearchKey={onSearchKey} count={countText}
             filter={editMode ? "all" : filter} onFilter={setFilter} filterCounts={filterCounts} editMode={editMode}
             rackChips={rackChips} onJump={jumpTo} showEmpty={showEmpty} onShowEmpty={setShowEmpty}
             allCollapsed={allCollapsed} onToggleAll={toggleAll} coolingOpen={showPanel} onToggleCooling={() => toggleCooling()}
@@ -1833,9 +1862,10 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
             {searching ? <>No servers, equipment or cooling units {filtering ? "in this filter " : ""}match “<bdi>{search.query}</bdi>”{looseCoolingHit ? " in a rack (see the cooling units panel)" : ""}. </> : <>{filterEmptyText(filter)} </>}
             <button type="button" className="racks-link" onClick={clearFind}>{searching ? "Clear search" : "Show all"}</button></p>}
           {showPanel && <CoolingPanel groups={cooling.groups} rackNames={allNames} loaded={cooling.loaded} loadError={cooling.loadError}
-            canEdit={editMode && cooling.editable} canOperate={cooling.canOperate} editMode={editMode} lastChange={cooling.lastChange}
-            matchKeys={searching ? search.keys : null} onOpen={cooling.open} onAdd={cooling.add} onUndo={cooling.undoLast}
-            onRetry={cooling.retry} onClose={() => toggleCooling(false)} history={cooling.history}/>}
+            canEdit={editMode && cooling.editable} canPlace={cooling.canPlace} canOperate={cooling.canOperate} editMode={editMode} lastChange={cooling.lastChange}
+            matchKeys={searching ? search.keys : null} onOpen={cooling.open} onPlace={cooling.edit} onAdd={cooling.add} onUndo={cooling.undoLast}
+            onRetry={cooling.retry} onClose={() => toggleCooling(false)} history={cooling.history}
+            phone={phone} expanded={panelExpanded} onExpand={setPanelExpanded}/>}
           {!rackStats.length && <p className="racks-empty">No racks yet. Add a PDU in Admin → Devices, or turn on Edit to add a rack (Admin).</p>}
           <DndContext sensors={crossSensors} collisionDetection={collision}
             onDragStart={handleDragStart}
@@ -2087,7 +2117,7 @@ function ReadOnlyAsset({ item, owner, onClose }) {
 }
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, onOpenConsole, section: controlledSection, editMode = false, onSummary, maintenance, onSwitchFeeds, rack, onRackChange}) {
+export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, onOpenConsole, section: controlledSection, editMode = false, onSummary, maintenance, onSwitchFeeds, onRequestEdit, rack, onRackChange}) {
   const {canOperate, canAdmin, preferences} = useAccounts();
   const {revision: engineerRevision} = useEngineers();
   const [localSection, setSection] = useState("racks");
@@ -2118,6 +2148,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const editingRef = useRef(editMode);
   editingRef.current = editMode;
   const itemsSeq = useRef(0);
+  // Cooling units are edited through dialogs, never inline, so they keep reloading in Edit mode too, except while a
+  // cooling dialog is open (its form is based on what it opened with); coolingSeq drops an answer a save overtook.
+  const coolingSeq = useRef(0);
+  const holdCoolingRef = useRef(false);
   const holdItems = selectedCustomId != null;
   const holdItemsRef = useRef(holdItems);
   holdItemsRef.current = holdItems;
@@ -2128,14 +2162,15 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     if (!initial && !force && document.hidden) return Promise.resolve();
     const editing = !initial && !force && editingRef.current;
     const itemsTurn = holdItemsRef.current ? null : ++itemsSeq.current;
-    if (editing && itemsTurn == null) return Promise.resolve();
+    const coolingTurn = !initial && !force && holdCoolingRef.current ? null : ++coolingSeq.current;
+    if (editing && itemsTurn == null && coolingTurn == null) return Promise.resolve();
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     const keep = setter => next => setter(prev => same(prev, next) ? prev : next);
     const failed = {};
     const reason = e => (e?.status ? `HTTP ${e.status}` : e?.message || "no answer");
-    const get = (store, path) => editing ? Promise.resolve(null)
-      : fetch(path, { cache: "no-store" }).then(r => { if (r.ok) return r.json(); const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; })
-        .catch(e => { if (store) failed[store] ||= reason(e); return null; });
+    const fetchStore = (store, path) => fetch(path, { cache: "no-store" }).then(r => { if (r.ok) return r.json(); const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; })
+      .catch(e => { if (store) failed[store] ||= reason(e); return null; });
+    const get = (store, path) => editing ? Promise.resolve(null) : fetchStore(store, path);
     return Promise.all([
       get("layout", "/api/rack-positions"),
       get("layout", "/api/rack-slots"),
@@ -2143,17 +2178,20 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       itemsTurn == null ? Promise.resolve(null) : loadRackItems().catch(e => { failed.items = reason(e); return null; }),
       get("layout", "/api/rack-overrides"),
       get(null, "/api/opt-owners"),
-      get("cooling", "/api/chillers"),
+      coolingTurn == null ? Promise.resolve(null) : fetchStore("cooling", "/api/chillers"),
     ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
       const itemsCurrent = itemsTurn != null && itemsTurn === itemsSeq.current;
       if (itemsCurrent && (items || initial)) keep(setCustomItems)(items||{});
+      const coolingCurrent = coolingTurn != null && coolingTurn === coolingSeq.current && (initial || force || !holdCoolingRef.current);
       setLoadErrors(prev => {
         const next = { ...prev };
         const mark = store => { if (failed[store]) next[store] = failed[store]; else delete next[store]; };
         if (itemsCurrent) mark("items");
-        if (!editing) { mark("layout"); mark("cooling"); }
+        if (!editing) mark("layout");
+        if (coolingCurrent) mark("cooling");
         return same(prev, next) ? prev : next;
       });
+      if (coolingCurrent && (chill || initial)) { keep(setChillers)(chill||{units:[],connections:[]}); setChillersLoaded(true); }
       if (!initial && !force && editingRef.current) return;   // editing (or editing started while loading)
       // A failed reload keeps what is shown; the first load falls back to empty documents as before.
       if (order || initial) keep(setRackOrder)(order||{});
@@ -2161,7 +2199,6 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       if (sw || initial) keep(setSwitchAssignments)(sw||{});
       if (overrides || initial) keep(setRackOverrides)(overrides||{});
       if (owners) { keep(setOptOwners)(owners); setOwnersLoaded(true); }
-      if (chill || initial) { keep(setChillers)(chill||{units:[],connections:[]}); setChillersLoaded(true); }
     });
   },[]);
   useEffect(()=>{ reloadLayouts(true); },[reloadLayouts]);
@@ -2201,12 +2238,22 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const chillersRef = useRef(chillers);
   chillersRef.current = chillers;
   const [lastCooling, setLastCooling] = useState(null);
+  // change: the move as this page saw it. Its "before" is taken again from the server document the edit is applied to
+  // (another session may have moved the unit meanwhile), so Undo puts back where the unit really was; resolves to it.
   const saveCooling = useCallback(async (edit, change) => {
     const previous = chillersRef.current;
-    const guarded = doc => { const next = edit(normalizeChillers(doc)); assertKeepsUnits(doc, next); return next; };
+    let saved = change;
+    const guarded = doc => {
+      const base = normalizeChillers(doc);
+      if (change) { const unit = base.units.find(u => u && typeof u === "object" && u.id === change.unitId); if (unit) saved = coolingChange(unit, change.after); }
+      const next = edit(base); assertKeepsUnits(doc, next); return next;
+    };
+    coolingSeq.current++;
     setChillers(guarded(previous));   // optimistic; an edit that cannot apply throws here, before anything is sent
-    await persistLayout("/api/chillers", guarded, setChillers, previous);
-    if (change) setLastCooling(change);
+    try { await persistLayout("/api/chillers", guarded, setChillers, previous); }
+    finally { coolingSeq.current++; }
+    if (saved) setLastCooling(saved);
+    return saved;
   }, [persistLayout]);
   const undoCooling = useCallback(async change => {
     try {
@@ -2365,6 +2412,14 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     return shelfOptions(rows, 42, coolingGroups.byRack[rackName]?.placed || {});
   }, [rackStats, rackOrder, rackSlots, customItems, coolingGroups]);
   const openCooling = useCallback(unit => setCoolingDialog({ mode: editMode && coolingEditable ? "edit" : "view", unitId: unit.id }), [editMode, coolingEditable]);
+  // Place… / Move… outside Edit mode: Edit turns on (App's own toggle) and the unit opens to be edited, Rack focused.
+  const canPlaceCooling = coolingEditable && (editMode || !!onRequestEdit);
+  const editCooling = useCallback(unit => {
+    if (!coolingEditable) return;
+    if (!editingRef.current) { if (!onRequestEdit) return; onRequestEdit(); }
+    setCoolingDialog({ mode: "edit", unitId: unit.id });
+  }, [coolingEditable, onRequestEdit]);
+  holdCoolingRef.current = coolingDialog != null;
   const addCooling = useCallback(rackName => setCoolingDialog({ mode: "create", rack: rackName || null, newId: newChillerId() }), []);
   // After a save the focus goes to the unit's chip in its new place (the panel when its card is closed or hidden).
   const focusUnit = useCallback(id => {
@@ -2388,46 +2443,50 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     }
     const unit = unitById(dialog.unitId);
     if (!unit) throw new Error("This cooling unit is no longer in the list. Close and reopen the panel.");
-    const change = coolingChange(unit, { name, rack: rackName, u });
-    await saveCooling(doc => updateChiller(doc, unit.id, { name, rack: rackName, u }), change)
+    const saved = await saveCooling(doc => updateChiller(doc, unit.id, { name, rack: rackName, u }), coolingChange(unit, { name, rack: rackName, u }))
       .catch(e => { throw new Error(`The cooling assignment was not saved: ${e.message}`); });
     setCoolingDialog(null);
-    coolingMoved(change);
+    coolingMoved(saved);
     focusUnit(unit.id);
   }, [coolingDialog, saveCooling, unitById, showToast, coolingMoved, focusUnit]);
   const takeOffShelf = useCallback(async () => {
     const unit = unitById(coolingDialog?.unitId);
     if (!unit) return;
-    const change = coolingChange(unit, { name: unit.name, rack: unit.rack, u: null });
-    await saveCooling(doc => updateChiller(doc, unit.id, { u: null }), change)
+    const saved = await saveCooling(doc => updateChiller(doc, unit.id, { u: null }), coolingChange(unit, { name: unit.name, rack: unit.rack, u: null }))
       .catch(e => { throw new Error(`The cooling assignment was not saved: ${e.message}`); });
     setCoolingDialog(null);
-    showToast(<><bdi>{unit.name}</bdi> is off its shelf; it stays in {unit.rack}.</>, "ok", () => undoCooling(change));
+    showToast(<><bdi>{unit.name}</bdi> is off its shelf; it stays in {unit.rack}.</>, "ok", () => undoCooling(saved));
     focusUnit(unit.id);
   }, [coolingDialog, unitById, saveCooling, showToast, undoCooling, focusUnit]);
   // A drag in Edit mode on the overview: shelf (u) or the rack's "not on a shelf" strip (u null).
   const placeCooling = useCallback(async (id, rackName, u) => {
     const unit = unitById(id);
     if (!unit || (unit.rack === rackName && (validShelf(unit.u) ? unit.u : null) === u)) return;
-    const change = coolingChange(unit, { name: unit.name, rack: rackName, u });
     try {
-      await saveCooling(doc => placeChiller(doc, id, rackName, u), change);
-      coolingMoved(change);
+      coolingMoved(await saveCooling(doc => placeChiller(doc, id, rackName, u), coolingChange(unit, { name: unit.name, rack: rackName, u })));
     } catch (e) {
       setLayoutError(`The cooling assignment was not saved: ${e.message}`);
       showToast(`The cooling assignment was not saved: ${e.message}`, "error");
     }
   }, [unitById, saveCooling, coolingMoved, showToast]);
   const coolingHistory = useMemo(() => ({
-    currentIds: new Set(chillerDoc.units.map(u => u?.id)),
+    currentIds: new Set(chillerDoc.units.filter(u => u && typeof u === "object").map(u => u.id)),
+    currentPlaces: chillerDoc.units.filter(u => u && typeof u === "object").map(u => ({ id: u.id, name: u.name, rack: u.rack ?? null, u: u.u ?? null })),
     load: async () => {
       const response = await fetch("/api/chillers/history", { cache: "no-store" });
       if (!response.ok) throw new Error(response.status === 404 ? "this server does not keep a history yet" : `HTTP ${response.status}`);
       const body = await response.json();
       return (Array.isArray(body?.versions) ? body.versions : []).slice(0, 20);
     },
+    // The restore is sent with the ETag of the document this page shows: if the server's document is not that one any
+    // more, the page shows the latest instead and nothing is restored (the person decides again on what is current).
     restore: async revision => {
-      const { etag } = await loadLayout("/api/chillers");
+      const shown = chillersRef.current;
+      const { data, etag } = await loadLayout("/api/chillers");
+      if (!sameDocument(data, shown)) {
+        coolingSeq.current++; setChillers(data); setLastCooling(null);
+        throw new Error("The cooling units changed in another session; the list now shows the latest. Nothing was restored — check the history again.");
+      }
       const response = await fetch("/api/chillers/restore", { method: "POST", headers: { "Content-Type": "application/json", ...(etag ? { "If-Match": etag } : {}) }, body: JSON.stringify({ revision }) });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
@@ -2435,8 +2494,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         throw new Error(typeof body?.detail === "string" ? body.detail : `Restore failed (HTTP ${response.status}).`);
       }
       const doc = await response.json();
-      setChillers(doc); setLastCooling(null);
-      showToast(`Cooling units restored to version #${revision}. The layout before it is in the history.`);
+      coolingSeq.current++; setChillers(doc); setLastCooling(null);
+      showToast(`Cooling units restored to version #${revision}. Units added since stay where they are; the layout before it is in the history.`);
     },
     bringBack: async unit => {
       await saveCooling(doc => addChiller(doc, { id: unit.id, name: unit.name || unit.id, rack: unit.rack ?? null, u: validShelf(unit.u) ? unit.u : null }), null);
@@ -2445,11 +2504,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   }), [chillerDoc, reloadLayouts, saveCooling, showToast]);
   const coolingApi = useMemo(() => ({
     units: chillerDoc.units.filter(u => u && typeof u === "object"), groups: coolingGroups, loaded: chillersLoaded, loadError: loadErrors.cooling || "",
-    editable: coolingEditable, canOperate: !!canOperate, lastChange: lastCooling,
-    open: openCooling, add: addCooling, place: placeCooling,
+    editable: coolingEditable, canOperate: !!canOperate, canPlace: canPlaceCooling, lastChange: lastCooling,
+    open: openCooling, edit: editCooling, add: addCooling, place: placeCooling,
     undoLast: () => { if (lastCooling) undoCooling(lastCooling); },
     retry: () => reloadLayouts(false, true), history: canOperate ? coolingHistory : null,
-  }), [chillerDoc, coolingGroups, chillersLoaded, loadErrors.cooling, coolingEditable, canOperate, lastCooling, openCooling, addCooling, placeCooling, undoCooling, reloadLayouts, coolingHistory]);
+  }), [chillerDoc, coolingGroups, chillersLoaded, loadErrors.cooling, coolingEditable, canOperate, canPlaceCooling, lastCooling, openCooling, editCooling, addCooling, placeCooling, undoCooling, reloadLayouts, coolingHistory]);
 
   // ── power: the row switch, the details dialog and the edit panel all go through requestPower ──
   const powerCtx = useMemo(() => ({ devices, pduStatuses, maintenance }), [devices, pduStatuses, maintenance]);
@@ -2466,36 +2525,52 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const powerFor = useCallback(s => (powerEnabled ? powerGroups.get(serverIdentity(s.name)) || null : null), [powerEnabled, powerGroups]);
   const powerPending = useCallback(s => powerPendingMap[serverIdentity(s.name)] || null, [powerPendingMap]);
   const waitingFor = useCallback(s => pduStatuses[s.pduId] === undefined, [pduStatuses]);
-  const powerToast = useCallback((serverName, action, results) => {
+  // After a feed-only request on a multi-feed server the toast says what still powers the server (a cycle of one feed
+  // does not power-cycle a server that another feed keeps running).
+  const powerToast = useCallback((serverName, action, results, { scope = "server", group = null } = {}) => {
+    const server = serverDisplayName(serverName);
     const failed = (results || []).filter(r => !r.ok);
-    const where = (results || []).filter(r => r.ok).map(r => `${r.pduName} · outlet ${r.outlet}`).join(", ");
-    if (!failed.length) showToast(<><bdi>{serverName}</bdi> is {action === "cycle" ? "power-cycled" : action} ({where}).</>);
-    else showToast(<>Some outlets of <bdi>{serverName}</bdi> were not switched: {failed.map(r => `${r.pduName} outlet ${r.outlet}${r.error ? ` (${r.error})` : ""}`).join(", ")}.</>, "error");
+    const done = (results || []).filter(r => r.ok);
+    const where = done.map(r => `${r.pduName} · outlet ${r.outlet}`).join(", ");
+    if (failed.length) {
+      showToast(<>Some outlets of <bdi>{server}</bdi> were not switched: {failed.map(r => `${r.pduName} outlet ${r.outlet}${r.error ? ` (${r.error})` : ""}`).join(", ")}.</>, "error");
+      return;
+    }
+    const switched = new Set(done.map(r => `${r.pduId}:${r.outlet}`));
+    const powered = scope === "feed" && action !== "on" ? (group?.feeds || []).filter(f => !switched.has(f.id) && f.state === "on") : [];
+    if (powered.length && done.length === 1) {
+      const still = powered.map(f => `${f.pduName} · outlet ${f.outlet}`).join(", ");
+      showToast(action === "cycle"
+        ? <><bdi>{done[0].label}</bdi> was power-cycled ({where}); <bdi>{server}</bdi> stayed powered by {still}, so it was not power-cycled.</>
+        : <><bdi>{done[0].label}</bdi> is off ({where}); <bdi>{server}</bdi> is still powered by {still}.</>);
+      return;
+    }
+    if (scope === "feed" && action === "on" && done.length === 1 && (group?.feeds.length || 0) > 1) {
+      showToast(<><bdi>{done[0].label}</bdi> is on ({where}).</>);
+      return;
+    }
+    showToast(<><bdi>{server}</bdi> is {action === "cycle" ? "power-cycled" : action} ({where}).</>);
   }, [showToast]);
   // The plan is checked again against the latest PDU readings; if the outlets changed, nothing is switched.
   const runPower = useCallback(async ({ serverName, action, scope, feedId, plan }) => {
     if (!powerEnabled) throw new Error("Viewer account: read only");
     const fresh = planServerPower(serverPowerGroup(serverName, powerLatest.current), action, scope, feedId);
-    if (fresh.disabledReason || !sameTargets(plan, fresh)) throw new Error("The outlet mapping changed while the dialog was open — nothing was switched.");
+    // A feed that became blocked (maintenance, protected outlet) refuses the whole request before any outlet switches.
+    if (fresh.disabledReason) throw new Error(`${fresh.disabledReason} — nothing was switched.`);
+    if (!sameTargets(plan, fresh)) throw new Error("The outlet mapping changed while the dialog was open — nothing was switched.");
     const key = serverIdentity(serverName);
     setPowerPendingMap(p => ({ ...p, [key]: action }));
     try { return await onSwitchFeeds(fresh.targets, action, { stopOnFailure: action === "off" }); }
     finally { setPowerPendingMap(p => { const next = { ...p }; delete next[key]; return next; }); }
   }, [powerEnabled, onSwitchFeeds]);
+  // Every request on this page opens the in-app confirmation that names the outlets, Power on included: the account
+  // preference confirm_power ("Ask before Power off and Power cycle") is not a reason to switch a server unasked here.
   const requestPower = useCallback((server, action, opener, { scope = "server", feedId = null } = {}) => {
     const group = powerGroups.get(serverIdentity(server.name));
     if (!group || !powerEnabled) return;
     const feed = feedId || `${server.pduId}:${server.outlet}`;
-    // Only Power on (whole server) may skip the question, and only when the account turned confirm_power off.
-    if (action === "on" && scope === "server" && preferences?.confirm_power === false) {
-      const plan = planServerPower(group, "on", "server");
-      if (!plan.disabledReason) {
-        runPower({ serverName: server.name, action: "on", scope, plan }).then(results => powerToast(server.name, "on", results), e => showToast(powerErrorText(e), "error"));
-        return;
-      }
-    }
     setPowerDialog({ serverName: server.name, key: group.key, snapshot: group, action, scope, feedId: feed, allowScopeChoice: group.feeds.length > 1 && scope === "server" });
-  }, [powerGroups, powerEnabled, preferences, runPower, powerToast, showToast]);
+  }, [powerGroups, powerEnabled]);
 
   const serverActions = useMemo(()=>({
     kvmFor: name => kvmByServer.get(serverIdentity(name)) || null,
@@ -2663,7 +2738,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       {selectedServer&&!editMode&&<Portal>
         <ServerDetailsDialog server={selectedServer} visual={selectedVisual} owner={optOwners[selectedServer.id]} sw={switchAssignments[selectedServer.id]}
           shelf={selectedShelf} watts={(selectedVisual.state === "on" || selectedVisual.state === "off") ? reading(selectedServer.watts, 0, " W") : "—"}
-          group={powerFor(selectedServer)} pending={powerPending(selectedServer)} waiting={waitingFor(selectedServer)}
+          group={powerGroups.get(serverIdentity(selectedServer.name)) || null} pending={powerPending(selectedServer)} waiting={waitingFor(selectedServer)}
           onRequestPower={powerEnabled ? (action, el, opts) => requestPower(selectedServer, action, el, opts) : null}
           onClose={()=>setSelectedServerId(null)}
           consoleButton={canOperate && onOpenConsole && kvmByServer.get(serverIdentity(selectedServer.name)) ? <KvmButton server={selectedServer}/> : null} sshSlot={<SshSlot server={selectedServer} size="md"/>}/>
@@ -2692,16 +2767,21 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         </Portal>
       )}
 
-      {coolingDialog && dialogUnit && <Portal>
-        <CoolingUnitDialog key={coolingDialog.unitId || coolingDialog.newId} mode={coolingDialog.mode === "edit" && !(editMode && coolingEditable) ? "view" : coolingDialog.mode}
-          unit={dialogUnit} rackNames={racks} shelfOptionsFor={shelfOptionsFor} canOperate={!!canOperate}
-          onSave={saveCoolingDialog} onTakeOffShelf={takeOffShelf} onClose={() => setCoolingDialog(null)}/>
-      </Portal>}
+      {coolingDialog && dialogUnit && (() => {
+        const mode = coolingDialog.mode === "edit" && !(editMode && coolingEditable) ? "view" : coolingDialog.mode;
+        // A new key per mode: "Move…" in the view dialog opens a fresh edit dialog with the Rack select focused.
+        return <Portal>
+          <CoolingUnitDialog key={`${coolingDialog.unitId || coolingDialog.newId}:${mode}`} mode={mode}
+            unit={dialogUnit} rackNames={racks} shelfOptionsFor={shelfOptionsFor} canOperate={!!canOperate}
+            onRequestEdit={mode === "view" && canPlaceCooling ? () => editCooling(dialogUnit) : null}
+            onSave={saveCoolingDialog} onTakeOffShelf={takeOffShelf} onClose={() => setCoolingDialog(null)}/>
+        </Portal>;
+      })()}
       {powerDialog && <Portal>
         <PowerConfirmDialog serverName={powerDialog.serverName} group={powerGroupNow} action={powerDialog.action} scope={powerDialog.scope}
           feedId={powerDialog.feedId} allowScopeChoice={powerDialog.allowScopeChoice}
           onConfirm={({ action, scope, feedId, plan }) => runPower({ serverName: powerDialog.serverName, action, scope, feedId, plan })}
-          onClose={(done, results, action) => { const name = powerDialog.serverName; setPowerDialog(null); if (done) powerToast(name, action, results); }}/>
+          onClose={(done, results, action, scope) => { const name = powerDialog.serverName; setPowerDialog(null); if (done) powerToast(name, action, results, { scope, group: powerGroupNow }); }}/>
       </Portal>}
       {section === "racks" && <UndoToast toast={toast} onDismiss={dismissToast}/>}
     </main></ServerActionsContext.Provider></EditContext.Provider>

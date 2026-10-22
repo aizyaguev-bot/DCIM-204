@@ -110,12 +110,23 @@ async def _not_in_state(device_id: str, dev, expected: str, targets=()) -> set[i
     return {o.number for o in status.outlets if o.state != expected} | (set(targets) - seen)
 
 
+def protection_summary(protection: power_protection.Protection) -> dict:
+    """What the Racks page needs to explain a blocked Off up front: "ok" | "unconfigured" | "invalid" and the protected
+    outlet numbers per PDU id. Outlet numbers only (no entry text, no device addresses or credentials)."""
+    state = "unconfigured" if not protection.configured else "invalid" if protection.errors else "ok"
+    protected: dict[str, list[int]] = {}
+    for pdu_id, outlet in protection.outlets:
+        protected.setdefault(str(pdu_id), []).append(int(outlet))
+    return {"protection": state, "protected": {pdu_id: sorted(numbers) for pdu_id, numbers in sorted(protected.items())}}
+
+
 @router.get("/maintenance")
 async def maintenance_list(db: AsyncSession = Depends(get_db)):
     rows = (await db.scalars(select(PduMaintenance))).all()
     log = (await db.scalars(select(PduMaintenanceLog).order_by(PduMaintenanceLog.id.desc()).limit(LOG_LIMIT))).all()
+    protection = await power_protection.load(db, get_settings())
     return {"password_mode": password_mode(), "pdus": {row.device_id: _state(row) for row in rows},
-            "log": [_entry(row) for row in log]}
+            "log": [_entry(row) for row in log], **protection_summary(protection)}
 
 
 async def shutdown_pdu(db: AsyncSession, device_id: str, by: str, reason: str, *,

@@ -181,7 +181,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
    assert.equal(await storage.locator('[data-u-slot="1"][data-auto]').count(),1);
    const autoIndex=storage.locator('[data-u-slot="1"] .shelf-index');
    assert.match(await autoIndex.getAttribute('title'),/^Auto-placed — no saved U/);
-   assert.deepEqual(await autoIndex.evaluate(e=>{const s=getComputedStyle(e);return[s.opacity,s.fontStyle];}),['0.55','italic']);
+   // Auto-placed shelf numbers are italic at full contrast (no opacity on text, RACKS-UI-SPEC §14).
+   assert.deepEqual(await autoIndex.evaluate(e=>{const s=getComputedStyle(e);return[s.opacity,s.fontStyle];}),['1','italic']);
    assert.deepEqual(await storage.locator('[data-u-slot="3"] .shelf-index').evaluate(e=>{const s=getComputedStyle(e);return[s.opacity,s.fontStyle,e.title];}),['1','normal','Shelf 3']);
    // Rack-01 (C7 vector): OPT11, OPT12 and OPT14 are auto-placed on U1-U3 and marked; OPT13 is saved at U7 and is not.
    const rack01=card('Rack-01');

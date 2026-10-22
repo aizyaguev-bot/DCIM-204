@@ -197,9 +197,10 @@ function navigationHarness(adminSection = "devices") {
     pushState(value, title, url) { this.state = value; window.location.href = String(url); window.location.search = new URL(url).search; },
     replaceState(value) { this.state = value; },
   };
-  const setters = ["view", "mainTab", "editMode", "adminSection"].map(key => value => { state[key] = value; });
-  const actions = () => new Function("window", "history", "setView", "setMainTab", "setEditMode", "setAdminSection", "adminSection", `${navigationSource}; return { navigate, navigateAdmin };`)(window, history, ...setters, state.adminSection);
-  const pop = new Function("location", "setView", "setMainTab", "setEditMode", "setAdminSection", `${popSource}; return onPop;`)(window.location, ...setters);
+  const setters = ["view", "mainTab", "editMode", "adminSection", "openRack"].map(key => value => { state[key] = value; });
+  const mainTabRef = { get current() { return state.mainTab; } };
+  const actions = () => new Function("window", "history", "setView", "setMainTab", "setEditMode", "setAdminSection", "setOpenRack", "adminSection", `${navigationSource}; return { navigate, navigateAdmin };`)(window, history, ...setters, state.adminSection);
+  const pop = new Function("location", "setView", "setMainTab", "setEditMode", "setAdminSection", "setOpenRack", "mainTabRef", `${popSource}; return onPop;`)(window.location, ...setters, mainTabRef);
   return { state, window, history, actions, pop };
 }
 

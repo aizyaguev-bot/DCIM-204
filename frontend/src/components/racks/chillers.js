@@ -107,3 +107,30 @@ export function undoCoolingChange(doc, change) {
   }
   return updateChiller(doc, change.unitId, change.before);
 }
+
+// Two cooling documents are the same when they hold the same data (key order does not matter).
+export function sameDocument(a, b) {
+  const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(",")}]`
+    : value && typeof value === "object" ? `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`
+    : JSON.stringify(value ?? null);
+  return canonical(normalizeChillers(a)) === canonical(normalizeChillers(b));
+}
+
+// What changed between two lists of unit places ({ id, name, rack, u }, as the history lists them), unit by unit:
+// { id, name, from, to, renamedFrom } where from/to are describePlace texts (from null = added, to null = left out).
+export function placeChanges(before, after) {
+  const byId = list => new Map((list || []).filter(p => isObject(p) && p.id != null).map(p => [p.id, p]));
+  const a = byId(before), b = byId(after);
+  const shelf = p => (validShelf(p.u) ? p.u : null);
+  const out = [];
+  for (const [id, p] of a) {
+    const q = b.get(id);
+    if (!q) { out.push({ id, name: p.name || id, from: describePlace(p), to: null, renamedFrom: null }); continue; }
+    const renamed = (p.name || "") !== (q.name || "");
+    if (renamed || (p.rack ?? null) !== (q.rack ?? null) || shelf(p) !== shelf(q)) {
+      out.push({ id, name: q.name || id, from: describePlace(p), to: describePlace(q), renamedFrom: renamed ? (p.name || id) : null });
+    }
+  }
+  for (const [id, q] of b) if (!a.has(id)) out.push({ id, name: q.name || id, from: null, to: describePlace(q), renamedFrom: null });
+  return out;
+}
