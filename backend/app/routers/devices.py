@@ -2,7 +2,7 @@ from contextlib import ExitStack, asynccontextmanager
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-import asyncio, uuid, json, logging, pathlib
+import asyncio, uuid, json, logging, math, pathlib, re, unicodedata
 
 from .. import inventory_store, name_sync
 from ..database import get_db
@@ -16,6 +16,8 @@ log = logging.getLogger(__name__)
 
 _BACKEND_DIR = pathlib.Path(__file__).parent.parent.parent
 _labels_lock = asyncio.Lock()
+# Device create/edit: the shared-address check and its commit run one at a time (taken after a maintenance lock).
+_address_lock = asyncio.Lock()
 
 
 async def _one_label_writer():
@@ -118,23 +120,68 @@ def _check_address(ip: str):
         raise HTTPException(422, "Enter a single IP address or DNS host name (no http://, port, path, quotes or spaces).") from None
 
 
+def _check_name(name: str) -> str:
+    """A device needs a visible name; it is stored without surrounding spaces. (Not a DeviceBase validator: DeviceOut
+    inherits it, and listing a legacy row with a blank name must keep working.)"""
+    name = name.strip()
+    if not name:
+        raise HTTPException(422, "Enter a device name.")
+    return name
+
+
+_UNSET_ADDRESSES = frozenset({"", "0.0.0.0", "::"})  # placeholders several rows may share
+
+
+def _address_key(ip) -> str:
+    """A device address in one comparable form: validate_host's (IPv6 compressed, host names lower-case) without a
+    trailing dot. A legacy value validate_host refuses compares as written, lower-case."""
+    from ..ping_monitor import validate_host
+    text = str(ip or "").strip()
+    try:
+        key = validate_host(text)
+    except ValueError:
+        key = text.lower()
+    return key.rstrip(".") if key.rstrip(".") else key
+
+
+async def _reject_shared_address(db: AsyncSession, kind: str, ip: str, exclude_id: str | None = None):
+    """Each PDU or KVM needs its own address: outlet commands and maintenance locks follow the device row, so two rows
+    on one address would control one physical PDU twice. Racks and unset addresses are exempt; legacy duplicates are
+    left as they are (only a create, or an edit of the address or kind, is checked)."""
+    if kind not in _PORT_KINDS:
+        return
+    key = _address_key(ip)
+    if key in _UNSET_ADDRESSES:
+        return
+    others = (await db.execute(select(Device).where(Device.kind.in_(_PORT_KINDS))
+                               .execution_options(populate_existing=True))).scalars().all()
+    for other in sorted(others, key=lambda d: ((d.name or "").casefold(), d.id)):
+        if other.id != exclude_id and _address_key(other.ip) == key:
+            name = (other.name or "").strip() or "Another device"
+            raise HTTPException(409, f"{name} ({other.kind.upper()}) already uses this address. "
+                                     "Each PDU or KVM needs its own address.")
+
+
 @router.post("/", response_model=DeviceOut, status_code=201)
 async def create_device(body: DeviceCreate, db: AsyncSession = Depends(get_db)):
+    name = _check_name(body.name)
     _check_address(body.ip)
-    dev = Device(
-        id=str(uuid.uuid4()),
-        name=body.name,
-        kind=body.kind,
-        model=body.model,
-        ip=body.ip,
-        rack=body.rack,
-        port_count=body.port_count,
-        notes=body.notes,
-        username_enc=encrypt(body.username) if body.username else "",
-        password_enc=encrypt(body.password) if body.password else "",
-    )
-    db.add(dev)
-    await db.commit()
+    async with _address_lock:
+        await _reject_shared_address(db, body.kind, body.ip)
+        dev = Device(
+            id=str(uuid.uuid4()),
+            name=name,
+            kind=body.kind,
+            model=body.model,
+            ip=body.ip,
+            rack=body.rack,
+            port_count=body.port_count,
+            notes=body.notes,
+            username_enc=encrypt(body.username) if body.username else "",
+            password_enc=encrypt(body.password) if body.password else "",
+        )
+        db.add(dev)
+        await db.commit()
     await db.refresh(dev)
     return dev
 
@@ -159,22 +206,28 @@ async def _locked_device(device_id: str, db: AsyncSession):
 @router.put("/{device_id}", response_model=DeviceOut)
 async def update_device(device_id: str, body: DeviceCreate, db: AsyncSession = Depends(get_db)):
     async with _locked_device(device_id, db) as dev:
+        # An unchanged saved name or address never blocks other edits (legacy rows may hold either).
+        name = _check_name(body.name) if body.name != dev.name else dev.name
         if body.ip != dev.ip:
-            _check_address(body.ip)  # an unchanged saved address never blocks other edits
-        if body.ip != dev.ip or body.kind != dev.kind:
+            _check_address(body.ip)
+        readdressed = body.ip != dev.ip or body.kind != dev.kind
+        if readdressed:
             await _reject_if_in_maintenance(device_id, db)
-        dev.name = body.name
-        dev.kind = body.kind
-        dev.model = body.model
-        dev.ip = body.ip
-        dev.rack = body.rack
-        dev.port_count = body.port_count
-        dev.notes = body.notes
-        if body.username:
-            dev.username_enc = encrypt(body.username)
-        if body.password:
-            dev.password_enc = encrypt(body.password)
-        await db.commit()
+        async with _address_lock:  # lock order: the device's maintenance lock, then this one
+            if readdressed:
+                await _reject_shared_address(db, body.kind, body.ip, exclude_id=device_id)
+            dev.name = name
+            dev.kind = body.kind
+            dev.model = body.model
+            dev.ip = body.ip
+            dev.rack = body.rack
+            dev.port_count = body.port_count
+            dev.notes = body.notes
+            if body.username:
+                dev.username_enc = encrypt(body.username)
+            if body.password:
+                dev.password_enc = encrypt(body.password)
+            await db.commit()
     await db.refresh(dev)
     return dev
 
@@ -582,6 +635,131 @@ def _position(server, ids, layouts):
     return {"rack": rack, "slot": slot}
 
 
+# ── The U numbers the DCIM rack view shows (frontend DcimView.jsx: its server list and buildRackRows) ─────────────
+# DCIM draws each PDU outlet label (trimmed, lower-cased: its "DCIM id") in the label's rack override, else in the
+# PDU's rack. Per rack it sorts them by rack_positions, then by name, takes the U from rack_slots and gives every one
+# without a U the next free U from 1. Custom rack items do not block a server's U. A move pins those automatic U
+# numbers first (as the 3D twin's dcimMoveMany does), so taking or freeing a U, or a renamed id, cannot renumber them.
+_NON_SERVER_LABEL = re.compile(r"^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$", re.I)  # = DcimView, byte for byte
+_DEFAULT_OUTLET_LABEL = re.compile(r"outlet\s*[0-9]+|port\s*[0-9]+|\s*", re.I)  # DcimView isDefaultOutletLabel
+_JS_DECIMAL = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+_ICU_PUNCTUATION = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"  # ASCII punctuation in ICU root collation order
+
+
+def _js_number(value):
+    """JavaScript Number(value) for a rack_slots value (NaN when it is not a number)."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        return 0 if not text else float(text) if _JS_DECIMAL.fullmatch(text) else math.nan
+    return math.nan
+
+
+def _locale_key(text: str):
+    """Sort key close to String.prototype.localeCompare (ICU root collation) for server names: spaces, punctuation
+    (ICU order), digits, then letters ignoring case and accents; then accents; then lower case before upper case."""
+    primary, accents, case = [], [], []
+    for ch in unicodedata.normalize("NFD", text):
+        if unicodedata.combining(ch) and accents:
+            accents[-1] += (ord(ch),)
+            continue
+        if ch.isspace():
+            weight = (0, ord(ch))
+        elif ch in _ICU_PUNCTUATION:
+            weight = (1, _ICU_PUNCTUATION.index(ch))
+        elif unicodedata.digit(ch, None) is not None:
+            weight = (2, unicodedata.digit(ch))
+        elif ch.isalpha():
+            weight = (3, ch.casefold())
+        else:
+            weight = (1, 100 + ord(ch))
+        primary.append(weight)
+        accents.append(())
+        case.append(1 if ch.isupper() else 0)
+    return tuple(primary), tuple(accents), tuple(case), text
+
+
+def _dcim_units(devices, labels, layouts):
+    """rack -> {DCIM id: (U, automatic)} for the servers the DCIM rack view draws, in its order. Pure: `labels` are
+    the labels the pages show (saved, else reported by the device), `layouts` the four layout files."""
+    overrides = layouts["rack_overrides.json"]
+    shown = {}  # DCIM id -> (name, rack); the first PDU (in device-list order) that carries a label wins
+    for dev in sorted((d for d in devices if d.kind == "pdu"), key=lambda d: (d.rack or "", d.name or "")):
+        for label in (labels.get(dev.id) or {}).values():
+            if not isinstance(label, str) or _DEFAULT_OUTLET_LABEL.fullmatch(label.strip()):
+                continue
+            key = label.strip().lower()
+            if key not in shown:
+                override = overrides.get(key)
+                shown[key] = (label.strip(), override if isinstance(override, str) and override else dev.rack or None)
+    by_rack = {}
+    for key, (name, rack) in sorted(shown.items(), key=lambda item: _locale_key(item[1][0])):
+        if rack is not None and not _NON_SERVER_LABEL.fullmatch(name):
+            by_rack.setdefault(rack, []).append((key, name))
+    units = {}
+    for rack, entries in by_rack.items():
+        order, slots = layouts["rack_positions.json"].get(rack), layouts["rack_slots.json"].get(rack)
+        first = {}
+        for position, value in enumerate(order if isinstance(order, list) else []):
+            if isinstance(value, str):
+                first.setdefault(value, position)
+        slots = slots if isinstance(slots, dict) else {}
+        entries.sort(key=lambda e: (0, first[e[0]]) if e[0] in first else (1, _locale_key(e[1])))
+        u_map = {key: _js_number(slots[key]) for key, _ in entries if slots.get(key) is not None}
+        used, automatic, next_u = set(u_map.values()), set(), 1
+        for key, _ in entries:
+            if key not in u_map:
+                while next_u in used:
+                    next_u += 1
+                u_map[key] = next_u
+                used.add(next_u)
+                automatic.add(key)
+                next_u += 1
+        units[rack] = {key: (u_map[key], key in automatic) for key, _ in entries}
+    return units
+
+
+def _automatic(units):
+    """rack -> {DCIM id: U} for the automatically placed entries of _dcim_units."""
+    auto = {}
+    for rack, entries in units.items():
+        pins = {key: u for key, (u, automatic) in entries.items() if automatic}
+        if pins:
+            auto[rack] = pins
+    return auto
+
+
+def _dcim_auto_slots(devices, labels, layouts):
+    """rack -> {DCIM id: U} for the servers the DCIM rack view places automatically (no rack_slots entry)."""
+    return _automatic(_dcim_units(devices, labels, layouts))
+
+
+def _add_auto_pins(layouts, auto, racks, skip=frozenset()):
+    """In place: each automatically placed DCIM id in `racks` gets a rack_slots entry with the U it shows now. Ids of
+    the servers in `skip` (identity keys) stay automatic; a malformed rack entry is never replaced here."""
+    slots = layouts["rack_slots.json"]
+    for rack in sorted(r for r in racks if r in auto):
+        pins = {key: u for key, u in auto[rack].items() if _key_of(key) not in skip}
+        if not pins:
+            continue
+        entries = slots.setdefault(rack, {})
+        if isinstance(entries, dict):
+            for key, u in pins.items():
+                if entries.get(key) is None:
+                    entries[key] = u
+
+
+def _with_auto_pins(layouts, auto, racks, skip=frozenset()):
+    """A copy of `layouts` with the automatic U numbers in `racks` pinned (see _add_auto_pins). The caller's layouts are
+    never changed: a move compares them with the files on disk to see what to write."""
+    pinned = json.loads(json.dumps(layouts))
+    _add_auto_pins(pinned, auto, racks, skip)
+    return pinned
+
+
 _VALUED_LAYOUTS = frozenset({"rack_slots.json", "rack_overrides.json", "switch_assignments.json"})
 _LAYOUT_NAMES = {"rack_slots.json": "rack slots", "rack_overrides.json": "rack assignments",
                  "switch_assignments.json": "switch assignments", "rack_positions.json": "rack order"}
@@ -680,8 +858,11 @@ async def server_locations(db) -> dict:
     index = _layout_ids(layouts)
     rows = []
     for key, server in _all_servers(devices, labels, layouts, await _monitor_names(db)).items():
-        position = _position(server, index.get(key, set()), layouts)
-        rows.append({"key": key, "name": server["name"], **position,
+        ids = index.get(key, set())
+        position = _position(server, ids, layouts)
+        # Where the server stays once all its ports are cleared: the rack layout files alone (no PDU/KVM rack).
+        kept = _position({"name": server["name"], "ports": []}, ids, layouts)
+        rows.append({"key": key, "name": server["name"], **position, "kept_position": kept,
                      **{kind: [_port_out(dev, port, label) for dev, port, label in server["ports"] if dev.kind == kind]
                         for kind in _PORT_KINDS}})
     rows.sort(key=lambda r: (r["rack"] is None, (r["rack"] or "").casefold(), r["slot"] is None, r["slot"] or 0,
@@ -733,6 +914,20 @@ def _plan_move(body, devices, labels, unreadable, layouts, names):
     mover = servers.get(key)
     if mover is None:
         raise HTTPException(404, "Server not found")
+    # The DCIM view numbers servers without a saved U itself. Pin those numbers in every rack this move touches (the
+    # mover's and target's racks, and the rack chosen), so the occupant check and the preview see them and no other
+    # server's U changes. A ports-only move leaves the mover's own ids automatic: merging them could otherwise refuse
+    # (two different pinned U for one id) a move that changes no position.
+    units = _dcim_units(devices, labels, layouts)
+    auto, dcim_rack = _automatic(units), {i: rack for rack, entries in units.items() for i in entries}
+    touched = {k for k in (key, _key_of(target_server) if target_server is not None else None) if k in servers}
+    plain_index = _layout_ids(layouts)
+    racks = {rack for i, rack in dcim_rack.items() if _key_of(i) in touched}
+    racks |= {_position(servers[k], plain_index.get(k, set()), layouts)["rack"] for k in touched}
+    if target_rack is not None:
+        racks.add(target_rack.strip())
+    ports_only = target_server is None and target_rack is None and target_slot is None
+    layouts = _with_auto_pins(layouts, auto, racks - {None}, skip={key} if ports_only else frozenset())
     index = _layout_ids(layouts)
     new_labels = {dev_id: dict(saved) for dev_id, saved in labels.items()}
     new_layouts = json.loads(json.dumps(layouts))
@@ -825,6 +1020,8 @@ def _plan_move(body, devices, labels, unreadable, layouts, names):
             rack = target_rack.strip() if target_rack is not None else original["rack"]
             if rack is None:
                 raise HTTPException(400, "Choose a rack for the slot")
+            # Its own rack with no slot chosen keeps the U it has there; another rack without a slot has none yet.
+            slot = target_slot if target_slot is not None else original["slot"] if rack == original["rack"] else None
             occupant = None
             if target_slot is not None:
                 occupant = next((k for k, s in sorted(after_servers.items()) if k != key and
@@ -833,8 +1030,11 @@ def _plan_move(body, devices, labels, unreadable, layouts, names):
                 name = after_servers[occupant]["name"]
                 raise HTTPException(409, f"U{target_slot} in {rack} is used by {name}. "
                                          f"Allow the swap to exchange positions with {name}, or choose another slot.")
-            _place(new_layouts, after_index.get(key, set()), current_ids, rack, target_slot)
+            _place(new_layouts, after_index.get(key, set()), current_ids, rack, slot)
             if occupant:
+                # The occupant leaves every rack it shows in for the mover's place: keep the U numbers there too.
+                _add_auto_pins(new_layouts, auto, {r for i, r in dcim_rack.items() if _key_of(i) == occupant} - racks,
+                               skip={key, occupant})
                 involved.append(occupant)
                 _place(new_layouts, after_index.get(occupant, set()), _dcim_ids(after_servers[occupant]),
                        original["rack"], original["slot"])

@@ -161,8 +161,11 @@ async def test_swap_with_dual_feeds_keeps_port_suffixes_and_swaps_every_layout_f
     assert body["positions"] == [
         {"server": "OPTN45", "before": {"rack": "Rack-01", "slot": 7}, "after": {"rack": "Rack-01", "slot": 3}},
         {"server": "OPTN44", "before": {"rack": "Rack-01", "slot": 3}, "after": {"rack": "Rack-01", "slot": 7}}]
+    # The U numbers the DCIM view gave by itself in the racks involved are pinned first (web-1 at U1 in Rack-01, the
+    # PSU2 outlet of OPTN45 at U1 in Rack-02), so every outlet keeps its U and only the names swap.
     assert read_layout(lab.folder) == {
-        "rack_slots.json": {"Rack-01": {"optn45": 3, "optn44 (psu1)": 7}, "Rack-02": {"optn45 (psu2)": 3}},
+        "rack_slots.json": {"Rack-01": {"optn45": 3, "optn44 (psu1)": 7, "web-1": 1},
+                            "Rack-02": {"optn45 (psu2)": 3, "optn44 (psu2)": 1}},
         "rack_positions.json": {"Rack-01": ["optn44 (psu1)", "optn45", "web-1"]},
         "rack_overrides.json": {"optn44 (psu1)": "Rack-01", "other": "Rack-09"},
         "switch_assignments.json": {"optn45": {"switch": "SW1", "port": "12"}, "optn44 (psu1)": {"switch": "SW2", "port": "3"}},
@@ -187,7 +190,9 @@ async def test_swap_is_reversible(lab):
         "pdu-b": {"1": "OPTN44 (PSU2)", "2": "OPTN45 (PSU2)", "5": "Outlet 5"},  # display name as first written
         "kvm-a": {"1": "OPTN44", "2": "OPTN45"},
     }
-    assert read_layout(lab.folder) == files
+    # Back where they were; the automatic U numbers the first swap pinned stay pinned.
+    assert read_layout(lab.folder) == {**files, "rack_slots.json": {
+        "Rack-01": {"optn44": 3, "optn45 (psu1)": 7, "web-1": 1}, "Rack-02": {"optn44 (psu2)": 3, "optn45 (psu2)": 1}}}
 
 
 async def test_move_without_swap_takes_over_the_target_location_and_unplaces_the_target(lab):
@@ -206,14 +211,15 @@ async def test_move_without_swap_takes_over_the_target_location_and_unplaces_the
         {"server": "OPTN45", "before": {"rack": "Rack-01", "slot": 7}, "after": {"rack": "Rack-01", "slot": 3}},
         {"server": "OPTN44", "before": {"rack": "Rack-01", "slot": 3}, "after": {"rack": None, "slot": None}}]
     assert read_layout(lab.folder) == {
-        "rack_slots.json": {"Rack-01": {"optn45": 3}, "Rack-02": {"optn45 (psu2)": 3}},
+        "rack_slots.json": {"Rack-01": {"optn45": 3, "web-1": 1}, "Rack-02": {"optn45 (psu2)": 3}},
         "rack_positions.json": {"Rack-01": ["optn45", "web-1"]},
         "rack_overrides.json": {"other": "Rack-09"},
         "switch_assignments.json": {"optn45": {"switch": "SW1", "port": "12"}},
     }
     assert await monitors_and_owners(lab.db) == people
     keys = [s["key"] for s in (await lab.client.get("/api/devices/locations")).json()["servers"]]
-    assert keys == ["optn45", "web-1", "other"]  # OPTN44 has no port, layout entry or monitor left
+    # OPTN44 has no port, layout entry or monitor left; web-1 now lists at its pinned U1, before OPTN45 at U3.
+    assert keys == ["web-1", "optn45", "other"]
 
 
 async def test_target_ports_occupied_by_another_server_is_409_and_changes_nothing(lab):
@@ -236,10 +242,12 @@ async def test_target_ports_empty_moves_ports_and_sets_rack_and_slot(lab):
     assert labels["kvm-a"] == {**LABELS["kvm-a"], "3": "web-1"}
     assert [(c["device_id"], c["port"], c["before"], c["after"]) for c in body["changes"]] == [
         ("pdu-a", "3", "web-1", "Outlet 3"), ("pdu-b", "5", "Outlet 5", "web-1"), ("kvm-a", "3", None, "web-1")]
+    # The preview carries the U the DCIM view shows for web-1 (automatic U1); Rack-02's automatic U1 is pinned.
     assert body["positions"] == [
-        {"server": "web-1", "before": {"rack": "Rack-01", "slot": None}, "after": {"rack": "Rack-02", "slot": 9}}]
+        {"server": "web-1", "before": {"rack": "Rack-01", "slot": 1}, "after": {"rack": "Rack-02", "slot": 9}}]
     layout = read_layout(lab.folder)
-    assert layout["rack_slots.json"] == {**LAYOUT["rack_slots.json"], "Rack-02": {"optn44 (psu2)": 3, "web-1": 9}}
+    assert layout["rack_slots.json"] == {**LAYOUT["rack_slots.json"],
+                                         "Rack-02": {"optn44 (psu2)": 3, "optn45 (psu2)": 1, "web-1": 9}}
     assert layout["rack_positions.json"] == {"Rack-01": ["optn45 (psu1)", "optn44"]}
     assert layout["rack_overrides.json"] == {**LAYOUT["rack_overrides.json"], "web-1": "Rack-02"}
     assert layout["switch_assignments.json"] == LAYOUT["switch_assignments.json"]
@@ -256,7 +264,9 @@ async def test_target_ports_keep_own_ports_and_carry_position_ids_to_the_new_lab
     assert labels["kvm-a"] == {"1": "optn44", "2": "Port 2"}
     assert r.json()["positions"] == [
         {"server": "OPTN45", "before": {"rack": "Rack-01", "slot": 7}, "after": {"rack": "Rack-01", "slot": 7}}]
-    assert read_layout(lab.folder) == LAYOUT  # its layout ids still match a label it keeps
+    # Its layout ids still match a label it keeps; only web-1's automatic U in its rack is pinned.
+    assert read_layout(lab.folder) == {**LAYOUT, "rack_slots.json": {**LAYOUT["rack_slots.json"],
+                                                                     "Rack-01": {"optn44": 3, "optn45 (psu1)": 7, "web-1": 1}}}
 
 
 async def test_target_slot_occupied_is_409_unless_swap_which_swaps_positions_only(lab):
@@ -268,15 +278,18 @@ async def test_target_slot_occupied_is_409_unless_swap_which_swaps_positions_onl
 
     r = await move(lab, **body, swap=True)
     assert r.status_code == 200, r.text
+    # web-1 showed at the automatic U1, so OPTN44 takes U1.
     assert r.json()["positions"] == [
-        {"server": "web-1", "before": {"rack": "Rack-01", "slot": None}, "after": {"rack": "Rack-01", "slot": 3}},
-        {"server": "OPTN44", "before": {"rack": "Rack-01", "slot": 3}, "after": {"rack": "Rack-01", "slot": None}}]
+        {"server": "web-1", "before": {"rack": "Rack-01", "slot": 1}, "after": {"rack": "Rack-01", "slot": 3}},
+        {"server": "OPTN44", "before": {"rack": "Rack-01", "slot": 3}, "after": {"rack": "Rack-01", "slot": 1}}]
     labels = await saved_labels(lab.db)
     # Only web-1's own ports moved; OPTN44 keeps every port label.
     assert labels["pdu-a"] == {"1": "OPTN44", "2": "OPTN45 (PSU1)", "3": "Outlet 3", "4": "web-1"}
     assert labels["pdu-b"] == LABELS["pdu-b"] and labels["kvm-a"] == LABELS["kvm-a"]
     layout = read_layout(lab.folder)
-    assert layout["rack_slots.json"] == {"Rack-01": {"optn45 (psu1)": 7, "web-1": 3}, "Rack-02": {}}
+    # OPTN44 leaves Rack-02 (its PSU2 outlet) too, so the automatic U1 of OPTN45's PSU2 outlet there is pinned.
+    assert layout["rack_slots.json"] == {"Rack-01": {"optn45 (psu1)": 7, "web-1": 3, "optn44": 1, "optn44 (psu2)": 1},
+                                         "Rack-02": {"optn45 (psu2)": 1}}
     assert layout["rack_overrides.json"] == {**LAYOUT["rack_overrides.json"], "web-1": "Rack-01",
                                              "optn44": "Rack-01", "optn44 (psu2)": "Rack-01"}
     assert layout["switch_assignments.json"] == LAYOUT["switch_assignments.json"]
@@ -286,7 +299,7 @@ async def test_target_slot_alone_uses_the_current_rack(lab):
     r = await move(lab, server="optn45", target_ports=[{"device_id": "pdu-a", "port": "2"}], target_slot=5)
     assert r.status_code == 200, r.text
     assert r.json()["positions"][0]["after"] == {"rack": "Rack-01", "slot": 5}
-    assert read_layout(lab.folder)["rack_slots.json"]["Rack-01"] == {"optn44": 3, "optn45 (psu1)": 5}
+    assert read_layout(lab.folder)["rack_slots.json"]["Rack-01"] == {"optn44": 3, "optn45 (psu1)": 5, "web-1": 1}
 
 
 async def test_cleared_ports_store_the_default_name_and_list_as_empty(lab):
@@ -320,7 +333,9 @@ async def test_a_cleared_legacy_port_key_is_removed_not_turned_into_a_server(lab
     assert r.status_code == 200, r.text
     assert (await saved_labels(lab.db))["pdu-b"] == LABELS["pdu-b"]
     keys = [s["key"] for s in (await lab.client.get("/api/devices/locations")).json()["servers"]]
-    assert keys == ["optn44", "optn45", "web-1", "optn46", "other"]  # optn46 keeps the rack of its old PDU (Rack-02)
+    # optn46 keeps the rack of its old PDU (Rack-02). "Legacy" showed at the automatic U1 of Rack-02, which the move
+    # pinned, so the rack layout still lists it there without a port, like any server with a saved U.
+    assert keys == ["optn44", "optn45", "web-1", "legacy", "optn46", "other"]
 
 
 async def test_dry_run_returns_the_same_answer_and_writes_nothing(lab):
@@ -431,7 +446,7 @@ async def test_a_layout_save_while_the_move_commits_is_not_blocked(lab, monkeypa
     assert r.status_code == 200, r.text
     slots = json.loads(path.read_text())
     assert seen["etag"] and slots["Rack-07"] == {"spare": 1}
-    assert slots["Rack-01"] == {"optn45": 3, "optn44 (psu1)": 7}
+    assert slots["Rack-01"] == SWAPPED_SLOTS
 
 
 async def test_clear_with_expected_refuses_a_port_changed_in_another_session(lab):
@@ -490,7 +505,8 @@ async def test_differing_dual_feed_slots_do_not_block_a_move_that_sets_the_rack(
     r = await move(lab, **body, target_rack="Rack-02", target_slot=4)
     assert r.status_code == 200, r.text
     assert r.json()["positions"][0]["after"] == {"rack": "Rack-02", "slot": 4}
-    assert read_layout(lab.folder)["rack_slots.json"] == {"Rack-01": {"optn44": 3}, "Rack-02": {"optn44 (psu2)": 3, "optn45": 4}}
+    assert read_layout(lab.folder)["rack_slots.json"] == {"Rack-01": {"optn44": 3, "web-1": 1},
+                                                          "Rack-02": {"optn44 (psu2)": 3, "optn45": 4}}
 
 
 async def test_numbered_ports_are_normalised(lab):
@@ -598,7 +614,7 @@ async def test_a_request_cancelled_during_the_commit_keeps_files_and_labels_cons
         assert read_layout(lab.folder) == before
         assert await saved_labels(lab.db) == LABELS
     else:  # saved before the caller went away: the files stay moved with the labels
-        assert read_layout(lab.folder)["rack_slots.json"]["Rack-01"] == {"optn45": 3, "optn44 (psu1)": 7}
+        assert read_layout(lab.folder)["rack_slots.json"]["Rack-01"] == SWAPPED_SLOTS
         assert (await saved_labels(lab.db))["pdu-a"]["1"] == "OPTN45"
 
 
@@ -714,7 +730,7 @@ async def test_viewer_reads_locations_and_operator_moves(accounts_lab, username,
 
 # ── Codex HF-R2: labels are committed first, then the layout files are written all-or-nothing ────────────────────
 
-SWAPPED_SLOTS = {"optn45": 3, "optn44 (psu1)": 7}
+SWAPPED_SLOTS = {"optn45": 3, "optn44 (psu1)": 7, "web-1": 1}  # web-1's automatic U1 is pinned by the swap
 
 
 def fail_on_layout_write(monkeypatch, number, error):
@@ -909,3 +925,175 @@ async def test_clearing_a_port_named_only_by_the_device_keeps_the_default_name(l
     r = await lab.client.patch("/api/devices/kvm-a/labels", json={**LABELS["kvm-a"], "3": ""})
     assert r.status_code == 200, r.text
     assert (await saved_labels(lab.db))["kvm-a"] == {**LABELS["kvm-a"], "3": "Port 3"}
+
+
+# ── SWEEP-2395 LOC-1 / LOC-2 / LOC-4: the U numbers the DCIM view gives by itself, the position kept by a clear ─────
+
+def pdu_row(device_id, rack, names):
+    """A simulated PDU row whose outlets 1..n carry `names`."""
+    return Device(id=device_id, name=device_id.upper(), kind="pdu", ip="", rack=rack, port_count=8,
+                  labels_json=json.dumps({str(n): name for n, name in enumerate(names, 1)}))
+
+
+def dcim_u(rows, layouts):
+    """rack -> {DCIM id: U} as the DCIM rack view (DcimView.jsx buildRackRows) numbers these rows."""
+    full = {fname: {} for fname in devices._LAYOUT_FILES}
+    full.update(layouts)
+    units = devices._dcim_units(rows, {d.id: d.labels for d in rows}, full)
+    return {rack: {i: u for i, (u, _) in entries.items()} for rack, entries in units.items()}
+
+
+def test_auto_u_parity_vector_shared_with_the_rack_rows_test():
+    # The same vector frontend/src/__tests__/rack-rows.test.js asserts for buildRackRows (contract C7).
+    rows = [pdu_row("pdu-1", "Rack-01", ["OPT11", "OPT12", "OPT13", "OPT14"]),
+            pdu_row("pdu-5", "Rack-05", ["OPT51", "OPT52", "OPT53", "OPT54"])]
+    assert dcim_u(rows, {"rack_slots.json": {"Rack-01": {"opt13": 7}}}) == {
+        "Rack-01": {"opt11": 1, "opt12": 2, "opt14": 3, "opt13": 7},
+        "Rack-05": {"opt51": 1, "opt52": 2, "opt53": 3, "opt54": 4}}
+    # A rack override draws the label in that rack, where it takes its place in name order.
+    assert dcim_u(rows, {"rack_overrides.json": {"opt12": "Rack-05"}})["Rack-05"] == {
+        "opt12": 1, "opt51": 2, "opt52": 3, "opt53": 4, "opt54": 5}
+
+
+def test_auto_u_follows_build_rack_rows_for_placeholders_order_and_slots():
+    # The rack-rows.test.js cases: placeholder labels never take a U; rack order and saved slots decide first.
+    rows = [pdu_row("pdu-7", "Rack-07", ["empty", "OPT71", "OPT72", "OPT73", "OPT74"])]
+    assert dcim_u(rows, {}) == {"Rack-07": {"opt71": 1, "opt72": 2, "opt73": 3, "opt74": 4}}
+    rows = [pdu_row("pdu-1", "Rack-01", ["KVM Power", "OPT1", "PDU", "--", "n/a", " Free ", "SPARE", "kvm_power"]),
+            pdu_row("pdu-2", "Rack-01", ["OPT2", "empty box", "Outlet 3", "port 4", "  "])]
+    assert dcim_u(rows, {}) == {"Rack-01": {"empty box": 1, "opt1": 2, "opt2": 3}}
+    rows = [pdu_row("pdu-1", "Rack-01", ["empty", "OPT1", "OPT2", "OPT3"])]
+    assert dcim_u(rows, {"rack_positions.json": {"Rack-01": ["opt3", "empty", "opt1", "opt2"]},
+                         "rack_slots.json": {"Rack-01": {"opt2": 1}}}) == {"Rack-01": {"opt2": 1, "opt3": 2, "opt1": 3}}
+    # Saved values count as JavaScript Number() reads them; a null slot is no slot.
+    rows = [pdu_row("pdu-1", "Rack-01", ["OPT1", "OPT2", "OPT3", "OPT4"])]
+    assert dcim_u(rows, {"rack_slots.json": {"Rack-01": {"opt1": "2", "opt2": True, "opt3": None}}}) == {
+        "Rack-01": {"opt1": 2, "opt2": 1, "opt3": 3, "opt4": 4}}
+
+
+def test_the_non_server_label_rule_is_the_dcim_views_byte_for_byte():
+    import pathlib
+    import re
+    source = pathlib.Path(devices.__file__).resolve().parents[3] / "frontend" / "src" / "pages" / "DcimView.jsx"
+    if not source.exists():
+        pytest.skip("frontend source not present")
+    found = re.search(r"const NON_SERVER_LABEL = /(.+)/([a-z]*);", source.read_text(encoding="utf-8"))
+    assert found and found[1] == devices._NON_SERVER_LABEL.pattern and found[2] == "i"
+
+
+def test_names_sort_like_locale_compare():
+    # Node's localeCompare order (ICU, en-US) for these names: the DCIM view sorts servers without a rack order so.
+    expected = ["_x", "-x", "@x", "~x", "1x", "a b", "a_b", "a-b", "a.b", "a(b)", "a1", "A1", "a10", "a1b", "a9", "ab",
+                "aB", "Ab", "AB", "e", "é", "f", "Opt_3", "OPT11", "opt12", "optn44", "optn44 (psu1)",
+                "OPTN44 (PSU2)", "web-1", "x;", "x:", "z", "Z"]
+    assert sorted(reversed(expected), key=devices._locale_key) == expected
+
+
+def test_pinning_copies_the_layouts():
+    layouts = {fname: {} for fname in devices._LAYOUT_FILES}
+    layouts["rack_slots.json"] = {"Rack-05": {"opt53": 9}, "Rack-06": ["malformed"]}
+    auto = {"Rack-05": {"opt51": 1, "opt52": 2}, "Rack-06": {"opt61": 1}, "Rack-07": {"opt71": 1}}
+    pinned = devices._with_auto_pins(layouts, auto, {"Rack-05", "Rack-06"}, skip={"opt52"})
+    assert pinned["rack_slots.json"] == {"Rack-05": {"opt53": 9, "opt51": 1}, "Rack-06": ["malformed"]}
+    assert layouts["rack_slots.json"] == {"Rack-05": {"opt53": 9}, "Rack-06": ["malformed"]}
+
+
+@pytest.fixture
+async def auto_lab(client, db_session, tmp_path, monkeypatch):
+    """Racks numbered only by the DCIM view itself: no rack layout file exists."""
+    monkeypatch.setattr(devices, "_BACKEND_DIR", tmp_path)
+    monkeypatch.setattr(inventory_store, "ITEMS_FILE", tmp_path / "rack_items.json")
+    db_session.add_all([pdu_row("pdu-4", "Rack-04", ["OPT41", "OPT42", "OPT43", "OPT44"]),
+                        pdu_row("pdu-5", "Rack-05", ["OPT51", "OPT52", "OPT53", "OPT54"]),
+                        pdu_row("pdu-7", "Rack-07", ["OPT71", "OPT72", "OPT73"])])
+    await db_session.commit()
+    return SimpleNamespace(client=client, db=db_session, folder=tmp_path)
+
+
+async def dcim_view(lab):
+    """rack -> {DCIM id: U} as the DCIM rack view shows the saved labels and layout files now."""
+    rows = (await lab.db.execute(select(Device).execution_options(populate_existing=True))).scalars().all()
+    layouts, _ = devices._read_layouts(strict=True)
+    return {rack: {i: u for i, (u, _) in entries.items()}
+            for rack, entries in devices._dcim_units(rows, {d.id: d.labels for d in rows}, layouts).items()}
+
+
+async def test_a_swap_keeps_every_automatic_u_in_both_racks(auto_lab):
+    before = await dcim_view(auto_lab)
+    assert before == {"Rack-04": {"opt41": 1, "opt42": 2, "opt43": 3, "opt44": 4},
+                      "Rack-05": {"opt51": 1, "opt52": 2, "opt53": 3, "opt54": 4},
+                      "Rack-07": {"opt71": 1, "opt72": 2, "opt73": 3}}
+    preview = await move(auto_lab, server="OPT52", target_server="OPT71", dry_run=True)
+    assert preview.status_code == 200, preview.text
+    # The preview shows the U the DCIM view shows, not "no slot".
+    assert preview.json()["positions"] == [
+        {"server": "OPT52", "before": {"rack": "Rack-05", "slot": 2}, "after": {"rack": "Rack-07", "slot": 1}},
+        {"server": "OPT71", "before": {"rack": "Rack-07", "slot": 1}, "after": {"rack": "Rack-05", "slot": 2}}]
+    assert not list(auto_lab.folder.glob("*.json"))
+    r = await move(auto_lab, server="OPT52", target_server="OPT71", plan_revision=preview.json()["plan_revision"])
+    assert r.status_code == 200, r.text
+    assert read_layout(auto_lab.folder) == {"rack_slots.json": {
+        "Rack-05": {"opt51": 1, "opt71": 2, "opt53": 3, "opt54": 4}, "Rack-07": {"opt52": 1, "opt72": 2, "opt73": 3}}}
+    # Before the fix OPT71 sorted after OPT54 in Rack-05, so OPT53 and OPT54 each moved up a U.
+    assert await dcim_view(auto_lab) == {"Rack-04": before["Rack-04"],
+                                         "Rack-05": {"opt51": 1, "opt71": 2, "opt53": 3, "opt54": 4},
+                                         "Rack-07": {"opt52": 1, "opt72": 2, "opt73": 3}}
+
+
+async def test_a_slot_shown_by_an_automatic_u_is_occupied_and_swaps(auto_lab):
+    body = dict(server="OPT73", target_ports=[{"device_id": "pdu-4", "port": "6"}], target_rack="Rack-04", target_slot=2)
+    r = await move(auto_lab, **body, swap=False)
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"].startswith("U2 in Rack-04 is used by OPT42. Allow the swap")
+    assert not list(auto_lab.folder.glob("*.json"))
+    before = await dcim_view(auto_lab)
+    r = await move(auto_lab, **body, swap=True)
+    assert r.status_code == 200, r.text
+    assert r.json()["positions"] == [
+        {"server": "OPT73", "before": {"rack": "Rack-07", "slot": 3}, "after": {"rack": "Rack-04", "slot": 2}},
+        {"server": "OPT42", "before": {"rack": "Rack-04", "slot": 2}, "after": {"rack": "Rack-07", "slot": 3}}]
+    # OPT41, OPT43 and OPT44 stay at U1, U3 and U4; OPT42 takes OPT73's U3 in Rack-07.
+    assert await dcim_view(auto_lab) == {"Rack-04": {"opt41": 1, "opt73": 2, "opt43": 3, "opt44": 4},
+                                         "Rack-05": before["Rack-05"],
+                                         "Rack-07": {"opt71": 1, "opt72": 2, "opt42": 3}}
+
+
+async def test_moving_within_its_own_rack_without_a_slot_keeps_the_u(lab):
+    # LOC-4: the Locations dialog sends the current rack and a blank slot.
+    r = await move(lab, server="optn45", target_ports=[{"device_id": "pdu-a", "port": "2"}], target_rack="Rack-01")
+    assert r.status_code == 200, r.text
+    assert r.json()["positions"] == [
+        {"server": "OPTN45", "before": {"rack": "Rack-01", "slot": 7}, "after": {"rack": "Rack-01", "slot": 7}}]
+    assert read_layout(lab.folder)["rack_slots.json"]["Rack-01"]["optn45 (psu1)"] == 7
+    # Another rack without a slot gives no U there yet.
+    r = await move(lab, server="optn45", target_ports=[{"device_id": "pdu-a", "port": "2"}], target_rack="Rack-02",
+                   dry_run=True)
+    assert r.status_code == 200, r.text
+    assert r.json()["positions"][0]["after"] == {"rack": "Rack-02", "slot": None}
+
+
+async def test_kept_position_is_where_a_cleared_server_stays(lab):
+    # LOC-2: OPTN44 has a saved U (rack_slots), OPTN45 a rack override and a U, web-1 only a rack order entry, and
+    # opt60 only an outlet on PDU-B (its rack comes from that PDU, which a clear takes away). opt60 has a ping monitor,
+    # so it stays listed once cleared.
+    dev = await lab.db.get(Device, "pdu-b")
+    dev.labels_json = json.dumps({**LABELS["pdu-b"], "6": "opt60"})
+    lab.db.add(PingTarget(id="t60", source_key="server:opt60", name="opt60", host="opt60"))
+    await lab.db.commit()
+    rows = {s["key"]: s for s in (await lab.client.get("/api/devices/locations")).json()["servers"]}
+    kept = {key: rows[key]["kept_position"] for key in ("optn44", "optn45", "web-1", "opt60", "other")}
+    assert kept == {"optn44": {"rack": "Rack-01", "slot": 3}, "optn45": {"rack": "Rack-01", "slot": 7},
+                    "web-1": {"rack": "Rack-01", "slot": None}, "opt60": {"rack": None, "slot": None},
+                    "other": {"rack": "Rack-09", "slot": None}}
+    assert (rows["opt60"]["rack"], rows["opt60"]["slot"]) == ("Rack-02", None)
+    for key in ("optn44", "optn45", "web-1", "opt60"):
+        for kind in ("pdu", "kvm"):
+            for port in rows[key][kind]:
+                r = await lab.client.patch("/api/devices/direct-label", json={
+                    "device_id": port["device_id"], "port": port["port"], "label": "", "expected": port["label"]})
+                assert r.status_code == 200, r.text
+    after = {s["key"]: s for s in (await lab.client.get("/api/devices/locations")).json()["servers"]}
+    for key, position in kept.items():
+        assert {"rack": after[key]["rack"], "slot": after[key]["slot"]} == position, key
+        assert after[key]["kept_position"] == position, key
+        assert (after[key]["pdu"], after[key]["kvm"]) == ([], []), key
