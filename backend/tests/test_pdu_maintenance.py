@@ -181,7 +181,7 @@ async def test_outlet_on_and_cycle_blocked_during_maintenance_but_off_allowed(mc
     for action in ("on", "cycle"):
         r = await mclient.post(power, json={"action": action})
         assert r.status_code == 409
-        assert r.json()["detail"] == "PDU is in maintenance mode; restore it from the Maintenance column first"
+        assert r.json()["detail"] == "PDU is in maintenance mode; restore it first"
     assert fake.calls == []
     assert (await mclient.post(power, json={"action": "off"})).status_code == 200
     assert fake.calls == [(2, "off")]
@@ -376,7 +376,7 @@ async def test_outlet_on_waits_for_shutdown_lock_then_conflicts(mclient, pdu_id,
         await db_session.commit()
     r = await task
     assert r.status_code == 409
-    assert r.json()["detail"] == "PDU is in maintenance mode; restore it from the Maintenance column first"
+    assert r.json()["detail"] == "PDU is in maintenance mode; restore it first"
     assert fake.calls == [] and fake.states[2] == "off"
 
 

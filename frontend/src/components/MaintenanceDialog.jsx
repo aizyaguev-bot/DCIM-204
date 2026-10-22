@@ -14,6 +14,14 @@ const FALLBACK_ERRORS = {
 
 export const isNamedOutlet = o => !!o?.label && !/^Outlet \d+$/.test(o.label);
 
+export function uncertainOutletText(outlets) {
+  const n = outlets.length;
+  const list = outlets.map(o => `${isNamedOutlet(o) ? `${o.number} ${o.label}` : `Outlet ${o.number}`} (${o.state || "unknown"})`).join(", ");
+  return n === 1
+    ? `1 outlet is in an unknown or cycling state and will not be switched off. It may still carry power: ${list}.`
+    : `${n} outlets are in an unknown or cycling state and will not be switched off. They may still carry power: ${list}.`;
+}
+
 export function passwordLabel(mode) {
   return mode === "account" ? "Your account password" : "Lab Manager password";
 }
@@ -41,6 +49,8 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
   const outlets = status?.outlets || [];
   const byNumber = new Map(outlets.map(o => [o.number, o]));
   const onOutlets = outlets.filter(o => o.state === "on");
+  // The server switches off only outlets that are on; unknown or cycling outlets are skipped and may still carry power.
+  const uncertain = shutdown && !unreachable ? outlets.filter(o => o.state !== "on" && o.state !== "off") : [];
   const restoreList = (state?.outlets_off || []).map(n => byNumber.get(n) || { number: n, label: `Outlet ${n}` });
   const affected = shutdown ? onOutlets : restoreList;
   const named = affected.filter(isNamedOutlet);
@@ -172,6 +182,11 @@ export default function MaintenanceDialog({ mode, device, status, state, passwor
                     : <p className="text-zinc-300"><strong className="text-rose-300">{onOutlets.length}</strong> of {outlets.length} outlets are on and will be switched off.</p>
                 ) : (
                   <p className="text-zinc-300"><strong className="text-nv-300">{restoreList.length}</strong> outlet{restoreList.length === 1 ? "" : "s"} that were on before maintenance will be switched on.</p>
+                )}
+                {uncertain.length > 0 && (
+                  <p role="alert" className="text-amber-300 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs break-words">
+                    {uncertainOutletText(uncertain)}
+                  </p>
                 )}
                 {named.length > 0 && (
                   <div>
