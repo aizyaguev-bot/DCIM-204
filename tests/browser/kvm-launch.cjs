@@ -10,7 +10,7 @@ const skipFocusTrap = process.env.DCIM_SKIP_FOCUS_TRAP === '1';
   const errors = [], checks = [], unexpectedWrites = [];
   const allowedWrite = /^\/api\/kvms\/kvm1\/(ports\/[134]\/mark-(in-use|free)|mark-free)$/;
   // Status polling is slowed to an hour, so an IN USE mark that shows up quickly came from the click itself.
-  async function login(username, { blockPopup = false, viewport = { width: 1440, height: 1000 } } = {}) {
+  async function login(username, { blockPopup = false, viewport = { width: 1440, height: 1000 }, preferences = {} } = {}) {
     const context = await browser.newContext({ viewport });
     // What's new opens over the page in a fresh profile; it is not under test here.
     await context.addInitScript(() => { try { localStorage.setItem('dcim.seenVersion', 'LOCAL PREVIEW - TEST DATA'); } catch {} });
@@ -25,7 +25,7 @@ const skipFocusTrap = process.env.DCIM_SKIP_FOCUS_TRAP === '1';
       if (url.pathname === '/api/auth/status') {
         const response = await route.fetch();
         const json = await response.json();
-        if (json.user?.preferences) json.user.preferences = { ...json.user.preferences, refresh_seconds: 3600 };
+        if (json.user?.preferences) json.user.preferences = { ...json.user.preferences, refresh_seconds: 3600, ...preferences };
         return route.fulfill({ response, json });
       }
       return route.continue();
@@ -189,6 +189,37 @@ const skipFocusTrap = process.env.DCIM_SKIP_FOCUS_TRAP === '1';
     assert.equal(await portInUse(phone.context, 4), false, 'Leaving the page frees the inline console port');
     checks.push('Phone: leaving the page with an inline console open frees its port');
     await phone.context.close();
+
+    // '/' with Consoles as the start page: the first entry has no history state and no ?tab=.
+    // Closing the console (button or Back) must return to Remote consoles, not to Dashboard.
+    const first = await login('operator', { blockPopup: true, preferences: { start_page: 'consoles' } });
+    await first.page.goto(origin + '/');
+    await first.page.getByRole('heading', { name: 'Remote consoles' }).waitFor();
+    await first.page.locator('.kvm-port-tile').filter({ hasText: 'OPT11' }).waitFor();
+    assert.equal(await first.page.evaluate(() => history.state), null, 'The start page entry has no history state');
+    const onConsoles = async how => {
+      // The console's own entry is left once the close (or Back) has gone through popstate.
+      await first.page.waitForFunction(() => !history.state?.kvmConsole);
+      await first.page.waitForTimeout(300);
+      assert.equal(await first.page.getByRole('heading', { name: 'Dashboard', exact: true }).count(), 0, how + ' must not land on Dashboard');
+      await first.page.getByRole('heading', { name: 'Remote consoles' }).waitFor({ timeout: 2000 });
+      assert.equal(await first.page.evaluate(() => history.state?.tab), 'consoles', 'The start entry now names its page');
+      assert.equal(new URL(first.page.url()).search, '', how + ' keeps the address');
+    };
+    for (const how of ['Close KVM console', 'Back']) {
+      const used = marking(first.page, 'mark-in-use');
+      await first.page.locator('.kvm-port-tile').filter({ hasText: 'OPT11' }).click();
+      await consoleDialog(first.page).waitFor();
+      const lease = await leaseOf(await used);
+      const freed = marking(first.page, 'mark-free');
+      if (how === 'Back') await first.page.goBack();
+      else await first.page.getByRole('button', { name: 'Close KVM console' }).click();
+      assertFreedWith(await freed, lease);
+      assert.equal(await consoleDialog(first.page).count(), 0);
+      await onConsoles(how);
+    }
+    checks.push('Start page without ?tab=: closing the console (button or Back) stays on Remote consoles');
+    await first.context.close();
 
     const viewer = await login('viewer');
     assert.equal(await viewer.page.locator('.kvm-port-tile').filter({ hasText: 'OPT11' }).isDisabled(), true);

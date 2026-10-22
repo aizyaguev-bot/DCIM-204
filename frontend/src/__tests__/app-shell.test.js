@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { dashboardStats } from "../dashboardStats.js";
 
 // App.jsx needs a JSX loader, so its plain-JS functions are cut from the source and run with stubs.
-const app = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
+// A checkout with core.autocrlf writes CRLF; the anchors below are written with LF.
+const app = readFileSync(new URL("../App.jsx", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 function slice(start, end) {
   const from = app.indexOf(start);
   assert.ok(from >= 0, `App.jsx contains ${start}`);
@@ -49,13 +50,18 @@ test("KVM stats count an offline KVM as an alert, like an offline PDU", () => {
   assert.match(app, /useMemo\(\(\) => dashboardStats\(pdus, kvms, pduStatuses, kvmStatuses\)/);
 });
 
-function consoleHarness({ inUse = false, confirmAnswer = true, popup = null, markOk = true, lease = "a".repeat(32), noLease = false } = {}) {
-  const calls = { open: [], fetch: [], confirm: [], pushState: [], released: [], shown: [], errors: [], status: [] };
+function consoleHarness({ inUse = false, confirmAnswer = true, popup = null, markOk = true, lease = "a".repeat(32), noLease = false,
+  state = { tab: "consoles", view: { kind: "kvm", id: "kvm1" } }, view = { kind: "kvm", id: "kvm1" } } = {}) {
+  const calls = { open: [], fetch: [], confirm: [], pushState: [], replaceState: [], released: [], shown: [], errors: [], status: [] };
   const window = {
     open: url => { calls.open.push(url); return popup; },
     confirm: text => { calls.confirm.push(text); return confirmAnswer; },
   };
-  const history = { state: { view: { kind: "kvm", id: "kvm1" } }, pushState(value) { calls.pushState.push(value); this.state = value; } };
+  const history = {
+    state,
+    pushState(value) { calls.pushState.push(value); this.state = value; },
+    replaceState(value) { calls.replaceState.push(value); this.state = value; },
+  };
   const fetch = async (url, init) => {
     calls.fetch.push({ url, init });
     return { ok: markOk, json: async () => (noLease ? { ok: true } : { ok: true, lease }) };
@@ -73,6 +79,7 @@ function consoleHarness({ inUse = false, confirmAnswer = true, popup = null, mar
     inlineConsoleRef,
     showInlineConsole: value => { inlineConsoleRef.current = value; calls.shown.push(value); },
     setInterval: () => 1,
+    mainTab: "consoles", view, adminSection: "devices",
   };
   const open = fn(Object.keys(deps), slice("  function openKvmConsole(", "  function showInlineConsole("), "openKvmConsole")(...Object.values(deps));
   return { open, calls, inlineConsoleRef, history };
@@ -117,6 +124,7 @@ test("an inline console gets a history entry; a replacement frees the port it he
   assert.equal(h.calls.pushState.length, 1);
   assert.equal(h.calls.pushState[0].kvmConsole, true);
   assert.deepEqual(h.calls.pushState[0].view, { kind: "kvm", id: "kvm1" }, "the page's own history state is kept");
+  assert.deepEqual(h.calls.replaceState, [], "a page entry that already names its tab is left as it is");
   const first = h.inlineConsoleRef.current;
   h.open("kvm1", 1);
   assert.equal(h.calls.pushState.length, 1, "one history entry for the console, however often it is replaced");
@@ -128,6 +136,32 @@ test("an inline console gets a history entry; a replacement frees the port it he
   const popup = consoleHarness({ popup: { closed: false } });
   popup.open("kvm1", 1);
   assert.deepEqual([popup.calls.shown, popup.calls.pushState], [[], []], "a popup console stays out of the page history");
+  const popupFirstLoad = consoleHarness({ popup: { closed: false }, state: null });
+  popupFirstLoad.open("kvm1", 1);
+  assert.deepEqual(popupFirstLoad.calls.replaceState, [], "a popup console leaves the first entry alone too");
+});
+
+test("a console opened on the first page load (no history state) returns to that page when it closes", () => {
+  // Opening '/' with a start page from preferences: no ?tab= and a null history state.
+  const h = consoleHarness({ state: null, view: { kind: "dashboard" } });
+  h.open("kvm1", 1);
+  const page = { tab: "consoles", view: { kind: "dashboard" }, adminSection: "devices" };
+  assert.deepEqual(h.calls.replaceState, [page], "the page entry is recorded before the console entry");
+  assert.deepEqual(h.calls.pushState, [{ ...page, kvmConsole: true }]);
+  h.open("kvm1", 3);
+  assert.equal(h.calls.replaceState.length, 1, "replacing the console does not touch the page entry again");
+
+  // Closing goes back to that entry; the frozen onPop must read it as Remote consoles, not Dashboard.
+  const run = state => {
+    const seen = {};
+    const onPop = fn(["location", "setView", "setMainTab", "setAdminSection", "setEditMode"],
+      slice("    const onPop =", '    window.addEventListener("popstate"'), "onPop")(
+      { search: "" }, value => { seen.view = value; }, value => { seen.tab = value; }, value => { seen.section = value; }, () => {});
+    onPop({ state });
+    return seen;
+  };
+  assert.deepEqual(run(h.calls.replaceState[0]), { view: { kind: "dashboard" }, tab: "consoles", section: "devices" });
+  assert.equal(run(null).tab, "dashboard", "without the recorded entry, Back would land on Dashboard");
 });
 
 function releaseHarness() {

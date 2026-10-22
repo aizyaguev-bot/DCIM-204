@@ -168,7 +168,12 @@ export default function App() {
     }
     showInlineConsole({ deviceId, port: portNumber, url, name, leaseP });
     // Back (or a phone's back gesture) closes the console instead of leaving the page.
-    if (!prev) history.pushState({ ...history.state, kvmConsole: true }, "");
+    if (!prev) {
+      // A first page load (start page from preferences, no ?tab=) has no history state, which onPop
+      // reads as Dashboard: record the current page first, so closing the console returns to it.
+      if (!history.state?.tab) history.replaceState({ ...history.state, tab: mainTab, view, adminSection }, "");
+      history.pushState({ ...history.state, kvmConsole: true }, "");
+    }
   }
 
   function showInlineConsole(value) {
