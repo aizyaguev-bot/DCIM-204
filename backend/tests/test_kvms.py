@@ -4,6 +4,7 @@ Unit tests for KVM status caching, in-use tracking overlay, and auto-clear logic
 All tests mock the Raritan hardware driver so no live KVM is required.
 Integration tests against real KVMs live in test_kvm_regression.py.
 """
+import re
 import time
 import httpx
 from types import SimpleNamespace
@@ -17,6 +18,11 @@ from app.schemas import KvmPort, KvmStatus
 
 def make_port(number=1, label="Server-A", status="idle", in_use=False):
     return KvmPort(number=number, label=label, status=status, in_use=in_use)
+
+
+def lease(expires_at, key="a" * 32):
+    """One console lease on a port: { lease: expires_at (monotonic) }."""
+    return {key: expires_at}
 
 
 def make_status(ports=None, device_id="dev1", reachable=True):
@@ -49,14 +55,14 @@ def test_apply_overlays_unchanged_when_nothing_to_apply():
 
 def test_apply_overlays_sets_in_use_for_tracked_port():
     status = make_status([make_port(number=1, status="idle")])
-    kvms_module._in_use["dev1"] = {1: time.monotonic() + 3600}
+    kvms_module._in_use["dev1"] = {1: lease(time.monotonic() + 3600)}
     result = _apply_overlays("dev1", status, {})
     assert result.ports[0].in_use is True
 
 
 def test_apply_overlays_ignores_expired_in_use_entry():
     status = make_status([make_port(number=1, status="idle")])
-    kvms_module._in_use["dev1"] = {1: time.monotonic() - 1}  # already expired
+    kvms_module._in_use["dev1"] = {1: lease(time.monotonic() - 1)}  # already expired
     result = _apply_overlays("dev1", status, {})
     assert result.ports[0].in_use is False
 
@@ -69,7 +75,7 @@ def test_apply_overlays_applies_label_override():
 
 def test_apply_overlays_in_use_and_label_together():
     status = make_status([make_port(number=3, label="", status="idle")])
-    kvms_module._in_use["dev1"] = {3: time.monotonic() + 3600}
+    kvms_module._in_use["dev1"] = {3: lease(time.monotonic() + 3600)}
     result = _apply_overlays("dev1", status, {"3": "gpu-server"})
     assert result.ports[0].label == "gpu-server"
     assert result.ports[0].in_use is True
@@ -78,7 +84,7 @@ def test_apply_overlays_in_use_and_label_together():
 def test_apply_overlays_only_marks_tracked_port_not_all():
     ports = [make_port(number=1), make_port(number=2)]
     status = make_status(ports)
-    kvms_module._in_use["dev1"] = {1: time.monotonic() + 3600}
+    kvms_module._in_use["dev1"] = {1: lease(time.monotonic() + 3600)}
     result = _apply_overlays("dev1", status, {})
     assert result.ports[0].in_use is True   # port 1 — tracked
     assert result.ports[1].in_use is False  # port 2 — not tracked
@@ -98,13 +104,15 @@ async def test_mark_port_in_use_returns_ok(client, kvm_device):
     dev_id = kvm_device["id"]
     r = await client.post(f"/api/kvms/{dev_id}/ports/1/mark-in-use")
     assert r.status_code == 200
-    assert r.json() == {"ok": True}
+    body = r.json()
+    assert body["ok"] is True and body["sessions"] == 1
+    assert re.fullmatch(r"[0-9a-f]{32}", body["lease"])
 
 
 async def test_mark_port_in_use_records_future_expiry(client, kvm_device):
     dev_id = kvm_device["id"]
-    await client.post(f"/api/kvms/{dev_id}/ports/2/mark-in-use")
-    expiry = kvms_module._in_use[dev_id][2]
+    r = await client.post(f"/api/kvms/{dev_id}/ports/2/mark-in-use")
+    expiry = kvms_module._in_use[dev_id][2][r.json()["lease"]]
     # Expiry should be ~4 hours from now
     assert expiry > time.monotonic() + 3600
 
@@ -112,8 +120,8 @@ async def test_mark_port_in_use_records_future_expiry(client, kvm_device):
 async def test_mark_device_free_clears_all_markers(client, kvm_device):
     dev_id = kvm_device["id"]
     kvms_module._in_use[dev_id] = {
-        1: time.monotonic() + 3600,
-        2: time.monotonic() + 3600,
+        1: lease(time.monotonic() + 3600),
+        2: lease(time.monotonic() + 3600),
     }
     r = await client.post(f"/api/kvms/{dev_id}/mark-free")
     assert r.status_code == 200
@@ -125,6 +133,182 @@ async def test_mark_free_on_device_with_no_markers_does_not_crash(client, kvm_de
     dev_id = kvm_device["id"]
     r = await client.post(f"/api/kvms/{dev_id}/mark-free")
     assert r.status_code == 200
+
+
+# ── Per-console leases (KVM-1: one console closing must not free a shared port) ─
+
+def _port_in_use(dev_id, number=1):
+    status = make_status([make_port(number=number, status="idle")], device_id=dev_id)
+    return _apply_overlays(dev_id, status, {}).ports[0].in_use
+
+
+async def _launch(client, dev_id, port=1):
+    r = await client.post(f"/api/kvms/{dev_id}/ports/{port}/mark-in-use")
+    assert r.status_code == 200
+    return r.json()
+
+
+async def _close(client, dev_id, port=1, **kwargs):
+    return await client.post(f"/api/kvms/{dev_id}/ports/{port}/mark-free", **kwargs)
+
+
+async def test_two_consoles_on_one_port_stay_in_use_until_both_close(client, kvm_device):
+    dev_id = kvm_device["id"]
+    first, second = await _launch(client, dev_id), await _launch(client, dev_id)
+    assert first["lease"] != second["lease"]
+    assert (first["sessions"], second["sessions"]) == (1, 2)
+
+    r = await _close(client, dev_id, json={"lease": first["lease"]})
+    assert r.status_code == 200 and r.json() == {"ok": True, "sessions": 1}
+    assert _port_in_use(dev_id) is True
+    assert list(kvms_module._in_use[dev_id][1]) == [second["lease"]]
+
+    r = await _close(client, dev_id, json={"lease": second["lease"]})
+    assert r.json() == {"ok": True, "sessions": 0}
+    assert _port_in_use(dev_id) is False
+    assert dev_id not in kvms_module._in_use
+
+
+async def test_status_endpoint_reports_in_use_until_last_console_closes(client, kvm_device):
+    dev_id = kvm_device["id"]
+    kvms_module._cache[dev_id] = (time.monotonic(), make_status([make_port(number=1)], device_id=dev_id))
+    first, second = await _launch(client, dev_id), await _launch(client, dev_id)
+    await _close(client, dev_id, json={"lease": first["lease"]})
+    assert (await client.get(f"/api/kvms/{dev_id}/status")).json()["ports"][0]["in_use"] is True
+    await _close(client, dev_id, json={"lease": second["lease"]})
+    assert (await client.get(f"/api/kvms/{dev_id}/status")).json()["ports"][0]["in_use"] is False
+
+
+async def test_unknown_lease_is_a_no_op(client, kvm_device):
+    dev_id = kvm_device["id"]
+    live = await _launch(client, dev_id)
+    r = await _close(client, dev_id, json={"lease": "f" * 32})
+    assert r.status_code == 200 and r.json() == {"ok": True, "sessions": 1}
+    assert list(kvms_module._in_use[dev_id][1]) == [live["lease"]]
+
+
+async def test_lease_only_frees_its_own_port(client, kvm_device):
+    dev_id = kvm_device["id"]
+    on_one, on_two = await _launch(client, dev_id, 1), await _launch(client, dev_id, 2)
+    r = await _close(client, dev_id, 2, json={"lease": on_one["lease"]})
+    assert r.json() == {"ok": True, "sessions": 1}
+    assert set(kvms_module._in_use[dev_id]) == {1, 2}
+    assert list(kvms_module._in_use[dev_id][2]) == [on_two["lease"]]
+
+
+async def test_expired_lease_is_a_no_op_for_the_live_one(client, kvm_device):
+    dev_id = kvm_device["id"]
+    now = time.monotonic()
+    kvms_module._in_use[dev_id] = {1: {"a" * 32: now - 1, "b" * 32: now + 3600}}
+    r = await _close(client, dev_id, json={"lease": "a" * 32})
+    assert r.status_code == 200 and r.json() == {"ok": True, "sessions": 1}
+    assert list(kvms_module._in_use[dev_id][1]) == ["b" * 32]
+
+
+async def test_mark_free_without_body_removes_only_the_oldest_lease(client, kvm_device):
+    dev_id = kvm_device["id"]
+    now = time.monotonic()
+    kvms_module._in_use[dev_id] = {1: {"b" * 32: now + 3000, "a" * 32: now + 2000}}
+    r = await _close(client, dev_id)
+    assert r.status_code == 200 and r.json() == {"ok": True, "sessions": 1}
+    assert list(kvms_module._in_use[dev_id][1]) == ["b" * 32]  # the newer console stays
+    r = await _close(client, dev_id)
+    assert r.json() == {"ok": True, "sessions": 0}
+    assert dev_id not in kvms_module._in_use
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"json": {}},
+    {"json": {"lease": None}},
+    {"content": b"", "headers": {"Content-Type": "application/json"}},
+    {"content": b"null", "headers": {"Content-Type": "application/json"}},
+])
+async def test_mark_free_with_no_lease_in_body_removes_the_oldest(client, kvm_device, kwargs):
+    dev_id = kvm_device["id"]
+    first, second = await _launch(client, dev_id), await _launch(client, dev_id)
+    r = await _close(client, dev_id, **kwargs)
+    assert r.status_code == 200 and r.json() == {"ok": True, "sessions": 1}
+    assert list(kvms_module._in_use[dev_id][1]) == [second["lease"]]
+
+
+async def test_mark_free_reads_a_lease_sent_without_json_content_type(client, kvm_device):
+    """A plain fetch/keepalive on page close may send the JSON as text/plain."""
+    dev_id = kvm_device["id"]
+    first, second = await _launch(client, dev_id), await _launch(client, dev_id)
+    r = await _close(client, dev_id, content=f'{{"lease":"{second["lease"].upper()}"}}'.encode(),
+                     headers={"Content-Type": "text/plain;charset=UTF-8"})
+    assert r.status_code == 200 and r.json() == {"ok": True, "sessions": 1}
+    assert list(kvms_module._in_use[dev_id][1]) == [first["lease"]]
+
+
+@pytest.mark.parametrize("content", [
+    b"not json", b'{"lease": "xyz"}', b'{"lease": 5}', b'{"lease": ""}',
+    ('{"lease": "%s"}' % ("a" * 65)).encode(), b'["a"]', b'"a"', b"\xff\xfe",
+    b"[" * 250 + b"]" * 250,                              # deeply nested, under the size cap
+    ('{"lease": "%s", "x": "%s"}' % ("a" * 32, "y" * 600)).encode(),  # over the size cap
+])
+async def test_mark_free_rejects_a_malformed_lease_without_freeing(client, kvm_device, content):
+    dev_id = kvm_device["id"]
+    await _launch(client, dev_id)
+    r = await _close(client, dev_id, content=content, headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    assert len(kvms_module._in_use[dev_id][1]) == 1
+
+
+async def test_mark_free_ignores_a_lease_in_the_query_string(client, kvm_device):
+    """The lease travels only in the body; a query parameter is not a lease."""
+    dev_id = kvm_device["id"]
+    first, second = await _launch(client, dev_id), await _launch(client, dev_id)
+    r = await client.post(f"/api/kvms/{dev_id}/ports/1/mark-free?lease={second['lease']}")
+    assert r.json() == {"ok": True, "sessions": 1}
+    assert list(kvms_module._in_use[dev_id][1]) == [second["lease"]]  # oldest removed instead
+
+
+async def test_mark_free_on_unmarked_port_is_ok(client, kvm_device):
+    r = await _close(client, kvm_device["id"], json={"lease": "a" * 32})
+    assert r.status_code == 200 and r.json() == {"ok": True, "sessions": 0}
+    r = await _close(client, kvm_device["id"])
+    assert r.json() == {"ok": True, "sessions": 0}
+
+
+async def test_mark_free_handler_accepts_direct_calls():
+    kvms_module._in_use["dev1"] = {1: {"a" * 32: time.monotonic() + 60, "b" * 32: time.monotonic() + 90}}
+    assert await kvms_module.mark_port_free("dev1", 1, body={"lease": "b" * 32}) == {"ok": True, "sessions": 1}
+    assert await kvms_module.mark_port_free("dev1", 1, body=None) == {"ok": True, "sessions": 0}
+    assert "dev1" not in kvms_module._in_use
+
+
+def test_one_expired_and_one_live_lease_keeps_port_in_use():
+    now = time.monotonic()
+    kvms_module._in_use["dev1"] = {1: {"a" * 32: now - 1, "b" * 32: now + 3600}}
+    assert _port_in_use("dev1") is True
+    kvms_module._in_use["dev1"] = {1: {"a" * 32: now - 2, "b" * 32: now - 1}}
+    assert _port_in_use("dev1") is False
+
+
+async def test_expired_leases_are_not_counted_as_sessions(client, kvm_device):
+    dev_id = kvm_device["id"]
+    kvms_module._in_use[dev_id] = {1: lease(time.monotonic() - 1)}
+    body = await _launch(client, dev_id)
+    assert body["sessions"] == 1
+    assert list(kvms_module._in_use[dev_id][1]) == [body["lease"]]
+
+
+async def test_leases_per_port_are_bounded(client, kvm_device, monkeypatch):
+    monkeypatch.setattr(kvms_module, "_MAX_LEASES_PER_PORT", 3)
+    dev_id = kvm_device["id"]
+    launched = [(await _launch(client, dev_id))["lease"] for _ in range(4)]
+    assert list(kvms_module._in_use[dev_id][1]) == launched[1:]
+
+
+async def test_device_wide_mark_free_clears_every_lease(client, kvm_device):
+    dev_id = kvm_device["id"]
+    for port in (1, 1, 2, 3):
+        await _launch(client, dev_id, port)
+    r = await client.post(f"/api/kvms/{dev_id}/mark-free")
+    assert r.json() == {"ok": True}
+    assert dev_id not in kvms_module._in_use
+    assert _port_in_use(dev_id) is False
 
 
 # ── Status endpoint ───────────────────────────────────────────────────────────
@@ -150,7 +334,7 @@ async def test_kvm_status_fresh_cache_applies_in_use_overlay(client, kvm_device)
     dev_id = kvm_device["id"]
     cached = make_status([make_port(number=1, status="idle")], device_id=dev_id)
     kvms_module._cache[dev_id] = (time.monotonic(), cached)
-    kvms_module._in_use[dev_id] = {1: time.monotonic() + 3600}
+    kvms_module._in_use[dev_id] = {1: lease(time.monotonic() + 3600)}
     r = await client.get(f"/api/kvms/{dev_id}/status")
     assert r.json()["ports"][0]["in_use"] is True
 
@@ -195,7 +379,7 @@ async def test_auto_clear_removes_old_inactive_port():
     """Port marked >2 min ago and live status says not active → cleared."""
     dev_id = "test-dev"
     # Simulate marked 3 minutes ago: exp = now + TTL - 180
-    kvms_module._in_use[dev_id] = {1: time.monotonic() + _IN_USE_TTL - 180}
+    kvms_module._in_use[dev_id] = {1: lease(time.monotonic() + _IN_USE_TTL - 180)}
 
     fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
         KvmPort(number=1, label="", status="idle", status_source="live"),
@@ -211,7 +395,7 @@ async def test_auto_clear_keeps_recently_marked_port():
     """Port marked <2 min ago → NOT cleared even if not active (grace period)."""
     dev_id = "test-dev"
     # Marked 30 seconds ago: exp = now + TTL - 30
-    kvms_module._in_use[dev_id] = {1: time.monotonic() + _IN_USE_TTL - 30}
+    kvms_module._in_use[dev_id] = {1: lease(time.monotonic() + _IN_USE_TTL - 30)}
 
     fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
         KvmPort(number=1, label="", status="idle"),
@@ -227,7 +411,7 @@ async def test_auto_clear_keeps_still_active_port():
     """Port marked long ago but still active → NOT cleared."""
     dev_id = "test-dev"
     # Marked 10 minutes ago
-    kvms_module._in_use[dev_id] = {1: time.monotonic() + _IN_USE_TTL - 600}
+    kvms_module._in_use[dev_id] = {1: lease(time.monotonic() + _IN_USE_TTL - 600)}
 
     fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
         KvmPort(number=1, label="", status="active"),
@@ -239,6 +423,57 @@ async def test_auto_clear_keeps_still_active_port():
     assert 1 in kvms_module._in_use.get(dev_id, {})
 
 
+async def test_auto_clear_waits_for_grace_period_of_newest_lease():
+    """An old idle console must not clear a port where a new console just started."""
+    dev_id = "test-dev"
+    now = time.monotonic()
+    kvms_module._in_use[dev_id] = {1: {
+        "a" * 32: now + _IN_USE_TTL - 600,  # opened 10 minutes ago
+        "b" * 32: now + _IN_USE_TTL - 30,   # opened 30 seconds ago
+    }}
+    fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
+        KvmPort(number=1, label="", status="idle", status_source="live"),
+    ])
+    with patch.object(kvms_module, "_fetch_status", AsyncMock(return_value=fresh)):
+        with patch.object(kvms_module, "ensure_session", AsyncMock()):
+            await kvms_module._refresh_background(dev_id, object())
+    assert set(kvms_module._in_use[dev_id][1]) == {"a" * 32, "b" * 32}
+
+
+async def test_auto_clear_drops_every_lease_once_newest_is_past_grace(monkeypatch):
+    dev_id = "test-dev"
+    clock = [5000.0]
+    monkeypatch.setattr(kvms_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    kvms_module._in_use[dev_id] = {
+        1: {"a" * 32: clock[0] + _IN_USE_TTL - 600, "b" * 32: clock[0] + _IN_USE_TTL - 119},
+        2: {"c" * 32: clock[0] + _IN_USE_TTL - 600},
+    }
+    fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
+        KvmPort(number=1, label="", status="idle", status_source="live"),
+        KvmPort(number=2, label="", status="active", status_source="live"),
+    ])
+    with patch.object(kvms_module, "_fetch_status", AsyncMock(return_value=fresh)):
+        with patch.object(kvms_module, "ensure_session", AsyncMock()):
+            await kvms_module._refresh_background(dev_id, object())
+            assert len(kvms_module._in_use[dev_id][1]) == 2  # newest is 119 s old
+            clock[0] += 1
+            await kvms_module._refresh_background(dev_id, object())
+    assert 1 not in kvms_module._in_use[dev_id]   # both leases dropped at 120 s
+    assert 2 in kvms_module._in_use[dev_id]       # still active, kept
+
+
+async def test_auto_clear_removes_empty_device_entry():
+    dev_id = "test-dev"
+    kvms_module._in_use[dev_id] = {1: lease(time.monotonic() + _IN_USE_TTL - 600)}
+    fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
+        KvmPort(number=1, label="", status="idle", status_source="live"),
+    ])
+    with patch.object(kvms_module, "_fetch_status", AsyncMock(return_value=fresh)):
+        with patch.object(kvms_module, "ensure_session", AsyncMock()):
+            await kvms_module._refresh_background(dev_id, object())
+    assert dev_id not in kvms_module._in_use
+
+
 @pytest.mark.parametrize("status,source", [
     ("idle", "configured"),   # LX II / KX III sidebar.asp
     ("empty", "configured"),
@@ -247,7 +482,7 @@ async def test_auto_clear_keeps_still_active_port():
 async def test_auto_clear_keeps_mark_when_status_is_not_live(status, source):
     """Sidebar/static ports never report 'active'; the manual mark must survive."""
     dev_id = "test-dev"
-    kvms_module._in_use[dev_id] = {1: time.monotonic() + _IN_USE_TTL - 600}
+    kvms_module._in_use[dev_id] = {1: lease(time.monotonic() + _IN_USE_TTL - 600)}
     fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
         KvmPort(number=1, label="", status=status, status_source=source),
     ])
@@ -259,7 +494,7 @@ async def test_auto_clear_keeps_mark_when_status_is_not_live(status, source):
 
 async def test_auto_clear_keeps_mark_for_port_missing_from_live_status():
     dev_id = "test-dev"
-    kvms_module._in_use[dev_id] = {5: time.monotonic() + _IN_USE_TTL - 600}
+    kvms_module._in_use[dev_id] = {5: lease(time.monotonic() + _IN_USE_TTL - 600)}
     fresh = KvmStatus(device_id=dev_id, reachable=True, ports=[
         KvmPort(number=1, label="", status="idle", status_source="live"),
     ])
@@ -298,7 +533,7 @@ async def test_in_use_mark_survives_refreshes_from_sidebar_and_static_ports(monk
     monkeypatch.setattr(kvms_module, "ensure_session", AsyncMock())
     dev = SimpleNamespace(id="kvm-sb", ip="example.invalid", model=model, port_count=4, labels_json="{}")
 
-    await kvms_module.mark_port_in_use(dev.id, 1)
+    marked = await kvms_module.mark_port_in_use(dev.id, 1)
     await kvms_module._refresh_background(dev.id, dev)
     clock[0] += 121
     await kvms_module._refresh_background(dev.id, dev)
@@ -310,6 +545,10 @@ async def test_in_use_mark_survives_refreshes_from_sidebar_and_static_ports(monk
     assert all(p.status_source != "live" for p in status.ports)
     assert [p.number for p in _apply_overlays(dev.id, status, {}).ports if p.in_use] == [1]
 
+    await kvms_module.mark_port_free(dev.id, 1, body={"lease": marked["lease"]})
+    assert not any(p.in_use for p in _apply_overlays(dev.id, status, {}).ports)
+    # The handler still works when called directly with no body.
+    await kvms_module.mark_port_in_use(dev.id, 1)
     await kvms_module.mark_port_free(dev.id, 1)
     assert not any(p.in_use for p in _apply_overlays(dev.id, status, {}).ports)
 
