@@ -57,6 +57,8 @@ READ_ATTEMPTS = 3
 F12_INTERVAL = 0.5
 USER_POLL = 5.0
 REFRESH_INTERVAL = 2.0
+BUSY = "Another remote install is running; wait until it finishes"
+SIMULATED_NO_CONSOLE = "A simulated job has no console to open"
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -185,7 +187,8 @@ def can(job: PxeJob, now: float) -> dict:
         "choose_grub": state == "waiting_for_grub_choice",
         "install": state == "ready_to_install" and job.install_sent_at is None,
         "cancel": (state == "draft" or state in PRE_INSTALL) and job.install_sent_at is None,
-        "takeover": state in PRE_INSTALL or state in POST_INSTALL or state == "failed",
+        # After a failure only a real console is left to open; a simulated job has none.
+        "takeover": state in PRE_INSTALL or state in POST_INSTALL or (state == "failed" and job.driver != "simulated"),
         "complete": state == "install_started",
         "acknowledge": state in ("failed", "manual_takeover") and job.install_may_have_started and holds,
         "refresh_screenshot": state in PRE_INSTALL or state in POST_INSTALL,
@@ -812,7 +815,6 @@ class PxeRunner:
         return job.id
 
     async def start(self, job_id: str, actor: str, reason: str):
-        busy = "Another remote install is running; wait until it finishes"
         async with self._action(job_id) as db:
             job = await self._load(db, job_id)
             if job.state != "draft":
@@ -821,8 +823,8 @@ class PxeRunner:
                 job.error_code, job.error_detail = "draft_expired", "The job was not started in time"
                 await self._transition(db, job, "cancelled", action="expired", shot=False)
                 raise HTTPException(409, "The job expired; create a new one")
-            if await self._running_count(db, job.id) >= self.settings_fn().pxe_max_active_jobs:
-                raise HTTPException(409, busy)                # fast path; re-checked atomically below
+            if await self._running_count(db, job.id) >= max(1, int(self.settings_fn().pxe_max_active_jobs)):
+                raise HTTPException(409, BUSY)                # fast path; re-checked atomically below
             if not await self._claim(db, job):
                 raise HTTPException(409, "The job is handled by another server worker")
             await db.commit()
@@ -839,7 +841,7 @@ class PxeRunner:
             try:
                 await self._guard(db, job)
                 if not await self._take_slot(db, job):
-                    raise HTTPException(409, busy)
+                    raise HTTPException(409, BUSY)
             except (HTTPException, Superseded):
                 try:
                     await device.screen.close()
@@ -998,6 +1000,8 @@ class PxeRunner:
             if job.state in PRE_INSTALL or job.state in POST_INSTALL:
                 await self._transition(db, job, "manual_takeover", actor, "takeover", "Automation stopped for manual control")
             elif job.state == "failed":
+                if job.driver == "simulated":           # refused before anything is logged
+                    raise HTTPException(409, SIMULATED_NO_CONSOLE)
                 await self._event(db, job, "takeover", actor, "Console opened after a failure")
                 await self._commit(db, job)
             else:
