@@ -2,6 +2,17 @@
 
 ---
 
+## v2.41.4 — 2026-10-22 — Old installer backups are cleaned up automatically
+
+### Changed
+- The VM's auto-updater now removes old installer backups on its own, so a full disk
+  can no longer stop updates (as happened today). It always keeps the newest 8
+  backups and every backup from the last 7 days (up to 12), never touches the backup
+  of the running version, and logs each removal. `vm-auto-update.py prune --dry-run`
+  shows what it would remove.
+
+---
+
 ## v2.41.3 — 2026-10-22 — Approving SSH servers no longer fails on one unknown address
 
 ### Fixed
