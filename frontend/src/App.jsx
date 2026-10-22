@@ -289,6 +289,21 @@ export default function App() {
     }
   }
 
+  // Racks power: the page asked first (its own dialog), so this only switches the outlets in order and reports each
+  // one; after an Off failure the rest are not attempted. Every affected PDU is read again once.
+  async function switchFeeds(targets, action, { stopOnFailure = false } = {}) {
+    if (!canOperate) throw new Error("Viewer account: read only");
+    const results = [];
+    let stop = false;
+    for (const t of targets) {
+      if (stop) { results.push({ ...t, ok: false, notAttempted: true }); continue; }
+      try { await api.outletPower(t.pduId, t.outlet, action); results.push({ ...t, ok: true }); }
+      catch (e) { results.push({ ...t, ok: false, status: e.status, error: errorMessage(e) }); if (stopOnFailure) stop = true; }
+    }
+    await Promise.all([...new Set(targets.map(t => t.pduId))].map(loadPduStatus));
+    return results;
+  }
+
   async function handleTurnOnAll(device, numbers) {
     if (!canOperate || !device || !numbers.length) return;
     const results = await Promise.allSettled(numbers.map(n => api.outletPower(device.id, n, "on")));
@@ -417,6 +432,7 @@ export default function App() {
           onRefresh={loadDevices}
           onOpenConsole={openKvmConsole}
           maintenance={maintenance}
+          onSwitchFeeds={switchFeeds}
         />
       )}
 

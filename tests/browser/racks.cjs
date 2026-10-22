@@ -147,13 +147,14 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
    await page.reload();await card('Rack-06').waitFor();
    await page.waitForFunction(()=>document.querySelector('[data-rack-id="Rack-06"] .rack-meta span')?.textContent==='3 OPTs');
    await page.waitForFunction(k=>{const el=[...document.querySelectorAll('.rack-kpi')].find(e=>e.querySelector('span')?.textContent==='Servers on');return el&&el.querySelector('strong').textContent===`${k.on-1}/${k.all-1}`;},k0);
-   assert.equal(await card('Rack-06').locator('.server-cell[aria-label="View empty"]').count(),0);
+   assert.equal(await card('Rack-06').locator('.server-cell[data-server="empty"]').count(),0);
    await card('Rack-06').locator('.rack-card-name').click();
-   const stat=await page.evaluate(()=>{const label=[...document.querySelectorAll('div')].find(d=>d.textContent==='OPTs'&&d.nextElementSibling);return label?.nextElementSibling.textContent;});
-   assert.equal(stat,'3');
+   // the rack detail's figures line says the same
+   await page.locator('#rack-detail-title').waitFor();
+   assert.equal(await page.locator('.rack-detail .rack-meta span').first().innerText(),'3 OPTs');
    await page.getByRole('button',{name:'All racks'}).click();
   }finally{await labels('pdu6',{'1':'OPT61','2':'OPT62','3':'OPT63','4':'OPT64'});}
-  passed.push('RACK-5 "empty" label: 3 OPTs, OPTs stat 3, KPI down by 1/1');
+  passed.push('RACK-5 "empty" label: 3 OPTs on the card and in the detail, KPI down by 1/1');
 
   // ── LOC-3 + CONN-4: Main storage shelves, auto-placed shelves ──
   // Earlier suites on a reused fixture may have pinned or moved OPTs: remember what is there and put it back after.
@@ -169,11 +170,11 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
   try{
    await page.reload();
    const storage=card('Storage-Main');
-   await storage.locator('.server-cell[aria-label="View OPT72"]').waitFor();
+   await storage.locator('.server-cell[data-server="OPT72"]').waitFor();
    assert.deepEqual(await storage.locator('[data-u-slot]').evaluateAll(els=>els.map(e=>e.dataset.uSlot)),['1','3','0']);
    assert.equal(await storage.locator('.shelf-empty').count(),0);
-   assert.equal(await storage.locator('[data-u-slot="3"] .server-cell[aria-label="View OPT72"]').count(),1);
-   assert.equal(await storage.locator('[data-u-slot="1"] .server-cell[aria-label="View OPT63"]').count(),1);
+   assert.equal(await storage.locator('[data-u-slot="3"] .server-cell[data-server="OPT72"]').count(),1);
+   assert.equal(await storage.locator('[data-u-slot="1"] .server-cell[data-server="OPT63"]').count(),1);
    assert.equal(await storage.locator('[data-u-slot="0"] .equipment-cell[aria-label="View Spare"]').count(),1);
    passed.push('LOC-3 Main storage draws OPT63 (U1), OPT72 (U3) and Spare, no empty shelves');
    assert.equal(await storage.locator('.shelf-row[data-auto]').count(),1);
@@ -185,12 +186,12 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
    // Rack-01 (C7 vector): OPT11, OPT12 and OPT14 are auto-placed on U1-U3 and marked; OPT13 is saved at U7 and is not.
    const rack01=card('Rack-01');
    const shelves01=await rack01.locator('.shelf-row').evaluateAll(els=>els.map(e=>[e.dataset.uSlot,e.hasAttribute('data-auto'),
-     [...e.querySelectorAll('.server-cell')].map(c=>c.getAttribute('aria-label').replace(/^View /,''))]).filter(r=>r[2].length));
+     [...e.querySelectorAll('.server-cell')].map(c=>c.dataset.server)]).filter(r=>r[2].length));
    assert.deepEqual(shelves01,[['1',true,['OPT11']],['2',true,['OPT12']],['3',true,['OPT14']],['7',false,['OPT13']]]);
-   // the rack detail table says the same
+   // the rack detail table says the same (by U: servers before equipment, rack level last)
    await rack01.locator('.rack-card-name').click();await page.getByRole('button',{name:'All racks'}).waitFor();
    const uCells=await page.locator('tbody tr').evaluateAll(rows=>rows.filter(r=>r.cells[2]?.textContent==='OPT').map(r=>[r.cells[1].textContent.trim(),r.cells[0].textContent.trim()]));
-   assert.deepEqual(uCells,[['OPT11','U1 (auto)'],['OPT12','U2 (auto)'],['OPT13','U7'],['OPT14','U3 (auto)']]);
+   assert.deepEqual(uCells,[['OPT11','U1 (auto)'],['OPT12','U2 (auto)'],['OPT14','U3 (auto)'],['OPT13','U7']]);
    await page.getByRole('button',{name:'All racks'}).click();
    passed.push('CONN-4 auto-placed shelves marked (Main storage 1 of 2, Rack-01 U1-U3 of the C7 vector, not the saved U7)');
   }finally{
@@ -218,7 +219,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
   await inside(phonePanel.getByRole('button',{name:'Move',exact:true}));
   assert.equal(await width(),375,'Equipment panel open');
   await phone.keyboard.press('Escape');await phonePanel.waitFor({state:'detached'});
-  await phone.locator('[data-rack-id="Rack-05"] .server-cell[aria-label="View OPT51"]').click();
+  await phone.locator('[data-rack-id="Rack-05"] button.server-open[aria-label="View OPT51"]').click();
   await phonePanel.getByText('Remove from DCIM').waitFor();
   await inside(phonePanel.getByRole('button',{name:'Close'}));
   await phone.keyboard.press('Escape');
