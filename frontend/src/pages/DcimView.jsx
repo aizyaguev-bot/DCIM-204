@@ -11,8 +11,8 @@ import SshButton from "../components/SshButton";
 import { serverIdentity } from "../api/locations";
 
 const EditContext = createContext(false);
-// Server actions in the rack views: the KVM port of each server (by server identity) and the console opener.
-const ServerActionsContext = createContext({ kvmFor: () => null, openConsole: null, canOperate: false });
+// Server actions in the rack views: the KVM port of each server (by server identity), the console opener and SSH.
+const ServerActionsContext = createContext({ kvmFor: () => null, openConsole: null, sshFor: () => null, canOperate: false });
 
 // Small KVM button for a server row: opens that server's KVM console (Operator and up).
 function KvmButton({ server, compact = false }) {
@@ -24,6 +24,17 @@ function KvmButton({ server, compact = false }) {
     aria-label={`Open KVM console of ${server.name}`}
     onClick={e => { e.stopPropagation(); openConsole(target.kvmId, target.port); }}
     onKeyDown={e => e.stopPropagation()}>KVM</button>;
+}
+
+// SSH button next to KVM for a server row: the shared SshButton (the terminal link in a new tab, or an inactive button
+// that names the reason). Nothing for Viewers or for labels that are not servers; clicks and keys stay off the row.
+function RackSshButton({ server, compact = false }) {
+  const { sshFor, canOperate } = useContext(ServerActionsContext);
+  const name = sshFor(server.name);
+  if (!name || !canOperate) return null;
+  return <span className="contents" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+    <SshButton name={name} size={compact ? "sm" : "md"} className={compact ? "ssh-open-compact" : ""}/>
+  </span>;
 }
 
 function Portal({ children }) {
@@ -235,7 +246,7 @@ function ServerCell({ server, sw, owner, onSelect, onRename }) {
         {sw?.switch && !owner && <span className="truncate" title={sw.switch}>{sw.switch}</span>}
       </div>
     </div>
-    <KvmButton server={server} compact/>
+    <div className="server-actions"><KvmButton server={server} compact/><RackSshButton server={server} compact/></div>
     <span className="server-state">{isOn ? "ON" : server.state === "off" ? "OFF" : "?"}</span>
   </div>;
 }
@@ -944,7 +955,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="border-b border-zinc-800/70 bg-zinc-900/40">
-                  <tr><Th label="U"/><Th label="Name"/><Th label="Type"/><Th label="State"/><Th label="W" right/><Th label="Outlet" right/><Th label="Switch"/><Th label="KVM"/></tr>
+                  <tr><Th label="U"/><Th label="Name"/><Th label="Type"/><Th label="State"/><Th label="W" right/><Th label="Outlet" right/><Th label="Switch"/><Th label="KVM / SSH"/></tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/30">
                   {/* PDU servers */}
@@ -966,7 +977,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                         <td className="px-3 py-2 text-xs font-mono text-right">{s.watts!=null?<span className={isOn?"text-nv-400":"text-zinc-600"}>{s.watts.toFixed(0)}</span>:<span className="text-zinc-800">—</span>}</td>
                         <td className="px-3 py-2 font-mono text-xs text-zinc-600 text-right">{s.outlet!=null?`#${s.outlet}`:<span className="text-zinc-800">—</span>}</td>
                         <td className="px-3 py-2 text-xs">{sw?.switch?<Pill color="cyan" sm>{sw.switch}{sw.port?`·${sw.port}`:""}</Pill>:<span className="text-zinc-800">—</span>}</td>
-                        <td className="px-3 py-2 text-xs"><KvmButton server={s}/></td>
+                        <td className="px-3 py-2 text-xs"><div className="flex items-center gap-2"><KvmButton server={s}/><RackSshButton server={s}/></div></td>
                       </tr>
                     );
                   })}
@@ -1848,6 +1859,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const serverActions = useMemo(()=>({
     kvmFor: name => kvmByServer.get(serverIdentity(name)) || null,
     openConsole: onOpenConsole || null,
+    sshFor: name => serverIdentity(name) ? name : null,
     canOperate: !!canOperate,
   }),[kvmByServer,onOpenConsole,canOperate]);
   // Inventory racks have no device status; Dashboard links to their saved layout.

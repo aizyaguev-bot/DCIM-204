@@ -614,3 +614,19 @@ test("App: ?tab=ssh is a page, Admin -> SSH is Operator+ and ?tab=admin&section=
   assert.match(app, /\{!sshPage && <AssistantPanel /);
   assert.match(app, /\{!sshPage && <footer /);
 });
+
+test("Racks: an SSH button sits next to KVM in the rack diagram and the rack table, through ServerActionsContext", async () => {
+  const { readFileSync } = await import("node:fs");
+  const dcim = readFileSync(new URL("../pages/DcimView.jsx", import.meta.url), "utf8");
+  const component = dcim.slice(dcim.indexOf("function RackSshButton("), dcim.indexOf("function Portal("));
+  assert.match(component, /useContext\(ServerActionsContext\)/);
+  assert.match(component, /if \(!name \|\| !canOperate\) return null;/, "nothing for Viewers or non-server labels");
+  assert.match(component, /<SshButton name=\{name\}/, "the shared SshButton (same server identity as the other SSH buttons)");
+  assert.match(component, /onClick=\{e => e\.stopPropagation\(\)\} onKeyDown=\{e => e\.stopPropagation\(\)\}/, "never opens the server row");
+  assert.match(dcim, /createContext\(\{ kvmFor: \(\) => null, openConsole: null, sshFor: \(\) => null, canOperate: false \}\)/);
+  assert.match(dcim, /sshFor: name => serverIdentity\(name\) \? name : null,/);
+  const cell = dcim.slice(dcim.indexOf("function ServerCell("), dcim.indexOf("\n}", dcim.indexOf("function ServerCell(")));
+  assert.match(cell, /<KvmButton server=\{server\} compact\/>\s*<RackSshButton server=\{server\} compact\/>/);
+  assert.match(dcim, /<KvmButton server=\{s\}\/><RackSshButton server=\{s\}\/>/);
+  assert.match(dcim, /<Th label="KVM \/ SSH"\/>/);
+});

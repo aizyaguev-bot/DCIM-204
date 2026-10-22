@@ -130,6 +130,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .kvm-open:hover { background: #2e1065; border-color: #a78bfa; color: #ede9fe; }
 .kvm-open:focus-visible { outline: 2px solid #a78bfa; outline-offset: 1px; }
 .kvm-open-compact { padding: 3px 5px; }
+/* Rack diagram: KVM and SSH stack in one column, so a server with both keeps the same name width as with KVM alone. */
+.server-actions { display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+.server-actions:empty { display: none; }
+.server-actions:has(> :nth-child(2)) .kvm-open-compact, .server-actions:has(> :nth-child(2)) .ssh-open-compact { padding: 1px 5px; line-height: 1; }
+.server-actions .ssh-open-compact { line-height: 1; padding: 3px 5px; }
 .server-cell.on .server-state { color: #76b900; }
 .equipment-cell { flex: 1 1 70px; min-width: 0; min-height: 42px; padding: 5px 8px; border-radius: 2px; border: 1px solid #3a3a3a; background: #161616; color: #e5e5e5; cursor: pointer; }
 .equipment-cell[data-type="switch"] { color: #7dd3fc; background: #0c1a20; border-color: #1f4050; }
