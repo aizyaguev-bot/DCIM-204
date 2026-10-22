@@ -266,7 +266,8 @@ export default function VoiceControls({ onTranscript, speakText, disabled = fals
         <p className="mt-1 text-zinc-500 italic truncate" dir="auto" title={interim}>{interim}</p>
       )}
       {error && <p id={errorId} role="alert" className="mt-1 text-amber-300">{error}</p>}
-      {showMic && <p id={noteId} className="mt-1 text-[11px] leading-snug text-zinc-500">{DICTATION_PRIVACY_NOTE}</p>}
+      {/* Short screens (a phone in landscape): one line, the full note in the tooltip and for screen readers. */}
+      {showMic && <p id={noteId} title={DICTATION_PRIVACY_NOTE} className="mt-1 text-[11px] leading-snug text-zinc-500 [@media(max-height:500px)]:truncate">{DICTATION_PRIVACY_NOTE}</p>}
     </div>
   );
 }
