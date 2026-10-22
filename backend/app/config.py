@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     accounts_admin_username: str = "admin"
     accounts_session_hours: int = Field(default=12, ge=1, le=168)
     accounts_secure_cookie: bool = False   # enable behind HTTPS; the existing VM uses HTTP
+    ssh_terminal_enabled: bool = True
+    ssh_allow_insecure_transport: bool = False
+    ssh_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
+    ssh_idle_timeout_seconds: int = Field(default=1800, ge=1)
+    ssh_max_session_seconds: int = Field(default=3600, ge=1)
+    ssh_max_sessions_per_user: int = Field(default=4, ge=1, le=100)
+    ssh_max_sessions_total: int = Field(default=20, ge=1, le=1000)
     ping_monitor_enabled: bool = True
     ping_monitor_timezone: str = "Asia/Jerusalem"
     email_alerts_enabled: bool = False

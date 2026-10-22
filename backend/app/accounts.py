@@ -79,6 +79,11 @@ async def identity(connection):
 
 
 def required_role(path, method):
+    if path == "/api/ssh" or path.startswith("/api/ssh/"):
+        if path == "/api/ssh/status" and method == "GET": return "Viewer"
+        if path == "/api/ssh/key" and method == "GET": return "Operator"
+        if method == "GET" and re.fullmatch(r"/api/ssh/[a-z0-9][a-z0-9_-]{0,127}/terminal", path): return "Operator"
+        return "Admin"
     if path == "/api/pxe" or path.startswith("/api/pxe/"):
         return "Admin" if re.fullmatch(r"/api/pxe/jobs/[^/]+/acknowledge", path) else "Operator"
     if (path == "/api/engineers" or path.startswith("/api/engineers/")) and method not in ("GET", "HEAD", "OPTIONS"): return "Admin"
@@ -133,6 +138,18 @@ class AccountAccess:
         unsafe = method not in ("GET", "HEAD", "OPTIONS")
 
         async def deny(status, detail):
+            current_account = scope.get("state", {}).get("account")
+            if current_account and (path == "/api/ssh" or path.startswith("/api/ssh/")):
+                # Only signed-in, same-origin denials belong in the SSH audit.
+                try:
+                    if same_origin(connection):
+                        from . import ssh_store
+                        by = current_account["user"]
+                        async with AsyncSessionLocal() as audit_db:
+                            await ssh_store.audit_event(audit_db, by, "denied", end_reason="denied",
+                                                        client_ip=connection.client.host if connection.client else "")
+                except Exception:
+                    pass  # Audit availability can never turn a denied request into an allowed request.
             if scope["type"] == "websocket": await send({"type":"websocket.close", "code":4403 if status == 403 else 4401})
             else: await JSONResponse({"detail":detail}, status_code=status, headers={"Cache-Control":"no-store"})(scope, receive, send)
 

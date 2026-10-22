@@ -79,7 +79,7 @@ export function terminalPageUrl(key) {
 export const ADMIN_SSH_URL = "/?tab=admin&section=ssh";
 
 // ─── WebSocket protocol ───────────────────────────────────────────────────────────────────────────
-// client → server: {"type":"auth","csrf_token":str} first, then {"type":"input","data":str} | {"type":"resize","cols":int,"rows":int}
+// client → server: {"type":"auth","csrf_token":str} first, then {"type":"input","data":str} | {"type":"resize","cols":int,"rows":int} | {"type":"pause"} | {"type":"resume"}
 // server → client: {"type":"output","data":str} | {"type":"status","state":"connecting|connected|closed","reason":str}
 // The CSRF token travels only in that first message, never in the URL.
 
@@ -130,6 +130,53 @@ export function parseServerMessage(raw) {
     return { type: "status", state: msg.state, reason: typeof msg.reason === "string" ? msg.reason : "" };
   }
   return null;
+}
+
+export const OUTPUT_HIGH_WATER = 1024 * 1024;
+export const OUTPUT_LOW_WATER = 256 * 1024;
+
+// Each controller belongs to one socket/terminal pair. Count bytes until xterm
+// has parsed them, rather than assuming write() consumes its input immediately.
+export function createOutputFlow({ write, send, isActive = () => true,
+  highWater = OUTPUT_HIGH_WATER, lowWater = OUTPUT_LOW_WATER }) {
+  if (!Number.isSafeInteger(highWater) || !Number.isSafeInteger(lowWater)
+      || lowWater < 0 || highWater <= lowWater) throw new RangeError("Invalid output watermarks");
+  const encoder = new TextEncoder();
+  let pendingBytes = 0, paused = false, disposed = false;
+  const active = () => !disposed && isActive();
+  const control = type => {
+    if (!active()) return;
+    // The socket may close between readyState inspection and send().
+    try { send(JSON.stringify({ type })); } catch {}
+  };
+  return {
+    write(data) {
+      if (!active() || typeof data !== "string" || !data) return false;
+      const bytes = encoder.encode(data).byteLength;
+      pendingBytes += bytes;
+      if (!paused && pendingBytes >= highWater) {
+        paused = true;
+        control("pause");
+      }
+      let completed = false;
+      const consumed = () => {
+        if (completed) return;
+        completed = true;
+        if (disposed) return;
+        pendingBytes -= bytes;
+        if (paused && pendingBytes <= lowWater) {
+          paused = false;
+          control("resume");
+        }
+      };
+      try { write(data, consumed); }
+      catch (error) { consumed(); throw error; }
+      return true;
+    },
+    dispose() { disposed = true; pendingBytes = 0; paused = false; },
+    get pendingBytes() { return pendingBytes; },
+    get paused() { return paused; },
+  };
 }
 
 // SHA256 fingerprints only (base64 body), so nothing else from a reason is ever shown.
@@ -337,9 +384,9 @@ export function sshAvailability({ status, error, loading, name, accountMode, pro
 }
 
 // ─── Admin settings ───────────────────────────────────────────────────────────────────────────────
-// Same rule as the backend: lowercase POSIX user names, at most 32 characters, optional trailing $.
+// Same rule as the backend: lowercase POSIX user names, at most 32 characters.
 export function isPosixUser(name) {
-  return typeof name === "string" && /^[a-z_][a-z0-9_-]{0,31}\$?$/.test(name);
+  return typeof name === "string" && name === name.trim() && /^[a-z_][a-z0-9_-]{0,31}$/.test(name);
 }
 
 // The backend has the opt-in list (H4) when its status rows report `allowed`.

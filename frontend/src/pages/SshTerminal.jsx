@@ -5,7 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useAccounts } from "../accounts";
 import { useSshStatus } from "../components/SshButton";
 import {
-  terminalUrl, currentCsrf, authMessage, inputMessages, resizeMessage, parseServerMessage, safeLinkUrl,
+  terminalUrl, currentCsrf, authMessage, inputMessages, resizeMessage, parseServerMessage, safeLinkUrl, createOutputFlow,
   connectionReducer, INITIAL_CONNECTION, PHASE_LABEL, ADMIN_SSH_URL, httpErrorText, sshAvailability, hostKeyState, sshStatusStore,
 } from "../api/ssh";
 
@@ -45,6 +45,7 @@ function TerminalSession({ serverKey, onExit, canAdmin, accountMode }) {
   const hostRef = useRef(null);
   const termRef = useRef(null);
   const socketRef = useRef(null);
+  const outputRef = useRef(null);
   const attemptRef = useRef(0);
   const serverRef = useRef({ name, user: server?.user });
   serverRef.current = { name, user: server?.user };
@@ -55,6 +56,8 @@ function TerminalSession({ serverKey, onExit, canAdmin, accountMode }) {
   }, []);
 
   const disconnect = useCallback((userAction) => {
+    outputRef.current?.dispose();
+    outputRef.current = null;
     const ws = socketRef.current;
     socketRef.current = null;
     if (!ws) return;
@@ -71,6 +74,14 @@ function TerminalSession({ serverKey, onExit, canAdmin, accountMode }) {
     try { ws = new WebSocket(terminalUrl(serverKey, window.location)); }
     catch { dispatch({ type: "close", attempt, code: 1006, reason: "" }); return; }
     socketRef.current = ws;
+    const term = termRef.current;
+    const output = createOutputFlow({
+      write: (data, consumed) => term.write(data, consumed),
+      send: message => ws.send(message),
+      isActive: () => attempt === attemptRef.current && socketRef.current === ws
+        && ws.readyState === WebSocket.OPEN && !!term && termRef.current === term,
+    });
+    outputRef.current = output;
     let opened = false;
     ws.onopen = () => {
       if (attempt !== attemptRef.current) return;
@@ -86,11 +97,13 @@ function TerminalSession({ serverKey, onExit, canAdmin, accountMode }) {
       if (attempt !== attemptRef.current) return;
       const msg = parseServerMessage(event.data);
       if (!msg) return;
-      if (msg.type === "output") { termRef.current?.write(msg.data); return; }
+      if (msg.type === "output") { output.write(msg.data); return; }
       dispatch({ type: "status", attempt, state: msg.state, reason: msg.reason });
       if (msg.state === "connected") termRef.current?.focus();
     };
     ws.onclose = event => {
+      output.dispose();
+      if (outputRef.current === output) outputRef.current = null;
       if (attempt !== attemptRef.current) return;
       if (socketRef.current === ws) socketRef.current = null;
       // Refused before the handshake (the browser gets no reason): reload the status, which names the cause.
@@ -135,6 +148,8 @@ function TerminalSession({ serverKey, onExit, canAdmin, accountMode }) {
       clearTimeout(resizeTimer);
       inputs.dispose();
       resizes.dispose();
+      outputRef.current?.dispose();
+      outputRef.current = null;
       term.dispose();
       termRef.current = null;
     };

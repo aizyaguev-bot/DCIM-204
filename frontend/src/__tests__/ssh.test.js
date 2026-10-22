@@ -6,7 +6,7 @@ import {
   connectionReducer, INITIAL_CONNECTION, httpErrorText, hostKeyState, transportBlocked, sshAvailability, isPosixUser,
   hasOptIn, overridesFromStatus, formFromStatus, buildConfigPayload, normalizeSessions, toMillis, formatDuration,
   formatBytes, createStatusStore, STATUS_MAX_AGE, NOT_INSTALLED_TEXT, DISABLED_TEXT, NO_ACCOUNTS_TEXT, INSECURE_TEXT,
-  sameHost, eventLabel, endReasonLabel,
+  sameHost, eventLabel, endReasonLabel, createOutputFlow, OUTPUT_HIGH_WATER, OUTPUT_LOW_WATER,
 } from "../api/ssh.js";
 
 // Reason texts exactly as backend/app/routers/ssh.py and ssh_store.py send them (2026-10-21).
@@ -89,6 +89,103 @@ test("resize messages are integers within the server bounds", () => {
   assert.equal(resizeMessage(80.5, 24), null);
   assert.equal(resizeMessage("80", 24), null);
   assert.equal(resizeMessage(undefined, undefined), null);
+});
+
+test("output pauses once at the high watermark and resumes only after xterm consumes the backlog", () => {
+  const writes = [], callbacks = [], controls = [];
+  const flow = createOutputFlow({
+    write: (data, consumed) => { writes.push(data); callbacks.push(consumed); },
+    send: message => controls.push(JSON.parse(message)),
+  });
+  const chunk = "x".repeat(64 * 1024);
+  const highChunks = OUTPUT_HIGH_WATER / chunk.length;
+  for (let i = 0; i < highChunks; i++) flow.write(chunk);
+  assert.equal(flow.pendingBytes, OUTPUT_HIGH_WATER);
+  assert.deepEqual(controls, [{ type: "pause" }]);
+  // Already in-flight frames are still delivered in order without another pause.
+  flow.write("tail");
+  assert.equal(writes.join(""), chunk.repeat(highChunks) + "tail");
+  assert.equal(flow.pendingBytes, OUTPUT_HIGH_WATER + 4);
+  assert.equal(controls.length, 1);
+  while (flow.pendingBytes > OUTPUT_LOW_WATER + chunk.length) callbacks.shift()();
+  assert.equal(flow.paused, true);
+  assert.equal(controls.length, 1);
+  callbacks.shift()();
+  assert.equal(flow.paused, false);
+  assert.deepEqual(controls, [{ type: "pause" }, { type: "resume" }]);
+  while (callbacks.length) callbacks.shift()();
+  assert.equal(flow.pendingBytes, 0);
+  assert.equal(controls.length, 2);
+  // A later burst can pause and resume independently.
+  flow.write("z".repeat(OUTPUT_HIGH_WATER));
+  const consumed = callbacks.shift();
+  consumed(); consumed();
+  assert.equal(flow.pendingBytes, 0);
+  assert.deepEqual(controls, [{ type: "pause" }, { type: "resume" }, { type: "pause" }, { type: "resume" }]);
+});
+
+test("output watermarks count UTF-8 bytes rather than string length", () => {
+  const callbacks = [], controls = [], writes = [];
+  const flow = createOutputFlow({
+    highWater: 8, lowWater: 2,
+    write: (data, consumed) => { writes.push(data); callbacks.push(consumed); },
+    send: message => controls.push(JSON.parse(message)),
+  });
+  flow.write("\u{1f642}");
+  flow.write("\u00e9");
+  assert.equal(flow.pendingBytes, 6);
+  assert.deepEqual(controls, []);
+  flow.write("\ud800"); // TextEncoder treats an unpaired surrogate as a three-byte replacement.
+  assert.equal(flow.pendingBytes, 9);
+  assert.deepEqual(writes, ["\u{1f642}", "\u00e9", "\ud800"]);
+  assert.deepEqual(controls, [{ type: "pause" }]);
+  callbacks.shift()();
+  callbacks.shift()();
+  assert.equal(flow.pendingBytes, 3);
+  assert.equal(flow.paused, true);
+  callbacks.shift()();
+  assert.equal(flow.pendingBytes, 0);
+  assert.deepEqual(controls, [{ type: "pause" }, { type: "resume" }]);
+});
+
+test("output callbacks from a closed or replaced socket cannot control the next connection", () => {
+  const oldCallbacks = [], newCallbacks = [], controls = [];
+  let epoch = 1, open = true;
+  const make = (attempt, callbacks) => createOutputFlow({
+    highWater: 4, lowWater: 1,
+    write: (data, consumed) => callbacks.push(consumed),
+    send: message => controls.push({ attempt, ...JSON.parse(message) }),
+    isActive: () => open && epoch === attempt,
+  });
+  const old = make(1, oldCallbacks);
+  old.write("old!");
+  epoch = 2;
+  const current = make(2, newCallbacks);
+  current.write("new!");
+  oldCallbacks.shift()();
+  assert.equal(old.write("stale output"), false);
+  assert.equal(current.pendingBytes, 4);
+  assert.deepEqual(controls, [{ attempt: 1, type: "pause" }, { attempt: 2, type: "pause" }]);
+  open = false;
+  newCallbacks.shift()();
+  assert.equal(current.write("after close"), false);
+  assert.equal(controls.length, 2);
+});
+
+test("disposing an output controller invalidates delayed callbacks without discarding queued writes", () => {
+  const callbacks = [], writes = [], controls = [];
+  const flow = createOutputFlow({
+    highWater: 4, lowWater: 1,
+    write: (data, consumed) => { writes.push(data); callbacks.push(consumed); },
+    send: message => controls.push(JSON.parse(message)),
+  });
+  flow.write("tail");
+  flow.dispose();
+  assert.doesNotThrow(() => callbacks.shift()());
+  assert.equal(flow.pendingBytes, 0);
+  assert.equal(flow.write("after dispose"), false);
+  assert.deepEqual(writes, ["tail"]);
+  assert.deepEqual(controls, [{ type: "pause" }]);
 });
 
 test("server messages are validated", () => {
@@ -309,8 +406,8 @@ test("an older status without the new fields still works", () => {
 
 // ─── admin settings ─────────────────────────────────────────────────────────────────────────────
 test("SSH user names follow the backend rule", () => {
-  for (const ok of ["root", "lab", "_svc", "a-b_c9", "machine$", "a".repeat(32)]) assert.ok(isPosixUser(ok), ok);
-  for (const bad of ["", "Root", "9lab", "-x", "a b", "a;rm", "a".repeat(33), "lab@host", null]) assert.ok(!isPosixUser(bad), String(bad));
+  for (const ok of ["root", "lab", "_svc", "a-b_c9", "a".repeat(32)]) assert.ok(isPosixUser(ok), ok);
+  for (const bad of ["", "Root", "9lab", "-x", "a b", "a;rm", "a".repeat(33), "lab@host", "machine$", "root\n", "root\r", "root\u2028", null]) assert.ok(!isPosixUser(bad), String(bad));
 });
 
 test("per-server overrides prefer the explicit map", () => {
