@@ -137,11 +137,29 @@ def load_sdk():
 
 
 def _api_key(settings) -> str:
+    """The key on these settings. Once `resolve_key` (or the router) has run, ctx.settings is a keystore.KeyedSettings
+    view and this is the effective key: the one an Admin stored on the site, else ASSISTANT_ANTHROPIC_API_KEY."""
     secret = getattr(settings, "assistant_anthropic_api_key", None)
     if secret is None:
         return ""
     value = secret.get_secret_value() if hasattr(secret, "get_secret_value") else secret
     return value.strip() if isinstance(value, str) else ""
+
+
+async def resolve_key(ctx: ToolContext) -> None:
+    """Key resolution: puts the effective key on ctx.settings (keystore.resolve; site-stored key > .env key, read
+    again within keystore.KEY_CACHE_SECONDS of a change, no restart). The chat router hands over settings that are
+    already resolved; this covers any other caller that has a session factory. Demo-only settings (LLM switched off)
+    are never given a key. A failure keeps the settings as they are (the .env key)."""
+    settings = ctx.settings
+    if (ctx.session_factory is None or getattr(settings, "assistant_key_source", None) is not None
+            or not getattr(settings, "assistant_llm_enabled", True)):
+        return
+    try:
+        from . import keystore  # noqa: PLC0415 - keystore imports the models; keep engine imports light
+        ctx.settings = await keystore.resolve(settings, ctx.session_factory)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Assistant API key resolution failed (%s); using the .env key.", type(exc).__name__)
 
 
 def llm_status(settings, sdk_loader: Callable[[], Any] | None = None) -> tuple[str, str | None]:
@@ -827,6 +845,8 @@ async def answer_question(*, question: str, history: list[dict], context: dict, 
 
     tools = allowed_tools(tools, ctx)
     budget = float(getattr(ctx.settings, "assistant_timeout_seconds", 90) or 90)
+    if mode != "demo":
+        await resolve_key(ctx)
     engine_mode, reason = llm_status(ctx.settings)
     if mode == "demo":
         engine_mode = "demo"
@@ -865,6 +885,7 @@ async def answer_question(*, question: str, history: list[dict], context: dict, 
 __all__ = [
     "EAGER_INPUT_STREAMING", "EFFORT", "Ledger", "MAX_RESULT_CHARS", "MAX_TOOL_ROUNDS", "SOURCE_STATUSES",
     "allowed_tools", "answer_question", "client_factory", "default_client_factory", "finalize", "ground_answer",
-    "history_messages", "llm_status", "load_sdk", "parse_answer", "run_tool", "safe_answer", "strict_schema",
+    "history_messages", "llm_status", "load_sdk", "parse_answer", "resolve_key", "run_tool", "safe_answer",
+    "strict_schema",
     "tool_definitions", "tool_envelope", "validate",
 ]

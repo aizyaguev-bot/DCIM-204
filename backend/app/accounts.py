@@ -86,6 +86,8 @@ def required_role(path, method):
     if path == "/api/users" or path.startswith("/api/users/"): return "Admin"
     if path.startswith("/api/kvms/") and any(part in path for part in ("/proxy", "/autologin", "/console-url", "/viewer")):
         return "Operator"
+    # The assistant's Anthropic API key (Admin page): every method, reads included, is Admin only.
+    if path == "/api/assistant/key": return "Admin"
     # Action previews include impact lists, so their reads require Operator as well as their writes.
     if method == "GET" and re.fullmatch(r"/api/assistant/actions/config", path): return "Viewer"
     if re.fullmatch(r"/api/assistant/actions(?:/.*)?", path): return "Operator"

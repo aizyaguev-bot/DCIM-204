@@ -12,6 +12,7 @@ import DcimView from "./pages/DcimView";
 import SyncView from "./pages/SyncView";
 import LocationsView from "./pages/LocationsView";
 import ConnectionsView from "./pages/ConnectionsView";
+import AssistantKeyView from "./pages/AssistantKeyView";
 import ScanView from "./pages/ScanView";
 import MonitoringView from "./pages/MonitoringView";
 import AddDeviceModal from "./components/AddDeviceModal";
@@ -33,7 +34,7 @@ export default function App() {
   const [view, setView] = useState({ kind: "dashboard" });
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "dcim" ? "racks" : ["sync", "locations", "connections"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account"].includes(tab) ? tab : preferences.start_page;
+    return tab === "dcim" ? "racks" : ["sync", "locations", "connections", "assistant"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account"].includes(tab) ? tab : preferences.start_page;
   });
   const [pxeConfig, setPxeConfig] = useState(undefined);   // undefined: loading, null: unavailable
   const [pxeConfigError, setPxeConfigError] = useState("");
@@ -53,19 +54,19 @@ export default function App() {
   const [maintenanceDialog, setMaintenanceDialog] = useState(null);   // { mode: "shutdown" | "restore", pduId }
   const maintenanceSeq = useRef(0);
   // Admin sub-pages with their own shareable ?tab= link.
-  const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations", connections: "connections" })[new URLSearchParams(location.search).get("tab")] || "devices");
+  const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[new URLSearchParams(location.search).get("tab")] || "devices");
   function navigate(tab, rack) {
     const url = new URL(window.location.href);
     url.searchParams.set("tab", tab);
     if (rack) url.searchParams.set("rack", rack);
     else url.searchParams.delete("rack");
-    const section = ({ sync: "mapping", locations: "locations", connections: "connections" })[tab];
+    const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
     history.pushState({ tab, view: {kind:"dashboard"}, adminSection: section || adminSection }, "", url);
     setView({kind:"dashboard"}); setMainTab(section ? "admin" : tab); setEditMode(false);
     if (section) setAdminSection(section);
   }
   function navigateAdmin(section) {
-    navigate(["locations", "connections"].includes(section) ? section : "admin");
+    navigate(["locations", "connections", "assistant"].includes(section) ? section : "admin");
     setAdminSection(section);
     history.replaceState({ ...history.state, adminSection: section }, "");
   }
@@ -77,7 +78,7 @@ export default function App() {
   useEffect(() => {
     const onPop = event => {
       const tab = event.state?.tab || new URLSearchParams(location.search).get("tab") || "dashboard";
-      const section = ({ sync: "mapping", locations: "locations", connections: "connections" })[tab];
+      const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
       setView(event.state?.view || { kind: "dashboard" });
       setMainTab(tab === "dcim" ? "racks" : section ? "admin" : tab);
       setAdminSection(event.state?.adminSection || section || "devices");
@@ -388,7 +389,7 @@ export default function App() {
         onAccount={() => navigate("account")} onUsers={() => navigateAdmin("users")} remoteInstall={pxeConfig?.enabled === true} />
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
       {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
-      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
+      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
       {view.kind === "dashboard" && pageInfo && <div className="page-intro"><h1>{pageInfo[0]}</h1><p>{pageInfo[1]} {updatedText}</p></div>}
       {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
       {view.kind === "dashboard" && ["racks", "inventory", "power", "changelog"].includes(mainTab) && (
@@ -421,6 +422,7 @@ export default function App() {
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "users" && canAdmin && <UsersView />}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "engineers" && canAdmin && <EngineersView />}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "connections" && <ConnectionsView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "assistant" && <AssistantKeyView />}
       {view.kind === "dashboard" && mainTab === "monitoring" && <MonitoringView />}
 
       {view.kind === "dashboard" && mainTab === "twin" && (
