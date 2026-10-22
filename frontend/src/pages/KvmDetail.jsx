@@ -1,10 +1,16 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import StatusDot from "../components/StatusDot";
 import DeviceNamesPanel from "../components/DeviceNamesPanel";
 import NameSyncBadge, { NameSyncNotice, useNameSync } from "../components/NameSyncBadge";
 import {useAccounts} from "../accounts";
 import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
 import { labelChanges, labelEditState, labelMoveHints, labelPatchBody } from "../api/locations";
+import { LATEST_NOT_LOADED, latestDevice, rebaseLabelDraft, rebaseNote } from "../api/labelDraft";
+
+// The role reason comes first: a Viewer cannot act whatever the device state.
+const OPERATOR_REQUIRED = "Requires the Operator or Admin role";
+const CONSOLE_OPERATOR_REQUIRED = "KVM console requires an Operator or Admin account";
+const ADMIN_REQUIRED = "Removing a device requires the Admin role";
 
 export default function KvmDetail({ device, status, onBack, from, onPortClick, onDelete, onLabelsSave, onMarkFree, devices }) {
   const {canOperate,canAdmin} = useAccounts();
@@ -16,11 +22,16 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
   const nameSync = useNameSync(device?.id, device?.labels_revision);
+  const [labelNote, setLabelNote] = useState("");        // after a 409: what changed elsewhere; the draft is kept
+  const [needsRebase, setNeedsRebase] = useState(false); // a 409 came before the latest labels could be read
+  const editSession = useRef(0);                         // a save answer for a closed or replaced editor is ignored
+  const deviceRef = useRef(device);
+  deviceRef.current = device;
+  useEffect(() => { editSession.current++; setEditMode(false); setLabelNote(""); setSaveError(""); setNeedsRebase(false); }, [device?.id]);
   if (!device) return null;
   const ports = status?.ports || [];
   const active = ports.filter(p => p.status === "active").length;
   const inUsePorts = ports.filter(p => p.in_use);
-  const isLx = device.model?.includes("LX");
   const state = deviceState(status);
   const moveHints = editMode ? labelMoveHints(device, draftLabels, draftOriginal, devices) : {};
 
@@ -34,21 +45,65 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
     setDraftBase(base);
     setDraftRevision(device.labels_revision);
     setSaveError("");
+    setLabelNote("");
+    setNeedsRebase(false);
+    editSession.current++;
     setEditMode(true);
   }
 
+  function closeEditor() {
+    editSession.current++;
+    setEditMode(false);
+    setSaveError("");
+    setLabelNote("");
+    setNeedsRebase(false);
+  }
+
+  // Labels saved elsewhere meanwhile: keep the typed text, show their other changes, take their revision.
+  function applyRebase(latest, draft, original) {
+    const r = rebaseLabelDraft(draft, original, latest.labels || {}, ports);
+    setDraftLabels(r.draft);
+    setDraftOriginal(r.original);
+    setDraftBase(r.base);
+    setDraftRevision(latest.labels_revision);
+    setNeedsRebase(false);
+    setLabelNote(rebaseNote(r, "port"));
+    return r;
+  }
+
   async function saveLabels() {
-    if (labelChanges(draftLabels, draftOriginal).length === 0) { setEditMode(false); return; }
+    let draft = draftLabels, original = draftOriginal, base = draftBase, revision = draftRevision;
+    if (needsRebase) {
+      const latest = latestDevice(null, deviceRef.current, revision);
+      if (latest) {
+        const r = applyRebase(latest, draft, original);
+        if (r.conflicts.length) return;   // show what was changed elsewhere before replacing it
+        ({ draft, original, base } = r);
+        revision = latest.labels_revision;
+      }
+    }
+    if (labelChanges(draft, original).length === 0) { closeEditor(); return; }
+    const session = editSession.current;
     setSaving(true);
     setSaveError("");
     nameSync.clearNotice();
     try {
-      const saved = await onLabelsSave(labelPatchBody(draftBase, draftLabels, draftOriginal), draftRevision);
-      setEditMode(false);
-      nameSync.afterSave(saved?.device_names, saved?.device_names_reason);
+      const saved = await onLabelsSave(labelPatchBody(base, draft, original), revision);
+      // The name-sync note belongs to this device's save: skip it when the page moved to another device meanwhile.
+      if (session === editSession.current) {
+        closeEditor();
+        nameSync.afterSave(saved?.device_names, saved?.device_names_reason);
+      }
     } catch (e) {
-      setSaveError(errorMessage(e));
-      if (e.status === 409) setEditMode(false);
+      if (session !== editSession.current) return;
+      if (e.status === 409) {
+        // Never saved again on its own: the editor stays open with the draft for the user to review.
+        const latest = latestDevice(e, deviceRef.current, revision);
+        if (latest) applyRebase(latest, draft, original);
+        else { setLabelNote(LATEST_NOT_LOADED); setNeedsRebase(true); }
+      } else {
+        setSaveError(errorMessage(e));
+      }
     } finally {
       setSaving(false);
     }
@@ -73,32 +128,33 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
               <span className="flex-1">KVM in use — {inUsePorts.map(p => p.label || `Port ${p.number}`).join(", ")}</span>
               <button disabled={!canOperate} onClick={e => { e.stopPropagation(); onMarkFree && onMarkFree(); }}
-                title="Mark as free" aria-label="Mark KVM free"
+                title={canOperate ? "Mark as free" : OPERATOR_REQUIRED} aria-label="Mark KVM free"
                 className="w-6 h-6 inline-flex items-center justify-center rounded text-emerald-600 hover:text-emerald-300 hover:bg-emerald-500/10 transition leading-none">✕</button>
             </div>
           )}
           {state === "error" && (
             <div role="alert" className="px-4 py-2.5 bg-rose-500/10 border-b border-rose-500/30 text-rose-300 text-xs">⚠ {status.error}</div>
           )}
-          {isLx && (
-            <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs">
-              LX II unit — clicking a port opens the native viewer in a new tab
-            </div>
-          )}
           <div className="p-4">
-            {!canOperate && <p dir="rtl" className="text-sm text-amber-300 mb-3">לפתיחת קונסול KVM נדרשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.</p>}
+            {!canOperate && (
+              <div id="kvm-readonly-note" className="mb-3 space-y-1">
+                <p dir="rtl" className="text-sm text-amber-300">לפתיחת קונסול KVM נדרשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.</p>
+                <p className="text-sm text-amber-300">Read only. Opening a console and editing port labels require the Operator or Admin role; removing the device requires the Admin role.</p>
+              </div>
+            )}
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-zinc-500">Ports</div>
               {!editMode ? (
                 <button disabled={!canOperate || ports.length === 0} onClick={startEdit}
-                  title={canOperate && ports.length === 0 ? "Labels can be edited once the port list has loaded" : undefined}
+                  title={!canOperate ? OPERATOR_REQUIRED : ports.length === 0 ? "Labels can be edited once the port list has loaded" : undefined}
+                  aria-describedby={!canOperate ? "kvm-readonly-note" : undefined}
                   className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-zinc-400">
                   <PencilIcon /> Edit Labels
                 </button>
               ) : (
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setEditMode(false)}
-                    className="text-xs text-zinc-400 hover:text-zinc-200 px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800 transition">
+                  <button onClick={closeEditor} disabled={saving}
+                    className="text-xs text-zinc-400 hover:text-zinc-200 px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800 transition disabled:opacity-50">
                     Cancel
                   </button>
                   <button onClick={saveLabels} disabled={saving}
@@ -107,6 +163,9 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
                   </button>
                 </div>
               )}
+            </div>
+            <div id="kvm-label-note" role="status">
+              {labelNote && <p className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">{labelNote}</p>}
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
             <NameSyncNotice notice={nameSync.notice} />
@@ -125,6 +184,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
                         <input
                           value={draftLabels[p.number] ?? ""}
                           onChange={e => setDraftLabels(d => ({ ...d, [p.number]: e.target.value }))}
+                          readOnly={saving}
                           placeholder="Empty"
                           aria-label={`Label for port ${p.number}`}
                           aria-describedby={moveHints[p.number] ? `move-hint-kvm-${p.number}` : undefined}
@@ -163,9 +223,12 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-xs text-amber-200">ⓘ {device.notes}</div>
           )}
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4">
-            <button disabled={!canAdmin} onClick={onDelete} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400">
+            <button disabled={!canAdmin} onClick={onDelete} title={!canAdmin ? ADMIN_REQUIRED : undefined}
+              aria-describedby={canAdmin ? undefined : canOperate ? "kvm-remove-note" : "kvm-readonly-note"}
+              className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent">
               Remove device
             </button>
+            {canOperate && !canAdmin && <p id="kvm-remove-note" className="text-[11px] text-zinc-500 px-3">{ADMIN_REQUIRED}.</p>}
           </div>
         </aside>
       </div>
@@ -173,14 +236,20 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
   );
 }
 
+// No aria-label: the tile's name is its visible text (label, P<n>, IN USE); the title adds the state.
 function PortCard({ port, syncRow, onClick }) {
   const {canOperate} = useAccounts();
   const active = port.status === "active";
+  const inUse = !!port.in_use;
   const occupied = !!port.label && !/^port\s*\d+$/i.test(port.label);
+  const title = !canOperate ? CONSOLE_OPERATOR_REQUIRED
+    : `${port.label || `Port ${port.number}`} · ${inUse ? "In use" : port.status || "Unknown"}`;
   return (
-    <button disabled={!canOperate} onClick={onClick}
-      className={`w-full relative rounded border cursor-pointer overflow-hidden aspect-[4/3] transition
-        ${active
+    <button disabled={!canOperate} onClick={onClick} title={title} data-in-use={inUse}
+      className={`w-full relative rounded border cursor-pointer overflow-hidden aspect-[4/3] transition disabled:cursor-not-allowed
+        ${inUse
+          ? "bg-[#ef9100]/10 border-[#ef9100]/70"
+          : active
           ? "bg-emerald-950/40 border-emerald-500/70 shadow-[0_0_14px_rgba(52,211,153,0.25)]"
           : occupied
             ? "bg-nv-400/5 border-nv-400/40 hover:border-nv-400/70"
@@ -202,11 +271,14 @@ function PortCard({ port, syncRow, onClick }) {
         <span className="font-mono text-zinc-500 text-[11px]">P{port.number}</span>
         <StatusDot status={port.status} />
         <NameSyncBadge row={syncRow} />
-        {active && <span className="ml-auto text-[10px] font-bold text-emerald-400 tracking-wide">ACTIVE</span>}
+        {inUse
+          ? <span className="ml-auto text-[10px] font-bold text-[#ef9100] tracking-wide">IN USE</span>
+          : active && <span className="ml-auto text-[10px] font-bold text-emerald-400 tracking-wide">ACTIVE</span>}
       </div>
 
-      {active   && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />}
-      {occupied && !active && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-nv-400/70" />}
+      {inUse && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[#ef9100] shadow-[0_0_8px_#ef9100]" />}
+      {active && !inUse && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />}
+      {occupied && !active && !inUse && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-nv-400/70" />}
     </button>
   );
 }

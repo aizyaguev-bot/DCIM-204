@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import StatusDot from "../components/StatusDot";
 import DeviceNamesPanel from "../components/DeviceNamesPanel";
 import NameSyncBadge, { NameSyncNotice, useNameSync } from "../components/NameSyncBadge";
@@ -6,9 +6,13 @@ import {useAccounts} from "../accounts";
 import { formatMaintenanceTime } from "../components/MaintenanceColumn";
 import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
 import { labelChanges, labelEditState, labelMoveHints, labelPatchBody } from "../api/locations";
+import { LATEST_NOT_LOADED, latestDevice, rebaseLabelDraft, rebaseNote } from "../api/labelDraft";
 
-const MAINTENANCE_BLOCKED = "PDU is in maintenance mode; restore it from the Maintenance column first";
+const MAINTENANCE_BLOCKED = "PDU is in maintenance mode; use Restore power on this page first";
 const OFFLINE_BLOCKED = "PDU is unreachable; outlet power actions are unavailable";
+// The role reason comes first: a Viewer cannot act whatever the device state.
+const OPERATOR_REQUIRED = "Requires the Operator or Admin role";
+const ADMIN_REQUIRED = "Removing a device requires the Admin role";
 
 export default function PduDetail({ device, status, maintenance, maintenanceMode, onMaintenance, onBack, from, onOutletAction, onTurnOnAll, onDelete, onLabelsSave, devices }) {
   const {canOperate,canAdmin} = useAccounts();
@@ -20,15 +24,23 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
   const nameSync = useNameSync(device?.id, device?.labels_revision);
+  const [labelNote, setLabelNote] = useState("");        // after a 409: what changed elsewhere; the draft is kept
+  const [needsRebase, setNeedsRebase] = useState(false); // a 409 came before the latest labels could be read
+  const editSession = useRef(0);                         // a save answer for a closed or replaced editor is ignored
+  const deviceRef = useRef(device);
+  deviceRef.current = device;
+  useEffect(() => { editSession.current++; setEditMode(false); setLabelNote(""); setSaveError(""); setNeedsRebase(false); }, [device?.id]);
   if (!device) return null;
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;
   const state = deviceState(status);
   const inMaintenance = !!maintenance;
-  const turnOnBlocked = inMaintenance ? MAINTENANCE_BLOCKED : state === "offline" ? OFFLINE_BLOCKED : state !== "online" ? "Outlet states are not available" : undefined;
+  const toTurnOn = outlets.filter(o => o.state !== "on").map(o => o.number);
+  const turnOnBlocked = !canOperate ? OPERATOR_REQUIRED : inMaintenance ? MAINTENANCE_BLOCKED : state === "offline" ? OFFLINE_BLOCKED
+    : state !== "online" || outlets.length === 0 ? "Outlet states are not available" : toTurnOn.length === 0 ? "All outlets are already on" : undefined;
   const maintenanceReady = canOperate && maintenanceMode != null && maintenanceMode !== "unavailable";
   const moveHints = editMode ? labelMoveHints(device, draftLabels, draftOriginal, devices) : {};
-  const maintenanceHint = maintenanceMode === "unavailable" ? "Maintenance actions require a configured password"
+  const maintenanceHint = !canOperate ? OPERATOR_REQUIRED : maintenanceMode === "unavailable" ? "Maintenance actions require a configured password"
     : maintenanceMode == null ? "Maintenance state is not loaded yet" : undefined;
 
   function startEdit() {
@@ -41,21 +53,65 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
     setDraftBase(base);
     setDraftRevision(device.labels_revision);
     setSaveError("");
+    setLabelNote("");
+    setNeedsRebase(false);
+    editSession.current++;
     setEditMode(true);
   }
 
+  function closeEditor() {
+    editSession.current++;
+    setEditMode(false);
+    setSaveError("");
+    setLabelNote("");
+    setNeedsRebase(false);
+  }
+
+  // Labels saved elsewhere meanwhile: keep the typed text, show their other changes, take their revision.
+  function applyRebase(latest, draft, original) {
+    const r = rebaseLabelDraft(draft, original, latest.labels || {}, outlets);
+    setDraftLabels(r.draft);
+    setDraftOriginal(r.original);
+    setDraftBase(r.base);
+    setDraftRevision(latest.labels_revision);
+    setNeedsRebase(false);
+    setLabelNote(rebaseNote(r, "outlet"));
+    return r;
+  }
+
   async function saveLabels() {
-    if (labelChanges(draftLabels, draftOriginal).length === 0) { setEditMode(false); return; }
+    let draft = draftLabels, original = draftOriginal, base = draftBase, revision = draftRevision;
+    if (needsRebase) {
+      const latest = latestDevice(null, deviceRef.current, revision);
+      if (latest) {
+        const r = applyRebase(latest, draft, original);
+        if (r.conflicts.length) return;   // show what was changed elsewhere before replacing it
+        ({ draft, original, base } = r);
+        revision = latest.labels_revision;
+      }
+    }
+    if (labelChanges(draft, original).length === 0) { closeEditor(); return; }
+    const session = editSession.current;
     setSaving(true);
     setSaveError("");
     nameSync.clearNotice();
     try {
-      const saved = await onLabelsSave(labelPatchBody(draftBase, draftLabels, draftOriginal), draftRevision);
-      setEditMode(false);
-      nameSync.afterSave(saved?.device_names, saved?.device_names_reason);
+      const saved = await onLabelsSave(labelPatchBody(base, draft, original), revision);
+      // The name-sync note belongs to this device's save: skip it when the page moved to another device meanwhile.
+      if (session === editSession.current) {
+        closeEditor();
+        nameSync.afterSave(saved?.device_names, saved?.device_names_reason);
+      }
     } catch (e) {
-      setSaveError(errorMessage(e));
-      if (e.status === 409) setEditMode(false);
+      if (session !== editSession.current) return;
+      if (e.status === 409) {
+        // Never saved again on its own: the editor stays open with the draft for the user to review.
+        const latest = latestDevice(e, deviceRef.current, revision);
+        if (latest) applyRebase(latest, draft, original);
+        else { setLabelNote(LATEST_NOT_LOADED); setNeedsRebase(true); }
+      } else {
+        setSaveError(errorMessage(e));
+      }
     } finally {
       setSaving(false);
     }
@@ -96,18 +152,24 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
             </a>
           </div>
           <div className="p-4">
+            {!canOperate && (
+              <p id="pdu-readonly-note" className="text-sm text-amber-300 mb-3">
+                Read only. Outlet power, label editing and maintenance require the Operator or Admin role; removing the device requires the Admin role.
+              </p>
+            )}
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-zinc-500">Outlets</div>
               {!editMode ? (
                 <button disabled={!canOperate || outlets.length === 0} onClick={startEdit}
-                  title={canOperate && outlets.length === 0 ? "Labels can be edited once the outlet list has loaded" : undefined}
+                  title={!canOperate ? OPERATOR_REQUIRED : outlets.length === 0 ? "Labels can be edited once the outlet list has loaded" : undefined}
+                  aria-describedby={!canOperate ? "pdu-readonly-note" : undefined}
                   className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-nv-400 px-2 py-1 rounded hover:bg-zinc-800 transition disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-zinc-400">
                   <PencilIcon /> Edit Labels
                 </button>
               ) : (
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setEditMode(false)}
-                    className="text-xs text-zinc-400 hover:text-zinc-200 px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800 transition">
+                  <button onClick={closeEditor} disabled={saving}
+                    className="text-xs text-zinc-400 hover:text-zinc-200 px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800 transition disabled:opacity-50">
                     Cancel
                   </button>
                   <button onClick={saveLabels} disabled={saving}
@@ -116,6 +178,9 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
                   </button>
                 </div>
               )}
+            </div>
+            <div id="pdu-label-note" role="status">
+              {labelNote && <p className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">{labelNote}</p>}
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
             <NameSyncNotice notice={nameSync.notice} />
@@ -141,6 +206,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
                         <input
                           value={draftLabels[o.number] ?? ""}
                           onChange={e => setDraftLabels(d => ({ ...d, [o.number]: e.target.value }))}
+                          readOnly={saving}
                           placeholder={`Outlet ${o.number}`}
                           aria-label={`Label for outlet ${o.number}`}
                           aria-describedby={moveHints[o.number] ? `move-hint-pdu-${o.number}` : undefined}
@@ -200,19 +266,26 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
           <EnvSensorsPanel status={status} />
           <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4 space-y-1">
             <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">Quick actions</div>
-            <button disabled={!canOperate || !!turnOnBlocked} title={turnOnBlocked}
+            <button disabled={!!turnOnBlocked} title={turnOnBlocked}
+              aria-describedby={!canOperate ? "pdu-readonly-note" : undefined}
               className="w-full text-left text-sm px-3 py-2 rounded hover:bg-zinc-800 text-zinc-200 disabled:opacity-50 disabled:hover:bg-transparent"
-              onClick={() => { if (confirm(`Turn ON all outlets of ${device.name}?`)) onTurnOnAll(outlets.filter(o => o.state !== "on").map(o => o.number)); }}>
+              onClick={() => {
+                if (turnOnBlocked) return;
+                const which = toTurnOn.length === outlets.length ? "all outlets" : `${toTurnOn.length === 1 ? "outlet" : "outlets"} ${toTurnOn.join(", ")}`;
+                if (confirm(`Turn ON ${which} of ${device.name}?`)) onTurnOnAll(toTurnOn);
+              }}>
               ⏻ Turn on all outlets
             </button>
             {inMaintenance ? (
               <button type="button" disabled={!maintenanceReady} title={maintenanceHint}
+                aria-describedby={!canOperate ? "pdu-readonly-note" : undefined}
                 className="w-full text-left text-sm px-3 py-2 rounded hover:bg-nv-400/15 text-nv-300 disabled:opacity-50 disabled:hover:bg-transparent"
                 onClick={() => onMaintenance("restore")}>
                 ⏻ Restore power
               </button>
             ) : (
               <button type="button" disabled={!maintenanceReady} title={maintenanceHint}
+                aria-describedby={!canOperate ? "pdu-readonly-note" : undefined}
                 className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/15 text-rose-300 disabled:opacity-50 disabled:hover:bg-transparent"
                 onClick={() => onMaintenance("shutdown")}>
                 ⏻ Turn off all outlets
@@ -222,9 +295,12 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
               <p className="text-[11px] text-amber-300 px-3">Turning off all outlets requires a configured maintenance password.</p>
             )}
             <div className="border-t border-zinc-800 my-2" />
-            <button disabled={!canAdmin} onClick={onDelete} className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400">
+            <button disabled={!canAdmin} onClick={onDelete} title={!canAdmin ? ADMIN_REQUIRED : undefined}
+              aria-describedby={canAdmin ? undefined : canOperate ? "pdu-remove-note" : "pdu-readonly-note"}
+              className="w-full text-left text-sm px-3 py-2 rounded hover:bg-rose-500/10 text-rose-400 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent">
               Remove device
             </button>
+            {canOperate && !canAdmin && <p id="pdu-remove-note" className="text-[11px] text-zinc-500 px-3">{ADMIN_REQUIRED}.</p>}
           </div>
         </aside>
       </div>
@@ -289,7 +365,7 @@ function PencilIcon() {
 
 function PowerButtons({ outlet, locked, offline, onAction }) {
   const {canOperate} = useAccounts();
-  if (!canOperate) return <span className="text-xs text-zinc-600">Read only</span>;
+  if (!canOperate) return <span className="text-xs text-zinc-600" title={OPERATOR_REQUIRED}>Read only</span>;
   const on = outlet.state === "on";
   const name = outlet.label || `Outlet ${outlet.number}`;
   const blocked = offline ? OFFLINE_BLOCKED : locked ? MAINTENANCE_BLOCKED : undefined;
