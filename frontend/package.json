@@ -13,6 +13,7 @@
     "test:locations": "node --test src/__tests__/locations.test.js",
     "test:connections": "node --test src/__tests__/connections.test.js",
     "test:rack-rows": "node --test src/__tests__/rack-rows.test.js",
+    "test:assistant-key": "node --test src/__tests__/assistant-key.test.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",

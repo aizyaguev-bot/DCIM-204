@@ -6,6 +6,10 @@ Operator tool `propose_action` may also store action proposals; they run only af
 /api/assistant/actions, and the chat response lists them as `action_proposals`. The router decides the answer mode
 (SEC-AI-3 open site, SEC-AI-9 daily cap) before the engine runs. Message text and answers are never logged at INFO,
 error bodies are fixed strings, and no setting other than the model name and the public limits is ever returned.
+
+The Anthropic API key: a key an Admin stores on the site (/api/assistant/key, keystore.py) takes precedence over
+ASSISTANT_ANTHROPIC_API_KEY from .env. Mode, status and the engine all read the effective key through
+keystore.KeyedSettings, so a change applies without a restart (within keystore.KEY_CACHE_SECONDS on other workers).
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ import json
 import logging
 import pathlib
 import re
+import sys
 import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -27,7 +32,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .. import accounts, confirm, inventory_store
 from ..config import get_settings
 from ..database import AsyncSessionLocal
-from . import ratelimit, storage
+from . import keystore, ratelimit, storage
 from .contracts import (ENTITY_KINDS, PRIORITIES, SOURCE_STATUSES, WORK_ITEM_DRAFT_SCHEMA, Source, ToolContext,
                         empty_answer)
 from .principal import client_key, ensure_client, principal_for, user_key
@@ -91,12 +96,14 @@ MSG_RATE = {
 DEMO_REASONS = {
     "assistant_disabled": "סוכן ה-AI כבוי בהגדרות השרת (ASSISTANT_ENABLED=false).",
     "llm_disabled": "מודל השפה כבוי בהגדרות השרת (ASSISTANT_LLM_ENABLED=false).",
-    "no_api_key": "לא הוגדר בשרת מפתח API למודל השפה (ASSISTANT_ANTHROPIC_API_KEY).",
+    "no_api_key": ("לא הוגדר מפתח API למודל השפה: מנהל יכול להזין אותו בעמוד הניהול (Admin → AI assistant) "
+                   "או בהגדרת ASSISTANT_ANTHROPIC_API_KEY בשרת."),
     "sdk_missing": "חבילת anthropic אינה מותקנת בשרת (יש להתקין את backend/requirements.txt).",
     "open_site": ("האתר פתוח ללא חשבונות משתמש וללא סיסמה משותפת, ולכן מודל השפה אינו מופעל "
                   "(ASSISTANT_ALLOW_OPEN_LLM=false)."),
     "daily_limit": "נוצלה המכסה היומית של שאלות למודל השפה (ASSISTANT_DAILY_LIMIT); עד לחידושה התשובות במצב הדגמה.",
-    "llm_auth_failed": "מפתח ה-API של מודל השפה נדחה; יש לבדוק את ASSISTANT_ANTHROPIC_API_KEY.",
+    "llm_auth_failed": ("מפתח ה-API של מודל השפה נדחה; יש לבדוק אותו בעמוד הניהול (Admin → AI assistant) "
+                        "או ב-ASSISTANT_ANTHROPIC_API_KEY."),
     "llm_rate_limited": "שירות מודל השפה הגביל זמנית את קצב הבקשות.",
     "llm_unreachable": "לא ניתן היה להתחבר לשירות מודל השפה (רשת או proxy).",
     "llm_unavailable": "שירות מודל השפה אינו זמין כרגע.",
@@ -141,6 +148,8 @@ def _anthropic_available() -> bool:
 
 
 def _has_key(settings) -> bool:
+    """A key is configured. With keystore.KeyedSettings (every request path) this is the effective key: the
+    site-stored key, else the .env key."""
     key = getattr(settings, "assistant_anthropic_api_key", None)
     if key is None:
         return False
@@ -231,9 +240,13 @@ def _status_sources(settings) -> list[dict]:
     return sources
 
 
-@router.get("/status")
-async def assistant_status():
-    settings = get_settings()
+async def _with_effective_key(settings):
+    """The settings view carrying the effective API key (site key > .env key); see keystore.resolve."""
+    return await keystore.resolve(settings, AsyncSessionLocal)
+
+
+async def _current_mode(settings) -> tuple[str, str | None]:
+    """mode_for plus the daily LLM cap as already used (the status shown to users; nothing is counted)."""
     mode, reason = mode_for(settings)
     if mode == "llm":
         try:
@@ -242,6 +255,13 @@ async def assistant_status():
             used = 0
         if used >= settings.assistant_daily_limit:
             mode, reason = "demo", "daily_limit"
+    return mode, reason
+
+
+@router.get("/status")
+async def assistant_status():
+    settings = await _with_effective_key(get_settings())
+    mode, reason = await _current_mode(settings)
     return {"enabled": bool(getattr(settings, "assistant_enabled", True)), "mode": mode,
             "demo_reason": reason_text(reason) if mode == "demo" else None, "demo_reason_code": reason,
             "model": settings.assistant_model,
@@ -750,7 +770,7 @@ async def _ask(principal, settings, mode: str, reason: str | None, message: str,
 # ---------------------------------------------------------------------------------------------------------------
 @router.post("/chat")
 async def chat(request: Request):
-    settings = _enabled_settings()
+    settings = await _with_effective_key(_enabled_settings())
     principal = principal_for(request, settings)
     _guard_write(request, settings)
     body = await _json_body(request)
@@ -895,3 +915,179 @@ async def update_work_item(item_id: str, request: Request):
     if item is None:
         raise _fail(404, MSG_NO_WORK_ITEM)
     return item
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# The Anthropic API key (Admin page). Admin only (accounts.required_role, repeated here); writes need the Admin's own
+# password (confirm.verify, the maintenance throttle) and the CSRF header (middleware). Bodies are parsed by hand so
+# no validation error can echo the submitted key; every message is a fixed English string.
+# ---------------------------------------------------------------------------------------------------------------
+KEY_MSG_ADMIN = "Only an Admin can manage the assistant API key"
+KEY_MSG_NO_PASSWORD = "Managing the API key requires user accounts or a site password"
+KEY_MSG_CROSS_ORIGIN = "Cross-origin action rejected"
+KEY_MSG_NEED_JSON = "Send the request as JSON"
+KEY_MSG_BAD_BODY = "Invalid request body"
+KEY_MSG_TOO_BIG = "The request is too large"
+KEY_MSG_PASSWORD = "Password is required"
+KEY_MSG_PASSWORD_LONG = "Password is too long"
+KEY_MSG_TEST_FLAG = "test must be true or false"
+KEY_MSG_MASTER = "Set LAB_MANAGER_MASTER_KEY on the VM first; the key would not be protected"
+KEY_MSG_FORMAT = "This does not look like an Anthropic API key (sk-ant-…)"
+KEY_MSG_DB = "The database is busy. Try again in a moment."
+KEY_MSG_SAVE = "The key could not be saved. Try again."
+KEY_REASONS = {   # English mode reasons for the Admin page (the assistant panel keeps the Hebrew DEMO_REASONS)
+    "assistant_disabled": "The assistant is turned off on the server (ASSISTANT_ENABLED=false).",
+    "llm_disabled": "The language model is turned off on the server (ASSISTANT_LLM_ENABLED=false).",
+    "no_api_key": "No API key is set on the site or in the VM .env file.",
+    "sdk_missing": "The anthropic package is not installed on the VM.",
+    "open_site": ("The site has no user accounts and no shared password, so the language model stays off "
+                  "(ASSISTANT_ALLOW_OPEN_LLM=false)."),
+    "daily_limit": "The daily language-model question limit is used up (ASSISTANT_DAILY_LIMIT); demo mode until it resets.",
+}
+
+
+def _key_admin(request: Request, settings):
+    """Admin principal for the key routes (the middleware already enforced the role in accounts mode)."""
+    principal = principal_for(request, settings)
+    if not principal.allows("Admin"):
+        raise _fail(403, KEY_MSG_ADMIN)
+    return principal
+
+
+def _key_guard_write(request: Request, settings):
+    """PUT/DELETE: a configured password, same origin in legacy mode (accounts mode: the middleware checked origin and
+    CSRF) and a JSON body."""
+    if confirm.password_mode(settings) == "unavailable":
+        raise _fail(403, KEY_MSG_NO_PASSWORD)
+    if not getattr(settings, "accounts_enabled", False) and not accounts.same_origin(request):
+        raise _fail(403, KEY_MSG_CROSS_ORIGIN)
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if content_type != "application/json":
+        raise _fail(415, KEY_MSG_NEED_JSON)
+
+
+async def _key_body(request: Request) -> tuple[dict, str]:
+    """(body, password); the body is never echoed in an error."""
+    try:
+        raw = await _read_bounded(request)
+    except HTTPException as exc:
+        raise _fail(exc.status_code, KEY_MSG_TOO_BIG if exc.status_code == 413 else KEY_MSG_BAD_BODY) from None
+    try:
+        body = json.loads(raw)
+    except ValueError:   # includes UnicodeDecodeError
+        raise _fail(400, KEY_MSG_BAD_BODY) from None
+    if not isinstance(body, dict):
+        raise _fail(400, KEY_MSG_BAD_BODY)
+    password = body.get("password")
+    if not isinstance(password, str) or not password:
+        raise _fail(400, KEY_MSG_PASSWORD)
+    if len(password) > confirm.MAX_PASSWORD:
+        raise _fail(400, KEY_MSG_PASSWORD_LONG)
+    return body, password
+
+
+@asynccontextmanager
+async def _key_session():
+    try:
+        async with AsyncSessionLocal() as db:
+            yield db
+    except SQLAlchemyError:
+        log.warning("assistant key: database temporarily unavailable")
+        raise _fail(503, KEY_MSG_DB) from None
+
+
+def _audit_name(name) -> str:
+    return re.sub(r"[^A-Za-z0-9._@-]", "?", str(name))[:64] or "?"
+
+
+def _audit(action: str, by: str):
+    print(f"assistant key {action} by {_audit_name(by)}", file=sys.stderr, flush=True)
+
+
+async def _confirm_password(request: Request, password: str, settings) -> str:
+    """The Admin's own password (the shared password in legacy mode) under the maintenance throttle; the audit name."""
+    async def denied(by):
+        log.warning("assistant key: password confirmation failed for %s", _audit_name(by))
+
+    async with _key_session() as db:
+        return await confirm.verify(request, db, password, settings, confirm.confirm_lock, on_denied=denied)
+
+
+async def _key_state(settings) -> dict:
+    effective = await _with_effective_key(settings)
+    async with _key_session() as db:
+        stored = await keystore.info(db)
+    source = effective.assistant_key_source
+    mode, reason = await _current_mode(effective)
+    state = {"source": source, "hint": None, "set_by": None, "set_at": None,
+             "master_key_configured": keystore.master_key_configured(settings), "mode": mode,
+             "reason": KEY_REASONS.get(reason, "The language model is not available.") if mode == "demo" else None,
+             "reason_code": reason if mode == "demo" else None,
+             "stored_key_unreadable": bool(stored and not stored["readable"])}
+    if source == "site" and stored:
+        state.update(hint=stored["hint"], set_by=stored["set_by"], set_at=stored["set_at"])
+    elif source == "env":
+        state["hint"] = keystore.hint(keystore.env_key(settings))
+    return state
+
+
+@router.get("/key")
+async def get_key(request: Request):
+    """{source: site|env|none, hint, set_by, set_at, master_key_configured, mode, reason, reason_code,
+    stored_key_unreadable}. Never the key: `hint` is "…" + its last 4 characters."""
+    settings = get_settings()
+    _key_admin(request, settings)
+    return await _key_state(settings)
+
+
+@router.put("/key")
+async def put_key(request: Request):
+    """Body {key, password, test=true}. Checks: master key set (409), key format (422), password (403/429), then
+    optionally one test call (422 with a fixed reason; nothing is stored). Stores crypto.encrypt(key)."""
+    settings = get_settings()
+    _key_admin(request, settings)
+    _key_guard_write(request, settings)
+    body, password = await _key_body(request)
+    test = body.get("test", True)
+    if not isinstance(test, bool):
+        raise _fail(400, KEY_MSG_TEST_FLAG)
+    if not keystore.master_key_configured(settings):
+        raise _fail(409, KEY_MSG_MASTER)
+    key = body.get("key")
+    if not keystore.validate_format(key):
+        raise _fail(422, KEY_MSG_FORMAT)
+    key = key.strip()
+    by = await _confirm_password(request, password, settings)
+    result = None
+    if test:
+        ok, reason = await keystore.test_key(key, settings)
+        result = {"ok": bool(ok), "reason": reason}
+        if not ok:
+            raise _fail(422, reason)
+    try:
+        async with _key_session() as db:
+            stored = await keystore.store(db, key, by)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - never echo internals
+        log.warning("assistant key: the key could not be stored (%s)", type(exc).__name__)
+        raise _fail(503, KEY_MSG_SAVE) from None
+    _audit("set", by)
+    return {"ok": True, "source": "site", "hint": stored["hint"], "test": result}
+
+
+@router.delete("/key")
+async def delete_key(request: Request):
+    """Body {password}. Removes the site key; the .env key (if any) applies again."""
+    settings = get_settings()
+    _key_admin(request, settings)
+    _key_guard_write(request, settings)
+    _, password = await _key_body(request)
+    by = await _confirm_password(request, password, settings)
+    async with _key_session() as db:
+        removed = await keystore.remove(db)
+    if removed:
+        _audit("removed", by)
+    state = await _key_state(settings)
+    return {"ok": True, "removed": removed, "source": state["source"], "hint": state["hint"],
+            "mode": state["mode"], "reason": state["reason"]}

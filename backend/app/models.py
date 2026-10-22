@@ -293,3 +293,15 @@ class PxeJobEvent(Base):
     action: Mapped[str] = mapped_column(String)
     detail: Mapped[str] = mapped_column(String, default="")
     screenshot_ref: Mapped[str] = mapped_column(String, default="")
+
+
+class AssistantSetting(Base):
+    """Assistant secrets set from the Admin page (assistant/keystore.py). `value_enc` is Fernet ciphertext under
+    LAB_MANAGER_MASTER_KEY and is never returned; `hint` is "…" plus the last 4 characters."""
+    __tablename__ = "assistant_settings"
+    name: Mapped[str] = mapped_column(String, primary_key=True)   # "anthropic_api_key"
+    value_enc: Mapped[str] = mapped_column(String)
+    hint: Mapped[str] = mapped_column(String, default="")
+    set_by: Mapped[str] = mapped_column(String, default="")
+    set_at: Mapped[str] = mapped_column(String, default="")       # UTC ISO 8601
+    revision: Mapped[int] = mapped_column(Integer, default=1)
