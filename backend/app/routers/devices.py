@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import asyncio, uuid, json, logging, pathlib
 
-from .. import inventory_store
+from .. import inventory_store, name_sync
 from ..database import get_db
 from ..models import Device, PduMaintenance
 from ..pdu_locks import maintenance_lock
@@ -212,7 +212,10 @@ async def update_labels(
     # A move goes through /move-server and a deliberate global rename through /rename-opt.
     dev.labels_json = json.dumps(new_labels)
     await db.commit()
-    return {"ok": True, "synced": [], "labels_revision": inventory_store.revision(new_labels)}
+    # Only now, with the save committed: the ports whose saved label changed go to the PDU/KVM itself.
+    changed = {p for p in set(old_labels) | set(new_labels) if old_labels.get(p) != new_labels.get(p)}
+    names = await name_sync.queue({device_id: changed})
+    return {"ok": True, "synced": [], "labels_revision": inventory_store.revision(new_labels), **names}
 
 
 @router.get("/sync-map")
@@ -297,6 +300,7 @@ async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db), _writ
     labels = json.loads(dev.labels_json) if dev.labels_json else {}
     if expected is not None and expected.strip() not in _shown_labels(dev, labels, port):
         raise HTTPException(409, "This port changed in another session. Reload and try again.")
+    before = labels.get(port)
     if label:
         labels[port] = label
     else:
@@ -305,7 +309,8 @@ async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db), _writ
         _clear_port(labels, dev, port)
     dev.labels_json = json.dumps(labels)
     await db.commit()
-    return {"ok": True}
+    names = await name_sync.queue({device_id: {port}} if labels.get(port) != before else {})
+    return {"ok": True, **names}
 
 
 @router.post("/rename-opt", status_code=200)
@@ -321,20 +326,26 @@ async def rename_opt(body: dict, db: AsyncSession = Depends(get_db), _writer: No
     await _rename_monitor_and_owner(db, old_name, new_name)
 
     result = await db.execute(select(Device))
-    updated = []
+    updated, changed = [], {}
     for dev in result.scalars().all():
         labels = json.loads(dev.labels_json) if dev.labels_json else {}
         new_labels = {p: (new_name if v.lower() == old_name.lower() else v) for p, v in labels.items()}
         if new_labels != labels:
             dev.labels_json = json.dumps(new_labels)
             updated.append(dev.name)
+            changed[dev.id] = {p for p in labels if new_labels[p] != labels[p]}
 
     id_renames = {old_name.lower(): new_name.lower()}
     for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json", "rack_overrides.json"):
         _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames)
 
     await db.commit()
-    return {"ok": True, "updated_devices": updated}
+    # A default port name ("Outlet 5") renamed everywhere is not a server rename: it is never pushed automatically.
+    if _identity(old_name) and _identity(new_name):
+        names = await name_sync.queue(changed)
+    else:
+        names = name_sync.not_queued(name_sync.PLACEHOLDER_RENAME)
+    return {"ok": True, "updated_devices": updated, **names}
 
 
 # ── Server locations: which PDU outlets / KVM ports / rack slot each server occupies, with an explicit move ──
@@ -885,9 +896,12 @@ async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: N
         raise HTTPException(409, "Changed since the preview. Preview again.")
 
     # 1. The port labels. Nothing else has been written yet, so a failed commit needs only a rollback.
+    changed = {}
     for dev in devices:
         if new_labels[dev.id] != labels[dev.id]:
-            dev.labels_json = json.dumps(_saved_after(saved[dev.id], labels[dev.id], new_labels[dev.id]))
+            written = _saved_after(saved[dev.id], labels[dev.id], new_labels[dev.id])
+            dev.labels_json = json.dumps(written)
+            changed[dev.id] = {p for p in set(saved[dev.id]) | set(written) if saved[dev.id].get(p) != written.get(p)}
     error, cancelled = await _finish_commit(db)
     if error is not None:
         log.error("Server move was not saved (%s); no layout file was written", type(error).__name__)
@@ -924,6 +938,8 @@ async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: N
         if refused:
             raise failure  # 409 layout changed, or 503 unreadable layout file: nothing was written
         raise HTTPException(503, _MOVE_FAILED) from None
+    # Labels and layout files are both saved (also when only the caller went away): now the device names follow.
+    result.update(await name_sync.queue(changed))
     if cancelled:
         raise asyncio.CancelledError()  # saved; only the caller went away
     return result

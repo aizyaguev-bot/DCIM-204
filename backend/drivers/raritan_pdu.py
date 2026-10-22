@@ -14,7 +14,10 @@ Discovered API (reverse-engineered from Angular bundle):
 """
 
 import asyncio
+import copy
+import json
 import math
+import re
 import httpx
 from typing import Any
 
@@ -23,6 +26,30 @@ from .raritan_kvm import classify_error
 TIMEOUT = 6.0
 PDU_PATH = "/model/pdu/1"
 MAX_CONCURRENT = 6  # max simultaneous connections to one PDU
+# PX-Series/Xerus 4.0.20 User Guide, p. 170: outlet names allow 64 characters.
+# https://cdn1.raritan.com/download/pdu-g2/4.0.20/PDU_G2_UG_A2_4.0.20.pdf
+NAME_MAX = 64
+_RID = re.compile(r"/[A-Za-z0-9._:/-]+")
+# This is the Outlet API major discovered on the supported Xerus devices above.
+# Unknown API majors need review before their settings may be replayed.
+_OUTLET_TYPE = re.compile(r"pdumodel\.Outlet:3(?:\.[0-9]+){0,2}")
+_NAME_UNSUPPORTED = "Outlet names cannot be written to this PDU yet"
+_INVALID_RID = "Device API returned an invalid resource identifier"
+_INVALID_NAME = "Name has characters the device cannot store"
+_UNSUPPORTED_SETTINGS = "Unsupported outlet settings format"
+_OTHER_SETTINGS_CHANGED = "Other outlet settings changed during the write - check the PDU"
+_FORBIDDEN_NAME_CHARS = frozenset("'\"\\<>&`")
+# Required JSON types for the identified Outlet API major 3; unknown fields stay
+# intact. StartupState is an IDL enum represented as a JSON integer.
+# https://help.servertech.com/json-rpc/4.0.20/Outlet_8idl_source.html
+_OUTLET_SETTINGS_TYPES = {
+    "name": str,
+    "startupState": int,
+    "usePduCycleDelay": bool,
+    "cycleDelay": int,
+    "nonCritical": bool,
+    "sequenceDelay": int,
+}
 
 
 class RaritanPduError(Exception):
@@ -63,6 +90,8 @@ class RaritanPduDriver:
 
     async def _rpc(self, rid_path: str, method: str, params: Any = None) -> Any:
         """POST a JSON-RPC 2.0 call to the given path, return result._ret_ or raise."""
+        if not isinstance(rid_path, str) or _RID.fullmatch(rid_path) is None:
+            raise RaritanPduError(_INVALID_RID)
         client = await self._client_ctx()
         payload = {
             "jsonrpc": "2.0",
@@ -74,7 +103,9 @@ class RaritanPduDriver:
         # messages and httpx exception text may carry URLs or credentials.
         try:
             async with self._sem:
-                resp = await client.post(f"{self.base_url}{rid_path}", json=payload)
+                # A redirect must never replay a settings write at another path.
+                options = {"follow_redirects": False} if method == "setSettings" else {}
+                resp = await client.post(f"{self.base_url}{rid_path}", json=payload, **options)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise RaritanPduError(f"Device API responded with HTTP {e.response.status_code}") from None
@@ -130,6 +161,105 @@ class RaritanPduDriver:
         rids = await self._get_outlet_rids()
         tasks = [self._get_one_outlet(idx, rid) for idx, rid in enumerate(rids)]
         return await asyncio.gather(*tasks)
+
+    async def _get_outlet_settings(self, rid: str, *, validate: bool = True) -> dict:
+        settings = await self._rpc(rid, "getSettings")
+        if not isinstance(settings, dict) or (validate and any(
+            type(settings.get(key)) is not expected for key, expected in _OUTLET_SETTINGS_TYPES.items()
+        )):
+            # An unrecognised response must never become a guessed settings write.
+            raise RaritanPduError(_UNSUPPORTED_SETTINGS)
+        return settings
+
+    async def _get_name_outlet_rids(self) -> list[str]:
+        """Fresh discovery for names; legacy status caches cannot authorize writes."""
+        outlets = await self._rpc(PDU_PATH, "getOutlets")
+        if not isinstance(outlets, list) or not outlets:
+            raise RaritanPduError(_NAME_UNSUPPORTED)
+        rids = []
+        for outlet in outlets:
+            if not isinstance(outlet, dict):
+                raise RaritanPduError(_NAME_UNSUPPORTED)
+            rid = outlet.get("rid")
+            if not isinstance(rid, str) or _RID.fullmatch(rid) is None:
+                raise RaritanPduError(_INVALID_RID)
+            outlet_type = outlet.get("type")
+            if not isinstance(outlet_type, str) or _OUTLET_TYPE.fullmatch(outlet_type) is None:
+                raise RaritanPduError(_NAME_UNSUPPORTED)
+            rids.append(rid)
+        if len(set(rids)) != len(rids):
+            raise RaritanPduError(_NAME_UNSUPPORTED)
+        return rids
+
+    async def name_support(self) -> tuple[bool, str]:
+        """Require known Outlet types, safe RIDs and complete, typed settings."""
+        try:
+            rids = await self._get_name_outlet_rids()
+            for rid in rids:
+                await self._get_outlet_settings(rid)
+        except RaritanPduError as exc:
+            if str(exc) in (_NAME_UNSUPPORTED, _INVALID_RID, _UNSUPPORTED_SETTINGS):
+                return False, str(exc)
+            raise
+        return True, ""
+
+    async def get_outlet_names(self) -> dict[int, str]:
+        """Read raw names only; an empty name means the device's default label."""
+        rids = await self._get_name_outlet_rids()
+        settings = await asyncio.gather(*(self._get_outlet_settings(rid) for rid in rids))
+        return {number: value["name"] for number, value in enumerate(settings, 1)}
+
+    async def set_outlet_name(self, outlet_number: int, name: str) -> str:
+        """Change only the name in the current settings, then return its read-back.
+
+        Xerus Outlet.setSettings takes the complete Settings struct and returns
+        an integer status (0 = success, 1 = invalid parameters).
+
+        Read twice and refuse any observed change before writing from the second
+        snapshot. Xerus has no compare-and-set: a residual millisecond-scale
+        window (longer if requests are delayed) remains between the second read
+        and the write. A concurrent change in that window can be overwritten
+        without detection by the read-back; this guard does not provide atomicity.
+        """
+        if type(outlet_number) is not int or outlet_number < 1:
+            raise RaritanPduError("Outlet number is out of range")
+        if not isinstance(name, str) or any(not 0x20 <= ord(char) <= 0x7E for char in name):
+            # Check before stripping so a control-only input cannot clear a name.
+            raise RaritanPduError(_INVALID_NAME)
+        name = name.strip()
+        if len(name) > NAME_MAX or any(char in _FORBIDDEN_NAME_CHARS for char in name):
+            raise RaritanPduError(_INVALID_NAME)
+
+        rids = await self._get_name_outlet_rids()
+        if outlet_number > len(rids):
+            raise RaritanPduError(f"Outlet {outlet_number} out of range (max {len(rids)})")
+        rid = rids[outlet_number - 1]
+        settings = await self._get_outlet_settings(rid)
+        if settings["name"] == name:
+            return name
+        first = json.dumps(settings, sort_keys=True)
+        settings = await self._get_outlet_settings(rid, validate=False)
+        if json.dumps(settings, sort_keys=True) != first:
+            raise RaritanPduError(_OTHER_SETTINGS_CHANGED)
+        # Preserve a value/type-sensitive snapshot, including nested and unknown
+        # fields, from the second read. Equality with the validated first snapshot
+        # also establishes the second snapshot's format. No settings are cached
+        # or reused for another port.
+        before = json.dumps({key: value for key, value in settings.items() if key != "name"}, sort_keys=True)
+        updated = copy.deepcopy(settings)
+        updated["name"] = name
+        result = await self._rpc(rid, "setSettings", {"settings": updated})
+        if type(result) is not int:
+            raise RaritanPduError("Device API returned an invalid name-write result")
+        if result != 0:
+            raise RaritanPduError(f"Device refused the name (code {result})")
+        stored = await self._get_outlet_settings(rid, validate=False)
+        after = json.dumps({key: value for key, value in stored.items() if key != "name"}, sort_keys=True)
+        if after != before:
+            raise RaritanPduError(_OTHER_SETTINGS_CHANGED)
+        if not isinstance(stored.get("name"), str):
+            raise RaritanPduError(_UNSUPPORTED_SETTINGS)
+        return stored["name"]
 
     async def _get_one_outlet(self, idx: int, rid: str) -> dict:
         outlet_num = idx + 1

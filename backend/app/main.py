@@ -12,14 +12,14 @@ import pathlib
 
 from .database import init_db, AsyncSessionLocal, get_db
 from .models import Device
-from .routers import devices, pdus, pdu_maintenance, kvms, kvm_proxy, inventory, monitoring, pxe, mapping_export
+from .routers import devices, device_names, pdus, pdu_maintenance, kvms, kvm_proxy, inventory, monitoring, pxe, mapping_export
 from .ping_monitor import monitor_loop
 from .alerts import alert_loop
 from .accounts import AccountAccess, bootstrap_admin, router as accounts_router
 from .assistant.router import router as assistant_router
 from .assistant.actions import runner as action_runner
 from .assistant.actions.router import router as assistant_actions_router
-from . import confirm, inventory_store
+from . import confirm, inventory_store, name_sync
 from .config import get_settings
 from sqlalchemy import select
 
@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
         await action_runner.recover_interrupted(AsyncSessionLocal)
     except Exception as exc:  # noqa: BLE001
         print(f"assistant actions: interrupted-job recovery skipped ({type(exc).__name__})", file=sys.stderr)
+    await name_sync.start()
     warmup = asyncio.create_task(_warm_cache())
     monitor = asyncio.create_task(monitor_loop())
     alerts = asyncio.create_task(alert_loop())
@@ -73,6 +74,7 @@ async def lifespan(app: FastAPI):
         monitor.cancel()
         alerts.cancel()
         await asyncio.gather(warmup, monitor, alerts, return_exceptions=True)
+        await name_sync.stop()
         if pxe._runner is not None:
             await pxe._runner.aclose()  # stops PXE job loops and closes their consoles
 
@@ -151,6 +153,8 @@ app.add_middleware(
 )
 app.add_middleware(AccountAccess)
 
+# Before devices: its /name-sync/... and /{id}/device-names paths must never be read as a device id.
+app.include_router(device_names.router)
 app.include_router(devices.router)
 app.include_router(mapping_export.router)
 app.include_router(pdus.router)

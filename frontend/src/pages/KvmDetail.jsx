@@ -1,5 +1,7 @@
 import { Fragment, useState } from "react";
 import StatusDot from "../components/StatusDot";
+import DeviceNamesPanel from "../components/DeviceNamesPanel";
+import NameSyncBadge, { NameSyncNotice, useNameSync } from "../components/NameSyncBadge";
 import {useAccounts} from "../accounts";
 import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
 import { labelChanges, labelEditState, labelMoveHints, labelPatchBody } from "../api/locations";
@@ -13,6 +15,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
   const [draftBase, setDraftBase] = useState({});   // saved labels when editing started
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
+  const nameSync = useNameSync(device?.id, device?.labels_revision);
   if (!device) return null;
   const ports = status?.ports || [];
   const active = ports.filter(p => p.status === "active").length;
@@ -38,9 +41,11 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
     if (labelChanges(draftLabels, draftOriginal).length === 0) { setEditMode(false); return; }
     setSaving(true);
     setSaveError("");
+    nameSync.clearNotice();
     try {
-      await onLabelsSave(labelPatchBody(draftBase, draftLabels, draftOriginal), draftRevision);
+      const saved = await onLabelsSave(labelPatchBody(draftBase, draftLabels, draftOriginal), draftRevision);
       setEditMode(false);
+      nameSync.afterSave(saved?.device_names, saved?.device_names_reason);
     } catch (e) {
       setSaveError(errorMessage(e));
       if (e.status === 409) setEditMode(false);
@@ -104,6 +109,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
               )}
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
+            <NameSyncNotice notice={nameSync.notice} />
             {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these port labels on {device.name}. To move a server with its PDU outlets, KVM port and rack position, use Admin → Locations → Move.</p>}
             {ports.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
@@ -115,7 +121,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
                   <div key={p.number} className="space-y-1">
                     {editMode ? (
                       <div className="rounded border border-nv-400/40 bg-nv-400/5 p-3 flex flex-col gap-2">
-                        <span className="text-xs font-mono text-zinc-500">Port {p.number}</span>
+                        <span className="flex items-center gap-1 text-xs font-mono text-zinc-500">Port {p.number}<NameSyncBadge row={nameSync.ports[String(p.number)]} /></span>
                         <input
                           value={draftLabels[p.number] ?? ""}
                           onChange={e => setDraftLabels(d => ({ ...d, [p.number]: e.target.value }))}
@@ -131,13 +137,14 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
                         )}
                       </div>
                     ) : (
-                      <PortCard port={p} onClick={() => onPortClick(p)} />
+                      <PortCard port={p} syncRow={nameSync.ports[String(p.number)]} onClick={() => onPortClick(p)} />
                     )}
                   </div>
                 ))}
               </div>
             )}
           </div>
+          <DeviceNamesPanel key={device.id} device={device} kind="kvm" sync={nameSync} />
         </section>
 
         <aside className="space-y-4">
@@ -166,7 +173,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
   );
 }
 
-function PortCard({ port, onClick }) {
+function PortCard({ port, syncRow, onClick }) {
   const {canOperate} = useAccounts();
   const active = port.status === "active";
   const occupied = !!port.label && !/^port\s*\d+$/i.test(port.label);
@@ -194,6 +201,7 @@ function PortCard({ port, onClick }) {
       <div className="absolute inset-x-0 bottom-0 px-2 py-1.5 bg-gradient-to-t from-black to-transparent flex items-center gap-1.5">
         <span className="font-mono text-zinc-500 text-[11px]">P{port.number}</span>
         <StatusDot status={port.status} />
+        <NameSyncBadge row={syncRow} />
         {active && <span className="ml-auto text-[10px] font-bold text-emerald-400 tracking-wide">ACTIVE</span>}
       </div>
 

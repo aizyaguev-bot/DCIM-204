@@ -97,7 +97,8 @@ async def test_label_edit_changes_only_that_device_not_monitors_owners_or_layout
     r = await lab.client.patch("/api/devices/pdu-a/labels", json={**LABELS["pdu-a"], "1": "optn45"},
                                headers={"If-Match": revision})
     assert r.status_code == 200, r.text
-    assert r.json() == {"ok": True, "synced": [], "labels_revision": inventory_store.revision({**LABELS["pdu-a"], "1": "optn45"})}
+    assert r.json() == {"ok": True, "synced": [], "labels_revision": inventory_store.revision({**LABELS["pdu-a"], "1": "optn45"}),
+                        "device_names": "off"}
     labels = await saved_labels(lab.db)
     assert labels["pdu-a"] == {**LABELS["pdu-a"], "1": "optn45"}
     assert labels["pdu-b"] == LABELS["pdu-b"] and labels["kvm-a"] == LABELS["kvm-a"]
@@ -334,7 +335,7 @@ async def test_dry_run_returns_the_same_answer_and_writes_nothing(lab):
         assert snapshot(lab.folder, locks=True) == files  # not even a lock file
         assert await monitors_and_owners(lab.db) == people
     applied = await move(lab, **body)
-    assert {**preview.json(), "dry_run": False} == applied.json()
+    assert {**preview.json(), "dry_run": False, "device_names": "off"} == applied.json()
 
 
 @pytest.mark.parametrize("body,status", [

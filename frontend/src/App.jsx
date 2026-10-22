@@ -246,15 +246,18 @@ export default function App() {
   }
 
   // Errors are rethrown for the caller to show; a 409 (labels changed elsewhere) reloads first.
+  // The response is returned so pages can show whether the names were sent to the device (device_names).
   async function saveLabels(id, labels, revision) {
+    let saved;
     try {
-      await api.updateLabels(id, labels, revision);
+      saved = await api.updateLabels(id, labels, revision);
     } catch (e) {
       if (e.status === 409) { await loadDevices(); await refreshAllStatuses(); }
       throw e;
     }
     await loadDevices();
     await refreshAllStatuses();
+    return saved;
   }
 
   async function handleMarkKvmFree(id) {
