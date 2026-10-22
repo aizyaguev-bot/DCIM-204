@@ -2,6 +2,38 @@
 
 ---
 
+## v2.41.2 — 2026-10-22 — 41 more fixes from the full site check
+
+### Fixed
+- **Devices:** two PDUs or KVMs can no longer share one address, and a device needs
+  a name. The device list reloads on its own, and the Alerts count includes offline
+  KVMs.
+- **Locations:** moves and swaps no longer renumber other servers in the rack, the
+  preview shows the U, and "Clear location" names the rack and U that are kept.
+- **PDU–KVM mapping:** asks before taking a KVM port another server uses, refuses a
+  save based on stale data, keeps links visible when a KVM is unavailable, shows
+  partial saves honestly, and fits a phone screen.
+- **Scan:** scans in quick succession are queued instead of lost or cut, a failed
+  scan is cleared, and a Viewer is never asked to act.
+- **KVM consoles:** each console holds its own lease end to end (pages, 3D Twin and
+  assistant), "Mark KVM free" lists the in-use ports and asks first, and the phone's
+  Back button behaves.
+- **Accounts:** role and status changes ask for confirmation, open tabs stay in step
+  after a sign-in change, an ended session is explained without losing your input,
+  and successful sign-ins no longer count against the sign-in limit.
+- **Ping Monitor:** the side panel stays on screen, keyboard focus is visible, a
+  concurrent edit no longer discards your draft, and renaming an engineer no longer
+  reactivates a deactivated one.
+- **Equipment:** U slots must be whole numbers 0–42, and a whole-list save keeps
+  linked barcodes.
+- **Maintenance:** the shutdown dialog warns about outlets in an unknown or cycling
+  state.
+- **Remote install:** the run limit is enforced before a draft is created, and a
+  failed simulated job offers no console takeover.
+- **Connections export:** shows KVM ports right after a restart.
+
+---
+
 ## v2.41.1 — 2026-10-22 — 26 fixes from the full site check
 
 ### Fixed
