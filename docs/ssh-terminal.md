@@ -52,7 +52,7 @@ The private key is not encrypted on disk. Three safeguards protect it:
 
 ## 4. Approve servers, then install the public key on each server
 
-1. **Admin → SSH → Configuration.** Set the default remote user and any per-server users (POSIX names: lowercase letters,
+1. **Admin → SSH → Servers.** Set the default remote user and any per-server users (POSIX names: lowercase letters,
    digits, `_` and `-`, at most 32). Approve each server that may be reached. An approval is accepted only when:
    - the host matches the server's saved host;
    - it resolves to an address that is not loopback, link-local, multicast or one of the VM's own addresses.
@@ -100,7 +100,7 @@ The pin stays **unconfirmed** until an Admin checks it:
 
    If the site pinned a different algorithm, use `ssh_host_ecdsa_key.pub` or `ssh_host_rsa_key.pub` instead.
 2. Compare the `SHA256:` value with the fingerprint shown in Admin → SSH.
-3. If they match, press **Accept fingerprint** and confirm with your password. The pin becomes confirmed.
+3. If they match, press **Confirm key…** and confirm with your password. The pin becomes confirmed.
 4. If they differ, do not use the terminal for that server. Another machine answered at that name or address: a DNS or
    IP mistake, or someone in the middle. Fix the server's saved host first.
 
@@ -119,7 +119,7 @@ regenerated. If neither happened, treat it as a possible interception and do not
 There is no blind "forget" button. To move to the new key, an Admin:
 
 1. Checks the new fingerprint on the server's KVM console, as in section 5.
-2. Presses **Accept fingerprint** for the offered value in Admin → SSH and confirms with their password.
+2. Presses **Accept new key…** for the offered value in Admin → SSH and confirms with their password.
 
 The replacement succeeds only if both fingerprints still match what the Admin saw: the old pin, and the offered value the
 site recorded. If anything changed in between, the request is refused and the page must be reloaded. The new pin is
@@ -138,7 +138,7 @@ chmod 600 ~/.ssh/authorized_keys
 grep -c 'dcim-204-' ~/.ssh/authorized_keys   # 0 when no DCIM-204 key is left
 ```
 
-**Replace the key on the site.** Use **Admin → SSH → Rotate key**:
+**Replace the key on the site.** Use **Admin → SSH → Replace key…**:
 
 - It asks for your password, and it applies only to the fingerprint you are looking at.
 - Tick "end sessions" to close open terminals at the same time.
@@ -146,7 +146,7 @@ grep -c 'dcim-204-' ~/.ssh/authorized_keys   # 0 when no DCIM-204 key is left
 - Install the new key (section 4) on every server that should stay reachable, and run the revoke command for the old key on
   each of them.
 
-**Stop everything at once.** **Admin → SSH → End all sessions** closes every open terminal. To switch the feature off, set
+**Stop everything at once.** **Admin → SSH → End N open sessions…** closes every open terminal. To switch the feature off, set
 `SSH_TERMINAL_ENABLED=false` in `.env` and run `backend/.venv/bin/python scripts/lab-service.py restart`.
 
 ## 8. Limits and logging
