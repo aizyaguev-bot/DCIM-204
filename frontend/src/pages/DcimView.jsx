@@ -7,8 +7,23 @@ import { splitSections, sectionHeading, versionOf } from "../api/changelog";
 import { SectionBody, plain } from "../components/WhatsNew";
 import {useAccounts, accountRequest} from "../accounts";
 import {OwnerSelect, useEngineers} from "../engineers";
+import { serverIdentity } from "../api/locations";
 
 const EditContext = createContext(false);
+// Server actions in the rack views: the KVM port of each server (by server identity) and the console opener.
+const ServerActionsContext = createContext({ kvmFor: () => null, openConsole: null, canOperate: false });
+
+// Small KVM button for a server row: opens that server's KVM console (Operator and up).
+function KvmButton({ server, compact = false }) {
+  const { kvmFor, openConsole, canOperate } = useContext(ServerActionsContext);
+  const target = kvmFor(server.name);
+  if (!target || !openConsole || !canOperate) return null;
+  return <button type="button" className={compact ? "kvm-open kvm-open-compact" : "kvm-open"}
+    title={`Open the KVM console of ${server.name} (${target.kvmName}, port ${target.port})`}
+    aria-label={`Open KVM console of ${server.name}`}
+    onClick={e => { e.stopPropagation(); openConsole(target.kvmId, target.port); }}
+    onKeyDown={e => e.stopPropagation()}>KVM</button>;
+}
 
 function Portal({ children }) {
   return createPortal(children, document.body);
@@ -219,6 +234,7 @@ function ServerCell({ server, sw, owner, onSelect, onRename }) {
         {sw?.switch && !owner && <span className="truncate" title={sw.switch}>{sw.switch}</span>}
       </div>
     </div>
+    <KvmButton server={server} compact/>
     <span className="server-state">{isOn ? "ON" : server.state === "off" ? "OFF" : "?"}</span>
   </div>;
 }
@@ -927,7 +943,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="border-b border-zinc-800/70 bg-zinc-900/40">
-                  <tr><Th label="U"/><Th label="Name"/><Th label="Type"/><Th label="State"/><Th label="W" right/><Th label="Outlet" right/><Th label="Switch"/></tr>
+                  <tr><Th label="U"/><Th label="Name"/><Th label="Type"/><Th label="State"/><Th label="W" right/><Th label="Outlet" right/><Th label="Switch"/><Th label="KVM"/></tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/30">
                   {/* PDU servers */}
@@ -949,6 +965,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                         <td className="px-3 py-2 text-xs font-mono text-right">{s.watts!=null?<span className={isOn?"text-nv-400":"text-zinc-600"}>{s.watts.toFixed(0)}</span>:<span className="text-zinc-800">—</span>}</td>
                         <td className="px-3 py-2 font-mono text-xs text-zinc-600 text-right">{s.outlet!=null?`#${s.outlet}`:<span className="text-zinc-800">—</span>}</td>
                         <td className="px-3 py-2 text-xs">{sw?.switch?<Pill color="cyan" sm>{sw.switch}{sw.port?`·${sw.port}`:""}</Pill>:<span className="text-zinc-800">—</span>}</td>
+                        <td className="px-3 py-2 text-xs"><KvmButton server={s}/></td>
                       </tr>
                     );
                   })}
@@ -965,6 +982,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                         <td className="px-3 py-2 text-xs text-zinc-800 text-right">—</td>
                         <td className="px-3 py-2 text-xs text-zinc-800 text-right">—</td>
                         <td className="px-3 py-2 text-xs text-zinc-700">{item.notes||"—"}</td>
+                        <td className="px-3 py-2 text-xs text-zinc-800">—</td>
                       </tr>
                     );
                   })}
@@ -1696,7 +1714,8 @@ function ReadOnlyAsset({ item, owner, onClose }) {
 }
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, section: controlledSection, editMode = false, onSummary}) {
+export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, onOpenConsole, section: controlledSection, editMode = false, onSummary}) {
+  const {canOperate, preferences: accountPrefs} = useAccounts();
   const {revision: engineerRevision} = useEngineers();
   const [localSection, setSection] = useState("racks");
   const section = controlledSection || localSection;
@@ -1713,19 +1732,43 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [selectedCustom,    setSelectedCustom]    = useState(null);
   const [layoutError,       setLayoutError]       = useState("");
 
-  useEffect(()=>{
-    Promise.all([
-      fetch("/api/rack-positions").then(r=>r.json()).catch(()=>({})),
-      fetch("/api/rack-slots").then(r=>r.json()).catch(()=>({})),
-      fetch("/api/switch-assignments").then(r=>r.json()).catch(()=>({})),
-      loadRackItems().catch(()=>({})),
-      fetch("/api/rack-overrides").then(r=>r.json()).catch(()=>({})),
+  // The rack layout (positions, U slots, overrides, equipment, owners) is reloaded on the dashboard's refresh interval
+  // and when the tab becomes visible again, so moves made in Locations, the 3D Twin, the assistant or another session
+  // show here without a page reload. Paused while editing, so a reload never replaces what is being edited.
+  const editingRef = useRef(editMode);
+  editingRef.current = editMode;
+  const reloadLayouts = useCallback((initial = false) => {
+    if (!initial && (editingRef.current || document.hidden)) return Promise.resolve();
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const keep = setter => next => setter(prev => same(prev, next) ? prev : next);
+    return Promise.all([
+      fetch("/api/rack-positions").then(r=>r.ok?r.json():null).catch(()=>null),
+      fetch("/api/rack-slots").then(r=>r.ok?r.json():null).catch(()=>null),
+      fetch("/api/switch-assignments").then(r=>r.ok?r.json():null).catch(()=>null),
+      loadRackItems().catch(()=>null),
+      fetch("/api/rack-overrides").then(r=>r.ok?r.json():null).catch(()=>null),
       fetch("/api/opt-owners").then(r=>r.ok?r.json():null).catch(()=>null),
-      fetch("/api/chillers").then(r=>r.json()).catch(()=>({units:[],connections:[]})),
+      fetch("/api/chillers").then(r=>r.ok?r.json():null).catch(()=>null),
     ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
-      setRackOrder(order||{});setRackSlots(slots||{});setSwitchAssignments(sw||{});setCustomItems(items||{});setRackOverrides(overrides||{});if(owners){setOptOwners(owners);setOwnersLoaded(true);}setChillers(chill||{units:[],connections:[]});setChillersLoaded(true);
+      if (!initial && editingRef.current) return;   // editing started while loading
+      // A failed reload keeps what is shown; the first load falls back to empty documents as before.
+      if (order || initial) keep(setRackOrder)(order||{});
+      if (slots || initial) keep(setRackSlots)(slots||{});
+      if (sw || initial) keep(setSwitchAssignments)(sw||{});
+      if (items || initial) keep(setCustomItems)(items||{});
+      if (overrides || initial) keep(setRackOverrides)(overrides||{});
+      if (owners) { keep(setOptOwners)(owners); setOwnersLoaded(true); }
+      if (chill || initial) { keep(setChillers)(chill||{units:[],connections:[]}); setChillersLoaded(true); }
     });
   },[]);
+  useEffect(()=>{ reloadLayouts(true); },[reloadLayouts]);
+  const refreshSeconds = Math.max(5, Number(accountPrefs?.refresh_seconds) || 15);
+  useEffect(()=>{
+    const timer = setInterval(() => reloadLayouts(), refreshSeconds * 1000);
+    const onVisible = () => { if (!document.hidden) reloadLayouts(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  },[reloadLayouts, refreshSeconds]);
 
   // One layout edit: saved against the server's current document; on failure the optimistic
   // state is undone, the store reloaded, and the error rethrown for the caller to show.
@@ -1786,6 +1829,24 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   },[]);
 
   const pdus       = devices.filter(d=>d.kind==="pdu");
+  // Each server's KVM port: live port labels of a reachable KVM first (as on the dashboard), then saved labels.
+  const kvmByServer = useMemo(()=>{
+    const map=new Map();
+    devices.filter(d=>d.kind==="kvm").forEach(kvm=>{
+      const st=kvmStatuses?.[kvm.id];
+      const live=st?.reachable ? (st.ports||[]) : [];
+      const liveNums=new Set(live.map(p=>String(p.number)));
+      const add=(label,port)=>{const id=serverIdentity(label);const n=parseInt(port,10);if(id&&Number.isFinite(n)&&!map.has(id))map.set(id,{kvmId:kvm.id,kvmName:kvm.name,port:n});};
+      live.forEach(p=>add(p.label,p.number));
+      Object.entries(kvm.labels||{}).forEach(([num,label])=>{if(!liveNums.has(num))add(label,num);});
+    });
+    return map;
+  },[devices,kvmStatuses]);
+  const serverActions = useMemo(()=>({
+    kvmFor: name => kvmByServer.get(serverIdentity(name)) || null,
+    openConsole: onOpenConsole || null,
+    canOperate: !!canOperate,
+  }),[kvmByServer,onOpenConsole,canOperate]);
   // Inventory racks have no device status; Dashboard links to their saved layout.
   const rackDevices = devices.filter(d=>d.kind==="pdu"||d.kind==="rack");
   const racks = useMemo(()=>[...new Set([...rackDevices.map(d=>d.rack).filter(Boolean), ...Object.keys(customItems)])].sort(),[rackDevices, customItems]);
@@ -1796,6 +1857,9 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       const stored=pdu.labels||{},live=pduStatuses[pdu.id]?.outlets||[];
       const liveByN=Object.fromEntries((pduStatuses[pdu.id]?.reachable ? live : []).map(o=>[String(o.number),o]));
       Object.entries(stored).forEach(([num,label])=>{
+        // A reachable PDU's live outlet list already carries the latest saved labels (the dashboard shows the same):
+        // an older saved label for that outlet must not keep a server that has moved away.
+        if(liveByN[num])return;
         if(isDefaultOutletLabel(label))return;const key=label.trim().toLowerCase();if(map.has(key))return;
         const lo=liveByN[num];map.set(key,{id:key,name:label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:lo?.state??"unknown",watts:lo?.watts??null});
       });
@@ -1944,7 +2008,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     : null;
 
   return (
-    <EditContext.Provider value={editMode}><main className="flex-1 px-4 pb-5 w-full mx-auto">
+    <EditContext.Provider value={editMode}><ServerActionsContext.Provider value={serverActions}><main className="flex-1 px-4 pb-5 w-full mx-auto">
       {layoutError&&<div role="alert" className="mb-4 flex items-start gap-3 rounded-lg border border-rose-900 bg-rose-950/30 px-3 py-2 text-sm text-rose-300"><span className="flex-1 break-words">{layoutError}</span><button type="button" className="underline text-xs" onClick={()=>setLayoutError("")}>Dismiss</button></div>}
       {!controlledSection && <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
@@ -1995,6 +2059,6 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
             onSave={handleSaveCustom} onDelete={handleDeleteCustom} onMove={handleMoveCustom}/>
         </Portal>
       )}
-    </main></EditContext.Provider>
+    </main></ServerActionsContext.Provider></EditContext.Provider>
   );
 }

@@ -181,6 +181,13 @@ export default function App() {
     fetch("/api/version").then(r => r.json()).then(d => setVersion(d.version)).catch(() => {});
   }, []);
 
+  // Port labels saved in another session, by the assistant or in Locations reach every page (Racks included) on the
+  // same interval as the device statuses.
+  useEffect(() => {
+    const t = setInterval(() => { if (!document.hidden) loadDevices(); }, preferences.refresh_seconds * 1000);
+    return () => clearInterval(t);
+  }, [preferences.refresh_seconds]);
+
   useEffect(() => {
     if (devices.length === 0) return;
     const refresh = () => {
@@ -196,7 +203,8 @@ export default function App() {
   async function loadDevices() {
     try {
       const data = await api.getDevices();
-      setDevices(data);
+      // Polling: keep the same list object when nothing changed, so pages and status polling do not restart.
+      setDevices(prev => JSON.stringify(prev) === JSON.stringify(data) ? prev : data);
       setDeviceError("");
     } catch (e) {
       setDeviceError(errorMessage(e));
@@ -407,6 +415,7 @@ export default function App() {
           onLabelChange={(pduId, newLabels, revision) => saveLabels(pduId, newLabels, revision ?? devices.find(d => d.id === pduId)?.labels_revision)}
           onRenameOpt={handleRenameOpt}
           onRefresh={loadDevices}
+          onOpenConsole={openKvmConsole}
           maintenance={maintenance}
         />
       )}

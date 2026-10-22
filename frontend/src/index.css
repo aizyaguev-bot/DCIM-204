@@ -126,6 +126,10 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .server-meta { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 10px; color: #a7a7a7; min-width: 0; }
 .owner-pill { color: #c9b8ff; background: #241b45; border: 1px solid #4a3a8a; border-radius: 2px; padding: 0 3px; max-width: 85px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .server-state { font-size: 10px; font-weight: 700; color: #a7a7a7; }
+.kvm-open { font-size: 10px; font-weight: 700; line-height: 1; padding: 4px 7px; border-radius: 2px; border: 1px solid #6d28d9; color: #d8b4fe; background: #1e1033; flex-shrink: 0; cursor: pointer; }
+.kvm-open:hover { background: #2e1065; border-color: #a78bfa; color: #ede9fe; }
+.kvm-open:focus-visible { outline: 2px solid #a78bfa; outline-offset: 1px; }
+.kvm-open-compact { padding: 3px 5px; }
 .server-cell.on .server-state { color: #76b900; }
 .equipment-cell { flex: 1 1 70px; min-width: 0; min-height: 42px; padding: 5px 8px; border-radius: 2px; border: 1px solid #3a3a3a; background: #161616; color: #e5e5e5; cursor: pointer; }
 .equipment-cell[data-type="switch"] { color: #7dd3fc; background: #0c1a20; border-color: #1f4050; }
