@@ -109,6 +109,23 @@ async def test_validation_errors_never_echo_submitted_values(legacy):
     assert r.json()["detail"] == [{"loc": ["body", "ip"], "msg": "Field required", "type": "missing"}]
 
 
+async def test_validator_messages_are_shown_without_the_pydantic_prefix(legacy):
+    client, _ = legacy
+    r = await client.post("/api/auth/register", json={"username": "Bad User", "name": "Bad", "password": SECRET}, auth=RIGHT)
+    assert r.status_code == 422 and SECRET not in r.text
+    assert r.json()["detail"] == [{"loc": ["body", "username"], "type": "value_error",
+                                   "msg": "Use 3–32 letters, digits, dots, dashes or underscores"}]
+
+
+def test_only_value_error_messages_lose_the_prefix():
+    import app.main as main
+    error = {"loc": ("body", "name"), "msg": "Value error, Enter a device name.", "type": "value_error",
+             "input": SECRET, "ctx": {"error": ValueError(SECRET)}, "url": "https://errors.pydantic.dev"}
+    assert main._validation_item(error) == {"loc": ("body", "name"), "msg": "Enter a device name.", "type": "value_error"}
+    assert main._validation_item({"loc": ("body",), "msg": "Value error, kept", "type": "assertion_error"})["msg"] == "Value error, kept"
+    assert main._validation_item({"loc": ("body",), "msg": "Plain message", "type": "value_error"})["msg"] == "Plain message"
+
+
 async def test_shutdown_closes_the_pxe_job_runner(monkeypatch):
     import app.main as main
     from app import engineers
