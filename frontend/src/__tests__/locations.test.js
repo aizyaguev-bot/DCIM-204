@@ -6,6 +6,7 @@ import {
   normalizeMoveResult, moveResultIsEmpty, moveErrorText, labelMoveHints, portKey,
   syncClearPlan, locationClearPlan, clearPorts, clearFailureText, clearAsResult, applyBody,
   feedSuffix, labelEditState, labelChanges, labelPatchBody, defaultPortLabel, parsePortInUse, takenPorts,
+  sameLocation, clearSummary,
 } from "../api/locations.js";
 
 const realFetch = globalThis.fetch;
@@ -50,7 +51,19 @@ test("locations normalize ports to strings, sort empty ports and survive partial
   assert.deepEqual(loc.empty_ports.pdu.map(portKey), ["pa:2", "pa:10", "pb:9"]);
   assert.deepEqual(loc.racks, ["R1", "R2"]);
   assert.deepEqual(normalizeLocations(null), { servers: [], empty_ports: { pdu: [], kvm: [] }, racks: [] });
-  assert.deepEqual(normalizeLocations({ servers: [{ name: "OPTN9 (PSU1)" }] }).servers[0], { key: "optn9", name: "OPTN9 (PSU1)", rack: null, slot: null, pdu: [], kvm: [] });
+  assert.deepEqual(normalizeLocations({ servers: [{ name: "OPTN9 (PSU1)" }] }).servers[0],
+    { key: "optn9", name: "OPTN9 (PSU1)", rack: null, slot: null, pdu: [], kvm: [], kept: null, keptKnown: false });
+});
+
+test("locations carry the position a server keeps once its ports are cleared (kept_position)", () => {
+  const [kept, unplaced, legacy] = normalizeLocations({ servers: [
+    { key: "a", name: "A", rack: "R2", slot: "10", kept_position: { rack: "R2", slot: "10" } },
+    { key: "b", name: "B", rack: "R3", slot: null, kept_position: { rack: null, slot: null } },
+    { key: "c", name: "C", rack: "R3", kept_position: "nonsense" },
+  ] }).servers;
+  assert.deepEqual([kept.kept, kept.keptKnown], [{ rack: "R2", slot: 10 }, true]);
+  assert.deepEqual([unplaced.kept, unplaced.keptKnown], [{ rack: null, slot: null }, true]);
+  assert.deepEqual([legacy.kept, legacy.keptKnown], [null, false]);
 });
 
 test("search matches server, rack, slot and port device; rack filter supports unplaced", () => {
@@ -80,6 +93,9 @@ test("move body: target server with swap on by default", () => {
   });
   assert.equal(buildMoveRequest(server, { mode: "server", target: "optn44", swap: false }, false).body.swap, false);
   assert.equal(buildMoveRequest(server, { mode: "server", target: "optn44", swap: false }, false).body.dry_run, false);
+  // Each mode sends only its own swap box: unticking the slot swap never turns off the server swap, and the reverse.
+  assert.equal(buildMoveRequest(server, { mode: "server", target: "optn44", swap: true, slotSwap: false }, true).body.swap, true);
+  assert.equal(buildMoveRequest(server, { mode: "server", target: "optn44", swap: false, slotSwap: true }, true).body.swap, false);
   assert.match(buildMoveRequest(server, { mode: "server", target: "" }, true).error, /Choose the server/);
   assert.match(buildMoveRequest(server, { mode: "server", target: "optn45" }, true).error, /different server/);
   assert.match(buildMoveRequest(null, { mode: "server", target: "x" }, true).error, /Choose a server/);
@@ -97,6 +113,10 @@ test("move body: target ports with optional rack and slot, validated before any 
   assert.equal(placed.target_rack, "R1");
   assert.equal(placed.target_slot, 14);
   assert.equal(placed.swap, false);
+  // Ports mode sends the slot box (slotSwap), whatever the server-mode box says.
+  const slotOnly = { mode: "ports", pdu, kvm: [], rack: "R1", slot: "14" };
+  assert.equal(buildMoveRequest(server, { ...slotOnly, swap: true, slotSwap: false }, true).body.swap, false);
+  assert.equal(buildMoveRequest(server, { ...slotOnly, swap: false, slotSwap: true }, true).body.swap, true);
   // A slot alone keeps the server's current rack; an unplaced server must choose one.
   assert.equal(buildMoveRequest(server, { mode: "ports", pdu, slot: "3" }, true).body.target_rack, "R2");
   assert.match(buildMoveRequest(loc.servers[1], { mode: "ports", pdu, slot: "3" }, true).error, /rack/);
@@ -126,6 +146,32 @@ test("move results list before -> after per port and per position, and flag unpl
   assert.equal(moveResultIsEmpty(result), false);
   assert.equal(moveResultIsEmpty(normalizeMoveResult({ ok: true })), true);
   assert.equal(formatLocation({ rack: "R1", slot: null }), "R1");
+});
+
+test("move results drop positions that do not change, so a no-op move is empty", () => {
+  const same = { rack: "Rack-01", slot: 5 };
+  // The server lists the mover's position even when nothing moves: nothing would change.
+  const noop = normalizeMoveResult({ dry_run: true, changes: [], positions: [{ server: "OPT12", before: same, after: { ...same } }], unplaced: [] });
+  assert.deepEqual(noop.positions, []);
+  assert.equal(moveResultIsEmpty(noop), true);
+  // Unplaced before and after (missing fields count as none) is no move either.
+  assert.deepEqual(normalizeMoveResult({ positions: [{ server: "X", before: { rack: null, slot: null }, after: {} }] }).positions, []);
+  // A same-rack swap: labels change, both positions stay, so no position lines but the move is not empty.
+  const swap = normalizeMoveResult({
+    dry_run: true,
+    changes: [{ device_id: "p1", device_name: "PDU 01", kind: "pdu", port: "1", before: "OPT11", after: "OPT12" },
+              { device_id: "p1", device_name: "PDU 01", kind: "pdu", port: "2", before: "OPT12", after: "OPT11" }],
+    positions: [{ server: "OPT11", before: { rack: "Rack-01", slot: null }, after: { rack: "Rack-01", slot: null } },
+                { server: "OPT12", before: { rack: "Rack-01", slot: null }, after: { rack: "Rack-01", slot: null } }],
+  });
+  assert.deepEqual(swap.positions, []);
+  assert.equal(moveResultIsEmpty(swap), false);
+  // A real U change is kept.
+  const up = normalizeMoveResult({ positions: [{ server: "OPT12", before: same, after: { rack: "Rack-01", slot: 6 } }] });
+  assert.deepEqual(up.positions, [{ server: "OPT12", before: "Rack-01 · U5", after: "Rack-01 · U6" }]);
+  assert.equal(moveResultIsEmpty(up), false);
+  assert.equal(sameLocation({ rack: "R1", slot: "5" }, { rack: "R1", slot: 5 }), true);
+  assert.equal(sameLocation({ rack: "R1", slot: 5 }, { rack: "R2", slot: 5 }), false);
 });
 
 test("move errors prefer the server's detail and explain common statuses", () => {
@@ -186,14 +232,52 @@ test("sync map Clear names the outlet and its linked KVM port; an empty outlet h
   assert.equal(syncClearPlan({ ...row, label: "Outlet 7" }), null);
 });
 
-test("Clear location lists every port and keeps the rack position", () => {
-  const server = normalizeLocations(sample).servers[0];
+test("Clear location lists every port and says the saved rack position is kept only when the server keeps it", () => {
+  const withKept = kept => normalizeLocations({ ...sample, servers: [{ ...sample.servers[0], kept_position: kept }, sample.servers[1]] }).servers;
+  const [server, unplaced] = withKept({ rack: "R2", slot: 10 });
   const plan = locationClearPlan(server);
   assert.deepEqual(plan.ports.map(p => `${p.kind}:${p.device_id}:${p.port}`), ["pdu:pa:5", "pdu:pb:5", "kvm:k1:12"]);
-  assert.equal(plan.message, "Clear optn44 from all 3 ports?\n\n• PDU-A outlet 5 (optn44 (PSU1))\n• PDU-B outlet 5 (optn44 (PSU2))\n• KVM-1 port 12\n\nIts rack position (R2 · U10) is kept.");
-  assert.match(locationClearPlan(normalizeLocations(sample).servers[1]).message, /It has no rack position\.$/);
+  assert.equal(plan.message, "Clear optn44 from all 3 ports?\n\n• PDU-A outlet 5 (optn44 (PSU1))\n• PDU-B outlet 5 (optn44 (PSU2))\n• KVM-1 port 12\n\n"
+    + "Its saved rack position (R2 · U10) is kept. The Racks view and 3D Twin show it again once it has a PDU outlet.");
+  assert.deepEqual(plan.after, { rack: "R2", slot: 10 });
+  assert.match(locationClearPlan(unplaced).message, /It has no rack position\.$/);
+  assert.deepEqual(locationClearPlan(unplaced).after, { rack: null, slot: null });
   // A server listed only from its rack slot or monitor has no ports: nothing to clear.
   assert.equal(locationClearPlan({ name: "x", pdu: [], kvm: [] }), null);
+});
+
+test("Clear location says when the rack goes with the ports, changes, or may not be kept", () => {
+  const withKept = kept => normalizeLocations({ servers: [{ ...sample.servers[0], ...(kept === undefined ? {} : { kept_position: kept }) }] }).servers[0];
+  // Rack only from the PDU: the server becomes Unplaced.
+  let plan = locationClearPlan(withKept({ rack: null, slot: null }));
+  assert.match(plan.message, /\n\nIt becomes Unplaced: its rack \(R2\) comes only from these ports\.$/);
+  assert.deepEqual(plan.after, { rack: null, slot: null });
+  // The layout files hold another rack: that is where it goes.
+  plan = locationClearPlan(withKept({ rack: "R1", slot: 3 }));
+  assert.match(plan.message, /\n\nIts rack changes from R2 · U10 to R1 · U3 \(its saved position\)\.$/);
+  assert.deepEqual(plan.after, { rack: "R1", slot: 3 });
+  plan = locationClearPlan(withKept({ rack: "R2", slot: null }));
+  assert.match(plan.message, /\n\nIts position changes from R2 · U10 to R2 \(its saved position\)\.$/);
+  // A saved U without a rack is no position: Unplaced, and the notice says so.
+  plan = locationClearPlan(withKept({ rack: null, slot: 4 }));
+  assert.match(plan.message, /\n\nIt becomes Unplaced: its rack \(R2\) comes only from these ports\.$/);
+  assert.deepEqual(plan.after, { rack: null, slot: null });
+  // An older server without kept_position: no promise either way.
+  plan = locationClearPlan(withKept(undefined));
+  assert.match(plan.message, /\n\nIts rack may not be kept if it comes only from these ports\.$/);
+  assert.equal(plan.after, null);
+});
+
+test("Clear notice names the position only when every port was cleared and the position is known", () => {
+  const server = normalizeLocations({ servers: [{ ...sample.servers[0], kept_position: { rack: null, slot: null } }] }).servers[0];
+  const plan = locationClearPlan(server);
+  const ports = plan.ports;
+  assert.equal(clearSummary(server, plan, ports, []), "optn44: 3 of 3 port labels cleared. Now unplaced.");
+  assert.equal(clearSummary(server, plan, ports.slice(1), [{ ...ports[0], error: "x" }]), "optn44: 2 of 3 port labels cleared.");
+  assert.equal(clearSummary(server, { ...plan, after: null }, ports, []), "optn44: 3 of 3 port labels cleared.");
+  assert.equal(clearSummary(server, { ...plan, after: { rack: "R2", slot: 10 } }, ports, []), "optn44: 3 of 3 port labels cleared. Rack position kept (R2 · U10).");
+  assert.equal(clearSummary(server, { ...plan, after: { rack: "R1", slot: null } }, ports, []), "optn44: 3 of 3 port labels cleared. Now at R1.");
+  assert.equal(clearSummary(server, { ...plan, ports: ports.slice(0, 1) }, ports.slice(0, 1), []), "optn44: 1 of 1 port label cleared. Now unplaced.");
 });
 
 test("clearPorts sends an empty label per port, continues after a failure and reports it", async () => {

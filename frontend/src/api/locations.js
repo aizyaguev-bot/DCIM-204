@@ -18,15 +18,23 @@ const portRef = p => ({
 });
 const portOrder = (a, b) => a.device_name.localeCompare(b.device_name) || (Number(a.port) - Number(b.port)) || a.port.localeCompare(b.port);
 
+const rackOf = value => (value ? String(value) : null);
+const slotOf = value => (value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value));
+const isPosition = value => !!value && typeof value === "object" && !Array.isArray(value);
+
 // Tolerates missing fields so a partial response still renders.
+// kept: where the server stays once its PDU outlets and KVM ports are cleared (rack layout files only; the server's
+// kept_position field). An older server does not send it: keptKnown is then false and kept null.
 export function normalizeLocations(data) {
   const servers = asArray(data?.servers).filter(s => s && (s.key || s.name)).map(s => ({
     key: String(s.key ?? serverIdentity(s.name) ?? s.name),
     name: String(s.name ?? s.key),
-    rack: s.rack ? String(s.rack) : null,
-    slot: s.slot == null || s.slot === "" ? null : Number(s.slot),
+    rack: rackOf(s.rack),
+    slot: slotOf(s.slot),
     pdu: asArray(s.pdu).map(portRef),
     kvm: asArray(s.kvm).map(portRef),
+    kept: isPosition(s.kept_position) ? { rack: rackOf(s.kept_position.rack), slot: slotOf(s.kept_position.slot) } : null,
+    keptKnown: isPosition(s.kept_position),
   }));
   const empty = data?.empty_ports || {};
   return {
@@ -39,6 +47,11 @@ export function normalizeLocations(data) {
 export const portKey = p => `${p.device_id}:${p.port}`;
 export const kindNoun = kind => (kind === "kvm" ? "port" : "outlet");
 export const portText = (p, kind) => `${p.device_name} · ${kindNoun(kind)} ${p.port}`;
+
+// Same rack and U (no rack equals no rack, no U equals no U).
+export function sameLocation(a, b) {
+  return rackOf(a?.rack) === rackOf(b?.rack) && slotOf(a?.slot) === slotOf(b?.slot);
+}
 
 export function formatLocation(loc) {
   if (!loc || (!loc.rack && loc.slot == null)) return "Unplaced";
@@ -75,10 +88,13 @@ export function groupByDevice(ports) {
 }
 
 // Builds the move-server body from the dialog draft, or an error to show next to the form.
-// draft: { mode: "server"|"ports", target, swap, pdu: [ports], kvm: [ports], rack, slot }
+// draft: { mode: "server"|"ports", target, swap, slotSwap, pdu: [ports], kvm: [ports], rack, slot }
+// swap is the "Swap with the target server" box and slotSwap the "If that slot holds another server" box. Each mode
+// sends only its own box, so unticking one never carries over to the other (a draft without slotSwap uses swap).
 export function buildMoveRequest(server, draft, dryRun) {
   if (!server?.key) return { error: "Choose a server to move." };
-  const base = { server: server.key, target_server: null, target_ports: null, target_rack: null, target_slot: null, swap: draft?.swap !== false, dry_run: !!dryRun };
+  const swap = (draft?.mode === "server" ? draft?.swap : (draft?.slotSwap ?? draft?.swap)) !== false;
+  const base = { server: server.key, target_server: null, target_ports: null, target_rack: null, target_slot: null, swap, dry_run: !!dryRun };
   if (draft?.mode === "server") {
     if (!draft.target) return { error: "Choose the server whose location this server takes." };
     if (draft.target === server.key) return { error: "Choose a different server." };
@@ -112,11 +128,13 @@ export function describeChange(c) {
   return { where, before: c?.before || "(empty)", after: c?.after || "(empty)" };
 }
 
+// The server lists the position of every server involved, moved or not; only real moves are shown and counted.
 export function normalizeMoveResult(result) {
   return {
     dryRun: !!result?.dry_run,
     changes: asArray(result?.changes).map(c => ({ ...c, ...describeChange(c) })),
-    positions: asArray(result?.positions).map(p => ({ server: String(p?.server ?? ""), before: formatLocation(p?.before), after: formatLocation(p?.after) })),
+    positions: asArray(result?.positions).filter(p => !sameLocation(p?.before, p?.after))
+      .map(p => ({ server: String(p?.server ?? ""), before: formatLocation(p?.before), after: formatLocation(p?.after) })),
     unplaced: asArray(result?.unplaced).map(String),
     // The preview's token: Apply sends it back and the server refuses (409) if the plan changed since.
     planRevision: typeof result?.plan_revision === "string" ? result.plan_revision : null,
@@ -209,13 +227,41 @@ export function syncClearPlan(row) {
   return { ports, message: `Clear ${row.label} from ${ports.map(portWhere).join(" and ")}?` };
 }
 
-// Locations row: every PDU outlet and KVM port of the server; the rack position is not touched.
+// Locations row: every PDU outlet and KVM port of the server. The rack layout files are not touched, but a rack known
+// only from the server's PDU or KVM goes with the ports: the server's kept position says what stays.
+// after: the position once every port is cleared ({ rack, slot }), or null when the server did not say (older server).
+function clearPosition(server) {
+  const now = { rack: server.rack ?? null, slot: server.slot ?? null };
+  if (!now.rack && now.slot == null) return { after: now, text: "It has no rack position." };
+  if (!server.keptKnown || !server.kept) return { after: null, text: "Its rack may not be kept if it comes only from these ports." };
+  // A U without a rack is no position (the Racks view cannot draw it): treat it as unplaced.
+  const kept = server.kept.rack ? { rack: server.kept.rack, slot: server.kept.slot ?? null } : { rack: null, slot: null };
+  const from = formatLocation(now), to = formatLocation(kept);
+  let text;
+  if (sameLocation(kept, now)) text = `Its saved rack position (${from}) is kept. The Racks view and 3D Twin show it again once it has a PDU outlet.`;
+  else if (!kept.rack) text = `It becomes Unplaced: its rack (${now.rack || from}) comes only from these ports.`;
+  else if (kept.rack === now.rack) text = `Its position changes from ${from} to ${to} (its saved position).`;
+  else text = `Its rack changes from ${from} to ${to} (its saved position).`;
+  return { after: kept, text };
+}
+
 export function locationClearPlan(server) {
   const ports = [...(server?.pdu || []).map(p => ({ ...p, kind: "pdu" })), ...(server?.kvm || []).map(p => ({ ...p, kind: "kvm" }))];
   if (!ports.length) return null;
   const lines = ports.map(p => `• ${portWhere(p)}${p.label && p.label !== server.name ? ` (${p.label})` : ""}`);
-  const position = server.rack || server.slot != null ? `Its rack position (${formatLocation(server)}) is kept.` : "It has no rack position.";
-  return { ports, message: `Clear ${server.name} from all ${ports.length} port${ports.length === 1 ? "" : "s"}?\n\n${lines.join("\n")}\n\n${position}` };
+  const { after, text } = clearPosition(server);
+  return { ports, after, message: `Clear ${server.name} from all ${ports.length} port${ports.length === 1 ? "" : "s"}?\n\n${lines.join("\n")}\n\n${text}` };
+}
+
+// Notice after a Clear: how many labels were cleared and, only when every port was cleared and the server said where
+// the server stays, its position now.
+export function clearSummary(server, plan, cleared, failed) {
+  const total = plan.ports.length;
+  const head = `${server.name}: ${cleared.length} of ${total} port label${total === 1 ? "" : "s"} cleared.`;
+  const after = plan.after;
+  if (failed.length || cleared.length !== total || !after) return head;
+  if (!after.rack && after.slot == null) return `${head} Now unplaced.`;
+  return sameLocation(after, server) ? `${head} Rack position kept (${formatLocation(after)}).` : `${head} Now at ${formatLocation(after)}.`;
 }
 
 // Clears one port at a time so a failure names exactly which ports are still labelled. Each request carries the

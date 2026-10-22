@@ -3,7 +3,7 @@ import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
 import ExportCsvButton from "../components/ExportCsvButton";
 import {
-  applyBody, buildMoveRequest, clearAsResult, clearFailureText, clearPorts, filterServers, formatLocation, groupByDevice, kindNoun,
+  applyBody, buildMoveRequest, clearAsResult, clearFailureText, clearPorts, clearSummary, filterServers, formatLocation, groupByDevice, kindNoun,
   locationClearPlan, moveErrorText, moveResultIsEmpty, normalizeLocations, normalizeMoveResult, parsePortInUse, portKey, portOptions,
   portText, takenPorts,
 } from "../api/locations";
@@ -60,7 +60,8 @@ export default function LocationsView({ devices, onChanged }) {
     await Promise.allSettled([load(), onChanged?.()]);
   }
 
-  // Removes every PDU outlet and KVM port label of the server (one direct-label write per port); rack position untouched.
+  // Removes every PDU outlet and KVM port label of the server (one direct-label write per port); the rack layout files
+  // are untouched, so the server keeps only its saved position (plan.after), which the confirm and notice name.
   async function clearLocation(server) {
     const plan = locationClearPlan(server);
     if (!plan || !canOperate || clearing || !confirm(plan.message)) return;
@@ -68,7 +69,7 @@ export default function LocationsView({ devices, onChanged }) {
     try {
       const { cleared, failed } = await clearPorts(plan.ports, api.setDirectLabel);
       setNotice({
-        title: `${server.name}: ${cleared.length} of ${plan.ports.length} port label${plan.ports.length === 1 ? "" : "s"} cleared. Rack position kept.`,
+        title: clearSummary(server, plan, cleared, failed),
         result: clearAsResult(cleared),
         error: failed.length ? `Not cleared: ${clearFailureText(failed)}` : "",
       });
@@ -310,7 +311,8 @@ function ChangeList({ result }) {
 }
 
 function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale }) {
-  const [draft, setDraft] = useState(() => ({ mode: "server", target: "", swap: true, rack: "", slot: "",
+  // swap: "Swap with the target server" (server mode); slotSwap: "If that slot holds another server" (ports mode).
+  const [draft, setDraft] = useState(() => ({ mode: "server", target: "", swap: true, slotSwap: true, rack: "", slot: "",
     pdu: server.pdu.map(p => ({ ...p, current: true })), kvm: server.kvm.map(p => ({ ...p, current: true })) }));
   const [preview, setPreview] = useState(null);   // normalized dry-run result + the body it was made for
   const [result, setResult] = useState(null);     // normalized applied result
@@ -338,6 +340,8 @@ function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale
   const takenPdu = draft.mode === "ports" ? takenPorts(draft.pdu, locations, server, "pdu", inUse) : {};
   const takenKvm = draft.mode === "ports" ? takenPorts(draft.kvm, locations, server, "kvm", inUse) : {};
   const anyTaken = Object.keys(takenPdu).length + Object.keys(takenKvm).length > 0;
+  // A blank slot keeps the current U only while the rack stays the same; another rack has no U until one is chosen.
+  const keepsSlot = server.slot != null && (!draft.rack || draft.rack === server.rack);
 
   // The busy buttons are disabled while a request runs, which drops focus to <body>; put it back somewhere useful.
   useEffect(() => {
@@ -534,12 +538,12 @@ function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale
                     <div>
                       <label htmlFor="move-slot" className="block text-xs text-zinc-400 mb-1">Slot U (optional)</label>
                       <input id="move-slot" type="number" inputMode="numeric" min="1" max="99" value={draft.slot} disabled={disabled}
-                        onChange={e => update({ slot: e.target.value })} placeholder={server.slot != null ? String(server.slot) : "—"} className={`${input} w-full`} />
+                        onChange={e => update({ slot: e.target.value })} placeholder={keepsSlot ? String(server.slot) : "—"} className={`${input} w-full`} />
                     </div>
                   </div>
                   {String(draft.slot).trim() !== "" && (
                     <label className="flex items-start gap-2 text-zinc-200">
-                      <input type="checkbox" checked={draft.swap} disabled={disabled} onChange={e => update({ swap: e.target.checked })} className="mt-1 accent-nv-400" />
+                      <input type="checkbox" checked={draft.slotSwap} disabled={disabled} onChange={e => update({ slotSwap: e.target.checked })} className="mt-1 accent-nv-400" />
                       <span>If that slot holds another server, swap positions with it</span>
                     </label>
                   )}
