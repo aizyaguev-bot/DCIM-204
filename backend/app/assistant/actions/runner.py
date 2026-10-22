@@ -24,7 +24,11 @@ _SUMMARIES = {
     "partial": "הפעולה הושלמה חלקית. יש לבדוק את התוצאות לפני ניסיון נוסף.",
     "failed": "הפעולה נכשלה. יש לבדוק את התוצאות לפני ניסיון נוסף.",
     "interrupted": "הפעולה נקטעה בעקבות הפעלה מחדש של השרת. רכיבים שבתחזוקה עדיין ניתנים לשחזור.",
+    "refused": "המצב השתנה מאז ההצעה, ולכן שום שקע לא הודלק ולא כובה. יש לבקש הצעה חדשה.",
 }
+# Refusals before any outlet was switched (power.py preflight under the PDU locks): the job ends "refused", like a
+# drift found by the router, not "failed".
+_PREFLIGHT_ERRORS = ("PDU changed since the proposal", "Power cycle was not started")
 
 
 class _AbortJob(Exception):
@@ -431,7 +435,11 @@ async def execute(proposal_id: str, by: str, *, session_factory, settings, sleep
 
         status = "succeeded" if spec.switch == "none" else _status(result["targets"], result["pdus"])
         if result.get("aborted"):
-            status = "partial" if status in ("succeeded", "partial") else "failed"
+            nothing_switched = (result["aborted"].get("reason") == "drift" and not result["pdus"]
+                                and all(not item["ok"] and item.get("error") in _PREFLIGHT_ERRORS
+                                        for item in result["targets"]))
+            status = ("refused" if nothing_switched else
+                      "partial" if status in ("succeeded", "partial") else "failed")
         result["summary_he"] = _SUMMARIES[status]
         await _finish(session_factory, proposal_id, by, status, result)
     except (Exception, asyncio.CancelledError) as exc:

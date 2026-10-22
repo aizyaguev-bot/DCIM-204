@@ -410,7 +410,8 @@ async def test_cycle_lost_responses_are_verified_in_both_phases(sessions, fleet)
 
     result = (await power.cycle(sessions, [target()], BY, off_seconds=2, sleep=sleep))[0]
     assert result.ok and result.state_after == "on" and result.error == ""
-    assert fleet.drivers["pdu1"].reads == 2
+    # 1 live re-read under the lock before the first off (Codex ACT-CX-FINAL B1) + 1 read-back per phase.
+    assert fleet.drivers["pdu1"].reads == 3
 
 
 async def test_cycle_recovers_feed_when_off_happened_but_readback_failed(sessions, fleet):

@@ -1051,7 +1051,8 @@ async def test_power_pins_refusal_aborts_from_callback(
     pid = await proposal(kind, snapshot=impact(ids), request={"then_console": True})
     result = await run(pid, sessions, settings, fake)
     row, events = await read(sessions, pid)
-    assert row.status == ("failed" if failed_index == 0 else "partial")
+    # Nothing switched before the refusal -> "refused" (Codex ACT-CX-FINAL B1); after a switched feed -> partial.
+    assert row.status == ("refused" if failed_index == 0 else "partial")
     assert len(result["targets"]) == failed_index + 1 and row.progress_done == failed_index + 1
     assert result["aborted"]["reason"] == "drift" and result["aborted"]["pdu_id"] == ids[failed_index]
     assert not fake.console_servers and [event.event for event in events].count("aborted") == 1
@@ -1129,7 +1130,7 @@ async def test_real_power_pins_drift_stops_before_driver_creation(
     result = await run(pid, sessions, settings, fake)
     refused = "pdu-two" if kind == "server_cycle" else "pdu-one"
     assert result["aborted"] == {"reason": "drift", "pdu_id": refused, "pdu_name": refused.upper()}
-    assert (await read(sessions, pid))[0].status == "failed"
+    assert (await read(sessions, pid))[0].status == "refused"
     assert driver.calls == [] and driver.created == 0
     if kind == "server_cycle":
         assert result["pending_on"] == []

@@ -180,6 +180,21 @@ async def _cycle_preflight_locked(session_factory, targets: list[Target], pins):
             errors.update({(t.pdu_id, t.outlet): "PDU not found" for t in group})
         except Exception as exc:
             errors.update({(t.pdu_id, t.outlet): safe_error(exc) for t in group})
+    if errors or any(t.state not in ("on", "off") for t in targets) or not any(t.state == "on" for t in targets):
+        # Already refused (no PDU is contacted), refused below as "Outlet state is not known", or nothing to switch.
+        return devices, errors
+    # D3 under every lock (Codex ACT-CX-FINAL B1): each outlet must still be as proposed. A feed switched off (or on)
+    # while this job waited for the locks is drift: nothing is switched, so the cycle never turns such a feed on.
+    for device_id, group in _groups(targets).items():
+        try:
+            states, read_error = await _readback(device_id, devices[device_id])
+        except Exception as exc:
+            states, read_error = {}, safe_error(exc)
+        for target in group:
+            if not states:
+                errors[target.pdu_id, target.outlet] = read_error
+            elif states.get(target.outlet) != target.state:
+                errors[target.pdu_id, target.outlet] = "PDU changed since the proposal"
     return devices, errors
 
 

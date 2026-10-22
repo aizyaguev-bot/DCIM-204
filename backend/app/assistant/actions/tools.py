@@ -34,9 +34,20 @@ LAB_WIDE_PHRASES = ("כל המעבדה", "כל המעבדות", "lab-wide", "who
 # casefold, with "-" and spaces between "ה" and "pdu" ignored ("כל ה-PDU" == "כל הPDU" == "כל ה PDU").
 WHOLE_PDU_PHRASES = ("תחזוק", "maintenance", "כל הpdu", "whole pdu", "entire pdu", "all of the pdu", "every outlet",
                      "all outlets", "all the outlets", "כל השקעים")
-_OUTLET_NUMBER = re.compile(
-    r"(?<![0-9a-z\u05d0-\u05ea])(?:[ובלה]{0,3}(?:שקע|שקעים|יציאה|יציאות|פורט)|outlets?|sockets?|ports?)"
-    r"\s*(?:(?:מס(?:פר|'|\u05f3)?|no\.?|number|#)\s*)?[0-9]+", re.IGNORECASE)
+_OUTLET_WORD = (r"(?<![0-9a-zא-ת])(?:[ובלה]{0,3}(?:שקע|שקעים|יציאה|יציאות|פורט)|outlets?|sockets?|ports?)"
+                r"\s*(?:(?:מס(?:פר|'|׳)?|no\.?|number|#)\s*)?")
+_OUTLET_NUMBER = re.compile(_OUTLET_WORD + r"[0-9]+", re.IGNORECASE)
+# "outlet 3", "שקע 3 ו-4", "outlets 3, 4": the numbers that follow an outlet/port word. Digits inside a device name
+# ("PDU-2") are never an outlet number (Codex ACT-CX-FINAL S2).
+_OUTLET_LIST = re.compile(_OUTLET_WORD + r"(?P<numbers>[0-9]+(?:\s*(?:,|&|and|ו)\s*-?\s*[0-9]+)*)(?![0-9])",
+                          re.IGNORECASE)
+# The rack is only a place in "Turn off OPT11 in Rack-01" / "כבה את OPT11 בארון Rack-01" (Codex ACT-CX-FINAL S1).
+_RACK_LOCATIVE = re.compile(
+    r"(?:\b(?:in|at|inside|within|on|from)\s+(?:the\s+)?(?:rack\s+)?"
+    r"|(?:^|[^א-ת])ו?ש?[במ]-?\s*"
+    r"|(?:ו?ש?ב|ו?מה?)ארון\s+(?:ה?ארון\s+)?"
+    r"|בתוך\s+(?:ה?ארון\s+)?)$", re.IGNORECASE)
+_NAME_TOKEN = re.compile(r"(?<![0-9a-z])[a-z][a-z0-9_.-]*[0-9][a-z0-9_.-]*", re.IGNORECASE)
 LATEST = "latest"
 RESTORABLE_KINDS = ("rack_shutdown", "lab_shutdown")
 TEXT_CHARS = 100
@@ -172,6 +183,30 @@ def names_outlet(message) -> bool:
     return isinstance(message, str) and bool(_OUTLET_NUMBER.search(message))
 
 
+def outlet_numbers(message) -> set[int]:
+    """Outlet / port numbers written after an outlet or port word in the message."""
+    numbers = set()
+    for match in _OUTLET_LIST.finditer(message if isinstance(message, str) else ""):
+        numbers.update(int(n) for n in re.findall(r"[0-9]+", match["numbers"]))
+    return numbers
+
+
+def rack_is_target(message, rack) -> bool | None:
+    """None: the message does not name the rack. False: every mention only says where other named equipment is
+    ("OPT11 in Rack-01"), so the rack is not what the user asked to act on. True otherwise."""
+    text = message.casefold() if isinstance(message, str) else ""
+    parts = re.findall(r"[0-9a-z]+", str(rack or "").casefold())
+    if not parts:
+        return None
+    pattern = r"(?<![0-9a-z])" + r"[\s._:/-]*".join(map(re.escape, parts)) + r"(?![0-9a-z])"
+    starts = [match.start() for match in re.finditer(pattern, text)]
+    if not starts:
+        return None
+    if any(not _RACK_LOCATIVE.search(text[:start]) for start in starts):
+        return True
+    return not any(_squash(token) != _squash(rack) for token in _NAME_TOKEN.findall(text))
+
+
 def _number_in(message, number) -> bool:
     return isinstance(message, str) and bool(re.search(rf"(?<![0-9]){int(number)}(?![0-9])", message))
 
@@ -197,7 +232,8 @@ def _check_data_anchor(message: str, request: ProposalRequest) -> None:
         if not isinstance(device, str) or not mentions(message, device):
             raise _not_requested("a target PDU or KVM is not named in the user's own message of this turn.",
                                  "שם ה-PDU או ה-KVM של היעד לא מופיע בבקשה שלך. כתוב אותו במפורש.")
-        if not (isinstance(number, (int, str)) and str(number).strip().isdigit() and _number_in(message, number)):
+        if not (isinstance(number, (int, str)) and str(number).strip().isdigit()
+                and int(number) in outlet_numbers(message)):
             raise _not_requested("a target outlet or port number is not written in the user's own message.",
                                  "מספר השקע או היציאה של היעד לא מופיע בבקשה שלך. כתוב אותו במפורש.")
     if request.target_rack is not None and not mentions(message, request.target_rack):
@@ -224,8 +260,7 @@ def check_anchor(ctx: ToolContext, request: ProposalRequest) -> None:
             raise _not_requested("the PDU is not named in the user's own message of this turn.",
                                  "שם ה-PDU לא מופיע בבקשה שלך. כתוב במפורש את שם ה-PDU.")
         # A missing outlet number is left to the store's request validation (400 invalid, nothing read).
-        if (scope == "outlet" and type(request.outlet) is int
-                and not re.search(rf"(?<![0-9]){request.outlet}(?![0-9])", message)):
+        if scope == "outlet" and type(request.outlet) is int and request.outlet not in outlet_numbers(message):
             raise _not_requested("the outlet number is not written in the user's own message of this turn.",
                                  "מספר השקע לא מופיע בבקשה שלך. כתוב במפורש את מספר השקע.")
         if scope == "pdu" and names_outlet(message):
@@ -240,6 +275,11 @@ def check_anchor(ctx: ToolContext, request: ProposalRequest) -> None:
         if not _anchored(ctx, ("rack",), request.rack):
             raise _not_requested("the rack is not named in the user's own message of this turn.",
                                  "שם הארון לא מופיע בבקשה שלך. כתוב במפורש את שם הארון.")
+        if mentions(message, request.rack) and rack_is_target(message, request.rack) is False:
+            raise _not_requested("the rack is only where the equipment the user named is; a rack shutdown would "
+                                 "widen the scope. Propose the action for the named equipment instead.",
+                                 "הארון מוזכר רק כמיקום של הציוד שביקשת. כדי לכבות את כל הארון כתוב למשל: "
+                                 "כבה את ארון Rack-01.")
     elif scope == "lab":
         if not lab_wide(getattr(ctx, "user_message", "")):
             raise _not_requested("a lab-wide shutdown needs an explicit lab-wide request in the user's own message.",

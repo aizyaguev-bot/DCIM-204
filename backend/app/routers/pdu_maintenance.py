@@ -159,8 +159,13 @@ async def _shutdown_locked(db: AsyncSession, device_id: str, dev, by: str, reaso
     entry.ok, entry.failed = len(set(powered) - failed), len(failed)
     await db.commit()
     results = [{"outlet": n, "ok": n not in failed} for n in sorted(set(powered) | failed)]
-    return {"state": _state(row), "results": results,
-            "not_included": sorted(not_included), "protected": sorted(exclude)}
+    payload = {"state": _state(row), "results": results,
+               "not_included": sorted(not_included), "protected": sorted(exclude)}
+    if still_on is None:
+        # The verification read failed: the PDU counts as unreachable even when no outlet had to be switched, so a
+        # batch stops before the next PDU (D7, Codex ACT-CX-FINAL B2).
+        payload["reachable"] = False
+    return payload
 
 
 async def restore_pdu(db: AsyncSession, device_id: str, by: str, *, expected_pins: dict | None = None) -> dict:
@@ -190,7 +195,10 @@ async def _restore_locked(db: AsyncSession, device_id: str, dev, by: str) -> dic
         await db.delete(row)
         state = None
     await db.commit()
-    return {"state": state, "results": [{"outlet": n, "ok": n not in failed} for n in targets]}
+    payload = {"state": state, "results": [{"outlet": n, "ok": n not in failed} for n in targets]}
+    if still_off is None:
+        payload["reachable"] = False   # verification read failed (D7): a batch restore stops here
+    return payload
 
 
 @router.post("/{device_id}/maintenance/shutdown")
