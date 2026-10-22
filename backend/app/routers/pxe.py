@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import accounts, confirm
@@ -14,7 +14,8 @@ from ..database import AsyncSessionLocal, get_db
 from ..models import PxeJob, PxeJobEvent
 from ..pxe import mapping
 from ..pxe.raritan_driver import driver_ready
-from ..pxe.runner import EVENT_LIMIT, REBOOT_METHODS, TIMEOUTS, PxeRunner, job_dto
+from ..pxe.runner import (BUSY, EVENT_LIMIT, POST_INSTALL, PRE_INSTALL, REBOOT_METHODS, TIMEOUTS, PxeRunner,
+                          job_dto)
 from ..pxe.sim_driver import SCENARIOS
 
 router = APIRouter(prefix="/api/pxe", tags=["pxe"])
@@ -69,6 +70,16 @@ def _allowlisted(settings, key: str) -> bool:
     """The one allowlist rule for list, create and start: an empty list allows every computer only in simulated mode."""
     allowed = mapping.allowlist(settings.pxe_allowed_computers)
     return key in allowed or (not allowed and settings.pxe_driver == "simulated")
+
+
+async def _run_limit_reached(db: AsyncSession, settings, exclude: str | None = None) -> bool:
+    """PXE_MAX_ACTIVE_JOBS for the whole server: running jobs (rebooting up to install_started) count, drafts do not.
+
+    A read-only early answer for the list, create and start; the runner still takes its slot atomically."""
+    query = select(func.count()).select_from(PxeJob).where(PxeJob.state.in_(PRE_INSTALL + POST_INSTALL))
+    if exclude:
+        query = query.where(PxeJob.id != exclude)
+    return (await db.scalar(query) or 0) >= max(1, int(settings.pxe_max_active_jobs))
 
 
 def _console_blocked() -> bool:
@@ -134,6 +145,7 @@ async def pxe_computers(db: AsyncSession = Depends(get_db)):
     active = (await db.scalars(select(PxeJob).where(PxeJob.active_key.is_not(None)))).all()
     by_key = {job.active_key: job for job in active}
     busy_ports = {job.active_port_key for job in active}
+    run_limit = await _run_limit_reached(db, settings)
     result = []
     for key, computer in computers.items():
         blockers = []
@@ -146,6 +158,8 @@ async def pxe_computers(db: AsyncSession = Depends(get_db)):
         kvm = [{**k, "busy": f"{k['device_id']}:{k['port']}" in busy_ports} for k in computer["kvm"]]
         if not job and all(k["busy"] for k in kvm):
             blockers.append("kvm_port_busy")
+        if not job and run_limit:                 # a computer with its own job shows that job instead
+            blockers.append("run_limit")
         if settings.pxe_driver != "simulated" and not driver_ready():
             blockers.append("driver_unavailable")
         result.append({**computer, "kvm": kvm, "eligible": not blockers, "blockers": blockers,
@@ -178,6 +192,8 @@ async def pxe_create(body: NewJob, request: Request, db: AsyncSession = Depends(
     held = await db.scalar(select(PxeJob).where(PxeJob.active_key == key))
     if held and held.install_may_have_started and held.state in ("failed", "manual_takeover"):
         raise HTTPException(409, "A previous install may have started on this computer; an Admin must acknowledge it first")
+    if await _run_limit_reached(db, settings):    # no draft row that could never start
+        raise HTTPException(409, BUSY)
     await db.commit()
     job_id = await get_runner().create(computer=computer, kvm=kvm, reboot_method=body.reboot_method,
                                        pdu_targets=computer["pdu"] if body.reboot_method == "pdu_cycle" else [],
@@ -220,6 +236,11 @@ async def pxe_start(job_id: str, request: Request, db: AsyncSession = Depends(ge
     job = await db.get(PxeJob, job_id, populate_existing=True)
     if job and not _allowlisted(get_settings(), job.computer_key):
         raise HTTPException(403, "This computer is not allowed for remote install")
+    # Before the password check: a start that cannot run must not cost a password attempt or log a denial.
+    # An expired draft is left to the runner, which reports the expiry first (as runner.start does).
+    if (job and job.state == "draft" and get_runner().clock() < job.deadline_at
+            and await _run_limit_reached(db, get_settings(), exclude=job.id)):
+        raise HTTPException(409, BUSY)
     by, reason, _ = await _confirmed(request, db, job_id, ("draft",), "start", reason="optional")
     await get_runner().start(job_id, by, reason)
     return await _dto(db, job_id)

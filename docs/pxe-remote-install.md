@@ -29,7 +29,7 @@ File references such as `runner.py:39` give the file and line. Short file names 
 - The server must have a password configured: either user accounts are on, or the shared Lab Manager
   password is set. Without one, the page says "Remote install requires a configured password", and
   creating, starting, installing and completing a job are all refused (`confirm.py:28-36`,
-  `routers/pxe.py:98,161`).
+  `routers/pxe.py:109,175`).
 
 ### Step by step
 
@@ -37,27 +37,29 @@ File references such as `runner.py:39` give the file and line. Short file names 
 |---|---|---|---|
 | 1 | Opens **Remote install**. | Lists the computers it found on KVM port labels (and the PDU outlets that carry the same label). A computer is listed only if at least one KVM port has its label. | — (`mapping.py:30-61`) |
 | 2 | Picks a computer, the KVM port (only if the computer appears on more than one port), and a **Reboot method**. The default is **Ctrl+Alt+Del via KVM**. | Shows why a computer is not available (see "Computer list" in section 6). | — |
-| 3 | Clicks **Reboot and open boot menu**, then enters a reason and the password. | Creates the job, checks the allowlist again, **opens the KVM console first**, takes a run slot, then reboots the computer using the chosen method. | `draft` → `rebooting` (`runner.py:814-851`) |
-| 4 | Waits. | Watches the screen. When it sees a blank screen, the firmware screen or the boot menu, it presses F12, then keeps pressing F12 (at most every 0.5 s) until the boot menu can be read. | `rebooting` → `waiting_for_menu` (`runner.py:619-665`) |
-| 5 | Chooses the network boot entry from the list on the page, next to the latest screenshot. | The options are read from the screen every time, never assumed in a fixed order. Only network entries (IPv4, IPv6, PXE, Network, NIC, LAN) can be chosen. The non-USB IPv4 entry is marked **Recommended**. Before pressing Enter, the server reads the menu again, moves the highlight and checks it. | `waiting_for_choice` (`parsers.py:124-141`, `runner.py:905-923`) |
-| 6 | Waits. | Waits for the GRUB install menu. If it shows a countdown, it presses Up to stop it and checks that the countdown is gone. | `waiting_for_grub` (`runner.py:667-698`) |
+| 3 | Clicks **Reboot and open boot menu**, then enters a reason and the password. | Creates the job, checks the allowlist again, **opens the KVM console first**, takes a run slot, then reboots the computer using the chosen method. | `draft` → `rebooting` (`runner.py:817-853`) |
+| 4 | Waits. | Watches the screen. When it sees a blank screen, the firmware screen or the boot menu, it presses F12, then keeps pressing F12 (at most every 0.5 s) until the boot menu can be read. | `rebooting` → `waiting_for_menu` (`runner.py:622-668`) |
+| 5 | Chooses the network boot entry from the list on the page, next to the latest screenshot. | The options are read from the screen every time, never assumed in a fixed order. Only network entries (IPv4, IPv6, PXE, Network, NIC, LAN) can be chosen. The non-USB IPv4 entry is marked **Recommended**. Before pressing Enter, the server reads the menu again, moves the highlight and checks it. | `waiting_for_choice` (`parsers.py:124-141`, `runner.py:907-925`) |
+| 6 | Waits. | Waits for the GRUB install menu. If it shows a countdown, it presses Up to stop it and checks that the countdown is gone. | `waiting_for_grub` (`runner.py:670-701`) |
 | 7 | Chooses the install profile (GRUB entry). | Entries for the local drive, rescue, troubleshooting and memory test cannot be chosen. The server moves the highlight, checks it and presses `e` to edit the entry. | `waiting_for_grub_choice` (`parsers.py:125,144-149`) |
-| 8 | Waits. | In the GRUB editor it replaces **only the host** of `inst.repo` and `inst.ks` on the `linux`/`linuxefi` line, then reads the screen again. The new text must match exactly; otherwise it presses Esc (which discards the edit) and stops. | `updating_urls` (`rewrite.py:140-164`, `runner.py:700-750`) |
-| 9 | Reviews the before/after command line and clicks **Start install**. The password is required again. | Checks that the screen still shows the reviewed edit and that the review fingerprint (`rewrite_hash`) matches. It records that the install was sent, then presses Ctrl+X. | `ready_to_install` → `installing` (`runner.py:934-974`) |
-| 10 | Waits. | When it sees the installer's start text, it moves the job on. | `installing` → `install_started` (`runner.py:752-764`) |
-| 11 | When the install has finished, clicks **Mark as completed** (password required), or lets the job detect completion by itself. | It marks the job completed by itself only when the installed system's text login prompt appears after the installer's own reboot. | `install_started` → `completed` (`runner.py:766-788,1011-1019`) |
+| 8 | Waits. | In the GRUB editor it replaces **only the host** of `inst.repo` and `inst.ks` on the `linux`/`linuxefi` line, then reads the screen again. The new text must match exactly; otherwise it presses Esc (which discards the edit) and stops. | `updating_urls` (`rewrite.py:140-164`, `runner.py:703-753`) |
+| 9 | Reviews the before/after command line and clicks **Start install**. The password is required again. | Checks that the screen still shows the reviewed edit and that the review fingerprint (`rewrite_hash`) matches. It records that the install was sent, then presses Ctrl+X. | `ready_to_install` → `installing` (`runner.py:936-976`) |
+| 10 | Waits. | When it sees the installer's start text, it moves the job on. | `installing` → `install_started` (`runner.py:755-767`) |
+| 11 | When the install has finished, clicks **Mark as completed** (password required), or lets the job detect completion by itself. | It marks the job completed by itself only when the installed system's text login prompt appears after the installer's own reboot. | `install_started` → `completed` (`runner.py:769-791,1015-1023`) |
 
 At any point before the install is sent, **Cancel job** stops the job. If a GRUB edit is on screen,
-the server presses Esc first (`runner.py:976-992`). **Open console (manual takeover)** stops the
-automation for good and opens the KVM console for that port (`runner.py:994-1009`).
+the server presses Esc first (`runner.py:978-994`). **Open console (manual takeover)** stops the
+automation for good and opens the KVM console for that port (`runner.py:996-1013`). After a failure it
+is offered only for a real console: a failed simulated job has no console, so takeover is refused with
+409 and no event is logged (`runner.py:191,1003-1004`).
 
 If you leave the page before the job has started, the page cancels it (`RemoteInstallView.jsx:345-350`).
 A job that is not started within 15 minutes is cancelled with code `draft_expired`.
 
 ### The owner's fixed decisions and how the code applies them
 
-- **Reboot defaults to the KVM's Ctrl+Alt+Del.** `kvm_cad` is the default method (`routers/pxe.py:52`).
-  It sends Ctrl+Alt+Delete through the console (`runner.py:623-625`), and the operating system
+- **Reboot defaults to the KVM's Ctrl+Alt+Del.** `kvm_cad` is the default method (`routers/pxe.py:53`).
+  It sends Ctrl+Alt+Delete through the console (`runner.py:626-628`), and the operating system
   decides whether to restart. The other methods are **Manual** (you restart the computer yourself, and
   the job waits for the restart) and **PDU power cycle**.
 - **PDU power cycle only after a separate, explicit confirmation.** It is never chosen automatically.
@@ -68,16 +70,21 @@ A job that is not started within 15 minutes is cancelled with code `draft_expire
   PDU is in maintenance mode (`raritan_driver.py:34,231-295`). If Ctrl+Alt+Del is ignored, the job does
   not switch to PDU by itself. A "Retry with PDU power cycle" offer is **(planned)**.
 - **"Completed" means the installed system's login screen after its reboot, or a manual mark.** Seeing
-  the installer start is not proof that the install finished (`runner.py:766-788`). A graphical login
+  the installer start is not proof that the install finished (`runner.py:769-791`). A graphical login
   screen is not recognised: use **Mark as completed** (`parsers.py:120-121`).
 - **Never a retry after Ctrl+X.** The server records `install_sent_at` and blocks the computer before it
-  presses Ctrl+X (`runner.py:955-962`). After that, **Cancel job** is refused (`runner.py:979-980`) and
-  **Start install** cannot be used again (`runner.py:186,938-939`). Any failure after that point keeps
+  presses Ctrl+X (`runner.py:957-964`). After that, **Cancel job** is refused (`runner.py:981-982`) and
+  **Start install** cannot be used again (`runner.py:188,940-941`). Any failure after that point keeps
   the computer **blocked** until an Admin clicks **Acknowledge (Admin)**, and only then can a new job be
-  created for it (`runner.py:415-431,1021-1031`, `routers/pxe.py:178-180`).
+  created for it (`runner.py:418-434,1025-1035`, `routers/pxe.py:192-194`).
 - **No two installs at once.** The database allows only one active job per computer and per KVM port
   (`models.py:243-244`). `PXE_MAX_ACTIVE_JOBS` (default 1) also limits how many jobs run on the whole
-  server at the same time (`runner.py:352-367`).
+  server at the same time (`runner.py:355-370`). A job counts as running from `rebooting` up to
+  `install_started`; drafts and closed jobs do not count. While the limit is reached, every computer
+  that has no job of its own shows **Another install is running** (`run_limit`), and both creating a
+  job and starting a draft are refused with 409 "Another remote install is running; wait until it
+  finishes". The refusal comes before a draft row is written and before the password is checked, so it
+  costs no password attempt (`routers/pxe.py:75-82,161-162,195-196,239-243`).
 - **The shared PXE menu is never changed.** The edit exists only in the GRUB editor for this one boot.
   Paths, file names, `POSTFILE`, the kernel line and the `initrd` line are kept byte for byte. If the old
   host also appears elsewhere on the line (for example in `POSTFILE`), it is left unchanged and the
@@ -85,7 +92,7 @@ A job that is not started within 15 minutes is cancelled with code `draft_expire
 
 ### Time limits per state
 
-Each state has a deadline that starts when the job enters that state (`runner.py:39-45,402`). The page
+Each state has a deadline that starts when the job enters that state (`runner.py:39-45,405`). The page
 shows the time left.
 
 | State | Step | Limit | Failure code when it runs out |
@@ -118,15 +125,15 @@ startup (`config.py:66-68`), so restart it after any change.
 
 | Setting | Default | Meaning | Evidence |
 |---|---|---|---|
-| `PXE_ENABLED` | `false` | Master switch. When off, `/api/pxe/config` returns `{"enabled": false}`, every other `/api/pxe/*` endpoint returns 404, and the tab is hidden. | `config.py:41`, `routers/pxe.py:38-44,119-120` |
-| `PXE_DRIVER` | `simulated` | `simulated` or `raritan`. Each job keeps the driver it was created with. | `config.py:42`, `runner.py:797` |
+| `PXE_ENABLED` | `false` | Master switch. When off, `/api/pxe/config` returns `{"enabled": false}`, every other `/api/pxe/*` endpoint returns 404, and the tab is hidden. | `config.py:41`, `routers/pxe.py:39-45,130-131` |
+| `PXE_DRIVER` | `simulated` | `simulated` or `raritan`. Each job keeps the driver it was created with. | `config.py:42`, `runner.py:800` |
 | `PXE_OLD_REPO_HOST` | the old repository name from the install plan | The host replaced in `inst.repo` and `inst.ks`. It must start with a letter or digit and contain only letters, digits, `.` and `-`. | `config.py:43`, `rewrite.py:12,132-133` |
 | `PXE_NEW_REPO_HOST` | the new repository address from the install plan | The host written in its place. Only letters, digits, `.`, `:` and `-` are allowed, and it must differ from the old host. | `config.py:44`, `rewrite.py:13,134-137`, `screen.py:24` |
 | `PXE_ALLOWED_COMPUTERS` | empty | Computers that may be installed, separated by commas, spaces or semicolons. Names are matched like monitor names: case-insensitive, and for OPT names a suffix such as `(SSD)` is ignored. **Required for `raritan`.** | `config.py:45`, `mapping.py:16-17`, `ping_monitor.py:71-82` |
-| `PXE_MAX_ACTIVE_JOBS` | `1` (allowed 1–8) | How many jobs may run on the whole server at the same time. | `config.py:46`, `runner.py:352-367,824` |
-| `PXE_TICK_SECONDS` | `0.5` (above 0, at most 5) | Pause between automatic steps. | `config.py:47`, `runner.py:247-249` |
+| `PXE_MAX_ACTIVE_JOBS` | `1` (allowed 1–8) | How many jobs may run on the whole server at the same time. | `config.py:46`, `runner.py:355-370,826` |
+| `PXE_TICK_SECONDS` | `0.5` (above 0, at most 5) | Pause between automatic steps. | `config.py:47`, `runner.py:250-252` |
 | `PXE_SIM_TIME_SCALE` | `1.0` (above 0, at most 10) | Simulation only: multiplies the simulated computer's timings, so a value above 1 makes it slower. | `config.py:48`, `sim_driver.py:84-85` |
-| `PXE_SIM_SCENARIO` | `happy` | Simulation only: the scenario used for new jobs. An unknown name falls back to `happy`. | `config.py:49`, `routers/pxe.py:175` |
+| `PXE_SIM_SCENARIO` | `happy` | Simulation only: the scenario used for new jobs. An unknown name falls back to `happy`. | `config.py:49`, `routers/pxe.py:189` |
 
 The defaults of the two repository settings already match the install plan. Leave them unset unless
 the owner approves different values.
@@ -135,11 +142,13 @@ the owner approves different values.
 
 - Each job gets a simulated computer inside the server. It has a firmware screen, an F12 boot menu, PXE,
   a GRUB menu and editor, and an installer (`sim_driver.py`). No KVM is opened, no PDU outlet is
-  switched, and no real computer receives a key (`runner.py:83-103`). In simulation, "PDU power cycle"
-  only restarts the simulated computer (`runner.py:634`).
-- Manual takeover opens no console in simulation (`runner.py:1006-1007`).
+  switched, and no real computer receives a key (`runner.py:85-105`). In simulation, "PDU power cycle"
+  only restarts the simulated computer (`runner.py:637`).
+- Manual takeover opens no console in simulation (`runner.py:1010-1011`). A **failed** simulated job
+  does not offer takeover at all: the request is refused with 409 "A simulated job has no console to
+  open", and no "Console opened" event is logged (`runner.py:191,1003-1004`).
 - With an empty `PXE_ALLOWED_COMPUTERS`, every listed computer is allowed in simulation
-  (`routers/pxe.py:68-71`).
+  (`routers/pxe.py:69-72`).
 - Scenarios (`sim_driver.py:9-10`), with the result the automated tests check
   (`backend/tests/test_pxe_sim.py`):
 
@@ -162,17 +171,17 @@ the owner approves different values.
   Chromium browser driven by Playwright, and signs in on the server side with the KVM credentials
   stored in Lab Manager. Passwords never reach the browser (`raritan_driver.py:298-358`).
 - It reads the screen by OCR: the Tesseract program if it is installed, otherwise RapidOCR
-  (`raritan_driver.py:209-228`). A read below 90% confidence is never acted on (`runner.py:55,447-453`).
+  (`raritan_driver.py:209-228`). A read below 90% confidence is never acted on (`runner.py:55,450-456`).
 - It can only press keys from a fixed list: F12, arrows, Enter, Esc, `e`, Ctrl+A/E/K/X, Delete,
   Backspace, Home, End and Ctrl+Alt+Delete. The only text it can type is a repository host
   (`screen.py:20-33`).
 - A real job can start only when the console browser and a screen reader are installed
   (`raritan_driver.py:37-61`). Until then, creating or starting a job is refused with 503, the computer
   list shows "Remote install driver unavailable", and `/api/pxe/config` reports `"available": false`
-  (`routers/pxe.py:122,149-150,159-160,217-218`).
+  (`routers/pxe.py:133,163-164,173-174,233-234`).
 - **The allowlist is mandatory.** With `raritan`, an empty `PXE_ALLOWED_COMPUTERS` allows **no**
   computer. The allowlist is checked when the list is shown, when a job is created and again when it is
-  started (`routers/pxe.py:68-71,144,167,221`).
+  started (`routers/pxe.py:69-72,156,181,237`).
 
 ### Why it is off by default
 
@@ -199,7 +208,7 @@ Remote PXE install" at the time of writing), and a configured password (user acc
 password).
 
 1. If Remote install was already on, make sure no job is running. After a restart, every job that had not
-   sent its install yet fails with code `interrupted` (`runner.py:507-535`). This applies to every restart
+   sent its install yet fails with code `interrupted` (`runner.py:510-538`). This applies to every restart
    and to turning the feature off.
 2. On the VM, in the project folder from `docs/vm-runbook.md`, add these lines to the existing `.env`
    with an editor. Do not replace the device credentials that are already there, and do not print the
@@ -230,7 +239,7 @@ password).
    - `"reboot_methods": ["kvm_cad", "manual", "pdu_cycle"]`, `"max_active_jobs": 1`, the `"timeouts"` from
      section 1, the list of `"scenarios"`, and `"default_scenario": "happy"`
 
-   (`routers/pxe.py:116-126`). Then open the **Remote install** tab. It shows "Simulation mode — jobs
+   (`routers/pxe.py:127-137`). Then open the **Remote install** tab. It shows "Simulation mode — jobs
    run against a simulated computer" (`RemoteInstallView.jsx:567`).
 
 **To turn it off:** set `PXE_ENABLED=false` (or remove the lines), then run `lab-service.py restart`
@@ -260,7 +269,7 @@ None of this has been done yet. Each item needs the owner's approval.
 2. **Turn off monitoring and alerts on the trial instance**, so it does not send duplicate pings or
    emails: `PING_MONITOR_ENABLED=false` and `EMAIL_ALERTS_ENABLED=false` (`config.py:22,24`).
 3. **Use a copy of the live database, never the live file.** The KVM console session exists only inside
-   the process that started the job (`runner.py:860-862`), so two servers must never share one job
+   the process that started the job (`runner.py:862-864`), so two servers must never share one job
    table. Make the copy with SQLite's online backup rather than a plain file copy. Keep the same
    `LAB_MANAGER_MASTER_KEY`, because the stored KVM and PDU passwords are encrypted with it
    (`config.py:15`, `crypto.py:5-6`).
@@ -325,7 +334,7 @@ None of this has been done yet. Each item needs the owner's approval.
 7. **After Ctrl+X:** never retry. If something goes wrong, take over manually. The install is complete
    only when the login screen appears after the installer's reboot, or when you mark it manually.
 8. **At the end:** collect the job's events and screenshots (`backend/pxe_screens/<job id>/`) for
-   calibration. Up to 50 screenshots per job are kept, for at most 7 days (`runner.py:53-54,149-176`).
+   calibration. Up to 50 screenshots per job are kept, for at most 7 days (`runner.py:53-54,151-178`).
 
 ---
 
@@ -342,7 +351,7 @@ These are open. Fixes are **(planned)** and not yet in the code.
   options.
 - **F12 timing depends on OCR speed (planned).** F12 is pressed only after the screen has been read (up
   to 3 reads per step). The first F12 waits until a blank screen, the firmware screen or the boot menu
-  is recognised (`runner.py:449-453,640-665`). On a short firmware screen, F12 can come too late. Models
+  is recognised (`runner.py:452-456,643-668`). On a short firmware screen, F12 can come too late. Models
   where F12 boots from the network directly are not handled.
 - **Opening the console clicks the console picture (planned).** The driver clicks the canvas once to
   focus it, and that click reaches the target computer (`raritan_driver.py:354`).
@@ -350,7 +359,7 @@ These are open. Fixes are **(planned)** and not yet in the code.
   (`raritan_driver.py:185-186,429-432`).
 - **No "choose in the console, then resume" (planned).** When the screen cannot be read clearly, the job
   waits until the step's time limit and then fails. **Manual takeover** is final: automation cannot be
-  resumed (`runner.py:447-453,994-1009`).
+  resumed (`runner.py:450-456,996-1013`).
 - **No PDU offer after Ctrl+Alt+Del is ignored (planned).** Start a new job with another method instead
   (section 6).
 - **No console check without keys yet (planned).**
@@ -364,7 +373,7 @@ These are open. Fixes are **(planned)** and not yet in the code.
   wrong label switches the wrong computer, and nothing checks the computer's identity before power is
   cut.
 - After a server restart, jobs that had not sent the install fail with `interrupted`. Jobs that had sent
-  it are only watched against their deadline, and the console is no longer monitored (`runner.py:507-535`).
+  it are only watched against their deadline, and the console is no longer monitored (`runner.py:510-538`).
 
 ---
 
@@ -373,10 +382,18 @@ These are open. Fixes are **(planned)** and not yet in the code.
 Find the code in the red **Failed** box on the job, after "Failed at …". The **Events** list shows each
 step with its time.
 
-**Blocked** means `install_may_have_started` is set. The computer cannot get a new job until an Admin
-clicks **Acknowledge (Admin)** (`runner.py:415-431`, `routers/pxe.py:178-180`). A failure blocks the
-computer when the install was already sent, or when the job was in `waiting_for_grub` (where an install
-entry could boot without any key), unless the code says otherwise.
+**Blocked** means `needs_acknowledge`: `install_may_have_started` is set and the failed or taken-over job
+still holds the computer. The computer cannot get a new job until an Admin clicks **Acknowledge (Admin)**
+(`runner.py:418-434`, `routers/pxe.py:193-194`). A failure blocks the computer when the install was
+already sent, or when the job was in `waiting_for_grub` (where an install entry could boot without any
+key), unless the code says otherwise.
+
+The job's failure box tells these two cases apart by `install_sent_at`. When it is set, the box says
+"The install command may already have been sent." When it is not, it says "No install command was sent,
+but the GRUB menu may have booted an entry on its own." Both go on with "Do not retry automatically —
+check the console." The last sentence says a new job for the computer needs Admin acknowledgement, or,
+after an Admin acknowledged the job, that the computer is released for new installs
+(`frontend/src/api/pxe.js`, `blockedNotice`).
 
 ### Failure codes
 
@@ -404,7 +421,7 @@ entry could boot without any key), unless the code says otherwise.
 | `installer_error` | `installing`, `install_started` | Emergency shell, a dracut timeout, "Could not fetch", or a kernel panic. Often the new repository or kickstart address is not reachable. **Blocked.** | Check that the new address serves the same paths. Check any `POSTFILE` warning. |
 | `installer_not_started` | `installing` | A login prompt appeared instead of the installer. **Blocked.** | Check the console, then an Admin acknowledges. |
 | `completion_timeout` | `install_started` | No login prompt after the installer's reboot within 4 hours (also used when the console was no longer monitored after a server restart). **Blocked.** | Check the computer. Mark the install as completed before the deadline if it has finished. After this failure, an Admin acknowledges to release the computer. |
-| `kvm_disconnected` | any | The console session failed. One automatic reconnect was tried first (`runner.py:589-604`). **Blocked** in `waiting_for_grub` or after the install was sent. | Check that the KVM answers, that nobody else holds the port, and the single-login limits. |
+| `kvm_disconnected` | any | The console session failed. One automatic reconnect was tried first (`runner.py:592-607`). **Blocked** in `waiting_for_grub` or after the install was sent. | Check that the KVM answers, that nobody else holds the port, and the single-login limits. |
 | `interrupted` | any state before the install | The server restarted, or the console session was lost, before the install was sent. The job never resumes. **Blocked** in `waiting_for_grub`. | Start a new job. Do not restart the backend while jobs are running. |
 | `internal_error` | any | Unexpected automation error. | Collect the events and screenshots and report them. |
 | `draft_expired` | `draft` (job ends as `cancelled`) | The job was not started within 15 minutes. | Start a new job. |
@@ -417,24 +434,25 @@ entry could boot without any key), unless the code says otherwise.
 | Waiting for Admin acknowledge | `needs_acknowledge` | An Admin opens the failed job, checks the computer and clicks **Acknowledge (Admin)**. |
 | Not enabled for remote install | `not_allowlisted` | Add the computer to `PXE_ALLOWED_COMPUTERS` (with the owner's approval) and restart. |
 | KVM port in use | `kvm_port_busy` | Another job holds that KVM port. |
+| Another install is running | `run_limit` | `PXE_MAX_ACTIVE_JOBS` jobs are already running on the server. Wait until one finishes or is cancelled. Drafts do not count, and a computer with its own job shows that job instead. |
 | Remote install driver unavailable | `driver_unavailable` | `raritan` without the browser or screen reader. See section 4.1, item 4. |
 
-Sources: `routers/pxe.py:139-152`, `RemoteInstallView.jsx:22-28`.
+Sources: `routers/pxe.py:151-166`, `RemoteInstallView.jsx:22-28`.
 
 ### Common refusals
 
 | Message | Code | What to do |
 |---|---|---|
-| "Remote install requires a configured password" | 403 | Turn on user accounts or set the shared password (`routers/pxe.py:161`). |
-| "This computer is not allowed for remote install" | 403 | The computer is not on the allowlist. This is also checked at start (`routers/pxe.py:167-168,221-222`). |
+| "Remote install requires a configured password" | 403 | Turn on user accounts or set the shared password (`routers/pxe.py:175`). |
+| "This computer is not allowed for remote install" | 403 | The computer is not on the allowlist. This is also checked at start (`routers/pxe.py:181-182,237-238`). |
 | "Password is incorrect" / "Too many attempts. Try again in five minutes." | 403 / 429 | After 10 failed attempts within 5 minutes, wait (`confirm.py:20-21,83-85,107`). |
-| "The Raritan console driver is not available in this phase" | 503 | See section 4.1, item 4 (`routers/pxe.py:159-160,217-218`). |
-| "Unknown computer or no KVM port is mapped to it" / "… more than one KVM port; choose one" | 422 | Check the KVM port labels and choose the port (`routers/pxe.py:165-172`, `mapping.py:64-74`). |
-| "No PDU outlet is mapped to this computer" | 422 | PDU power cycle needs a PDU outlet labelled with the computer's name (`routers/pxe.py:173-174`). |
-| "A previous install may have started on this computer; an Admin must acknowledge it first" | 409 | See **Blocked** above (`routers/pxe.py:178-180`). |
-| "Another install is active on this computer or KVM port" / "Another remote install is running; wait until it finishes" | 409 | One job at a time (`runner.py:807,815`). |
-| "The menu on screen changed; review the options again" / "Highlight verification failed; nothing was selected" | 409 | The page reloads the options. Choose again (`runner.py:905-919`). |
-| "The screen changed since the review; nothing was sent" | 409 | Ctrl+X was **not** sent. Review the reloaded summary (`runner.py:947-951`). |
-| "No console session for this job on this server" | 409 | The server restarted, or another server process owns the job (`runner.py:860-862`). |
-| "Screenshots can be refreshed every 2 seconds" | 429 | Wait 2 seconds (`runner.py:1039-1041`). |
-| "KVM console session failed" | 502 | The console could not be opened or read (`runner.py:836-838`). |
+| "The Raritan console driver is not available in this phase" | 503 | See section 4.1, item 4 (`routers/pxe.py:173-174,233-234`). |
+| "Unknown computer or no KVM port is mapped to it" / "… more than one KVM port; choose one" | 422 | Check the KVM port labels and choose the port (`routers/pxe.py:179-186`, `mapping.py:64-74`). |
+| "No PDU outlet is mapped to this computer" | 422 | PDU power cycle needs a PDU outlet labelled with the computer's name (`routers/pxe.py:187-188`). |
+| "A previous install may have started on this computer; an Admin must acknowledge it first" | 409 | See **Blocked** above (`routers/pxe.py:192-194`). |
+| "Another install is active on this computer or KVM port" / "Another remote install is running; wait until it finishes" | 409 | One job per computer and KVM port, and at most `PXE_MAX_ACTIVE_JOBS` running jobs. The second message is returned at create and at start, before the password is checked (`runner.py:60,810`, `routers/pxe.py:195-196,239-243`). |
+| "The menu on screen changed; review the options again" / "Highlight verification failed; nothing was selected" | 409 | The page reloads the options. Choose again (`runner.py:907-921`). |
+| "The screen changed since the review; nothing was sent" | 409 | Ctrl+X was **not** sent. Review the reloaded summary (`runner.py:949-953`). |
+| "No console session for this job on this server" | 409 | The server restarted, or another server process owns the job (`runner.py:862-864`). |
+| "Screenshots can be refreshed every 2 seconds" | 429 | Wait 2 seconds (`runner.py:1043-1045`). |
+| "KVM console session failed" | 502 | The console could not be opened or read (`runner.py:838-840`). |

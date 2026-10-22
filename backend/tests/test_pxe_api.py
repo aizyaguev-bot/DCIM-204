@@ -300,10 +300,91 @@ async def test_failure_scenario_through_the_api(api):
     job_id = await started(api, sim_scenario="missed_f12")
     job = await get_job(api, job_id)
     assert job["state"] == "failed" and job["error_code"] == "boot_menu_timeout" and job["failed_step"] == "waiting_for_menu"
-    assert job["can"]["takeover"] and job["screenshot_available"] and job["state_label"] == "נכשל"
+    assert job["screenshot_available"] and job["state_label"] == "נכשל"
+    # PXE-6: a failed simulated job has no console, so it offers no takeover and logs no "Console opened" event.
+    assert job["can"]["takeover"] is False
+    before = [e.action for e in await events(api, job_id)]
     r = await post(api, job_id, "takeover")
-    assert r.status_code == 200 and r.json()["job"]["state"] == "failed"
-    assert r.json()["console_url"] is None and r.json()["simulated"] is True
+    assert r.status_code == 409 and r.json()["detail"] == "A simulated job has no console to open"
+    again = await get_job(api, job_id)
+    assert again["state"] == "failed" and again["version"] == job["version"]
+    after = [e.action for e in await events(api, job_id)]
+    assert after == before and "takeover" not in after
+
+
+async def test_failed_real_console_job_still_offers_takeover(api):
+    async with api.sessions() as db:
+        db.add(PxeJob(id="d" * 32, computer_key="opt11", computer_name="OPT11", kvm_device_id="kvm1", kvm_port=1,
+                      reboot_method="kvm_cad", driver="raritan", state="failed", state_entered_at=api.clock(),
+                      deadline_at=api.clock(), created_by="tester", created_at=api.clock(), updated_at=api.clock()))
+        await db.commit()
+    assert (await get_job(api, "d" * 32))["can"]["takeover"] is True
+    r = await post(api, "d" * 32, "takeover")
+    assert r.status_code == 200 and r.json()["console_url"] == "/api/kvms/kvm1/autologin?port=1"
+    assert [e.action for e in await events(api, "d" * 32)] == ["takeover"]
+
+
+async def computers_by_key(api):
+    return {c["key"]: c for c in (await api.c.get("/api/pxe/computers")).json()}
+
+
+async def job_count(api):
+    async with api.sessions() as db:
+        return len((await db.scalars(select(PxeJob))).all())
+
+
+async def test_run_limit_blocks_other_computers_before_a_draft_or_password(api):
+    BUSY = "Another remote install is running; wait until it finishes"
+    draft_b = await create(api, computer_key="optn87", kvm_device_id="kvm2", kvm_port=1)
+    assert draft_b.status_code == 201, draft_b.text
+    b_id = draft_b.json()["id"]
+    a_id = await started(api)                                  # OPT11 runs and waits for a boot choice
+    assert (await get_job(api, a_id))["state"] == "waiting_for_choice"
+
+    computers = await computers_by_key(api)
+    assert computers["opt11"]["blockers"] == ["active_job"] and computers["opt11"]["active_job_id"] == a_id
+    assert computers["optn87"]["blockers"] == ["active_job"] and computers["optn87"]["active_job_id"] == b_id
+    assert computers["optn84"]["blockers"] == ["run_limit"] and computers["optn84"]["eligible"] is False
+
+    rows = await job_count(api)
+    r = await create(api, computer_key="optn84", kvm_device_id="kvm1", kvm_port=2)
+    assert r.status_code == 409 and r.json()["detail"] == BUSY
+    assert await job_count(api) == rows                        # no draft row was created
+
+    r = await post(api, b_id, "start", {"password": "wrong-" + SHARED, "reason": "x"})
+    assert r.status_code == 409 and r.json()["detail"] == BUSY # the limit is checked before the password
+    assert "denied" not in [e.action for e in await events(api, b_id)]
+    assert (await get_job(api, b_id))["state"] == "draft"
+
+    assert (await post(api, a_id, "cancel")).status_code == 200
+    computers = await computers_by_key(api)
+    assert computers["optn84"]["blockers"] == [] and computers["optn84"]["eligible"]
+    r = await post(api, b_id, "start", {"password": SHARED, "reason": "Reinstall lab PC"})
+    assert r.status_code == 200 and r.json()["state"] == "rebooting"
+
+
+async def test_expired_draft_reports_expiry_even_at_the_run_limit(api):
+    b_id = (await create(api, computer_key="optn87", kvm_device_id="kvm2", kvm_port=1)).json()["id"]
+    await started(api)
+    async with api.sessions() as db:
+        (await db.get(PxeJob, b_id)).deadline_at = api.clock() - 1
+        await db.commit()
+    r = await post(api, b_id, "start", {"password": SHARED, "reason": "x"})
+    assert r.status_code == 409 and r.json()["detail"] == "The job expired; create a new one"
+    job = await get_job(api, b_id)
+    assert job["state"] == "cancelled" and job["error_code"] == "draft_expired"
+
+
+async def test_run_limit_follows_max_active_jobs(api):
+    api.settings.pxe_max_active_jobs = 2
+    await started(api)
+    computers = await computers_by_key(api)
+    assert all("run_limit" not in c["blockers"] for c in computers.values())
+    second = await started(api, computer_key="optn84", kvm_device_id="kvm1", kvm_port=2)
+    assert (await get_job(api, second))["state"] == "waiting_for_choice"
+    computers = await computers_by_key(api)
+    assert computers["optn87"]["blockers"] == ["run_limit"]
+    assert (await create(api, computer_key="optn87", kvm_device_id="kvm2", kvm_port=1)).status_code == 409
 
 
 def test_required_roles():
