@@ -2,6 +2,47 @@
 
 ---
 
+## v2.40.0 — 2026-10-22 — Active lab assistant, port names written to the PDUs, API key page
+
+### Added
+- **The lab assistant can act — after you confirm.** Ask it in Hebrew or English to
+  turn a server, rack, PDU or the whole lab off or on, to reset a server (power
+  cycle, then open its KVM console), or to swap, move or clear server locations.
+  The assistant only proposes: every action shows the exact outlets or ports it
+  will change, and runs only when you confirm (power actions also ask for your
+  password and a confirmation phrase). Outlets listed in POWER_PROTECTED_OUTLETS
+  are never switched off. Off by default: set `ASSISTANT_ACTIONS_ENABLED=true` in
+  `.env` and restart (see docs/assistant-actions.md). Needs user accounts.
+- **Port names are written to the PDUs themselves.** When you save outlet names on
+  the site, the same names are written to the PDU's own web interface (names only,
+  never power or any other setting; the PDU is read back to confirm). Each outlet
+  shows a small status mark (synced, pending, failed), and the PDU page has a
+  **Device names** panel that compares the site with the PDU and writes the
+  differences you select. Clearing a name on the site resets the PDU's name to its
+  default. KVM port names are not written yet (the lab's KVM models have no
+  documented way to rename ports). `DEVICE_NAME_SYNC=manual` turns off the
+  automatic write (the panel still works), `off` turns all writes off.
+- **Admin → AI assistant:** paste the Anthropic API key in the browser instead of
+  editing `.env` on the VM. The key is tested before it is saved, stored encrypted,
+  shown only as its last 4 characters, and used within a few seconds without a
+  restart. Admins only; saving or removing it asks for your password.
+
+### Fixed
+- A power cycle re-checks every outlet under the PDU locks and refuses, switching
+  nothing, if an outlet changed since the proposal.
+- A lab or rack shutdown stops before the next PDU whenever a PDU stops answering,
+  even if its outlets were already off.
+- The assistant's focus moves into its panel at once, so Escape is never lost on
+  the 3D Twin page.
+- 3D Digital Twin: a click right after a live refresh no longer misses the
+  equipment under the pointer.
+
+### Changed
+- The VM installer's package check never installs anything, and pip ignores every
+  pip configuration file on the VM, so only the fixed package index is used.
+
+---
+
 ## v2.39.6 — 2026-10-21 — 3D Digital Twin: clearer moves and keyboard search
 
 ### Fixed

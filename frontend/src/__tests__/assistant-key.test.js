@@ -246,7 +246,8 @@ test("the key field is a password field that is not autocompleted or spell-check
   const input = view.match(/<input ref=\{keyInput\}[\s\S]*?\/>/)?.[0];
   assert.ok(input, "key input found");
   assert.match(input, /type="password"/);
-  assert.match(input, /autoComplete="off"/);
+  // "one-time-code": browsers never offer to save it as a password (Chrome ignores "off" on password fields).
+  assert.match(input, /autoComplete="one-time-code"/);
   assert.match(input, /spellCheck=\{false\}/);
   assert.match(view, />Anthropic API key\s*</);
   assert.match(view, />Your password\s*</);

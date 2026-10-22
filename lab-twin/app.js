@@ -1877,6 +1877,9 @@
     if (id !== S.hover) { setHover(id); }
   });
   function pickAt(e) {
+    // A live refresh rebuilds item meshes; until the next frame is drawn their world matrices are stale, so a tap
+    // right after a refresh would miss them (and in Move mode say "Choose a shelf").
+    scene.updateMatrixWorld();
     const r = canvas.getBoundingClientRect(); ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     raycaster.setFromCamera(ndc, camera);
     const hits = raycaster.intersectObjects(S.pickables.filter(m => isShown(m) && (m.material.opacity > 0.2)), false);

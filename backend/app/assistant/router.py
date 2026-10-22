@@ -974,7 +974,7 @@ async def _key_body(request: Request) -> tuple[dict, str]:
         raise _fail(exc.status_code, KEY_MSG_TOO_BIG if exc.status_code == 413 else KEY_MSG_BAD_BODY) from None
     try:
         body = json.loads(raw)
-    except ValueError:   # includes UnicodeDecodeError
+    except (ValueError, RecursionError):   # ValueError includes UnicodeDecodeError; RecursionError: deep nesting
         raise _fail(400, KEY_MSG_BAD_BODY) from None
     if not isinstance(body, dict):
         raise _fail(400, KEY_MSG_BAD_BODY)
@@ -1037,6 +1037,9 @@ async def get_key(request: Request):
     stored_key_unreadable}. Never the key: `hint` is "…" + its last 4 characters."""
     settings = get_settings()
     _key_admin(request, settings)
+    if confirm.password_mode(settings) == "unavailable":
+        # An open site (no accounts, no shared password): nobody can be told who set the key or how it ends.
+        raise _fail(403, KEY_MSG_NO_PASSWORD)
     return await _key_state(settings)
 
 

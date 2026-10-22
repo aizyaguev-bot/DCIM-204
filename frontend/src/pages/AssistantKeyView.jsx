@@ -157,7 +157,7 @@ export default function AssistantKeyView() {
           <fieldset disabled={!canSave} className="account-fields disabled:opacity-60">
             <label>Anthropic API key
               <input ref={keyInput} type="password" name="assistant-api-key" value={key} onChange={e => setKey(e.target.value)} required
-                autoComplete="off" spellCheck={false} autoCapitalize="off" autoCorrect="off" maxLength={KEY_MAX_LENGTH}
+                autoComplete="one-time-code" spellCheck={false} autoCapitalize="off" autoCorrect="off" maxLength={KEY_MAX_LENGTH}
                 placeholder="sk-ant-…" data-1p-ignore="" data-lpignore="true" aria-describedby="assistant-key-note" />
             </label>
             <p id="assistant-key-note" className="text-xs text-zinc-500 -mt-2">Stored encrypted on the server. Only its last 4 characters are ever shown.</p>
