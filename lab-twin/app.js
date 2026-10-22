@@ -1334,7 +1334,7 @@
     return Object.fromEntries(entries.filter(entry => entry && entry[1] != null));
   }
   let liveSession = 0;
-  let refreshInFlight = null;
+  let refreshInFlight = null, refreshQueued = null;
   async function connect() {
     const session = ++liveSession;
     if (S.live.timer) clearInterval(S.live.timer);
@@ -1422,7 +1422,14 @@
       computeModel(); buildItems({ refresh: true });
     } finally {
       if (refreshInFlight === session) refreshInFlight = null;
+      if (refreshQueued === session) { refreshQueued = null; if (session === liveSession) refreshStatuses().catch(() => {}); }
     }
+  }
+  // An explicit refresh after a change (e.g. a KVM port mark) must not be swallowed by a poll already in flight:
+  // that poll may carry the status from before the change, so one more refresh runs when it ends.
+  function refreshSoon() {
+    if (refreshInFlight === liveSession) { refreshQueued = liveSession; return; }
+    refreshStatuses().catch(() => {});
   }
   // ── power / console safety: act only on mappings that come from live DCIM data, always after an explicit choice
   const livePdu = id => (S.live.connected && id ? (S.live.devices || []).find(d => d.kind === 'pdu' && d.id === id) : null) || null;
@@ -1523,23 +1530,59 @@
     finally { if (btn) { btn.disabled = false; btn.innerHTML = old; } }
   }
   // KVM console: like the Lab Manager UI — window.open inside the click; if the browser refuses a new tab the console
-  // opens inline. The port is marked in use and always marked free again when the tab / inline console closes.
+  // opens inline. A port that is already in use asks first (advisory: someone else may be working on that server).
+  // Every console gets its own lease from mark-in-use and frees only that lease when its tab / inline console closes,
+  // so closing one console never clears another person's IN USE marker. A failed mark-in-use frees nothing.
   let inlineConsole = null;
-  function openKvm(kvmId, port, label) {
+  const kvmPort = (kvmId, port) => S.live.kvm?.[kvmId]?.ports?.find(p => p.number === port) || null;
+  // Show the server's answer at once (the status refresh that follows confirms it).
+  function setKvmPortInUse(kvmId, port, inUse) {
+    const p = kvmPort(kvmId, port); if (!p || !!p.in_use === inUse) return;
+    p.in_use = inUse; computeModel(); buildItems({ refresh: true });
+  }
+  async function openKvm(kvmId, port, label) {
     if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
-    const dev = liveKvm(kvmId);
+    let dev = liveKvm(kvmId);
     if (!dev || !Number.isInteger(port) || port < 1) { toast('Not in live DCIM — console disabled', 'err'); return; }
+    const named = label && !isDefaultOutletLabel(label) ? label : '';
+    if (kvmPort(kvmId, port)?.in_use) {
+      const choice = await askChoice({
+        title: 'הפורט כבר בשימוש',
+        html: `<div class="cf-line">${esc(dev.name || kvmId)} · Port ${esc(port)}${named ? ' · ' + esc(named) : ''}</div><div class="note" dir="rtl">מישהו אחר כנראה עובד עכשיו על השרת הזה דרך ה-KVM. פתיחה נוספת תציג לשניכם את אותו מסך, ושניכם תשלטו באותה מקלדת ועכבר.</div>`,
+        choices: [{ id: 'cancel', label: 'ביטול' }, { id: 'go', label: 'פתח בכל זאת', cls: 'btn-primary' }],
+      });
+      if (choice !== 'go') return;
+      if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; }
+      dev = liveKvm(kvmId);   // the backend may have disconnected while the dialog was open
+      if (!dev) { toast('Not in live DCIM — console disabled', 'err'); return; }
+    }
     const base = (S.settings.url || '').replace(/\/$/, ''); const path = `/api/kvms/${encodeURIComponent(kvmId)}`;
     const url = `${base}${path}/autologin?port=${encodeURIComponent(port)}`;
     let popup = null; try { popup = window.open(url, '_blank'); } catch { popup = null; }
-    const inUse = api(`${path}/ports/${port}/mark-in-use`, { method: 'POST' }).then(() => true, () => { toast('The console opened, but marking the port as in use failed — check that you are still signed in', 'err'); return false; });
-    // mark-free waits for mark-in-use, so a fast close can never leave the port stuck "in use"
-    const markFree = init => inUse.then(() => api(`${path}/ports/${port}/mark-free`, { method: 'POST', ...(init || {}) })).catch(() => {}).then(() => { if (!init) refreshStatuses(); });
+    // lease: this console's own marker; '' = an older server without leases (mark-free then has no body);
+    // null = marking failed, so there is nothing of ours to free
+    const lease = api(`${path}/ports/${port}/mark-in-use`, { method: 'POST' }).then(r => {
+      try { setKvmPortInUse(kvmId, port, true); } catch { /* display only: the lease must still be freed */ }
+      refreshSoon();   // KVM-4: confirm IN USE now, not at the next poll
+      return typeof r?.lease === 'string' ? r.lease : '';
+    }, () => { toast('The console opened, but marking the port as in use failed — check that you are still signed in', 'err'); return null; });
+    // mark-free waits for mark-in-use, so a fast close can never leave the port stuck "in use"; sent at most once
+    let freeing = null;
+    const markFree = init => freeing || (freeing = lease.then(l => {
+      if (l === null) return;
+      return api(`${path}/ports/${port}/mark-free`, { method: 'POST', ...(l ? { body: JSON.stringify({ lease: l }) } : {}), ...(init || {}) })
+        .then(r => r, () => null).then(r => {
+          if (init) return;   // pagehide: the page is going away
+          // sessions = consoles still open on this port (an older server without leases frees the whole port)
+          try { if (r) setKvmPortInUse(kvmId, port, typeof r.sessions === 'number' ? r.sessions > 0 : false); } catch { /* display only */ }
+          refreshSoon();
+        });
+    }));
     if (popup) {
       const t = setInterval(() => { if (popup.closed) { clearInterval(t); markFree(); } }, 2000);
       toast(`Opening KVM console · ${dev.name || kvmId} port ${port}`, 'ok'); return;
     }
-    openInlineConsole({ title: `${dev.name || kvmId} · Port ${port}${label && !isDefaultOutletLabel(label) ? ' · ' + label : ''}`, url, markFree });
+    openInlineConsole({ title: `${dev.name || kvmId} · Port ${port}${named ? ' · ' + named : ''}`, url, markFree });
     toast('The browser blocked a new tab — the console opened inside the twin', 'err');
   }
   function openInlineConsole({ title, url, markFree }) {
