@@ -206,6 +206,9 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
     const onPop = () => setOpen(false);                   // phone Back: the page changes, so the sheet closes
     const onKey = e => {
       if (e.key !== "Tab" || e.defaultPrevented || draftRef.current || !panelRef.current) return;
+      // A modal above the sheet (an action confirmation, the inline KVM console) traps Tab itself; this listener
+      // runs first, so pulling focus into the sheet would leave that dialog stuck on its first control.
+      if ([...document.querySelectorAll('[aria-modal="true"]')].some(el => el !== panelRef.current)) return;
       trapTab(e, panelRef.current);
     };
     window.addEventListener("popstate", onPop);
