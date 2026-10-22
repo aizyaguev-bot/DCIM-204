@@ -91,6 +91,9 @@ def required_role(path, method):
     if method == "POST" and re.fullmatch(r"/api/assistant/chat", path): return "Viewer"
     if method == "DELETE" and re.fullmatch(r"/api/assistant/conversations/[0-9a-f]{32}", path): return "Viewer"
     if re.fullmatch(r"/api/devices/connections(?:\.csv)?", path): return "Operator"
+    # Device names: the live compare contacts the PDU/KVM, so even its GET is Operator; the push POST keeps the Operator
+    # default below; /api/devices/name-sync/status reads the database only and stays Viewer like any GET.
+    if re.fullmatch(r"/api/devices/[^/]+/device-names", path): return "Operator"
     if method in ("GET", "HEAD", "OPTIONS"): return "Viewer"
     if path in ("/api/auth/logout", "/api/me", "/api/me/password", "/api/me/preferences"): return "Viewer"
     if path == "/api/devices" or re.fullmatch(r"/api/devices/[^/]+", path):

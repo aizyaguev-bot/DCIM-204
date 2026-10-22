@@ -1,6 +1,7 @@
 """Isolated real FastAPI + temporary database/inventory, with hardware drivers replaced."""
 import asyncio
 from contextlib import asynccontextmanager
+import copy
 import json
 import os
 from pathlib import Path
@@ -22,16 +23,23 @@ account_test = os.environ.get('DCIM_TEST_ACCOUNTS') == '1'
 os.environ['ACCOUNTS_ENABLED'] = 'true' if account_test else 'false'
 if account_test:
     os.environ['LAB_MANAGER_PASSWORD'] = 'test-password-123'
+# Device name sync (site port names -> PDU/KVM): DCIM_FAKE_NAME_DEVICES=1 writes them to in-memory fake devices below
+# (the real backend decides everything else; DEVICE_NAME_SYNC=auto). Without the flag it stays off, as before.
+fake_names = os.environ.get('DCIM_FAKE_NAME_DEVICES') == '1'
+os.environ['DEVICE_NAME_SYNC'] = 'auto' if fake_names else 'off'
 sys.path.insert(0, str(root / 'backend'))
-from app import main, inventory_store
+from app import main, inventory_store, name_sync
 from app.database import init_db, AsyncSessionLocal
 from app.models import Device, PingTarget, MonitorDeviceSnapshot
+from sqlalchemy import select
 from app.routers import pdus, kvms, pxe, devices, kvm_proxy
 from app.pxe.runner import PxeRunner
 from app.config import get_settings
 from app.schemas import PduStatus, OutletState, InletReading, KvmStatus, KvmPort
-from drivers.raritan_kvm import RaritanKvmDriver
-from drivers.raritan_pdu import RaritanPduDriver
+from drivers import raritan_kvm, raritan_pdu
+from drivers.raritan_kvm import RaritanKvmDriver, RaritanKvmError
+from drivers.raritan_pdu import RaritanPduDriver, RaritanPduError
+import httpx
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.routing import Route
 
@@ -58,7 +66,13 @@ power_states = {}
 async def pdu_status(device_id, dev):
     n = int(device_id.removeprefix('pdu')) if device_id.startswith('pdu') else 1
     online = n != 7
-    outlets = [OutletState(number=i, label=f'OPT{n}{i}', state=power_states.get((dev.ip,i), 'on') if online else 'unknown', watts=(70+n*20+i*10) if online else 0) for i in range(1,5)]
+    def label(i):
+        if not fake_names:
+            return f'OPT{n}{i}'
+        # As the real status read: a saved site label wins, else the name stored on the (fake) PDU or its default.
+        saved = json.loads(dev.labels_json or '{}').get(str(i))
+        return saved if saved is not None else (stored_names(name_device(dev)).get(i) or f'Outlet {i}')
+    outlets = [OutletState(number=i, label=label(i), state=power_states.get((dev.ip,i), 'on') if online else 'unknown', watts=(70+n*20+i*10) if online else 0) for i in range(1,5)]
     return PduStatus(device_id=device_id, reachable=online, inlet_voltage=230 if online else 0, total_watts=sum(o.watts for o in outlets), outlets=outlets,
                      inlet_readings=[InletReading(number=1, voltage=230, current=sum(o.watts for o in outlets)/230, watts=sum(o.watts for o in outlets))] if online else [], error=None if online else 'Fixture: PDU unavailable')
 
@@ -73,6 +87,146 @@ class FakePdu:
     def __init__(self, ip, *args): self.ip = ip
     set_outlet_state = fake_power
     async def close(self): pass
+
+# ── Fake devices for device name sync (DCIM_FAKE_NAME_DEVICES=1) ─────────────────────────────────────────────────
+# Each fixture PDU is an in-memory Xerus JSON-RPC device (one outlet per site port, the seeded names stored on it;
+# "" = the PDU's own default name). The real RaritanPduDriver talks to it through an httpx mock transport, so its own
+# discovery, settings checks, read-modify-write and read-back all run. The KVM's firmware has no known rename method.
+# Fixture-only switches: POST /__fixture/name-devices/<id>; GET /__fixture/name-devices shows every fake device.
+name_devices = {}
+name_device_ips = {}
+NAME_DEVICE_MODES = ('ok', 'unreachable', 'settings_changed')
+XERUS_OUTLET_TYPE = 'pdumodel.Outlet:3.0.3'
+
+def outlet_rid(number):
+    return f'/tfwopaque/{XERUS_OUTLET_TYPE}/outlet.{number - 1}'
+
+def xerus_outlet_settings(name, number):
+    """pdumodel.Outlet_3_0_3.Settings as a Xerus PDU returns it (startupState 3 = PDU default)."""
+    return {'name': name, 'startupState': 3, 'usePduCycleDelay': True, 'cycleDelay': 10, 'nonCritical': False,
+            'sequenceDelay': 200 + number}
+
+def name_device(dev):
+    if dev.id not in name_devices:
+        labels = json.loads(dev.labels_json or '{}')
+        state = {'kind': dev.kind, 'mode': 'unreachable' if dev.id == 'pdu7' else 'ok',
+                 'delay': float(os.environ.get('DCIM_FAKE_NAME_DELAY', '0.2')),
+                 'writes': [], 'refused': [], 'forbidden': [], 'clobbered': [], 'reads': 0}
+        if dev.kind == 'pdu':
+            state['outlets'] = {i: xerus_outlet_settings(labels.get(str(i), ''), i) for i in range(1, (dev.port_count or 0) + 1)}
+        else:
+            state['names'] = {}
+        name_devices[dev.id] = state
+        name_device_ips[dev.ip] = dev.id
+    return name_devices[dev.id]
+
+def stored_names(state):
+    return {i: s['name'] for i, s in state['outlets'].items()} if 'outlets' in state else dict(state['names'])
+
+def fake_state_out(state):
+    return {**state, 'names': stored_names(state)}
+
+async def xerus_rpc(request):
+    """The JSON-RPC calls the name driver may make: getOutlets, getSettings, setSettings. Anything else (power!) is
+    refused with an RPC error and logged under "forbidden"; a setSettings that changes another setting under "clobbered"."""
+    state = name_devices.get(name_device_ips.get(request.url.host))
+    if state is None or state['kind'] != 'pdu' or state['mode'] == 'unreachable':
+        raise httpx.ConnectError('[Errno 111] Connection refused', request=request)
+    call = json.loads(request.content or b'{}')
+    method, params, path, outlets = call.get('method'), call.get('params'), request.url.path, state['outlets']
+    answer = lambda value: httpx.Response(200, json={'jsonrpc': '2.0', 'id': call.get('id'), 'result': {'_ret_': value}})
+    if path == raritan_pdu.PDU_PATH and method == 'getOutlets':
+        return answer([{'rid': outlet_rid(i), 'type': XERUS_OUTLET_TYPE} for i in sorted(outlets)])
+    number = next((i for i in outlets if outlet_rid(i) == path), None)
+    if number is not None and method == 'getSettings':
+        state['reads'] += 1
+        return answer(copy.deepcopy(outlets[number]))
+    if number is not None and method == 'setSettings':
+        await asyncio.sleep(state['delay'])
+        new, old = (params or {}).get('settings') if isinstance(params, dict) else None, outlets[number]
+        if not isinstance(new, dict) or set(new) != set(old) or any(type(new[k]) is not type(old[k]) for k in old) \
+                or len(new['name']) > raritan_pdu.NAME_MAX:
+            state['refused'].append([number, 'invalid settings'])
+            return answer(1)   # Xerus: 1 = invalid parameters
+        moved = sorted(k for k in old if k != 'name' and new[k] != old[k])
+        if moved:
+            state['clobbered'].append([number, moved])
+        stored = copy.deepcopy(new)
+        if state['mode'] == 'settings_changed':   # another setting moved on the device during the write
+            stored['cycleDelay'] = old['cycleDelay'] + 1
+        outlets[number] = stored
+        state['writes'].append([number, stored['name']])
+        return answer(0)
+    state['forbidden'].append([path, method])
+    return httpx.Response(200, json={'jsonrpc': '2.0', 'id': call.get('id'), 'error': {'code': -32601, 'message': 'fixture'}})
+
+class XerusHttpx:
+    """raritan_pdu's httpx: every client it builds talks to the fake Xerus devices above, never to a network."""
+    def __getattr__(self, name):
+        return getattr(httpx, name)
+    @staticmethod
+    def AsyncClient(*args, **kwargs):
+        kwargs.pop('verify', None)
+        kwargs['transport'] = httpx.MockTransport(xerus_rpc)
+        return httpx.AsyncClient(*args, **kwargs)
+
+class FakeXerusPdu(RaritanPduDriver):
+    """The real driver code; the preview forbids _rpc/_client_ctx on the base class below, this subclass keeps them."""
+    _rpc = RaritanPduDriver._rpc
+    _client_ctx = RaritanPduDriver._client_ctx
+
+class FakeNameKvm:
+    """A KVM whose rename method is not recognised: never written."""
+    def __init__(self, dev): self.state = name_device(dev)
+    async def name_support(self): return False, raritan_kvm._NAME_UNSUPPORTED
+    async def get_port_names(self):
+        self.state['reads'] += 1
+        return dict(self.state['names'])
+    async def set_port_name(self, port_number, name):
+        self.state['refused'].append([port_number, 'unsupported'])
+        raise RaritanKvmError(raritan_kvm._NAME_UNSUPPORTED)
+    async def close(self): pass
+
+def fake_name_driver(dev, username, password):
+    if dev.kind == 'pdu':
+        name_device(dev)
+        return FakeXerusPdu(dev.ip, username, password)
+    return FakeNameKvm(dev)
+
+def forbidden_name_driver(dev, username, password):
+    raise RuntimeError('Real hardware access forbidden in isolated preview')
+
+if fake_names:
+    raritan_pdu.httpx = XerusHttpx()
+name_sync._driver_factory = fake_name_driver if fake_names else forbidden_name_driver
+
+async def fixture_name_devices(request):
+    """GET: every fake name device. POST {names:{port:name}, mode, delay, clear_log}: change one behind the site's back.
+    A POST also forgets the site's shared 5 s live read of that device (as if 5 s had passed)."""
+    if request.method == 'GET':
+        return JSONResponse({key: fake_state_out(state) for key, state in name_devices.items()})
+    device_id = request.path_params['device_id']
+    async with AsyncSessionLocal() as db:
+        dev = await db.get(Device, device_id)
+    if dev is None or dev.kind not in ('pdu', 'kvm'):
+        return JSONResponse({'detail': 'no such fixture device'}, status_code=404)
+    state, body = name_device(dev), await request.json()
+    for port, value in (body.get('names') or {}).items():
+        if 'outlets' in state:
+            state['outlets'][int(port)]['name'] = value
+        else:
+            state['names'][int(port)] = value
+    if body.get('mode') is not None:
+        if body['mode'] not in NAME_DEVICE_MODES:
+            return JSONResponse({'detail': 'mode must be one of ' + ', '.join(NAME_DEVICE_MODES)}, status_code=422)
+        state['mode'] = body['mode']
+    if body.get('delay') is not None:
+        state['delay'] = float(body['delay'])
+    if body.get('clear_log'):
+        for log in ('writes', 'refused', 'forbidden', 'clobbered'):
+            state[log].clear()
+    name_sync._reads.pop(device_id, None)
+    return JSONResponse(fake_state_out(state))
 
 async def forbidden_rpc(*args, **kwargs):
     raise RuntimeError('Real hardware access forbidden in isolated preview')
@@ -103,6 +257,9 @@ async def preview_lab_data(request):
 
 # A route, not middleware: the accounts middleware must still decide who may read the inventory.
 main.app.router.routes.insert(0, Route('/twin/lab-data.json', preview_lab_data, methods=['GET']))
+if fake_names:   # outside /api: fixture switches only, never part of the product API
+    main.app.router.routes.insert(0, Route('/__fixture/name-devices', fixture_name_devices, methods=['GET']))
+    main.app.router.routes.insert(0, Route('/__fixture/name-devices/{device_id}', fixture_name_devices, methods=['POST']))
 
 @main.app.middleware('http')
 async def preview_hardware_boundary(request, call_next):
@@ -142,8 +299,18 @@ async def lifespan(app):
         db.add(Device(id='kvm1',name='KVM 01',kind='kvm',model='KX III',ip='192.0.2.20',rack='Rack-01',port_count=4,labels_json=json.dumps({'1':'OPT11'})))
         db.add(MonitorDeviceSnapshot(device_id='kvm1',kind='kvm',ip='192.0.2.20',checked_at=time.time(),reachable=True,ports_json=json.dumps([{'number':1,'label':'OPT11','status':'active','status_source':'live'}])))
         await db.commit()
+    if fake_names:   # the fake devices start with the seeded site names stored on them
+        async with AsyncSessionLocal() as db:
+            for dev in (await db.execute(select(Device).where(Device.kind.in_(('pdu', 'kvm'))))).scalars():
+                name_device(dev)
+    await name_sync.start()
     print(f'ISOLATED_PREVIEW_DATA={data}', flush=True)
-    yield
+    if fake_names:
+        print(f'FAKE_NAME_DEVICES=1 DEVICE_NAME_SYNC={name_sync.mode()}', flush=True)
+    try:
+        yield
+    finally:
+        await name_sync.stop()
 
 main.app.router.lifespan_context = lifespan
 

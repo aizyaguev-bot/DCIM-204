@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     pxe_tick_seconds: float = Field(default=0.5, gt=0, le=5)
     pxe_sim_time_scale: float = Field(default=1.0, gt=0, le=10)
     pxe_sim_scenario: str = "happy"
+    # Port names written to the PDUs/KVMs themselves: auto (after each label save) | manual (panel only) | off.
+    device_name_sync: str = "auto"
     # Lab assistant (read-only). Without a key, or with the LLM turned off, it answers in a clearly labelled demo mode.
     assistant_enabled: bool = True
     assistant_llm_enabled: bool = True

@@ -1,5 +1,5 @@
 import json
-from sqlalchemy import String, Integer, Boolean, Float, ForeignKey
+from sqlalchemy import String, Integer, Boolean, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -70,6 +70,31 @@ class Device(Base):
             return json.loads(self.labels_json or "{}")
         except Exception:
             return {}
+
+
+class DeviceNameSync(Base):
+    """Per port: the site name last sent (or to be sent) to the PDU/KVM itself and how that went.
+    status: pending | synced | failed | skipped; reason is a fixed, secret-free English text."""
+    __tablename__ = "device_name_sync"
+    __table_args__ = (UniqueConstraint("device_id", "port"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(String, index=True)
+    port: Mapped[str] = mapped_column(String)
+    desired: Mapped[str] = mapped_column(String, default="")
+    status: Mapped[str] = mapped_column(String, default="pending")
+    reason: Mapped[str] = mapped_column(String, default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[str] = mapped_column(String)            # UTC ISO
+    synced_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)  # +1 per queue/push: a result is recorded only for its revision
+
+
+class DeviceNameSyncLease(Base):
+    """One writer per device across API processes (same pattern as PingMonitorState's lease)."""
+    __tablename__ = "device_name_sync_lease"
+    device_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner: Mapped[str] = mapped_column(String, default="")
+    until: Mapped[float] = mapped_column(Float, default=0)
 
 
 class PduMaintenance(Base):

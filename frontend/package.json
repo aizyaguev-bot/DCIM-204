@@ -14,7 +14,8 @@
     "test:connections": "node --test src/__tests__/connections.test.js",
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:devicenames": "node --test src/__tests__/deviceNames.test.js"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

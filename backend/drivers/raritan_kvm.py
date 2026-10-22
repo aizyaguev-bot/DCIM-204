@@ -16,6 +16,7 @@ from typing import Optional
 TIMEOUT = httpx.Timeout(6.0, connect=6.0, read=6.0)
 
 AUTH_FAILED = "Device API authentication failed"
+_NAME_UNSUPPORTED = "Port names cannot be written to this KVM yet"
 
 
 class RaritanKvmError(Exception):
@@ -114,6 +115,63 @@ class RaritanKvmDriver:
         # Final fallback: static list (can't distinguish empty from idle)
         return [{"number": i + 1, "label": f"Port {i + 1}", "status": "idle", "status_source": "unknown"}
                 for i in range(port_count)]
+
+    async def name_support(self) -> tuple[bool, str]:
+        """No port-name write method has been positively identified yet."""
+        return False, _NAME_UNSUPPORTED
+
+    async def get_port_names(self) -> dict[int, str]:
+        """Return only names tied to explicit physical ports by the REST API.
+
+        Sidebar and static discovery synthesize labels, so they cannot establish
+        the name stored on the device. Failed or unknown responses stay unknown.
+        """
+        if self.auth_error or not isinstance(self.model, str) or "LX" in self.model:
+            return {}
+        try:
+            client = await self._client_ctx()
+            resp = await client.get(f"{self.base_url}/api/v1/targets")
+            if resp.status_code in (401, 403):
+                self.auth_error = AUTH_FAILED
+                return {}
+            if resp.status_code != 200:
+                return {}
+
+            data = resp.json()
+            if isinstance(data, list):
+                targets = data
+            elif isinstance(data, dict):
+                targets = data.get("targets", data.get("list"))
+            else:
+                return {}
+            if not isinstance(targets, list):
+                return {}
+
+            names = {}
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                raw_number = target.get("portNumber")
+                if type(raw_number) is int:
+                    number = raw_number
+                elif isinstance(raw_number, str) and re.fullmatch(r"[0-9]+", raw_number):
+                    number = int(raw_number)
+                else:
+                    continue
+                name = target.get("name")
+                if number <= 0 or not isinstance(name, str):
+                    continue
+                if re.fullmatch(r"Port [0-9]+", name.strip()):
+                    continue
+                names[number] = name
+            return names
+        except Exception:
+            # Do not return exception text or device bodies, or guess via fallback.
+            return {}
+
+    async def set_port_name(self, port_number: int, name: str) -> str:
+        """Refuse writes until a supported firmware method is implemented."""
+        raise RaritanKvmError(_NAME_UNSUPPORTED)
 
     def _session_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(verify=False, follow_redirects=True, timeout=TIMEOUT)

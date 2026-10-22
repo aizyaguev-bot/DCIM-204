@@ -1,5 +1,7 @@
 import { Fragment, useState } from "react";
 import StatusDot from "../components/StatusDot";
+import DeviceNamesPanel from "../components/DeviceNamesPanel";
+import NameSyncBadge, { NameSyncNotice, useNameSync } from "../components/NameSyncBadge";
 import {useAccounts} from "../accounts";
 import { formatMaintenanceTime } from "../components/MaintenanceColumn";
 import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
@@ -17,6 +19,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
   const [draftBase, setDraftBase] = useState({});   // saved labels when editing started
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
+  const nameSync = useNameSync(device?.id, device?.labels_revision);
   if (!device) return null;
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;
@@ -45,9 +48,11 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
     if (labelChanges(draftLabels, draftOriginal).length === 0) { setEditMode(false); return; }
     setSaving(true);
     setSaveError("");
+    nameSync.clearNotice();
     try {
-      await onLabelsSave(labelPatchBody(draftBase, draftLabels, draftOriginal), draftRevision);
+      const saved = await onLabelsSave(labelPatchBody(draftBase, draftLabels, draftOriginal), draftRevision);
       setEditMode(false);
+      nameSync.afterSave(saved?.device_names, saved?.device_names_reason);
     } catch (e) {
       setSaveError(errorMessage(e));
       if (e.status === 409) setEditMode(false);
@@ -113,6 +118,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
               )}
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
+            <NameSyncNotice notice={nameSync.notice} />
             {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these outlet labels on {device.name}. To move a server with its PDU outlets, KVM port and rack position, use Admin → Locations → Move.</p>}
             {outlets.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
@@ -131,7 +137,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
                   if (editMode) {
                     return (
                       <div key={o.number} className="rounded-lg border border-nv-400/40 bg-nv-400/5 p-2.5 flex flex-col gap-1.5">
-                        <span className="text-xs font-mono text-zinc-500">Outlet {o.number}</span>
+                        <span className="flex items-center gap-1 text-xs font-mono text-zinc-500">Outlet {o.number}<NameSyncBadge row={nameSync.ports[String(o.number)]} /></span>
                         <input
                           value={draftLabels[o.number] ?? ""}
                           onChange={e => setDraftLabels(d => ({ ...d, [o.number]: e.target.value }))}
@@ -149,7 +155,10 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
                     <div key={o.number} className={`flex items-center gap-3 p-2.5 rounded-lg border ${isOn ? borderCls : "border-zinc-800 bg-zinc-900/40"}`}>
                       <div className={`w-8 text-center font-mono text-xs shrink-0 ${hasName ? "text-nv-400/70" : "text-rose-500/60"}`}>{o.number}</div>
                       <div className="flex-1 min-w-0">
-                        <div className={`truncate text-sm font-medium ${hasName ? "text-zinc-200" : "text-zinc-500"}`}>{o.label}</div>
+                        <div className="flex items-center gap-1 min-w-0">
+                          <div className={`truncate min-w-0 text-sm font-medium ${hasName ? "text-zinc-200" : "text-zinc-500"}`}>{o.label}</div>
+                          <NameSyncBadge row={nameSync.ports[String(o.number)]} />
+                        </div>
                         <div className="text-[11px] tabular-nums mt-0.5">
                           {!isOn
                             ? <span className="text-zinc-600">{o.state}</span>
@@ -166,6 +175,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
               </div>
             )}
           </div>
+          <DeviceNamesPanel key={device.id} device={device} kind="pdu" sync={nameSync} />
         </section>
 
         <aside className="space-y-4">
