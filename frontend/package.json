@@ -15,7 +15,8 @@
     "test:rack-rows": "node --test src/__tests__/rack-rows.test.js",
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:assistant-actions": "node --test src/__tests__/assistantActions.test.js src/__tests__/assistantActionHistory.test.js"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

@@ -244,9 +244,11 @@ export default function AssistantPanel({ context, navigate, openDetail, devices 
   }, [pending, rateUntil]);
 
   // ---- focus: into the panel on open, back to the launcher on close ----
-  useEffect(() => {
-    if (open && !wasOpen.current) requestAnimationFrame(() => (inputRef.current && !inputRef.current.disabled ? inputRef.current : panelRef.current)?.focus());
-    if (!open && wasOpen.current) requestAnimationFrame(() => launcherRef.current?.focus());
+  // During the commit, not a frame later: on a busy page (the 3D Twin) the next frame can come seconds late, and a
+  // key such as Escape pressed in that gap would land on the page instead of the panel.
+  useLayoutEffect(() => {
+    if (open && !wasOpen.current) (inputRef.current && !inputRef.current.disabled ? inputRef.current : panelRef.current)?.focus();
+    if (!open && wasOpen.current) launcherRef.current?.focus();
     wasOpen.current = open;
   }, [open]);
 
