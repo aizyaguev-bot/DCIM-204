@@ -138,7 +138,7 @@ async def outlet_power(
         if not dev.enabled:
             raise HTTPException(status_code=409, detail="This PDU is disabled; enable it in Admin -> Devices first")
         if body.action in ("on", "cycle") and await db.get(PduMaintenance, device_id, populate_existing=True):
-            raise HTTPException(status_code=409, detail="PDU is in maintenance mode; restore it from the Maintenance column first")
+            raise HTTPException(status_code=409, detail="PDU is in maintenance mode; restore it first")
         if body.action in ("off", "cycle"):
             # Outlets that feed the site itself (POWER_PROTECTED_OUTLETS) are never switched off from the UI either.
             protection = await power_protection.load(db, get_settings())
