@@ -1,11 +1,13 @@
 // Remote PXE install API (/api/pxe) and pure helpers used by RemoteInstallView.
 // Helpers stay free of DOM/React so node --test can import this module.
 
-async function req(method, path, body) {
+// opts.keepalive lets a request (a draft cancel on pagehide) outlive the page.
+async function req(method, path, body, opts) {
   const res = await fetch(`/api/pxe${path}`, {
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
+    ...(opts?.keepalive ? { keepalive: true } : {}),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -37,11 +39,40 @@ export const pxeApi = {
   chooseBoot:  (id, optionId, version) => req("POST", `${job(id)}/choose-boot`, { option_id: optionId, version }),
   chooseGrub:  (id, optionId, version) => req("POST", `${job(id)}/choose-grub`, { option_id: optionId, version }),
   install:     (id, password, rewriteHash) => req("POST", `${job(id)}/install`, { password, rewrite_hash: rewriteHash }),
-  cancel:      (id)                   => req("POST", `${job(id)}/cancel`),
+  cancel:      (id, opts)             => req("POST", `${job(id)}/cancel`, undefined, opts),
   takeover:    (id)                   => req("POST", `${job(id)}/takeover`),
   complete:    (id, password)         => req("POST", `${job(id)}/complete`, { password }),
   acknowledge: (id)                   => req("POST", `${job(id)}/acknowledge`),
 };
+
+// Why a computer cannot get a new job, by GET /computers blocker code.
+export const BLOCKER_LABELS = {
+  active_job: "Another job is active",
+  needs_acknowledge: "Waiting for Admin acknowledge",
+  not_allowlisted: "Not enabled for remote install",
+  kvm_port_busy: "KVM port in use",
+  driver_unavailable: "Remote install driver unavailable",
+  run_limit: "Another install is running",
+};
+
+export function blockerText(code) {
+  if (typeof code === "string") return BLOCKER_LABELS[code] || code;
+  return code && typeof code === "object" ? String(code.message || code.detail || code.code || "") : String(code ?? "");
+}
+
+// The warning in a failed job's box once an install may have started; "" when nothing may have started.
+// install_sent_at tells a sent install command apart from a GRUB entry that may have booted on its own,
+// needs_acknowledge tells a held computer apart from one an Admin already released.
+export function blockedNotice(jobData) {
+  if (!jobData?.install_may_have_started) return "";
+  const first = jobData.install_sent_at != null
+    ? "The install command may already have been sent."
+    : "No install command was sent, but the GRUB menu may have booted an entry on its own.";
+  const last = jobData.needs_acknowledge === false
+    ? "An Admin acknowledged this job — the computer is released for new installs."
+    : "A new job for this computer needs Admin acknowledgement.";
+  return `${first} Do not retry automatically — check the console. ${last}`;
+}
 
 // Job ids are 32-character hex strings; screens show the first 8 (full id in a tooltip).
 export const shortId = id => String(id ?? "").slice(0, 8);

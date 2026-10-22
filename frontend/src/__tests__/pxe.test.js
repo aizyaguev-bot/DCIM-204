@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   STEPS, stepIndex, menuPhase, isTerminal, stateLabel, canFlags, asList, normalizeOptions, choiceKind,
   rebootMethods, formatCountdown, isExpired, parseConsoleUrl, highlightSegments, errorText, screenshotUrl,
-  toMillis, formatWhen, isSimulated, takeoverConsole, shortId,
+  toMillis, formatWhen, isSimulated, takeoverConsole, shortId, blockedNotice, blockerText, BLOCKER_LABELS, pxeApi,
 } from "../api/pxe.js";
 
 test("states map onto the five progress steps", () => {
@@ -202,4 +202,59 @@ test("job ids are shortened to 8 characters for display", () => {
 test("screenshot URL is cache-busted by sequence", () => {
   assert.equal(screenshotUrl(5, 3), "/api/pxe/jobs/5/screenshot?seq=3");
   assert.equal(screenshotUrl("a/b", undefined), "/api/pxe/jobs/a%2Fb/screenshot?seq=0");
+});
+
+test("the failed-job warning tells a sent install from a GRUB auto-boot and a held computer from a released one", () => {
+  assert.equal(blockedNotice(null), "");
+  assert.equal(blockedNotice({ state: "failed", install_may_have_started: false, install_sent_at: null, needs_acknowledge: false }), "");
+  const sent = "The install command may already have been sent.";
+  const grub = "No install command was sent, but the GRUB menu may have booted an entry on its own.";
+  const check = "Do not retry automatically — check the console.";
+  const held = "A new job for this computer needs Admin acknowledgement.";
+  const released = "An Admin acknowledged this job — the computer is released for new installs.";
+  const cases = [
+    [{ install_sent_at: 1760000000, needs_acknowledge: true }, sent, held],
+    [{ install_sent_at: 1760000000, needs_acknowledge: false }, sent, released],
+    [{ install_sent_at: null, needs_acknowledge: true }, grub, held],
+    [{ install_sent_at: null, needs_acknowledge: false }, grub, released],
+  ];
+  for (const [fields, first, last] of cases) {
+    assert.equal(blockedNotice({ state: "failed", install_may_have_started: true, ...fields }), `${first} ${check} ${last}`);
+  }
+  // An older API without needs_acknowledge keeps the cautious wording.
+  assert.equal(blockedNotice({ install_may_have_started: true, install_sent_at: 0 }), `${sent} ${check} ${held}`);
+  assert.equal(blockedNotice({ install_may_have_started: true }), `${grub} ${check} ${held}`);
+});
+
+test("the global run limit has its own computer blocker label", () => {
+  assert.equal(BLOCKER_LABELS.run_limit, "Another install is running");
+  assert.equal(blockerText("run_limit"), "Another install is running");
+  assert.equal(blockerText("needs_acknowledge"), "Waiting for Admin acknowledge");
+  assert.equal(blockerText("new_code"), "new_code");
+  assert.equal(blockerText({ message: "Custom" }), "Custom");
+  assert.equal(blockerText(null), "");
+});
+
+test("cancel passes keepalive to fetch only when asked, so a draft cancel can outlive the page", async () => {
+  const calls = [];
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, json: async () => ({ id: "x", state: "cancelled" }), text: async () => "" };
+  };
+  try {
+    const id = "f00dfeed12345678abcdef0123456789";
+    assert.deepEqual(await pxeApi.cancel(id, { keepalive: true }), { id: "x", state: "cancelled" });
+    await pxeApi.cancel(id);
+    await pxeApi.cancel(id, { keepalive: false });
+  } finally {
+    globalThis.fetch = saved;
+  }
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].url, "/api/pxe/jobs/f00dfeed12345678abcdef0123456789/cancel");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.keepalive, true);
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal("keepalive" in calls[1].init, false);
+  assert.equal("keepalive" in calls[2].init, false);
 });
