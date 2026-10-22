@@ -29,6 +29,11 @@ import SshAdmin from "./pages/SshAdmin";
 // The terminal page (and xterm) loads only when an SSH tab is opened.
 const SshTerminal = lazy(() => import("./pages/SshTerminal"));
 const ADMIN_SECTIONS = ["devices", "users", "engineers", "mapping", "locations", "connections", "assistant", "ssh", "help"];
+// ?tab=admin&section=<id> opens that Admin sub-page directly (the SSH terminal page links to Admin -> SSH this way).
+function linkedAdminSection(search) {
+  const section = new URLSearchParams(search).get("section");
+  return ADMIN_SECTIONS.includes(section) ? section : "devices";
+}
 
 export default function App() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
@@ -57,13 +62,8 @@ export default function App() {
   const [maintenanceError, setMaintenanceError] = useState("");
   const [maintenanceDialog, setMaintenanceDialog] = useState(null);   // { mode: "shutdown" | "restore", pduId }
   const maintenanceSeq = useRef(0);
-  // Admin sub-pages with their own shareable ?tab= link; other sub-pages can be deep-linked with ?tab=admin&section=<id> (Admin -> SSH).
-  const [adminSection, setAdminSection] = useState(() => {
-    const params = new URLSearchParams(location.search);
-    const fromTab = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[params.get("tab")];
-    if (fromTab) return fromTab;
-    return ADMIN_SECTIONS.includes(params.get("section")) ? params.get("section") : "devices";
-  });
+  // Admin sub-pages with their own shareable ?tab= link; the others open from ?tab=admin&section=<id>.
+  const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[new URLSearchParams(location.search).get("tab")] || linkedAdminSection(location.search));
   function navigate(tab, rack) {
     const url = new URL(window.location.href);
     url.searchParams.set("tab", tab);
@@ -92,8 +92,7 @@ export default function App() {
       const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
       setView(event.state?.view || { kind: "dashboard" });
       setMainTab(tab === "dcim" ? "racks" : section ? "admin" : tab);
-      const linked = new URLSearchParams(location.search).get("section");
-      setAdminSection(event.state?.adminSection || section || (ADMIN_SECTIONS.includes(linked) ? linked : "devices"));
+      setAdminSection(event.state?.adminSection || section || linkedAdminSection(location.search));
       setEditMode(false);
     };
     window.addEventListener("popstate", onPop);
