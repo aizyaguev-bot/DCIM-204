@@ -22,7 +22,7 @@
       document.body.classList.toggle('account-viewer', !window.DCIM_CAN_OPERATE);
       if (!window.DCIM_CAN_OPERATE && !document.getElementById('accountViewerStyle')) {
         const style = document.createElement('style'); style.id = 'accountViewerStyle';
-        style.textContent = '.account-viewer #btnEdit,.account-viewer #sbSave,.account-viewer [data-pw],.account-viewer [data-kvm]{display:none!important}';
+        style.textContent = '.account-viewer #btnEdit,.account-viewer #mEdit,.account-viewer #sbSave,.account-viewer [data-pw],.account-viewer [data-power-menu],.account-viewer [data-kvm]{display:none!important}';
         document.head.appendChild(style);
       }
     }

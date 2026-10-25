@@ -41,6 +41,13 @@ test engineer. The move check writes only the fixture's placement files. The
 navigation check saves an optional screenshot to the system temporary directory
 (override with DCIM_QA_SCREENSHOT). No live lab site or hardware is used.
 
+The 3D twin checks: `twin-safety.cjs` (power / console safety, KVM leases, moves, saves; it writes fixture
+data, so use a fresh fixture per run), `twin-overlays.cjs` (read-only; overlays, outlet counts, search keys at
+1440 and 375 px) and `twin-v3.cjs` (read-only; the redesigned top bar, rack bar, Issues / Racks / Data quality
+panel, health colours and legend, injected maintenance / ping / offline states, rack front view, server drawer,
+power confirmation, Viewer, and the phone bottom sheet with 44 px targets at 390 × 844). All default to port
+8770; `twin-v3.cjs` saves screenshots to `DCIM_QA_SHOTS` (default `C:/t/tv3-after`).
+
 The KVM launch check covers a normal console tab, blocked/throwing popup APIs
 from both a device card and its details, per-port in-use cleanup, and explicit
 Viewer restrictions. It exercises the built frontend with a simulated console;
