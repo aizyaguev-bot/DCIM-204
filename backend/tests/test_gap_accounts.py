@@ -165,6 +165,22 @@ ROUTE_ROLES = {
     **{f"POST /api/pxe/jobs/{{job_id}}/{a}": "Operator" for a in ("cancel", "choose-boot", "choose-grub", "complete", "install",
                                                                    "refresh-screenshot", "start", "takeover")},
     "POST /api/pxe/jobs/{job_id}/acknowledge": "Admin",
+    # Lab assistant's Anthropic API key (Admin page): every method, reads included, is Admin only.
+    "GET /api/assistant/key": "Admin", "PUT /api/assistant/key": "Admin", "DELETE /api/assistant/key": "Admin",
+    # Assistant actions: previews list their impact, so reads are Operator too; only the feature config is a Viewer read.
+    "GET /api/assistant/actions/config": "Viewer", "GET /api/assistant/actions/proposals": "Operator",
+    "POST /api/assistant/actions/proposals": "Operator", "GET /api/assistant/actions/proposals/{proposal_id}": "Operator",
+    "POST /api/assistant/actions/proposals/{proposal_id}/cancel": "Operator",
+    "POST /api/assistant/actions/proposals/{proposal_id}/execute": "Operator",
+    # Cooling unit history names who saved each version: Operator to read and to restore.
+    "GET /api/chillers/history": "Operator", "POST /api/chillers/restore": "Operator",
+    # Device names: the live compare contacts the PDU/KVM (Operator even to read); the sync status reads the DB only.
+    "GET /api/devices/name-sync/status": "Viewer", "GET /api/devices/{device_id}/device-names": "Operator",
+    "POST /api/devices/{device_id}/device-names/push": "Operator",
+    # SSH terminal: status for everyone, the public key and a terminal for Operators, configuration and sessions for Admins.
+    "GET /api/ssh/status": "Viewer", "GET /api/ssh/key": "Operator", "WEBSOCKET /api/ssh/{key}/terminal": "Operator",
+    "POST /api/ssh/key": "Admin", "GET /api/ssh/config": "Admin", "PUT /api/ssh/config": "Admin",
+    "GET /api/ssh/sessions": "Admin", "POST /api/ssh/sessions/end": "Admin", "POST /api/ssh/hosts/{key}/accept": "Admin",
 }
 ROLE_USER = {"Viewer": "viewer", "Operator": "operator", "Admin": "initial-admin"}
 
@@ -466,8 +482,6 @@ async def test_password_change_revokes_other_devices_only_when_it_succeeds(env):
         await sign_in(c, "operator", new)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a forced password change accepts the admin-issued temporary password as the "
-                                       "new password; must_change_password is cleared while the admin still knows it")
 async def test_forced_password_change_must_replace_the_temporary_password(env):
     async with client(env) as admin, client(env) as user:
         await sign_in(admin, "admin")

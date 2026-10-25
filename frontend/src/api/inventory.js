@@ -9,7 +9,11 @@ export function rackCode(rack) {
 async function parse(response) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = typeof body.detail === "string" ? body.detail : `Request failed (${response.status}). Check the fields and try again.`;
+    // FastAPI sends a 422 detail as a list of { msg } entries; join them like client.js does.
+    const detail = typeof body.detail === "string" ? body.detail
+      : Array.isArray(body.detail) ? body.detail.map(e => e?.msg).filter(Boolean).join("; ")
+      : "";
+    const message = detail || `Request failed (${response.status}). Check the fields and try again.`;
     const error = new Error(message);
     error.status = response.status;
     throw error;

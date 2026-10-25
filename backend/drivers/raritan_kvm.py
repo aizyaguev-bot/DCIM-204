@@ -245,15 +245,32 @@ class RaritanKvmDriver:
             raise RaritanKvmAuthError(f"HTTP {resp.status_code}")
         if resp.status_code != 200:
             raise RaritanKvmError(f"HTTP {resp.status_code}")
-        data = resp.json()
-        targets = data if isinstance(data, list) else data.get("targets", data.get("list", []))
+        # Older firmware without the REST API can answer 200 with an HTML page; that
+        # must reach the sidebar.asp fallback in get_ports(), not escape as a crash.
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise RaritanKvmError("targets: answer is not JSON") from exc
+        if isinstance(data, list):
+            targets = data
+        elif isinstance(data, dict):
+            targets = data.get("targets", data.get("list", []))
+        else:
+            raise RaritanKvmError("targets: unexpected JSON shape")
+        if not isinstance(targets, list):
+            raise RaritanKvmError("targets: unexpected JSON shape")
         ports = []
         for i, t in enumerate(targets):
-            label = t.get("name", t.get("label", t.get("targetName", f"Port {i+1}")))
+            if not isinstance(t, dict):
+                continue
             raw_status = t.get("connectionStatus", t.get("status", t.get("state")))
             status = _parse_kvm_status(raw_status)
             raw_number = t.get("portNumber", t.get("number"))
             number = int(raw_number) if str(raw_number).isdigit() and int(raw_number) > 0 else i + 1
+            # A target without a usable name must not fail the whole KVM's port list.
+            label = t.get("name", t.get("label", t.get("targetName")))
+            if not isinstance(label, str) or not label.strip():
+                label = f"Port {number}"
             # An inferred row number or an undocumented state cannot establish
             # the health of a particular physical port.
             known = raw_status is not None and str(raw_status).strip().lower() in {

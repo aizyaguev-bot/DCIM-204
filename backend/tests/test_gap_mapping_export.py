@@ -342,14 +342,8 @@ async def test_deployed_app_enforces_operator_role_on_both_exports(main_app_clie
     assert csv_rows(response) == [HEADERS, ["opt8", "", "", "", "", "unknown", "PDU-M (192.0.2.71) #3", ""]]
 
 
-# --- Known bug ----------------------------------------------------------------------------------------------------
+# --- Fixed bug: digit runs past Python's int() limit (only 1-9 digit runs are converted to numbers) -------------
 
-@pytest.mark.xfail(strict=True, raises=ValueError, reason=(
-    "BUG: mapping_export converts digit runs with plain int() (port keys in connection_summary and every digit "
-    "run in natural_key). Python 3.11+ refuses int() of more than 4300 digits, so one saved port key or label "
-    "with such a run (PATCH /api/devices/{id}/labels accepts any all-digit key and any label text) makes both "
-    "exports fail with a server error, while GET /api/devices/locations still lists the same data "
-    "(devices._short_number caps int() at 9 digits for this reason)."))
 @pytest.mark.parametrize("labels", [
     {"1" * 4301: "opt1"},           # an all-digit port key
     {"1": "opt" + "1" * 4301},      # a server name with a long digit run

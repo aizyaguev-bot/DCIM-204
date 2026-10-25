@@ -22,7 +22,7 @@ WebSocket:
   FastAPI's WebSocket endpoint tunnels them through to the device.
 """
 
-import asyncio, json, re, ssl, logging, html, inspect
+import asyncio, codecs, json, re, ssl, logging, html, inspect
 from urllib.parse import urlencode
 import httpx
 import websockets
@@ -50,6 +50,9 @@ STRIP_RESP_HEADERS = frozenset({
     "connection",
     "keep-alive",
 })
+
+# Every status whose Location the browser follows; all of them must stay inside the proxy.
+REDIRECTS = (301, 302, 303, 307, 308)
 
 # In legacy mode the browser's Authorization carries the shared site password. It, the site's
 # CSRF token and the client-address headers (plus every x-forwarded-*) never reach a device.
@@ -215,6 +218,26 @@ def _override_script(kvm_ip: str, proxy: str, base: str) -> str:
     return _OVERRIDE_TMPL % {"kvm_ip": literal(kvm_ip), "proxy": literal(proxy), "base": literal(base)}
 
 
+def _charset(content_type: str) -> str:
+    """Text encoding declared in a Content-Type header; utf-8 when absent, unknown or not a text codec."""
+    m = re.search(r'charset\s*=\s*["\']?([^;,"\'\s]+)', content_type, re.IGNORECASE)
+    if m:
+        try:
+            if getattr(codecs.lookup(m.group(1)), "_is_text_encoding", True):
+                return m.group(1)
+        except LookupError:
+            pass
+    return "utf-8"
+
+
+def _with_charset(content_type: str, charset: str) -> str:
+    """Content-Type with its charset parameter replaced (or added)."""
+    pattern = r'charset\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^;,\s]+)'
+    if re.search(pattern, content_type, re.IGNORECASE):
+        return re.sub(pattern, f"charset={charset}", content_type, count=1, flags=re.IGNORECASE)
+    return f"{content_type}; charset={charset}"
+
+
 def _rewrite(text: str, device_id: str, dev_ip: str, inject_head: str = "") -> str:
     """Rewrite all URLs that reference the KVM device to go through our proxy."""
     proxy = _prefix(device_id)
@@ -240,6 +263,14 @@ def _rewrite(text: str, device_id: str, dev_ip: str, inject_head: str = "") -> s
         r'(href|src|action|data-src)=(["\'])(/(?!api/)[^"\']*)\2',
         lambda m: f'{m.group(1)}={m.group(2)}{proxy}{m.group(3)}{m.group(2)}',
         text,
+    )
+    # Root-relative url(/...) in CSS (stylesheets and inline styles); the quote, if any, is kept.
+    # Protocol-relative //host and paths already under /api/ are left alone.
+    text = re.sub(
+        r'(url\(\s*["\']?)(?=/(?!/|api/))',
+        lambda m: f'{m.group(1)}{proxy}',
+        text,
+        flags=re.IGNORECASE,
     )
     # WebSocket URLs in JS
     text = re.sub(
@@ -445,7 +476,7 @@ async def kvm_proxy(
 
         # If redirected to auth, invalidate session, re-login and retry once
         location = resp.headers.get("location", "")
-        if resp.status_code in (301, 302, 307, 308) and "auth.asp" in location:
+        if resp.status_code in REDIRECTS and "auth.asp" in location:
             _sessions.pop(device_id, None)
             await _login(device_id, dev, client)
             if device_id in _sessions:
@@ -460,11 +491,14 @@ async def kvm_proxy(
             location = resp.headers.get("location", "")
 
         # If still a redirect (after auth or to any other page), rewrite Location
-        if resp.status_code in (301, 302, 307, 308):
+        if resp.status_code in REDIRECTS:
             new_loc = _norm_location(location, dev.ip, device_id)
+            # The device's body is dropped, so its length/encoding headers must go too, or the
+            # server aborts the reply ("Too little data for declared Content-Length").
             resp_headers = {
                 k: v for k, v in resp.headers.items()
                 if k.lower() not in STRIP_RESP_HEADERS
+                and k.lower() not in {"content-length", "content-encoding", "transfer-encoding"}
             }
             resp_headers["location"] = new_loc
             resp_headers.pop("set-cookie", None)
@@ -482,12 +516,19 @@ async def kvm_proxy(
         # Rewrite URLs in HTML, JS, and CSS
         if content and ("text/html" in ct or "javascript" in ct or "text/css" in ct):
             try:
-                text = content.decode("utf-8", errors="replace")
+                charset = _charset(ct)
+                text = content.decode(charset, errors="replace")
                 inject = ""
                 if "text/html" in ct:
                     inject = _override_script(dev.ip, _prefix(device_id), _base(device_id))
                 text = _rewrite(text, device_id, dev.ip, inject_head=inject)
-                content = text.encode("utf-8")
+                try:
+                    content = text.encode(charset)
+                except UnicodeEncodeError:
+                    content = text.encode("utf-8")
+                    ct = _with_charset(ct, "utf-8")
+                    resp_headers = {k: v for k, v in resp_headers.items() if k.lower() != "content-type"}
+                    resp_headers["content-type"] = ct
                 resp_headers = {
                     k: v for k, v in resp_headers.items()
                     if k.lower() not in {"etag", "last-modified", "expires", "cache-control", "content-length"}

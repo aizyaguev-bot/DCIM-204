@@ -146,10 +146,11 @@ export function buildRackRows(servers, rackName, rackOrder, rackSlots, customIte
     }
   });
 
-  // Build per-U groups: u → [{kind, data}]
+  // Build per-U groups: u → [{kind, data}]. A saved U that is not a whole number from 0 (old or hand-edited
+  // rack_slots data) is listed with the whole-rack equipment; uMap keeps the saved value, as the Twin and backend read it.
   const groups = new Map();
   sorted.forEach(s => {
-    const u = uMap[s.id];
+    const u = Number.isInteger(uMap[s.id]) && uMap[s.id] >= 0 ? uMap[s.id] : 0;
     if (!groups.has(u)) groups.set(u, []);
     groups.get(u).push({ kind: "server", data: s });
   });
@@ -173,7 +174,7 @@ export function buildRackRows(servers, rackName, rackOrder, rackSlots, customIte
     // Main storage has no empty shelves to draw: its occupied shelves in order, then the whole-unit equipment.
     [...groups.keys()].filter(u => u > 0).sort((a, b) => a - b).forEach(u => rows.push(row(u)));
   } else {
-    const maxU   = groups.size ? Math.max(...groups.keys()) : 0;
+    const maxU   = Math.max(0, ...[...groups.keys()].filter(u => Number.isInteger(u) && u >= 1));
     const totalU = Math.max(maxU + 2, 8);
     for (let u = 1; u <= totalU; u++) rows.push(row(u));
   }
@@ -1045,6 +1046,11 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
 // ─── RACK DETAIL VIEW ─────────────────────────────────────────────────────────
 // A rack's page: heading, figures, PDUs, the shelves diagram and one table of everything in U order (servers before
 // equipment on the same U, rack level last), then its cooling units. Phones get a List | Diagram switch.
+// A server's shelf for display: its U when that is a whole number from 0, otherwise null (buildRackRows lists it
+// at rack level).
+function serverShelf(u) {
+  return Number.isInteger(u) && u >= 0 ? u : null;
+}
 function equipmentU(item) {
   const n = typeof item.u === "string" && item.u.trim() ? Number(item.u) : item.u;
   return Number.isInteger(n) && n >= 0 && n <= 42 ? n : 0;
@@ -1065,11 +1071,11 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
   const cooling = view.coolingByRack?.[r.rack];
   const listMode = phone && !editMode && detailView !== "diagram";
   const entries = [
-    ...sorted.map(s => ({ kind: "server", u: uMap[s.id], data: s })),
+    ...sorted.map(s => ({ kind: "server", u: serverShelf(uMap[s.id]), data: s })),
     ...equipment.map(item => ({ kind: "custom", u: equipmentU(item), data: item })),
   ].sort((a, b) => ((a.u || 999) - (b.u || 999)) || (a.kind === b.kind ? 0 : a.kind === "server" ? -1 : 1));
   const uText = e => {
-    if (e.kind === "server") return `U${e.u}${slots[e.data.id] == null ? " (auto)" : ""}`;
+    if (e.kind === "server") return e.u == null ? "Rack level" : `U${e.u}${slots[e.data.id] == null ? " (auto)" : ""}`;
     return e.u ? `U${e.u}` : "Rack level";
   };
   const pdus = r.pdus.filter(p => p.kind === "pdu");
@@ -1589,8 +1595,11 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
   const searchRef = useRef(null);
   const matchAt = useRef(-1);
 
-  const uMaps = useMemo(() => Object.fromEntries(rackStats.map(rs => [rs.rack, buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems).uMap])),
-    [rackStats, rackOrder, rackSlots, customItems]);
+  // A saved U that is not a whole number has no shelf to jump to: search gets null for it.
+  const uMaps = useMemo(() => Object.fromEntries(rackStats.map(rs => {
+    const { uMap } = buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems);
+    return [rs.rack, Object.fromEntries(Object.entries(uMap).map(([id, u]) => [id, serverShelf(u)]))];
+  })), [rackStats, rackOrder, rackSlots, customItems]);
   const index = useMemo(() => buildSearchIndex({ rackStats, optOwners, switchAssignments, customItems, coolingUnits: cooling.units, uMaps }),
     [rackStats, optOwners, switchAssignments, customItems, cooling.units, uMaps]);
   const search = useMemo(() => searchIndex(index, q), [index, q]);
@@ -2704,7 +2713,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     if (!selectedServer) return "";
     const rs = rackStats.find(x => x.rack === selectedServer.rack);
     if (!rs) return "—";
-    const u = buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems).uMap[selectedServer.id];
+    const u = serverShelf(buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems).uMap[selectedServer.id]);
     if (u == null) return "—";
     return `${shelfLabel(u)}${(rackSlots[rs.rack] || {})[selectedServer.id] == null ? " (auto)" : ""}`;
   }, [selectedServer, rackStats, rackOrder, rackSlots, customItems]);

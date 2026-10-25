@@ -159,9 +159,8 @@ def test_redirect_location_normalisation(location, expected):
     assert proxy._norm_location(location, IP, "test") == expected
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a device redirect with a body keeps the device's Content-Length while the proxy "
-                                       "sends an empty body; uvicorn/h11 then aborts the response "
-                                       "('Too little data for declared Content-Length')")
+# A device redirect with a body must not keep the device's Content-Length while the proxy sends
+# an empty body (uvicorn/h11 would abort the response).
 async def test_a_redirect_with_a_body_declares_a_content_length_that_matches_what_is_sent(kvm):
     proxy._sessions["test"] = "pp_session_id=s"
     kvm.handler = lambda request: httpx.Response(302, content=b"<html>Moved</html>", headers={"location": "/home.asp"})
@@ -171,8 +170,7 @@ async def test_a_redirect_with_a_body_declares_a_content_length_that_matches_wha
     assert int(r.headers.get("content-length", "0")) == len(r.content)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: only 301/302/307/308 are treated as redirects; a 303 See Other passes its "
-                                       "absolute device Location through unchanged, so the iframe leaves the proxy")
+# A 303 See Other is a redirect too; its absolute device Location must stay inside the proxy.
 async def test_a_see_other_redirect_also_stays_inside_the_proxy(kvm):
     proxy._sessions["test"] = "pp_session_id=s"
     kvm.handler = lambda request: httpx.Response(303, headers={"location": f"https://{IP}/home.asp"})
@@ -276,8 +274,7 @@ def test_rewrite_handles_default_port_plain_http_and_leaves_a_neighbouring_host_
         '<script>var w="/api/kvms/test/proxy/ws/ws/x";var n="wss://192.0.2.150/y";</script>')
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: text/css is sent through _rewrite, but no pattern handles url(...); "
-                                       "root-relative CSS images/fonts resolve against the site origin, not the device")
+# Root-relative CSS url(...) images/fonts must resolve through the proxy, not the site origin.
 async def test_root_relative_css_urls_go_through_the_proxy(kvm):
     proxy._sessions["test"] = "pp_session_id=s"
     kvm.handler = lambda request: ok(b".logo{background:url(/images/logo.png)}", "text/css")
@@ -286,8 +283,8 @@ async def test_root_relative_css_urls_go_through_the_proxy(kvm):
     assert r.text == f".logo{{background:url({PREFIX}/images/logo.png)}}"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: rewriting decodes every page as UTF-8 with errors='replace' but keeps the "
-                                       "device's declared charset, so non-ASCII text of ISO-8859-1 pages is destroyed")
+# Rewriting must decode and re-encode in the device's declared charset, so non-ASCII text of
+# ISO-8859-1 pages survives.
 async def test_a_latin1_page_keeps_its_characters(kvm):
     proxy._sessions["test"] = "pp_session_id=s"
     kvm.handler = lambda request: ok("<html><head></head><body>Café réseau</body></html>".encode("latin-1"),

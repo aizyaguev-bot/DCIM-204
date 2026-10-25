@@ -474,18 +474,21 @@ class RaritanPduDriver:
                 sensors = await self._rpc(inlet_rid, "getSensors") or {}
             except RaritanPduError:
                 return result
+            if not isinstance(sensors, dict):
+                return result  # a malformed answer leaves this inlet unknown, never the whole PDU
             for sname, metric in [("activePower", "watts"), ("current", "current"), ("voltage", "voltage")]:
                 sinfo = sensors.get(sname)
-                if sinfo and sinfo.get("rid"):
+                if isinstance(sinfo, dict) and sinfo.get("rid"):
                     try:
                         reading = await self._rpc(sinfo["rid"], "getReading") or {}
                         # NumericSensor.Reading.valid / available are documented by Xerus.
-                        if reading.get("valid") is True and reading.get("available") is True:
+                        if (isinstance(reading, dict) and reading.get("valid") is True
+                                and reading.get("available") is True):
                             value = float(reading["value"])
                             if math.isfinite(value):
                                 result[metric] = value
-                    except (RaritanPduError, ValueError, TypeError, KeyError):
-                        pass  # One unavailable sensor must not hide the others.
+                    except (RaritanPduError, ValueError, TypeError, KeyError, AttributeError):
+                        pass  # One unavailable or malformed sensor must not hide the others.
             return result
 
         readings = await asyncio.gather(*(read_inlet(n, rid) for n, rid in enumerate(inlet_rids, 1)))

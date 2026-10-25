@@ -228,6 +228,11 @@ async def update_device(device_id: str, body: DeviceCreate, db: AsyncSession = D
             if body.password:
                 dev.password_enc = encrypt(body.password)
             await db.commit()
+            if readdressed or body.username or body.password:
+                # A cached status was read from the previous address / account: never show it for the new one.
+                from . import kvms, pdus
+                pdus.invalidate(device_id)
+                kvms._cache.pop(device_id, None)
     await db.refresh(dev)
     return dev
 
@@ -343,7 +348,10 @@ async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db), _writ
     showed), a port changed in another session is refused instead of overwritten."""
     device_id = body.get("device_id")
     port = str(body.get("port", "")).strip()
-    label = (body.get("label") or "").strip()
+    raw_label = body.get("label")
+    if raw_label is not None and not isinstance(raw_label, str):
+        raise HTTPException(status_code=400, detail="label must be text")
+    label = (raw_label or "").strip()
     expected = body.get("expected")
     if not device_id or not port:
         raise HTTPException(status_code=400, detail="device_id and port required")
@@ -368,33 +376,64 @@ async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db), _writ
 
 @router.post("/rename-opt", status_code=200)
 async def rename_opt(body: dict, db: AsyncSession = Depends(get_db), _writer: None = Depends(_one_label_writer)):
-    """Rename an OPT globally across all PDUs, KVMs, and DCIM position files."""
-    old_name = (body.get("old_name") or "").strip()
-    new_name = (body.get("new_name") or "").strip()
+    """Rename a server globally across all PDUs, KVMs, and DCIM position files."""
+    raw_old, raw_new = body.get("old_name"), body.get("new_name")
+    if any(v is not None and not isinstance(v, str) for v in (raw_old, raw_new)):
+        raise HTTPException(status_code=400, detail="old_name and new_name must be text")
+    old_name = (raw_old or "").strip()
+    new_name = (raw_new or "").strip()
     if not old_name or not new_name:
         raise HTTPException(status_code=400, detail="old_name and new_name required")
     if old_name.lower() == new_name.lower():
         raise HTTPException(status_code=400, detail="Names are identical")
+    old_id, new_id = _identity(old_name), _identity(new_name)
+    if not old_id:
+        # A default port name ("Outlet 5") names no server: renaming it would relabel every cleared port with that
+        # number on every device. Nothing changes and nothing is pushed.
+        return {"ok": True, "updated_devices": [], **name_sync.not_queued(name_sync.PLACEHOLDER_RENAME)}
 
     await _rename_monitor_and_owner(db, old_name, new_name)
 
+    # The monitor and owner follow the server identity, so a rename to another server renames every port of it
+    # ("OPTN45 (PSU1)", "OPTN45 (PSU2)", the KVM port "OPTN45"), each keeping its own feed suffix. The exact name
+    # (any case) becomes new_name; within one server (same identity) only the exact name changes.
+    whole_server = new_id is not None and new_id[0] != old_id[0]
+
+    def renamed(label):
+        if not isinstance(label, str):
+            return label
+        if label.strip().casefold() == old_name.casefold():
+            return new_name
+        if whole_server and _key_of(label) == old_id[0]:
+            return _relabel(label, new_id[1])
+        return label
+
     result = await db.execute(select(Device))
     updated, changed = [], {}
+    id_renames = {old_name.lower(): new_name.lower()}
     for dev in result.scalars().all():
-        labels = json.loads(dev.labels_json) if dev.labels_json else {}
-        new_labels = {p: (new_name if v.lower() == old_name.lower() else v) for p, v in labels.items()}
+        labels, readable = _saved_labels(dev)
+        if not readable:
+            continue  # unreadable saved labels are never overwritten
+        new_labels = {p: renamed(v) for p, v in labels.items()}
         if new_labels != labels:
             dev.labels_json = json.dumps(new_labels)
             updated.append(dev.name)
             changed[dev.id] = {p for p in labels if new_labels[p] != labels[p]}
+            for p in changed[dev.id]:
+                id_renames.setdefault(labels[p].strip().lower(), new_labels[p].lower())
+    if whole_server:
+        # Layout keys of this server with no port label left (DCIM keys them by the lower-case port label).
+        layouts, _ = _read_layouts(strict=False)
+        for sid in _layout_ids(layouts).get(old_id[0], ()):
+            id_renames.setdefault(sid, _relabel(sid, new_id[1]).lower())
 
-    id_renames = {old_name.lower(): new_name.lower()}
     for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json", "rack_overrides.json"):
         _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames)
 
     await db.commit()
-    # A default port name ("Outlet 5") renamed everywhere is not a server rename: it is never pushed automatically.
-    if _identity(old_name) and _identity(new_name):
+    # A rename to a default port name ("Outlet 5") is not a server rename: it is never pushed automatically.
+    if new_id:
         names = await name_sync.queue(changed)
     else:
         names = name_sync.not_queued(name_sync.PLACEHOLDER_RENAME)

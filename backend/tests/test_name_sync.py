@@ -205,9 +205,11 @@ async def test_rename_opt_queues_the_renamed_ports_and_never_writes_the_kvm(env)
     assert r.status_code == 200, r.text
     assert r.json()["device_names"] == "queued"
     await name_sync.drain()
-    assert env.state.calls == [{"pdu-a": {"1"}, "kvm-a": {"1"}}]
+    # Every port of the server is renamed (the PSU2 feed keeps its suffix), as its monitor and owner move with it.
+    assert env.state.calls == [{"pdu-a": {"1"}, "pdu-b": {"1"}, "kvm-a": {"1"}}]
     saved = await rows(env)
     assert saved["pdu-a", "1"].status == "synced" and env.state.drivers["pdu-a"].writes == [(1, "optn99")]
+    assert saved["pdu-b", "1"].status == "synced" and env.state.drivers["pdu-b"].writes == [(1, "optn99 (PSU2)")]
     assert (saved["kvm-a", "1"].status, saved["kvm-a", "1"].reason) == ("skipped", KVM_REASON)
     assert env.state.drivers["kvm-a"].writes == []
 

@@ -143,13 +143,18 @@ async def test_background_refresh_releases_guard_when_session_setup_fails(monkey
 
 # ── In-use markers: auto-clear and lifetime ───────────────────────────────────
 
+def _lease(expires_at, key="a" * 32):
+    """One console lease on a port, as kvms._in_use stores it: { lease: expires_at (monotonic) }."""
+    return {key: expires_at}
+
+
 @pytest.mark.parametrize("ports", [
     [],                                   # what _fetch_status returns for an offline KVM
     [_port(1, status="idle", source="live")],  # even a stale "not active" port list must not count
 ])
 async def test_unreachable_refresh_never_clears_in_use_marks(monkeypatch, ports):
     dev_id = "kvm-offline"
-    kvms_module._in_use[dev_id] = {1: time.monotonic() + _IN_USE_TTL - 600}  # marked 10 min ago
+    kvms_module._in_use[dev_id] = {1: _lease(time.monotonic() + _IN_USE_TTL - 600)}  # marked 10 min ago
     offline = KvmStatus(device_id=dev_id, reachable=False, ports=ports, error="Device API connection refused")
     monkeypatch.setattr(kvms_module, "_fetch_status", AsyncMock(return_value=offline))
     monkeypatch.setattr(kvms_module, "ensure_session", AsyncMock())
@@ -163,7 +168,7 @@ async def test_unreachable_refresh_never_clears_in_use_marks(monkeypatch, ports)
 async def test_auto_clear_drops_only_live_ports_that_are_not_active(monkeypatch):
     dev_id = "kvm-mixed"
     marked_long_ago = time.monotonic() + _IN_USE_TTL - 600
-    kvms_module._in_use[dev_id] = {1: marked_long_ago, 2: marked_long_ago, 3: marked_long_ago}
+    kvms_module._in_use[dev_id] = {1: _lease(marked_long_ago), 2: _lease(marked_long_ago), 3: _lease(marked_long_ago)}
     fresh = _status(dev_id, _port(1, status="empty"), _port(2, status="active"), _port(3, status="idle"))
     monkeypatch.setattr(kvms_module, "_fetch_status", AsyncMock(return_value=fresh))
     monkeypatch.setattr(kvms_module, "ensure_session", AsyncMock())
@@ -199,7 +204,7 @@ async def test_mark_free_for_one_port_keeps_other_ports_in_use(client, kvm):
     await client.post(f"/api/kvms/{dev_id}/ports/2/mark-in-use")
 
     r = await client.post(f"/api/kvms/{dev_id}/ports/1/mark-free")
-    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert r.status_code == 200 and r.json() == {"ok": True, "sessions": 0}
 
     ports = (await client.get(f"/api/kvms/{dev_id}/status")).json()["ports"]
     assert [p["number"] for p in ports if p["in_use"]] == [2]
@@ -220,7 +225,7 @@ async def test_overlay_never_mutates_cached_status_and_free_takes_effect_at_once
 
 def test_in_use_marks_are_per_device_and_never_invent_ports():
     now = time.monotonic()
-    kvms_module._in_use["kvm-a"] = {1: now + 3600, 9: now + 3600}
+    kvms_module._in_use["kvm-a"] = {1: _lease(now + 3600), 9: _lease(now + 3600)}
     a = _apply_overlays("kvm-a", _status("kvm-a", _port(1), _port(2)), {})
     b = _apply_overlays("kvm-b", _status("kvm-b", _port(1), _port(2)), {})
 
@@ -469,12 +474,10 @@ async def test_driver_reopens_its_client_after_close_and_close_is_idempotent():
         await driver.close()
 
 
-# ── Real bugs (kept as strict xfail; product code not changed here) ──────────
+# ── Fixed bugs (regression tests) ────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: KX III whose /api/v1/targets answers HTTP 200 with HTML (older firmware without the "
-    "REST API, or a redirect to a page) raises JSONDecodeError out of get_ports(); the sidebar "
-    "fallback is never tried and the reachable KVM is reported unreachable as 'Device API probe failed'"))
+# A KX III whose /api/v1/targets answers HTTP 200 with HTML (older firmware without the REST
+# API, or a redirect to a page) must fall back to sidebar.asp, not be reported unreachable.
 async def test_rest_html_answer_falls_back_to_sidebar_instead_of_marking_kvm_unreachable(monkeypatch):
     def handler(request):
         if request.url.path == "/api/v1/targets":
@@ -494,10 +497,8 @@ async def test_rest_html_answer_falls_back_to_sidebar_instead_of_marking_kvm_unr
         (1, "idle", "configured"), (2, "empty", "configured")]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: a single REST target with \"name\": null makes KvmPort(label=None) fail validation in "
-    "_fetch_status, so the whole reachable KVM is reported unreachable ('Device API probe failed') "
-    "and the other ports' live state is lost"))
+# A single REST target with "name": null must not make the whole reachable KVM unreachable
+# or lose the other ports' live state.
 async def test_rest_target_without_a_name_does_not_hide_the_whole_kvm(monkeypatch):
     def handler(request):
         if request.url.path == "/api/v1/targets":

@@ -1,9 +1,11 @@
 """Observed incidents and a durable SMTP outbox. No device control operations."""
 import asyncio
+import base64
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formatdate
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -105,6 +107,14 @@ async def observe_network(db, target, result, now, *, minute=False):
                          f"ICMP result: {result.status}. {result.detail}", settings=settings)
 
 
+def _configuration_key(settings):
+    """The HMAC key for credential fingerprints, derived from the master key (crypto.py's dev fallback when unset)."""
+    master = settings.lab_manager_master_key or base64.urlsafe_b64encode(hashlib.sha256(b"lab-manager-dev-key").digest())
+    if isinstance(master, str):
+        master = master.encode()
+    return hmac.new(master, b"dcim-alert-credentials-fingerprint", hashlib.sha256).digest()
+
+
 async def observe_device_api(db, device, reachable, detail, now):
     """A failed API check is distinct from a server outage or an outlet being off."""
     settings = get_settings()
@@ -115,12 +125,19 @@ async def observe_device_api(db, device, reachable, detail, now):
     previous = await db.get(AlertCondition, key)
     gap = (next_slot(previous.checked_at, ZoneInfo(settings.ping_monitor_timezone))
            - previous.checked_at + 120 if previous else 1920)
-    # Credential changes reset confirmation without copying secrets to alert tables.
+    # Credential changes reset confirmation without copying secrets to alert tables: only a keyed HMAC is stored,
+    # so a copy of the database cannot be used to check guesses of the shared PDU/KVM password offline.
     credentials = json.dumps([
         device.username_enc, device.password_enc,
         getattr(settings, device.kind + "_username"), getattr(settings, device.kind + "_password"),
-    ])
-    configuration = json.dumps([device.kind, device.ip, hashlib.sha256(credentials.encode()).hexdigest()])
+    ]).encode()
+    configuration = json.dumps([device.kind, device.ip,
+                                hmac.new(_configuration_key(settings), credentials, hashlib.sha256).hexdigest()])
+    # Upgrade: a state saved with the old unsalted SHA-256 of the same credentials takes the new value without
+    # resetting started_at or notified, so a deploy neither repeats an alert nor loses its recovery email.
+    if previous and previous.configuration == json.dumps([device.kind, device.ip,
+                                                          hashlib.sha256(credentials).hexdigest()]):
+        previous.configuration = configuration
     await observe(db, key=key, configuration=configuration, failed=not reachable,
                   now=now, max_gap=gap, delay=300,
                   title=f"{device.name}: {device.kind.upper()} API availability",

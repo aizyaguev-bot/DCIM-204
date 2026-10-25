@@ -390,6 +390,10 @@ async def password_change(body: PasswordChange, request: Request, response: Resp
     async with AsyncSessionLocal() as db:
         user = await db.get(User, current["user"]["id"])
         if not await asyncio.to_thread(verify_password, body.current_password, user.password_hash): raise HTTPException(400, "Current password is wrong")
+        if user.must_change_password and await asyncio.to_thread(verify_password, body.new_password, user.password_hash):
+            await refund(db, keys)   # the current password was right; only the choice of new one is refused
+            await db.commit()
+            raise HTTPException(400, "Choose a new password; the temporary password cannot be kept")
         user.password_hash = await asyncio.to_thread(hash_password, body.new_password)
         user.must_change_password = False
         await db.execute(delete(UserSession).where(UserSession.user_id == user.id))

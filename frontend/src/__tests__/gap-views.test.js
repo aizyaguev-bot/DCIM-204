@@ -87,7 +87,7 @@ test("equipment without a usable U is listed once, in a whole-rack row after the
 test("main storage has no U shelves: its equipment is one whole-unit row and an empty store has no rows", () => {
   const stored = [{ id: "x", name: "Spare PSU", u: 0 }, { id: "y", name: "Cables", u: 0 }];
   const { rows } = buildRackRows([], MAIN_STORAGE, {}, {}, { [MAIN_STORAGE]: stored });
-  assert.deepEqual(rows, [{ u: 0, items: [{ kind: "custom", data: stored[0] }, { kind: "custom", data: stored[1] }] }]);
+  assert.deepEqual(rows, [{ u: 0, items: [{ kind: "custom", data: stored[0] }, { kind: "custom", data: stored[1] }], auto: false }]);
   assert.deepEqual(buildRackRows([], MAIN_STORAGE, {}, {}, {}).rows, []);
   // Same equipment in a normal rack still gets the 8 numbered shelves.
   assert.equal(buildRackRows([], "Rack-01", {}, {}, { "Rack-01": stored }).rows.length, 9);
@@ -151,8 +151,7 @@ test("non-server labels are matched as whole words after trimming, never as part
   assert.equal(Object.keys(buildRackRows(servers, "Rack-01", {}, {}, {}).uMap).length, kept.length);
 });
 
-knownBug("one malformed rack_slots value must not hide the other servers of the rack",
-  "BUG: a non-numeric slot (e.g. 'U3' in rack_slots.json; PUT /api/rack-slots stores any value) makes maxU NaN, so buildRackRows returns no rows and the whole rack shows 'No equipment stored here' (the 3D Twin keeps the other OPTs)",
+test("one malformed rack_slots value must not hide the other servers of the rack",
   () => {
     const { rows } = buildRackRows([srv("opt1"), srv("opt2"), srv("opt3")], "Rack-01", {}, { "Rack-01": { opt2: "U3" } }, {});
     // Whatever a fix does with the bad slot, the rack keeps its numbered shelves and the valid servers on them.
@@ -160,6 +159,15 @@ knownBug("one malformed rack_slots value must not hide the other servers of the 
     assert.ok(rows.length >= 8, `rack rendered ${rows.length} rows`);
     assert.deepEqual(["OPT1", "OPT3"].filter(name => shown.includes(name)), ["OPT1", "OPT3"]);
   });
+
+test("a server whose saved U is not a whole number is listed at rack level; uMap keeps the saved value for the Twin", () => {
+  for (const bad of ["U3", 2.5, -1]) {
+    const { rows, uMap } = buildRackRows([srv("opt1"), srv("opt2"), srv("opt3")], "Rack-01", {}, { "Rack-01": { opt2: bad } }, {});
+    assert.deepEqual(used(rows), [[1, ["OPT1"]], [2, ["OPT3"]], [0, ["OPT2"]]], JSON.stringify(bad));
+    assert.deepEqual(rows.map(r => r.u), [...range(1, 8), 0]);
+    assert.ok(Object.is(uMap.opt2, Number(bad)), JSON.stringify(bad));
+  }
+});
 
 // ─── DcimView.isDefaultOutletLabel ──────────────────────────────────────────────────────────────────────────
 test("default outlet/port labels are recognised with or without spaces and padding; real names are not", () => {

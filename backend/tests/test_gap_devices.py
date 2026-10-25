@@ -219,10 +219,6 @@ async def test_direct_label_expected_is_checked_against_the_saved_label_before_t
     assert r.status_code == 200 and (await saved_labels(lab.db))["pdu-a"]["4"] == "optn47"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: direct-label and rename-opt call .strip() on the raw JSON value, so a non-text label "
-    "(e.g. 5) or old_name (e.g. a list) raises AttributeError and answers 500 instead of a 400 like the other "
-    "device endpoints."))
 async def test_a_non_text_label_or_name_is_refused_not_a_server_error(lab):
     app = FastAPI()
     app.include_router(devices.router)
@@ -335,10 +331,6 @@ async def test_rename_opt_leaves_an_unreadable_layout_file_untouched(lab):
     assert json.loads(await raw_labels(lab.db, "pdu-a"))["3"] == "web-2"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: rename-opt moves the whole server's monitor and owner (keyed by identity optn45) but renames only the "
-    "labels that equal old_name exactly; renaming the DCIM row 'OPTN45 (PSU1)' leaves 'OPTN45 (PSU2)' and the KVM "
-    "port 'OPTN45' under optn45, which has just lost its owner (tombstoned) and its monitor."))
 async def test_rename_opt_of_one_feed_renames_the_whole_server(lab):
     r = await rename(lab, "OPTN45 (PSU1)", "OPTN47 (PSU1)")
     assert r.status_code == 200, r.text
@@ -349,9 +341,6 @@ async def test_rename_opt_of_one_feed_renames_the_whole_server(lab):
         ("pdu-a", "OPTN47 (PSU1)"), ("pdu-b", "OPTN47 (PSU2)"), ("kvm-a", "OPTN47")]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: rename-opt accepts a default port name as old_name; renaming 'Outlet 5' rewrites every cleared outlet 5 "
-    "on every PDU into the new server name (move-server refuses such names with 'Choose a server by name')."))
 async def test_rename_opt_of_a_default_port_name_does_not_relabel_other_devices(lab):
     r = await lab.client.patch("/api/devices/direct-label", json={"device_id": "pdu-a", "port": "5", "label": ""})
     assert r.status_code == 200 and (await saved_labels(lab.db))["pdu-a"]["5"] == "Outlet 5"

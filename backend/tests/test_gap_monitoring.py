@@ -132,10 +132,6 @@ def test_server_identity_key_display_name_and_pingable_host(label, expected):
     assert ping_monitor.server_identity(label) == expected
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: server_identity treats placeholder outlet labels (Empty, Spare, Free, PDU, KVM Power, n/a, --) as "
-    "servers. DCIM rack rows and the 3D Twin skip them (NON_SERVER_LABEL), but monitoring registers them as "
-    "ping targets, lists them as servers and probes DNS names such as 'spare' and 'empty' every round."))
 def test_placeholder_outlet_labels_are_not_monitored_servers():
     placeholders = ["Empty", "SPARE", " Free ", "PDU", "KVM Power", "kvm_power", "n/a", "--"]
     assert {label: ping_monitor.server_identity(label) for label in placeholders} == dict.fromkeys(placeholders)
@@ -695,11 +691,6 @@ async def test_power_limits_are_strict_and_unreachable_pdu_is_not_an_observation
     assert "Measured: 199.5 V" in voltage.body and "Configured min: 200 V" in voltage.body
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: observe_device_api stores an unsalted SHA-256 of the plaintext shared PDU/KVM username and password "
-    "in alert_conditions.configuration when a device uses the shared credentials; anyone with a copy of the "
-    "database can confirm or dictionary-attack the device password offline (should be keyed, e.g. HMAC "
-    "with a server secret, or use a non-secret revision)."))
 async def test_device_api_alert_state_does_not_reveal_the_shared_device_password(factory, settings):
     settings.pdu_username, settings.pdu_password = "ftlab", "Summer2024!"
     device = Device(id="pdu", name="PDU", kind="pdu", ip="192.0.2.30")  # no per-device credentials
@@ -713,3 +704,31 @@ async def test_device_api_alert_state_does_not_reveal_the_shared_device_password
     recovered = [word for word in wordlist
                  if hashlib.sha256(json.dumps(["", "", "ftlab", word]).encode()).hexdigest() in configuration]
     assert recovered == []
+
+
+async def test_a_deploy_upgrades_the_old_device_api_fingerprint_without_a_repeat_alert_or_a_lost_recovery(factory, settings):
+    """A state saved by the old code (unsalted SHA-256 of the same credentials) keeps its episode after the upgrade."""
+    settings.pdu_username, settings.pdu_password = "ftlab", "Summer2024!"
+    await add(factory, Device(id="pdu", name="PDU", kind="pdu", ip="192.0.2.30"))
+    async with factory() as db:
+        device = await db.get(Device, "pdu")
+        credentials = json.dumps([device.username_enc, device.password_enc, "ftlab", "Summer2024!"])
+    legacy = json.dumps(["pdu", "192.0.2.30", hashlib.sha256(credentials.encode()).hexdigest()])
+    await add(factory, AlertCondition(key="device-api:pdu", configuration=legacy, started_at=1000, checked_at=1300,
+                                      notified=True))
+
+    async def observe(stamp, reachable):
+        async with factory() as db:
+            await alerts.observe_device_api(db, await db.get(Device, "pdu"), reachable, "Connection refused", stamp)
+            await db.commit()
+            return await db.get(AlertCondition, "device-api:pdu")
+    state = await observe(1360, False)  # the same outage, observed by the upgraded code
+    assert state.configuration != legacy and "Summer2024!" not in state.configuration
+    assert (state.started_at, state.notified) == (1000, True) and await emails(factory) == []
+    state = await observe(1420, True)
+    assert [row.subject for row in await emails(factory)] == ["[DCIM recovered] PDU: PDU API availability"]
+    assert state.notified is False
+    upgraded = state.configuration
+    settings.pdu_password = "Winter2025!"  # a real credential change still changes the stored fingerprint
+    state = await observe(1480, True)
+    assert state.configuration not in (upgraded, legacy) and "Winter2025!" not in state.configuration

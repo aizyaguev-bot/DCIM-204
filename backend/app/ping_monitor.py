@@ -68,9 +68,14 @@ def iso(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat() if value is not None else None
 
 
+# Placeholder outlet labels ("Empty", "KVM Power", "--") are not servers. A local copy of DcimView.jsx NON_SERVER_LABEL,
+# lab-twin/app.js NON_SERVER_LABEL and routers/devices._NON_SERVER_LABEL, byte for byte (not imported from routers).
+_NON_SERVER_LABEL = re.compile(r"^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$", re.I)
+
+
 def server_identity(name):
     name = str(name or "").strip()
-    if not name or re.fullmatch(r"(?:outlet|port)\s*\d+", name, re.I):
+    if not name or re.fullmatch(r"(?:outlet|port)\s*\d+", name, re.I) or _NON_SERVER_LABEL.fullmatch(name):
         return None
     # Multiple power feeds and descriptive suffixes refer to the same OPT host.
     match = re.fullmatch(r"(optn?\d+)(?:\s*\([^)]*\))?", name, re.I)

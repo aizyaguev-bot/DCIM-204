@@ -485,11 +485,8 @@ def test_a_failed_first_write_is_a_plain_failure_even_when_put_back_breaks(tmp_p
     assert {n: p.read_bytes() for n, p in paths.items()} == before
 
 
-# ─── real bugs (kept as strict xfail; product code is not changed here) ─────────────────────────────────────────
+# ─── fixed bugs: NaN/Infinity is refused before any store is written ──────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="BUG: a layout PUT body containing NaN/Infinity (accepted by Python's json, "
-                                       "never produced by JSON.stringify) is written to the store; every later GET "
-                                       "of that store then answers 500, so DCIM and the Twin can no longer load it")
 @pytest.mark.parametrize("url", ["/api/rack-slots", "/api/twin-data", "/api/rack-layout"])
 async def test_a_non_finite_number_never_makes_a_layout_store_unreadable(env, url):
     c = env.client
@@ -502,9 +499,6 @@ async def test_a_non_finite_number_never_makes_a_layout_store_unreadable(env, ur
     assert (await c.get(read_url)).status_code == 200
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: PUT /api/rack-items with an Infinity value answers 500 but has already "
-                                       "replaced rack_items.json; afterwards GET /api/rack-items and the barcode "
-                                       "scanner (GET /api/inventory) answer 500 until the file is repaired by hand")
 async def test_a_non_finite_number_never_breaks_the_equipment_inventory(env):
     c = env.client
     before = store.ITEMS_FILE.read_bytes()
@@ -514,3 +508,21 @@ async def test_a_non_finite_number_never_breaks_the_equipment_inventory(env):
     assert put.status_code < 500 or store.ITEMS_FILE.read_bytes() == before, "a failed save must not change the file"
     assert (await c.get("/api/rack-items")).status_code == 200
     assert (await c.get("/api/inventory")).status_code == 200
+
+
+@pytest.mark.parametrize("url, body", [
+    # A non-finite number outside the U slot (which valid_u already refuses) reached the file before the fix.
+    ("/api/rack-items", '{"Rack-01": [{"id": "ci-a", "name": "Switch A", "u": 1, "custom": {"weight": Infinity}}], '
+                        '"Rack-02": []}'),
+    ("/api/rack-slots", '{"Rack-01": {"opt11": [1, -Infinity]}}'),
+    ("/api/chillers", '{"units": [{"id": "c1", "name": "Chiller 1", "u": NaN}], "connections": []}'),
+], ids=["rack-items", "rack-slots", "chillers"])
+async def test_a_non_finite_number_anywhere_is_refused_with_422_and_nothing_is_written(env, url, body):
+    c = env.client
+    path = store.ITEMS_FILE if url == "/api/rack-items" else getattr(
+        env.main, {"/api/rack-slots": "_RACK_SLOTS_FILE", "/api/chillers": "_CHILLERS_FILE"}[url])
+    before = path.read_bytes() if path.exists() else None
+    put = await c.put(url, content=body.encode(), headers={"Content-Type": "application/json", "If-Match": await tag(c, url)})
+    assert put.status_code == 422 and put.json()["detail"] == store.NOT_FINITE
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert (await c.get(url)).status_code == 200

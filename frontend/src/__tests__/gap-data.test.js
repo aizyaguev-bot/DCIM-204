@@ -177,9 +177,8 @@ test("inventory: a rejected request shows the server's text, or the status when 
   await assert.rejects(loadInventory("x"), e => e.status === 502 && e.message === "Request failed (502). Check the fields and try again.");
 });
 
-xfail(
+test(
   "inventory: a 422 validation reason from the server reaches the Scan page",
-  "BUG: inventory.js parse() ignores FastAPI's list-shaped 422 detail (client.js joins it), so a scan rejected for control characters only says 'Check the fields'",
   async t => {
     serve(t, [{ status: 422, body: { detail: [{ type: "value_error", loc: ["body", "code"], msg: "Value error, Scan one barcode without control characters", input: "01\u001d123" }] } }]);
     const error = await rejection(updateInventory("", { code: "01\u001d123", name: "01\u001d123", type: "other", rack: "Rack-01", u: 1, position: "" }, '"r1"'));
@@ -258,8 +257,8 @@ test("locations: partial server rows get a key, a numeric slot, text ports and n
     racks: [1, "R2"],
   });
   assert.deepEqual(loc.servers, [
-    { key: "opt5", name: "opt5", rack: null, slot: 12, pdu: [], kvm: [{ device_id: "k1", device_name: "k1", port: "3" }] },
-    { key: "jetson", name: "Jetson", rack: null, slot: null, pdu: [], kvm: [] },
+    { key: "opt5", name: "opt5", rack: null, slot: 12, pdu: [], kvm: [{ device_id: "k1", device_name: "k1", port: "3" }], kept: null, keptKnown: false },
+    { key: "jetson", name: "Jetson", rack: null, slot: null, pdu: [], kvm: [], kept: null, keptKnown: false },
   ]);
   assert.deepEqual(loc.empty_ports.pdu.map(p => p.port), ["9", "10", "A1"]);
   assert.deepEqual(loc.empty_ports.kvm, []);

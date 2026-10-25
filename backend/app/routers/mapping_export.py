@@ -20,9 +20,16 @@ from .devices import server_locations
 router = APIRouter(prefix="/api/devices", tags=["connections"])
 
 
+def _short_number(value):
+    """True for 1-9 ASCII digits: int() of it is cheap (saved labels can hold digit runs past Python's int() limit).
+    A local copy of devices._short_number."""
+    return isinstance(value, str) and 0 < len(value) <= 9 and value.isascii() and value.isdigit()
+
+
 def natural_key(value):
-    """Compare the full name, with numbered OPT names in numeric order."""
-    return tuple(int(part) if index % 2 else part.casefold()
+    """Compare the full name, with numbered OPT names in numeric order. A digit run longer than 9 digits stays text
+    and sorts after the numbers at the same place."""
+    return tuple(((0, int(part), "") if _short_number(part) else (1, 0, part)) if index % 2 else part.casefold()
                  for index, part in enumerate(re.split(r"([0-9]+)", str(value))))
 
 
@@ -98,7 +105,7 @@ async def connection_summary(db: AsyncSession):
                 "device_id": device.id,
                 "device_name": device.name,
                 "device_ip": device.ip,
-                "port": int(port) if str(port).isascii() and str(port).isdigit() else str(port),
+                "port": int(port) if _short_number(str(port)) else str(port),
                 "label": label,
             }
             if device.kind == "pdu":

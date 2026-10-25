@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -17,6 +18,21 @@ MAX_U = 42
 U_SLOT_INVALID = "U slot must be a whole number from 0 to 42."
 LAYOUT_CONFLICT = "This layout was changed in another session. Reload and try again."
 LAYOUT_SAVE_FAILED = "The layout could not be saved. Please retry."
+NOT_FINITE = "Numbers must be finite (no NaN or Infinity). Nothing was saved."
+
+
+def reject_non_finite(payload):
+    """422 for a NaN or Infinity anywhere in `payload`: Python's json accepts them (JSON.stringify never sends them),
+    and once stored every later GET of that store would be a 500. Saves call this before taking any lock."""
+    pending = [payload]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            raise HTTPException(422, NOT_FINITE)
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
 
 
 def read_items():
@@ -107,6 +123,7 @@ def read_layout(path, default):
 
 def save_layout(path, payload, expected, default, ensure_ascii=True):
     """If-Match is optional, so old kiosk pages keep saving; a stale revision leaves the file untouched."""
+    reject_non_finite(payload)
     with locked_file(path, LAYOUT_SAVE_FAILED):
         if expected and expected != revision(read_layout(path, default)):
             raise HTTPException(409, LAYOUT_CONFLICT)
@@ -149,7 +166,8 @@ def replace_items(payload, expected):
     """Existing DCIM/Twin editors participate in version checks and movement history.
 
     Refusal order: revision (428/409), then shape and U slot (422), then barcode/serial uniqueness (409).
-    Nothing is written when any of them fails."""
+    Nothing is written when any of them fails. A NaN or Infinity anywhere is 422 before the lock is taken."""
+    reject_non_finite(payload)
     with locked_items() as current:
         check_revision(current, expected)
         incoming = deepcopy(payload)
@@ -228,6 +246,8 @@ def save_layouts(entries):
     file already written is put back to its exact previous bytes while the locks are still held, so no other writer
     can see or save the half-written layout. Synchronous on purpose: nothing awaits while the locks are held."""
     from contextlib import ExitStack
+    for _, _, payload, _, _ in entries:
+        reject_non_finite(payload)
     with ExitStack() as locks:
         for _, path, *_ in sorted(entries, key=lambda e: str(e[1])):
             locks.enter_context(locked_file(path, LAYOUT_SAVE_FAILED))
@@ -393,6 +413,7 @@ def save_versioned(path, payload, expected, default, by=None):
     """save_layout with history: If-Match stays optional (409 when stale); the document it replaces is kept.
     Units are never deleted: a payload that leaves out a unit id of the current document is 422 and changes nothing
     (422, not 409, because the pages retry a 409 once)."""
+    reject_non_finite(payload)
     with locked_file(path, LAYOUT_SAVE_FAILED):
         current, existed = _read_store(path, default)
         if expected and expected != revision(current):

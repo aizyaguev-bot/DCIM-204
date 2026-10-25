@@ -450,10 +450,6 @@ async def test_restart_while_waiting_for_grub_keeps_the_computer_blocked(env):
         await restarted.aclose()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: cancel during waiting_for_grub releases the computer (active_key=None, no acknowledge) although "
-    "runner.MAY_START says an install entry may boot there without further keys; every failure in that state "
-    "(interrupted, kvm_disconnected, grub_timeout) keeps the computer blocked, cancel does not"))
 async def test_cancel_while_waiting_for_grub_must_not_release_the_computer(env):
     job_id, _ = await S.started(env)
     sim = S.machine(env, job_id)
@@ -465,13 +461,30 @@ async def test_cancel_while_waiting_for_grub_must_not_release_the_computer(env):
     try:
         await env.runner.cancel(job_id, "tester")
     except HTTPException as exc:                            # refusing the cancel is an acceptable fix too
-        assert exc.value.status_code == 409
+        assert exc.status_code == 409
     env.clock.advance(30)
     sim.screen()
     assert sim.booted and any("inst.repo=" in line for line in sim.booted)   # the GRUB countdown booted it
     with pytest.raises(HTTPException) as exc:
         await S.new_job(env)                                # a new install on the same computer must wait
     assert exc.value.status_code == 409
+
+
+async def test_takeover_while_waiting_for_grub_keeps_the_computer_until_an_admin_acknowledges(env):
+    job_id, _ = await S.started(env)
+    job, _ = await S.load(env, job_id)
+    option = S.pick(json.loads(job.boot_options_json), lambda o: o["recommended"])
+    await env.runner.choose(job_id, "boot", option["id"], job.version, "tester")
+    job, _ = await S.load(env, job_id)
+    assert job.state == "waiting_for_grub" and job_dto(job, [], env.clock())["can"]["cancel"] is False
+    await env.runner.takeover(job_id, "tester")
+    job, _ = await S.load(env, job_id)
+    assert job.state == "manual_takeover" and job.install_may_have_started and job.active_key == "opt11"
+    with pytest.raises(HTTPException) as exc:
+        await S.new_job(env)
+    assert exc.value.status_code == 409
+    await env.runner.acknowledge(job_id, "admin")
+    assert await S.new_job(env)
 
 
 # -- pure building blocks ------------------------------------------------------------------

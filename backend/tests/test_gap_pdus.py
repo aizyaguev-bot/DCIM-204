@@ -524,10 +524,6 @@ async def test_pdu_without_inlets_reports_unknown_inlet_values():
     assert inlet == {"voltage": None, "current": None, "watts": None, "readings": []}
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: RaritanPduDriver.get_inlet only catches RaritanPduError/ValueError/TypeError/KeyError; a non-object "
-    "getReading/getSensors result (e.g. a bare number) raises AttributeError, so _fetch_status marks the whole "
-    "PDU unreachable and hides every outlet, instead of leaving that one inlet reading unknown as outlets do."))
 async def test_malformed_inlet_reading_leaves_only_that_reading_unknown(monkeypatch):
     fake = FakePdu(outlets=2)
     fake.readings["/inlet.0/voltage"] = 231.0           # bare number instead of a Reading object
@@ -577,11 +573,6 @@ async def test_env_sensors_are_empty_when_the_pdu_has_none():
 
 # ── Cache across an address change ────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: the PDU status cache is keyed by device id only and is not dropped when the device address changes; "
-    "after PUT /api/devices/{id} moves a PDU to a new IP, /api/pdus/{id}/status keeps returning the previous "
-    "PDU's outlets and states (fresh for 20 s, then once more while refreshing) next to power buttons that "
-    "now switch the new PDU."))
 async def test_address_change_does_not_serve_the_previous_pdus_outlets(client, pdu, monkeypatch):
     dev_id = pdu["id"]
     old, new, built = FakePdu(outlets=2), FakePdu(outlets=2), []
