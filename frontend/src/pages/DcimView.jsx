@@ -317,14 +317,18 @@ function ServerName({ server, onOpen, onRename }) {
   </button>;
 }
 
-// One server on a shelf: LED, name, state word (the meaning never depends on colour), maintenance, watts, owner,
-// switch, then Power (view mode), KVM and SSH.
+// One server on a shelf, as a tile: a status stripe on its left edge (the LED), name, state word (the meaning never
+// depends on colour), maintenance, watts, owner, switch, then Power (view mode), KVM and SSH in one row on the right.
+// data-feeds="partial": its feeds disagree (one on, one off), shown in amber like its Mixed switch.
 function ServerCell({ server, sw, owner, onSelect, onRename, overlay = false }) {
   const editMode = useContext(EditContext);
   const { visualFor, matchKeys } = useContext(RackViewContext);
+  const { powerFor } = useContext(ServerActionsContext);
   const visual = visualFor(server);
+  const partial = powerFor?.(server)?.state === "partial";
   const open = () => onSelect?.(server);
   return <div className="server-cell" data-server={server.name} data-server-id={server.id} data-state={visual.state}
+    data-feeds={partial ? "partial" : undefined}
     data-maintenance={visual.maintenance ? "" : undefined} data-match={matchKeys?.has(`s:${server.id}`) ? "" : undefined}
     onClick={e => { if (!e.target.closest(".server-actions,input,.server-open")) open(); }}>
     <span className="server-led" aria-hidden="true"/>
@@ -376,7 +380,7 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
   const { setNodeRef, isOver } = useDroppable({ id: `shelf:${rack}:${u}`, disabled: !coolingDrop || !(u > 0) });
   const servers = items.filter(i => i.kind === "server");
   const index = String(u).padStart(2, "0");
-  if (!items.length && !cooling.length) return <div ref={setNodeRef} data-u-slot={u} data-over={isOver ? "" : undefined} className="shelf-empty"><span className="shelf-index">{index}</span><span className="shelf-empty-line"/></div>;
+  if (!items.length && !cooling.length) return <div ref={setNodeRef} data-u-slot={u} data-over={isOver ? "" : undefined} className="shelf-empty"><span className="shelf-index">{index}</span><span className="shelf-empty-line">Free</span></div>;
   return <div ref={setNodeRef} data-u-slot={u} data-auto={auto ? "" : undefined} data-cooling-only={!items.length ? "" : undefined} data-over={isOver ? "" : undefined} className="shelf-row">
     <span className="shelf-index" title={auto ? `Auto-placed — no saved U for this OPT; it is shown on the next free shelf (${u}). Set its U in Edit mode to keep it here.` : u ? `Shelf ${u}` : "Rack level (no shelf)"}>{u ? index : "—"}</span>
     {editMode && servers.length > 0 && <div {...(dragHandleProps || {})} tabIndex={-1} className="shelf-grip" aria-label={`Move shelf ${u}`} onClick={e => e.stopPropagation()}>{Icon.grip}</div>}

@@ -361,22 +361,91 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .kvm-open { display: inline-flex; align-items: center; min-height: 32px; padding: 0 8px; font-size: 11px; }
 .kvm-open-compact { padding: 0 8px; }
 
-/* power switch */
-.power-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 52px; height: 32px; padding: 0 6px; border: 1px solid #333; border-radius: 2px; background: #111; color: #ccc; cursor: pointer; }
-.power-toggle:hover { border-color: #4b4b4b; }
-.power-glyph { font-size: 12px; line-height: 1; color: #a7a7a7; }
-.power-track { position: relative; flex-shrink: 0; width: 30px; height: 16px; border: 1px solid #757575; border-radius: 8px; background: #333; box-sizing: border-box; }
-.power-knob { position: absolute; top: 1px; left: 1px; display: flex; align-items: center; justify-content: center; width: 12px; height: 12px; border-radius: 50%; background: #a7a7a7; transition: left .15s; }
+/* unit tiles (v2.43): every unit on a shelf is a card. Servers carry a status stripe on the left edge (their LED):
+   green on, grey off, amber when the feeds disagree, purple in maintenance, dashed grey when unknown or unreachable.
+   Equipment has a type chip and no stripe; empty shelves are dashed "Free" slots. Blue edge = the tile in use. */
+.rack-shelves { padding: 10px 10px 2px; border-color: #27272a; border-radius: 8px; background: #141518; }
+.shelf-row { gap: 8px; min-height: 52px; margin: 0 0 8px; }
+.shelf-row + .shelf-row, .shelf-empty + .shelf-row, .shelf-gap + .shelf-row { padding-top: 0; border-top: 0; }
+.shelf-index { flex: 0 0 18px; justify-content: flex-end; font-size: 11px; color: #a1a1aa; }
+.shelf-row > .shelf-index, .shelf-row > .shelf-grip { min-height: 52px; }
+.shelf-content { gap: 8px; }
+.shelf-empty { height: 28px; margin: 0 0 8px; gap: 8px; }
+.shelf-empty .shelf-index { color: #a1a1aa; }
+.shelf-empty-line { display: flex; align-items: center; flex: 1; height: 100%; padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; background: transparent; font-size: 11px; color: #a1a1aa; }
+.shelf-gap { height: 28px; margin: 0 0 8px; padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; color: #a1a1aa; }
+.server-cell { position: relative; grid-template-columns: minmax(6ch, 1fr) auto; grid-template-areas: "name actions" "meta actions"; column-gap: 10px; row-gap: 3px;
+  min-height: 52px; padding: 7px 8px 7px 16px; border: 1px solid #3f3f46; border-radius: 8px; background: #2b2d33;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .35); cursor: pointer; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
+.server-cell[data-state] { border-color: #3f3f46; background: #2b2d33; }
+.server-cell:hover, .server-cell[data-state]:hover { border-color: #5b5b66; background: #303239; }
+.server-cell[data-state="unknown"], .server-cell[data-state="unreachable"] { border-style: dashed; border-color: #52525b; background: #232429; }
+.server-cell[data-state="unknown"] .server-name, .server-cell[data-state="unreachable"] .server-name { color: #d4d4d8; }
+.server-cell:focus-within, .server-cell[data-state]:focus-within { border-color: #38bdf8; box-shadow: 0 0 0 1px #38bdf8; }
+.server-cell > .server-led { position: absolute; grid-area: auto; top: 8px; bottom: 8px; left: 6px; width: 4px; height: auto; border: 0; border-radius: 2px; background: #71717a; }
+.server-cell[data-state="on"] > .server-led { background: #76b900; }
+.server-cell[data-state="off"] > .server-led { background: #71717a; }
+.server-cell[data-state="unknown"] > .server-led, .server-cell[data-state="unreachable"] > .server-led { background: repeating-linear-gradient(to bottom, #8a8a93 0 4px, transparent 4px 7px); }
+.server-cell[data-state="loading"] > .server-led { background: #52525b; }
+.server-cell[data-feeds="partial"] > .server-led { background: #f0b429; }
+.server-cell[data-maintenance] { box-shadow: 0 1px 2px rgba(0, 0, 0, .35); }
+.server-cell[data-maintenance] > .server-led { background: #a78bfa; }
+.server-cell .server-name { font-size: 14px; font-weight: 600; line-height: 1.3; color: #fafafa; }
+.server-cell .server-meta { align-items: center; gap: 3px 8px; font-size: 12px; color: #a7a7a7; }
+.server-cell .server-state { font-size: 11px; letter-spacing: .03em; }
+.server-cell .server-watts { color: #d4d4d8; }
+.server-cell .owner-pill { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border: 1px solid #52525b; border-radius: 9px; background: #1d1e22; color: #e4e4e7; }
+.server-cell .server-actions { gap: 6px; }
+.server-cell .kvm-open, .server-cell .server-actions .ssh-open-compact { min-height: 32px; padding: 0 10px; border-radius: 6px; font-size: 11px; }
+.equipment-cell { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; align-content: center; column-gap: 8px; row-gap: 3px;
+  min-height: 52px; padding: 7px 10px; border: 1px solid #3f3f46; border-radius: 8px; transition: border-color .15s ease, background-color .15s ease; }
+.equipment-cell, .equipment-cell[data-type="switch"], .equipment-cell[data-type="ups"] { border-color: #3f3f46; background: #232429; color: #fafafa; }
+.equipment-cell:hover, .equipment-cell[data-type]:hover { border-color: #5b5b66; background: #292a30; }
+.equipment-cell:focus-visible { outline: 2px solid #9fe040; outline-offset: 2px; border-color: #38bdf8; }
+.equipment-type { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border: 1px solid #52525b; border-radius: 4px; background: #3f3f46; color: #e4e4e7;
+  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.equipment-cell[data-type="switch"] .equipment-type { border-color: #1f5163; background: #0c2a36; color: #7dd3fc; }
+.equipment-cell[data-type="ups"] .equipment-type { border-color: #26502a; background: #0f2a14; color: #86efac; }
+.equipment-name { min-width: 0; font-size: 14px; font-weight: 600; color: #fafafa; }
+.equipment-serial { grid-column: 1 / -1; font-size: 11px; color: #a7a7a7; }
+
+/* power switch: a pill with its state written in it (ON / OFF) and a round knob with the power symbol. Blocked = dashed
+   and muted (the reason is in its title), unknown = empty dashed pill with the knob in the middle, split feeds = amber
+   "Mixed" pill, a request in progress = spinner in the knob and a slow pulse. */
+.power-toggle { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-width: 58px; height: 32px; padding: 0 3px;
+  border: 0; border-radius: 8px; background: transparent; color: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.power-toggle:focus-visible { outline: none; }
+.power-track { position: relative; display: block; flex-shrink: 0; width: 52px; height: 22px; border: 1px solid #63636e; border-radius: 11px; background: #3f3f46;
+  box-sizing: border-box; transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease; }
+.power-knob { position: absolute; top: 2px; left: 2px; display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%;
+  background: #e4e4e7; color: #52525b; box-shadow: 0 1px 2px rgba(0, 0, 0, .55); transition: transform .15s ease, background-color .15s ease; }
+.power-icon { display: block; }
+.power-label { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; font-size: 11px; font-weight: 700; line-height: 1; letter-spacing: 0; pointer-events: none; }
 .power-toggle[aria-checked="true"] .power-track { border-color: #76b900; background: #76b900; }
-.power-toggle[aria-checked="true"] .power-knob { left: 15px; background: #000; }
-.power-toggle[aria-checked="true"] .power-glyph { color: #9fe040; }
-.power-toggle[data-power-state="partial"] { border-color: #756122; color: #f0c060; font-size: 11px; font-weight: 700; }
-.power-toggle[aria-disabled="true"] { border-style: dashed; cursor: not-allowed; }
-.power-toggle[aria-disabled="true"] .power-track { border-color: #4b4b4b; background: #1a1a1a; }
-.power-toggle[aria-disabled="true"] .power-knob { background: #4b4b4b; }
-.power-toggle[aria-checked="true"][aria-disabled="true"] .power-track { border-color: #3c5c10; background: #3c5c10; }
-.power-toggle[aria-checked="true"][aria-disabled="true"] .power-knob { background: #000; }
-.power-spin { width: 8px; height: 8px; border: 1.5px solid #fff; border-top-color: transparent; border-radius: 50%; animation: racks-spin .8s linear infinite; }
+.power-toggle[aria-checked="true"] .power-knob { transform: translateX(30px); background: #fff; color: #4d7c0f; }
+.power-toggle[aria-checked="true"] .power-label { left: 8px; color: #0a1400; }
+.power-toggle[aria-checked="false"] .power-label { right: 7px; color: #f4f4f5; }
+.power-toggle:not([aria-disabled="true"]):hover .power-track { box-shadow: 0 0 0 3px rgba(255, 255, 255, .08); }
+.power-toggle[aria-checked="true"]:not([aria-disabled="true"]):hover .power-track { border-color: #86d000; background: #86d000; }
+.power-toggle[aria-checked="false"]:not([aria-disabled="true"]):hover .power-track { border-color: #7a7a85; background: #4b4b55; }
+.power-toggle:focus-visible .power-track, .power-toggle:focus-visible .power-mixed { outline: 2px solid #9fe040; outline-offset: 2px; }
+.power-toggle[aria-disabled="true"] { cursor: not-allowed; }
+.power-toggle[aria-disabled="true"]:not([aria-busy]) .power-track { border-style: dashed; }
+.power-toggle[data-power-state="on"][aria-disabled="true"]:not([aria-busy]) .power-track { border-color: #6a9a1e; background: #34500d; }
+.power-toggle[data-power-state="on"][aria-disabled="true"]:not([aria-busy]) .power-knob { background: #b9c4ab; color: #34500d; }
+.power-toggle[data-power-state="on"][aria-disabled="true"]:not([aria-busy]) .power-label { color: #d9f2b0; }
+.power-toggle[data-power-state="off"][aria-disabled="true"]:not([aria-busy]) .power-track { border-color: #5b5b66; background: #27272a; }
+.power-toggle[data-power-state="off"][aria-disabled="true"]:not([aria-busy]) .power-knob { background: #71717a; color: #27272a; }
+.power-toggle[data-power-state="off"][aria-disabled="true"]:not([aria-busy]) .power-label { color: #a1a1aa; }
+.power-toggle[data-power-state="unknown"] .power-track { border: 1px dashed #71717a; background: transparent; }
+.power-toggle[data-power-state="unknown"] .power-knob { transform: translateX(15px); border: 1.5px solid #8a8a93; background: transparent; box-shadow: none; color: #a1a1aa; }
+.power-toggle[data-power-state="unknown"] .power-icon { display: none; }
+.power-toggle[aria-busy="true"] .power-track { animation: racks-pulse 1.2s ease-in-out infinite; }
+.power-spin { width: 10px; height: 10px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: racks-spin .8s linear infinite; }
+.power-mixed { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px 0 6px; border: 1px solid #f0b429; border-radius: 11px; background: #f0b429; color: #1f1400;
+  font-size: 11px; font-weight: 700; line-height: 1; white-space: nowrap; transition: background-color .15s ease, box-shadow .15s ease; }
+.power-half { width: 10px; height: 10px; border: 1.5px solid currentColor; border-radius: 50%; background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
+.power-toggle[data-power-state="partial"]:hover .power-mixed { border-color: #f7c548; background: #f7c548; box-shadow: 0 0 0 3px rgba(240, 180, 41, .18); }
 .power-actions { display: flex; flex-direction: column; gap: 6px; }
 .power-actions-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .power-btn { min-height: 36px; padding: 0 12px; border: 1px solid #333; border-radius: 2px; background: #111; color: #eee; font-size: 12px; font-weight: 600; }
@@ -540,7 +609,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .edit-mode-notice p { flex: 1 1 320px; margin: 0; }
 
 @media (pointer: coarse), (max-width: 640px) {
-  .power-toggle { min-width: 56px; height: 40px; }
+  .power-toggle { min-width: 58px; height: 40px; }
+  .server-cell .kvm-open, .server-cell .server-actions .ssh-open-compact { min-height: 40px; }
   .kvm-open, .server-actions .ssh-open-compact, .racks-chip, .cooling-chip, .cooling-add, .racks-btn, .racks-btn-sm, .power-btn, .toast-undo { min-height: 40px; }
   .racks-chip { height: 40px; }
   .icon-btn, .toast-close { width: 40px; height: 40px; }
@@ -581,5 +651,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 }
 @media (prefers-reduced-motion: reduce) {
   .is-flash, .skeleton, .server-cell[data-state="loading"] > .server-led, .power-spin, .racks-chip[data-status="loading"] .dot { animation: none; }
-  .rack-collapse svg, .power-knob, .rack-load > div, .cooling-history-chevron { transition: none; }
+  .rack-collapse svg, .power-knob, .power-track, .power-mixed, .server-cell, .equipment-cell, .rack-load > div, .cooling-history-chevron { transition: none; }
+  .power-toggle[aria-busy="true"] .power-track { animation: none; }
 }

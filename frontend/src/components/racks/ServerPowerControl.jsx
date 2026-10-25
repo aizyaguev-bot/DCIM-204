@@ -12,9 +12,15 @@ export function powerBlockReason(group, action, { pending = null, waiting = fals
   return planServerPower(group, action, scope, feedId).disabledReason;
 }
 
-// The row's ON/OFF switch. It never switches anything itself: activating it asks for the opposite state
-// (onRequest(action, element)), or for a choice when the feeds disagree (action null). Blocked controls stay focusable
-// with aria-disabled and say why (title and a visually hidden description); a click then does nothing.
+// The power symbol on the switch knob (decorative; the button's name and aria-checked carry the meaning).
+const POWER_ICON = <svg className="power-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  strokeWidth="3" strokeLinecap="round" focusable="false"><path d="M12 3v8"/><path d="M6.3 7.2a8 8 0 1 0 11.4 0"/></svg>;
+
+// The row's ON/OFF switch: a pill with its state written in it (ON / OFF) and a round knob; an unknown state is an
+// empty dashed pill with the knob in the middle, and split feeds are an amber "Mixed" pill. It never switches anything
+// itself: activating it asks for the opposite state (onRequest(action, element)), or for a choice when the feeds
+// disagree (action null). Blocked controls stay focusable with aria-disabled and say why (title and a visually hidden
+// description); a click then does nothing.
 export default function ServerPowerControl({ server, group, pending = null, waiting = false, onRequest }) {
   const { canOperate } = useAccounts();
   const reasonId = useId();
@@ -23,7 +29,7 @@ export default function ServerPowerControl({ server, group, pending = null, wait
   if (group.state === "partial" && !pending && !waiting) {
     return <button type="button" className="power-toggle" data-power-state="partial" aria-haspopup="dialog"
       aria-label={`Power ${name}: some feeds on`} title="Some feeds are on and some are off"
-      onClick={e => onRequest(null, e.currentTarget)}><span aria-hidden="true" className="power-glyph">⏻</span><span className="power-mixed">Mixed</span></button>;
+      onClick={e => onRequest(null, e.currentTarget)}><span className="power-mixed"><span aria-hidden="true" className="power-half"/>Mixed</span></button>;
   }
   const on = group.state === "on";
   const action = on ? "off" : "on";
@@ -37,8 +43,10 @@ export default function ServerPowerControl({ server, group, pending = null, wait
       aria-label={`Power ${name}`} aria-describedby={reason ? reasonId : undefined}
       title={reason || (on ? `Power off ${name}` : `Power on ${name}`)}
       onClick={e => { if (!reason) onRequest(action, e.currentTarget); }}>
-      <span aria-hidden="true" className="power-glyph">⏻</span>
-      <span aria-hidden="true" className="power-track"><span className="power-knob">{pending && <span className="power-spin"/>}</span></span>
+      <span aria-hidden="true" className="power-track">
+        {(on || group.state === "off") && <span className="power-label">{on ? "ON" : "OFF"}</span>}
+        <span className="power-knob">{pending ? <span className="power-spin"/> : POWER_ICON}</span>
+      </span>
     </button>
     {reason && <span id={reasonId} className="sr-only">{reason}</span>}
   </>;
