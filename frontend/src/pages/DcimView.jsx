@@ -7,7 +7,8 @@ import { splitSections, sectionHeading, versionOf } from "../api/changelog";
 import { SectionBody, plain } from "../components/WhatsNew";
 import {useAccounts, accountRequest} from "../accounts";
 import {OwnerSelect, useEngineers} from "../engineers";
-import SshButton from "../components/SshButton";
+import SshButton, { useSshStatus } from "../components/SshButton";
+import { findServer } from "../api/ssh";
 import { serverIdentity } from "../api/locations";
 import { deviceState } from "../api/client";
 import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, buildSearchIndex, searchIndex, matchesFilter, shelfOptions } from "../components/racks/rackView.js";
@@ -317,30 +318,79 @@ function ServerName({ server, onOpen, onRename }) {
   </button>;
 }
 
-// One server on a shelf, as a tile: a status stripe on its left edge (the LED), name, state word (the meaning never
-// depends on colour), maintenance, watts, owner, switch, then Power (view mode), KVM and SSH in one row on the right.
+// The PDU feeds a server row names: the outlets carrying this row's own label (an OPT labelled PSU1/PSU2 has a row per
+// PSU), else every feed of the server, else the outlet the Racks list found it on.
+function rowFeeds(server, group) {
+  const name = String(server.name || "").trim().toLowerCase();
+  const feeds = group?.feeds || [];
+  const own = feeds.filter(f => String(f.label).trim().toLowerCase() === name);
+  if (own.length) return own;
+  if (feeds.length) return feeds;
+  const outlet = Number(server.outlet);
+  return server.pduName && Number.isFinite(outlet) ? [{ id: `${server.pduId}:${outlet}`, pduName: server.pduName, outlet, state: server.state }] : [];
+}
+
+// One chip per feed, "PDU 01 · 3". When the server's feeds disagree the chips are amber and say which feed is on or off.
+function FeedChips({ feeds, partial }) {
+  return feeds.map(f => {
+    const state = f.state === "on" || f.state === "off" ? f.state : "unknown";
+    return <span key={f.id} className="unit-chip feed-chip" data-feed-state={state} data-partial={partial ? "" : undefined}
+      title={`${f.pduName} · outlet ${f.outlet} · ${state === "unknown" ? "no reading" : state}`}>
+      <bdi>{f.pduName}</bdi>&nbsp;· {f.outlet}{partial && state !== "unknown" ? ` · ${state.toUpperCase()}` : ""}
+    </span>;
+  });
+}
+
+// The SSH host Lab Manager knows for a server (Operators and up get it from the /api/ssh/status snapshot the SSH buttons
+// already share). Nothing when no host is known or when it is just the server's own name.
+function ServerHost({ server }) {
+  const { data } = useSshStatus();
+  const known = findServer(data?.servers, server.name);
+  const host = String(known?.approved_host || known?.host || "").trim();
+  if (!host || serverIdentity(host) === serverIdentity(server.name)) return null;
+  return <span className="unit-host" dir="ltr" title={`SSH host ${host}`}>{host}</span>;
+}
+
+// One server on a shelf, as one row of a list whose columns line up down the rack card: a status stripe on its left
+// edge (the LED), the name, the state word (the meaning never depends on colour), maintenance and watts, its PDU feeds,
+// KVM port, owner, SSH host and switch port, then KVM, SSH and Power (view mode) at the row's end. In Edit mode the
+// grip ⠿ at the start of the row drags it. A narrow card (the overview grid, a phone) shows the chips on a second line.
 // data-feeds="partial": its feeds disagree (one on, one off), shown in amber like its Mixed switch.
-function ServerCell({ server, sw, owner, onSelect, onRename, overlay = false }) {
+function ServerCell({ server, sw, owner, onSelect, onRename, overlay = false, dragHandleProps = null }) {
   const editMode = useContext(EditContext);
   const { visualFor, matchKeys } = useContext(RackViewContext);
-  const { powerFor } = useContext(ServerActionsContext);
+  const { powerFor, feedsFor, kvmFor, canOperate, renderSsh } = useContext(ServerActionsContext);
+  const { mode } = useAccounts();
   const visual = visualFor(server);
   const partial = powerFor?.(server)?.state === "partial";
+  const group = feedsFor?.(server) || null;
+  const feeds = rowFeeds(server, group);
+  const kvm = kvmFor?.(server.name);
   const open = () => onSelect?.(server);
-  return <div className="server-cell" data-server={server.name} data-server-id={server.id} data-state={visual.state}
+  return <div className="server-cell unit-row" data-server={server.name} data-server-id={server.id} data-state={visual.state}
     data-feeds={partial ? "partial" : undefined}
     data-maintenance={visual.maintenance ? "" : undefined} data-match={matchKeys?.has(`s:${server.id}`) ? "" : undefined}
-    onClick={e => { if (!e.target.closest(".server-actions,input,.server-open")) open(); }}>
+    onClick={e => { if (!e.target.closest(".server-actions,input,.server-open,.shelf-grip")) open(); }}>
     <span className="server-led" aria-hidden="true"/>
-    <ServerName server={server} onOpen={open} onRename={onRename}/>
-    <div className="server-meta">
+    <div className="unit-main">
+      {editMode && !overlay && <div {...(dragHandleProps || {})} tabIndex={-1} className="shelf-grip" aria-label={`Move ${server.name}`} title="Drag to move" onClick={e => e.stopPropagation()}>{Icon.grip}</div>}
+      <ServerName server={server} onOpen={open} onRename={onRename}/>
+    </div>
+    <div className="unit-state">
       <span className="server-state" data-state={visual.state} title={visual.title}>{visual.word}</span>
       {visual.maintenance && <span className="maint-badge" title={BLOCK.maintenance}>Maintenance</span>}
       {(visual.state === "on" || visual.state === "off") && Number.isFinite(server.watts) && <span className="server-watts">{reading(server.watts, 0, " W")}</span>}
-      {owner && <span className="owner-pill" dir="auto" title={`Owner: ${owner}`}>{owner}</span>}
-      {sw?.switch && <span className="server-switch" dir="auto" title={`Switch ${sw.switch}${sw.port ? ` · port ${sw.port}` : ""}`}>{sw.switch}{sw.port ? `:${sw.port}` : ""}</span>}
     </div>
-    {!overlay && <div className="server-actions" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+    <div className="unit-details">
+      <span className="unit-col unit-feeds"><FeedChips feeds={feeds} partial={group?.state === "partial"}/></span>
+      <span className="unit-col unit-kvm">{kvm && <span className="unit-chip kvm-chip" title={`KVM: ${kvm.kvmName}, port ${kvm.port}`}><bdi>{kvm.kvmName}</bdi>&nbsp;· port {kvm.port}</span>}</span>
+      <span className="unit-col unit-owner">{owner && <span className="owner-pill" dir="auto" title={`Owner: ${owner}`}>{owner}</span>}</span>
+      <span className="unit-col unit-net">
+        {canOperate && renderSsh && mode !== "legacy" && <ServerHost server={server}/>}
+        {sw?.switch && <span className="server-switch" dir="auto" title={`Switch ${sw.switch}${sw.port ? ` · port ${sw.port}` : ""}`}>{sw.switch}{sw.port ? `:${sw.port}` : ""}</span>}
+      </span>
+    </div>
+    {!overlay && canOperate && <div className="server-actions unit-actions" data-edit={editMode ? "" : undefined} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
       {!editMode && <RowPower server={server}/>}
       <KvmButton server={server} compact/>
       <SshSlot server={server} size="sm"/>
@@ -348,17 +398,26 @@ function ServerCell({ server, sw, owner, onSelect, onRename, overlay = false }) 
   </div>;
 }
 
-// Individual equipment cell (Enter or Space opens it)
+// One equipment row (Enter or Space opens it): its name under the server names, its type chip in the state column,
+// serial and position in the chips column. It keeps an empty actions column so the columns line up with the servers.
 function EquipCell({ item, onSelect, onRename }) {
+  const editMode = useContext(EditContext);
+  const { canOperate } = useContext(ServerActionsContext);
   const meta = ITEM_TYPES[item.type] || ITEM_TYPES.other;
   const { matchKeys } = useContext(RackViewContext);
-  return <div className="equipment-cell" data-type={item.type} data-item-id={item.id} data-match={matchKeys?.has(`e:${item.id}`) ? "" : undefined}
+  return <div className="equipment-cell unit-row" data-type={item.type} data-item-id={item.id} data-match={matchKeys?.has(`e:${item.id}`) ? "" : undefined}
     onClick={() => onSelect?.(item)} role="button" tabIndex={0} aria-label={`View ${item.name}`}
     onKeyDown={e => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onSelect?.(item); } }}>
-    <span className="equipment-type">{meta.label}</span>
-    <InlineName value={item.name} onRename={onRename} onOpen={() => onSelect?.(item)} className="equipment-name"/>
-    {(item.serial_number || item.barcode) && <span className="equipment-serial" title={item.serial_number || item.barcode}>SN: {item.serial_number || item.barcode}</span>}
-    {item.shelf_position && <span className="equipment-serial">{item.shelf_position}</span>}
+    <div className="unit-main">
+      {editMode && <span className="unit-grip-space" aria-hidden="true"/>}
+      <InlineName value={item.name} onRename={onRename} onOpen={() => onSelect?.(item)} className="equipment-name"/>
+    </div>
+    <div className="unit-state"><span className="equipment-type">{meta.label}</span></div>
+    {(item.serial_number || item.barcode || item.shelf_position) && <div className="unit-details">
+      <span className="unit-col unit-feeds">{(item.serial_number || item.barcode) && <span className="equipment-serial" title={item.serial_number || item.barcode}>SN: {item.serial_number || item.barcode}</span>}</span>
+      <span className="unit-col unit-kvm">{item.shelf_position && <span className="equipment-serial" title={`Position: ${item.shelf_position}`}>{item.shelf_position}</span>}</span>
+    </div>}
+    {canOperate && <span className="unit-actions" data-edit={editMode ? "" : undefined} aria-hidden="true"/>}
   </div>;
 }
 
@@ -372,39 +431,38 @@ function RackCoolingChip({ unit, variant }) {
     highlighted={!!matchKeys?.has(`c:${unit.id}`)} dragHandle={coolingDraggable ? drag : null}/>;
 }
 
-// One U row — server + equipment side by side, or just equipment, or empty; cooling units on that shelf at the end
-function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, dragHandleProps }) {
-  const editMode = useContext(EditContext);
+// One shelf: its number once on the left, then one row per server (several servers = stacked rows), one row per piece of
+// equipment and the cooling units on that shelf; an empty shelf is a compact dashed "Free" row.
+function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, sortable = false }) {
   const { coolingByRack, coolingDrop } = useContext(RackViewContext);
   const cooling = u > 0 ? coolingByRack?.[rack]?.placed?.[u] || [] : [];
   const { setNodeRef, isOver } = useDroppable({ id: `shelf:${rack}:${u}`, disabled: !coolingDrop || !(u > 0) });
   const servers = items.filter(i => i.kind === "server");
   const index = String(u).padStart(2, "0");
   if (!items.length && !cooling.length) return <div ref={setNodeRef} data-u-slot={u} data-over={isOver ? "" : undefined} className="shelf-empty"><span className="shelf-index">{index}</span><span className="shelf-empty-line">Free</span></div>;
+  const Row = sortable ? SortableServerRow : ServerCell;
   return <div ref={setNodeRef} data-u-slot={u} data-auto={auto ? "" : undefined} data-cooling-only={!items.length ? "" : undefined} data-over={isOver ? "" : undefined} className="shelf-row">
     <span className="shelf-index" title={auto ? `Auto-placed — no saved U for this OPT; it is shown on the next free shelf (${u}). Set its U in Edit mode to keep it here.` : u ? `Shelf ${u}` : "Rack level (no shelf)"}>{u ? index : "—"}</span>
-    {editMode && servers.length > 0 && <div {...(dragHandleProps || {})} tabIndex={-1} className="shelf-grip" aria-label={`Move shelf ${u}`} onClick={e => e.stopPropagation()}>{Icon.grip}</div>}
     <div className="shelf-content">
-      {servers.map(({data}) => <ServerCell key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]} onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)}/>)}
+      {servers.map(({data}) => <Row key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]} onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)}/>)}
       {items.filter(i => i.kind === "custom").map(({data}) => <EquipCell key={data.id} item={data} onSelect={onSelectCustom} onRename={v => onRenameCustom?.(data, v)}/>)}
       {cooling.length > 0 && <div className="shelf-cooling">{cooling.map(unit => <RackCoolingChip key={unit.id} unit={unit} variant="shelf"/>)}</div>}
     </div>
   </div>;
 }
 
-// Sortable wrapper — applies DnD to the server in a U group
-function SortableURow({ isDragging, ...props }) {
+// A server row that Edit mode can drag by its grip (to another shelf of the rack, or onto another rack's card).
+function SortableServerRow(props) {
   const editMode = useContext(EditContext);
-  const serverId = props.items.find(i => i.kind === "server")?.data.id;
-  const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: serverId || "noop", disabled: !editMode });
-  const dragHandleProps = serverId ? { ...listeners, ...attributes } : {};
-  return (
-    <div ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={isDragging ? "opacity-30" : ""}>
-      <USlotGroup {...props} dragHandleProps={dragHandleProps}/>
-    </div>
-  );
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: props.server.id, disabled: !editMode });
+  return <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`unit-sortable${editMode && isDragging ? " opacity-30" : ""}`}>
+    <ServerCell {...props} dragHandleProps={{ ...listeners, ...attributes }}/>
+  </div>;
+}
+
+// A shelf with servers: each server row is sortable on its own (the rack card decides where a dropped row goes).
+function SortableURow({ isDragging, ...props }) {
+  return <USlotGroup {...props} sortable/>;
 }
 
 // ─── RACK CARD PARTS ──────────────────────────────────────────────────────────
@@ -2596,10 +2654,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     openConsole: onOpenConsole || null,
     sshFor: name => serverIdentity(name) ? name : null,
     canOperate: !!canOperate,
+    // Every feed of a server for its row's PDU chips (read-only, every role); powerFor stays Operator-only.
+    feedsFor: s => powerGroups.get(serverIdentity(s.name)) || null,
     powerFor: powerEnabled ? powerFor : null, powerPending, requestPower: powerEnabled ? requestPower : null, waitingFor,
     // The SSH slot of every server row, the detail table, the phone list and the details dialogs (v2.41 SSH button).
     renderSsh: (server, size) => <RackSshButton server={server} compact={size === "sm"}/>,
-  }),[kvmByServer,onOpenConsole,canOperate,powerEnabled,powerFor,powerPending,requestPower,waitingFor]);
+  }),[kvmByServer,onOpenConsole,canOperate,powerEnabled,powerGroups,powerFor,powerPending,requestPower,waitingFor]);
 
   const handleReorder = useCallback((rackName,newIds)=>{
     if (!editMode) return;

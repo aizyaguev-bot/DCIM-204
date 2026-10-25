@@ -361,22 +361,59 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .kvm-open { display: inline-flex; align-items: center; min-height: 32px; padding: 0 8px; font-size: 11px; }
 .kvm-open-compact { padding: 0 8px; }
 
-/* unit tiles (v2.43): every unit on a shelf is a card. Servers carry a status stripe on the left edge (their LED):
-   green on, grey off, amber when the feeds disagree, purple in maintenance, dashed grey when unknown or unreachable.
-   Equipment has a type chip and no stripe; empty shelves are dashed "Free" slots. Blue edge = the tile in use. */
-.rack-shelves { padding: 10px 10px 2px; border-color: #27272a; border-radius: 8px; background: #141518; }
-.shelf-row { gap: 8px; min-height: 52px; margin: 0 0 8px; }
+/* unit rows (v2.43): every server on a shelf is its own row, and the rows of a rack card read as one list whose columns
+   line up: a status stripe on the left edge (the LED: green on, grey off, amber when the feeds disagree, purple in
+   maintenance, dashed grey when unknown or unreachable), name, state and watts, PDU feeds, KVM port, owner, SSH host
+   and switch, then KVM, SSH and the power switch at the row's end. Every column but the name has a fixed or
+   proportional width, so a column starts at the same place in every row. A card narrower than one full row (the overview grid, the rack detail, a phone) puts
+   the chips on a second line; a narrow one also puts the state under the name. Equipment rows: name, type chip in the
+   state column, serial. Empty shelves are compact dashed "Free" rows. Blue edge = the row in use. */
+.rack-shelves { container: shelves / inline-size; padding: 10px 10px 2px; border-color: #27272a; border-radius: 8px; background: #141518; }
+.shelf-row { gap: 8px; min-height: 0; margin: 0 0 8px; }
 .shelf-row + .shelf-row, .shelf-empty + .shelf-row, .shelf-gap + .shelf-row { padding-top: 0; border-top: 0; }
 .shelf-index { flex: 0 0 18px; justify-content: flex-end; font-size: 11px; color: #a1a1aa; }
-.shelf-row > .shelf-index, .shelf-row > .shelf-grip { min-height: 52px; }
-.shelf-content { gap: 8px; }
+.shelf-row > .shelf-index { min-height: 48px; }
+.shelf-content { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 4px; }
 .shelf-empty { height: 28px; margin: 0 0 8px; gap: 8px; }
 .shelf-empty .shelf-index { color: #a1a1aa; }
 .shelf-empty-line { display: flex; align-items: center; flex: 1; height: 100%; padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; background: transparent; font-size: 11px; color: #a1a1aa; }
 .shelf-gap { height: 28px; margin: 0 0 8px; padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; color: #a1a1aa; }
-.server-cell { position: relative; grid-template-columns: minmax(6ch, 1fr) auto; grid-template-areas: "name actions" "meta actions"; column-gap: 10px; row-gap: 3px;
-  min-height: 52px; padding: 7px 8px 7px 16px; border: 1px solid #3f3f46; border-radius: 8px; background: #2b2d33;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .35); cursor: pointer; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
+.unit-row { position: relative; display: grid; flex: none; min-width: 0; min-height: 48px; align-items: center; column-gap: 10px; row-gap: 4px;
+  grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main actions" "state actions" "details details";
+  padding: 6px 8px 6px 16px; border: 1px solid #3f3f46; border-radius: 8px; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
+.unit-main { grid-area: main; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.unit-main > .server-open, .unit-main > .server-rename, .unit-main > .equipment-name { flex: 0 1 auto; min-width: 0; }
+.unit-state { grid-area: state; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; font-size: 12px; color: #a7a7a7; }
+.unit-details { grid-area: details; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.unit-col { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.unit-col:empty { display: none; }
+.unit-col > * { min-width: 0; max-width: 100%; }
+.unit-chip { display: inline-block; height: 20px; padding: 0 6px; border: 1px solid #52525b; border-radius: 4px; background: #1d1e22; color: #e4e4e7;
+  font: 11px/18px "JetBrains Mono", Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feed-chip[data-partial] { border-color: #8a6a10; background: #2a2008; color: #f0c060; }
+.kvm-chip { border-color: #5b3f8f; background: #1e1033; color: #d8b4fe; }
+.unit-host { font: 11px "JetBrains Mono", Consolas, monospace; color: #a7a7a7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.unit-net .server-switch { font: 11px "JetBrains Mono", Consolas, monospace; }
+.unit-actions { grid-area: actions; display: grid; grid-template-columns: 44px 44px 60px; grid-template-areas: "kvm ssh power"; column-gap: 4px; align-items: center; width: 156px; }
+.unit-actions[data-edit] { grid-template-columns: 44px 44px; grid-template-areas: "kvm ssh"; width: 92px; }
+.unit-actions .power-toggle { grid-area: power; min-width: 0; width: 60px; padding: 0; }
+.unit-actions .kvm-open { grid-area: kvm; justify-content: center; width: 100%; padding: 0; }
+.unit-actions .ssh-open-compact { grid-area: ssh; justify-content: center; width: 100%; padding: 0; }
+.unit-row .shelf-grip { flex: 0 0 24px; align-self: stretch; min-height: 32px; margin-left: -4px; }
+.unit-grip-space { flex: 0 0 24px; margin-left: -4px; }
+/* A long name wraps instead of hiding behind an ellipsis. */
+.unit-row .server-name, .unit-row .equipment-name { white-space: normal; overflow-wrap: anywhere; }
+@container shelves (min-width: 380px) {
+  .unit-row { grid-template-columns: minmax(0, 1fr) 5.5rem auto; grid-template-areas: "main state actions" "details details details"; }
+  .unit-details { display: grid; grid-template-columns: minmax(0, 5.25rem) minmax(0, 7.25rem) minmax(0, 1fr) minmax(0, .75fr); column-gap: 8px; }
+  .unit-col:empty { display: flex; }
+  .equipment-cell .unit-feeds { grid-column: span 2; }
+}
+@container shelves (min-width: 780px) {
+  .unit-row { grid-template-columns: minmax(0, .9fr) 8.5rem minmax(0, 3fr) auto; grid-template-areas: "main state details actions"; }
+  .unit-details { grid-template-columns: minmax(0, .9fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, .9fr); }
+}
+.server-cell { box-shadow: 0 1px 2px rgba(0, 0, 0, .35); cursor: pointer; }
 .server-cell[data-state] { border-color: #3f3f46; background: #2b2d33; }
 .server-cell:hover, .server-cell[data-state]:hover { border-color: #5b5b66; background: #303239; }
 .server-cell[data-state="unknown"], .server-cell[data-state="unreachable"] { border-style: dashed; border-color: #52525b; background: #232429; }
@@ -390,24 +427,21 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .server-cell[data-feeds="partial"] > .server-led { background: #f0b429; }
 .server-cell[data-maintenance] { box-shadow: 0 1px 2px rgba(0, 0, 0, .35); }
 .server-cell[data-maintenance] > .server-led { background: #a78bfa; }
-.server-cell .server-name { font-size: 14px; font-weight: 600; line-height: 1.3; color: #fafafa; }
-.server-cell .server-meta { align-items: center; gap: 3px 8px; font-size: 12px; color: #a7a7a7; }
+.server-cell .server-name { font-size: 14px; font-weight: 700; line-height: 1.3; color: #fafafa; }
 .server-cell .server-state { font-size: 11px; letter-spacing: .03em; }
 .server-cell .server-watts { color: #d4d4d8; }
-.server-cell .owner-pill { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border: 1px solid #52525b; border-radius: 9px; background: #1d1e22; color: #e4e4e7; }
-.server-cell .server-actions { gap: 6px; }
-.server-cell .kvm-open, .server-cell .server-actions .ssh-open-compact { min-height: 32px; padding: 0 10px; border-radius: 6px; font-size: 11px; }
-.equipment-cell { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; align-content: center; column-gap: 8px; row-gap: 3px;
-  min-height: 52px; padding: 7px 10px; border: 1px solid #3f3f46; border-radius: 8px; transition: border-color .15s ease, background-color .15s ease; }
-.equipment-cell, .equipment-cell[data-type="switch"], .equipment-cell[data-type="ups"] { border-color: #3f3f46; background: #232429; color: #fafafa; }
+.server-cell .owner-pill { display: inline-block; height: 20px; max-width: 100%; padding: 0 7px; border: 1px solid #52525b; border-radius: 10px; background: #1d1e22; color: #e4e4e7;
+  font-size: 11px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-cell .kvm-open, .server-cell .server-actions .ssh-open-compact { min-height: 32px; border-radius: 6px; font-size: 11px; }
+.equipment-cell, .equipment-cell[data-type="switch"], .equipment-cell[data-type="ups"] { border-color: #3f3f46; background: #232429; color: #fafafa; cursor: pointer; }
 .equipment-cell:hover, .equipment-cell[data-type]:hover { border-color: #5b5b66; background: #292a30; }
 .equipment-cell:focus-visible { outline: 2px solid #9fe040; outline-offset: 2px; border-color: #38bdf8; }
 .equipment-type { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border: 1px solid #52525b; border-radius: 4px; background: #3f3f46; color: #e4e4e7;
   font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .equipment-cell[data-type="switch"] .equipment-type { border-color: #1f5163; background: #0c2a36; color: #7dd3fc; }
 .equipment-cell[data-type="ups"] .equipment-type { border-color: #26502a; background: #0f2a14; color: #86efac; }
-.equipment-name { min-width: 0; font-size: 14px; font-weight: 600; color: #fafafa; }
-.equipment-serial { grid-column: 1 / -1; font-size: 11px; color: #a7a7a7; }
+.equipment-name { display: block; min-width: 0; font-size: 14px; font-weight: 600; color: #fafafa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.equipment-serial { display: block; font-size: 11px; color: #a7a7a7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* power switch: a pill with its state written in it (ON / OFF) and a round knob with the power symbol. Blocked = dashed
    and muted (the reason is in its title), unknown = empty dashed pill with the knob in the middle, split feeds = amber
@@ -638,7 +672,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   #cooling-panel[data-folded] .cooling-panel-header h2 { flex: 1 1 auto; min-width: 0; row-gap: 4px; }
   #cooling-panel[data-folded] .cooling-panel-actions { flex-wrap: nowrap; }
   .rack-card { padding: 10px; }
-  .server-cell, .equipment-cell { flex-basis: 100%; }
   .toast-region { bottom: 72px; }
   .rack-detail-head h2 { font-size: 20px; }
 }
