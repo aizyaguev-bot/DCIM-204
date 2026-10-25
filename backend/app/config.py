@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     device_name_sync: str = "auto"
     # Lab assistant (read-only). Without a key, or with the LLM turned off, it answers in a clearly labelled demo mode.
     assistant_enabled: bool = True
+    # Show the assistant panel even in demo mode (no language model, actions off). Off: the panel stays hidden until
+    # a key is connected or assistant actions are turned on.
+    assistant_show_in_demo: bool = False
     assistant_llm_enabled: bool = True
     assistant_anthropic_api_key: SecretStr | None = None   # server .env only; never sent to the browser or logged
     assistant_model: str = "claude-opus-5-5"

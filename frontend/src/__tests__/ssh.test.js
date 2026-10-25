@@ -869,7 +869,7 @@ test("App: ?tab=ssh is a page, Admin -> SSH is Operator+ and ?tab=admin&section=
   assert.match(navigate, /if \(tab !== "ssh"\) url\.searchParams\.delete\("server"\);/);
   assert.match(navigate, /url\.searchParams\.delete\("section"\);/);
   // The terminal page has no assistant panel or footer over it.
-  assert.match(app, /\{!sshPage && <AssistantPanel /);
+  assert.match(app, /\{!sshPage && (?:assistantShown && )?<AssistantPanel /);
   assert.match(app, /\{!sshPage && <footer /);
 });
 

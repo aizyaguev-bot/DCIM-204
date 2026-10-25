@@ -263,6 +263,7 @@ async def assistant_status():
     settings = await _with_effective_key(get_settings())
     mode, reason = await _current_mode(settings)
     return {"enabled": bool(getattr(settings, "assistant_enabled", True)), "mode": mode,
+            "show_in_demo": getattr(settings, "assistant_show_in_demo", False) is True,
             "demo_reason": reason_text(reason) if mode == "demo" else None, "demo_reason_code": reason,
             "model": settings.assistant_model,
             "limits": {"per_minute": settings.assistant_per_minute, "per_hour": settings.assistant_per_hour,
