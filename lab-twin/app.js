@@ -50,7 +50,7 @@
     filters: { zone: '', setup: '', statuses: new Set(STATUSES), onlyLow: false, q: '' },
     dirty: false,                        // unsaved edits to S.data (draft mirrored in localStorage)
     settings: LS.get('settings', { url: '', pass: '', poll: true }),
-    live: { connected: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, ping: {}, updatedAt: null, error: null, timer: null },
+    live: { connected: false, connecting: false, errorStatus: null, retrying: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, ping: {}, updatedAt: null, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
     colorBy: LS.get('colorBy', 'health') === 'status' ? 'status' : 'health', showPower: !!LS.get('showPower', false), envPanel: !!LS.get('envPanel', false),
     attnSeen: new Map(), drawerOpen: LS.get('drawerOpen', {}), racksList: LS.get('racksList', 'tree') === 'inv' ? 'inv' : 'tree',
@@ -105,6 +105,7 @@
   }
   canvas.addEventListener('pointerdown', e => {
     if (e.pointerType !== 'touch' && ![0, 1, 2].includes(e.button)) return;
+    if (S.tween && S.tween.ms > 0) markView(null);   // interrupted mid-flight: the camera is between two views
     controls.cancel(); S.tween = null; S.lastInput = performance.now();
     activePointers.add(e.pointerId);
     if (e.pointerType !== 'touch') { try { canvas.setPointerCapture(e.pointerId); } catch {} }
@@ -141,10 +142,32 @@
   // A data-space point (x across, y up, z depth) as a world-space vector. Walls, zones and free items sit directly
   // under the mirrored `world` group, so their label anchors must go through WX like every camera position.
   const W3 = (x, y, z) => new THREE.Vector3(WX(x), y, z);
+  // The renderer writes sRGB: a colour that must look exactly like its legend swatch (health caps, the down outline,
+  // the selection) is given in linear space, otherwise #4ade80 shows as a pale mint.
+  const linear = hex => new THREE.Color(hex).convertSRGBToLinear();
   let selectionHelper = null;
   function clearSelectionHelper() {
     if (!selectionHelper) return;
-    scene.remove(selectionHelper); selectionHelper.geometry.dispose(); selectionHelper.material.dispose(); selectionHelper = null;
+    scene.remove(selectionHelper);
+    selectionHelper.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    while (selectionHelper.children.length) selectionHelper.remove(selectionHelper.children[0]);
+    selectionHelper = null;
+  }
+  // Selection: a 1 px box outline plus thin sky-blue bars along its 12 edges, so it reads at any distance.
+  function selectionOutline(b) {
+    const g = new THREE.Group(); const col = linear(SELECT_COLOR);
+    const line = new THREE.Box3Helper(b, col); g.add(line);
+    const size = b.getSize(new THREE.Vector3()), c = b.getCenter(new THREE.Vector3());
+    const t = Math.min(0.014, Math.max(0.006, Math.max(size.x, size.y, size.z) * 0.006));
+    const m = new THREE.MeshBasicMaterial({ color: col });
+    const bar = (sx, sy, sz, x, y, z) => { const o = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), m); o.position.set(x, y, z); g.add(o); };
+    for (const i of [-1, 1]) for (const j of [-1, 1]) {
+      bar(size.x + t, t, t, c.x, c.y + i * size.y / 2, c.z + j * size.z / 2);
+      bar(t, size.y + t, t, c.x + i * size.x / 2, c.y, c.z + j * size.z / 2);
+      bar(t, t, size.z + t, c.x + i * size.x / 2, c.y + j * size.y / 2, c.z);
+    }
+    g.traverse(o => { o.renderOrder = 4; });
+    return g;
   }
 
   const labelsLayer = $('#labels');
@@ -154,7 +177,9 @@
   function resize() {
     const vp = $('#viewport'); const w = Math.max(1, vp.clientWidth), h = Math.max(1, vp.clientHeight);
     renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
-    placeAttnDock();
+    placeAttnDock(); layoutLegend(); rackBarEdges(true);
+    const r = vp.getBoundingClientRect(); const root = document.documentElement.style;
+    root.setProperty('--vp-cx', Math.round(r.left + r.width / 2) + 'px'); root.setProperty('--vp-bottom', Math.max(0, Math.round(innerHeight - r.bottom)) + 'px');
   }
   window.addEventListener('resize', () => { cancelNavigation(); resize(); });
   const viewportObserver = new ResizeObserver(resize); viewportObserver.observe($('#viewport'));
@@ -305,11 +330,16 @@
     const env = box(dd, h, w, mat('#000', { opacity: 0 }), 0, h / 2, 0); env.visible = false; g.add(env);
     const e = setEdgeOp(edges(env, col), .5); g.add(e); eds.push(e);
     const ed = setEdgeOp(edges(env, HEALTH.unknown.c, true), .75); ed.visible = false; g.add(ed); eds.push(ed);
-    // health cap: a thin coloured plate on top of the rack (not pickable), painted by paintRacks()
-    const cap = box(dd - 2 * p, 0.014, w - 2 * p, uniqueMat(new THREE.MeshBasicMaterial({ color: 0x3f3f46 })), 0, h + 0.008, 0); g.add(cap);
+    // health cap: a thin unlit plate on top of the rack (not pickable), painted by paintRacks() in the exact legend colour;
+    // drawn after the glass walls so they never wash it out
+    const cap = box(dd - 2 * p, 0.014, w - 2 * p, uniqueMat(new THREE.MeshBasicMaterial({ color: linear('#3f3f46') })), 0, h + 0.008, 0); cap.renderOrder = 3; g.add(cap);
+    // a down rack also gets a dashed red outline just outside its frame
+    const downGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(dd + 0.06, h + 0.05, w + 0.06));
+    const down = new THREE.LineSegments(downGeo, uniqueMat(new THREE.LineDashedMaterial({ color: linear(HEALTH.down.c), dashSize: 0.06, gapSize: 0.04, transparent: true, opacity: 1 })));
+    down.position.set(0, (h + 0.05) / 2, 0); down.computeLineDistances(); down.visible = false; down.renderOrder = 3; down.userData.baseOpacity = 1; g.add(down); eds.push(down);
     staticGroup.add(g); g.updateMatrixWorld(true);
-    const rec = reg({ id: su.id, cat: 'setup', def: su, group: g, meshes, edges: eds, status, conf: su.confidence, zone: su.zone, setup: su.id, anchor: localToWorld(g, 0, h + 0.12, 0), tpl, cap, envSolid: e, envDashed: ed });
-    makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span><span class="ln">${esc(rackName(su))}</span><span class="ls"></span><span class="lt"></span>`);
+    const rec = reg({ id: su.id, cat: 'setup', def: su, group: g, meshes, edges: eds, status, conf: su.confidence, zone: su.zone, setup: su.id, anchor: localToWorld(g, 0, h + 0.12, 0), tpl, cap, envSolid: e, envDashed: ed, envDown: down });
+    makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span><span class="ln" dir="auto">${esc(rackName(su))}</span><span class="ls"></span><span class="lt"></span>`);
     rec.label.title = `${su.id} · ${su.name}`;
     rec.labelTel = rec.label.querySelector('.lt');
     rec.label.addEventListener('mouseenter', () => { S.labelHover = su.id; });
@@ -531,7 +561,7 @@
       const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor });
       const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + 'W')}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : it.type === 'equip-switch' ? `switch under test${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
       const named = it.type === 'opt' || it.type.startsWith('equip-');
-      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${esc(named ? it.name : it.id)}<small>${esc(it.type === 'opt' ? it.id + ' · ' + sub : sub)}</small>`);
+      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span><bdi>${esc(named ? it.name : it.id)}</bdi><small>${esc(it.type === 'opt' ? it.id + ' · ' + sub : sub)}</small>`);
     });
     S.attention = computeAttention(S.model, S.live, S.recs);
     noteAttentionSeen(); paintRacks();
@@ -756,13 +786,15 @@
       if (rec.cat === 'setup' && rec.envSolid) {
         const h = rackHealth(rec.def) || { h: 'unknown', why: '' }; rec.health = h;
         const col = byHealth ? HEALTH[h.h].c : STATUS_COLOR[rec.status]; const unknown = byHealth && h.h === 'unknown';
-        rec.envSolid.material.color.set(col); rec.envSolid.visible = !unknown; rec.envDashed.visible = unknown;
-        rec.cap.material.color.set(unknown ? '#3f3f46' : col);
+        rec.envSolid.material.color.copy(linear(col)); rec.envSolid.visible = !unknown; rec.envDashed.visible = unknown;
+        rec.envDown.visible = byHealth && h.h === 'down';
+        rec.cap.userData.hex = unknown ? '#3f3f46' : col; rec.cap.material.color.copy(linear(rec.cap.userData.hex));
         const el = rec.label;
         if (el) {
           el.classList.remove('h-up', 'h-down', 'h-unknown', 'h-maint'); if (byHealth) el.classList.add('h-' + h.h);
           const lp = el.querySelector('.lp'); if (lp) lp.style.background = col;
-          const ls = el.querySelector('.ls'); if (ls) ls.textContent = byHealth && h.why ? ' · ' + h.why : '';
+          // the suffix tells one rack apart from the others; with no live data at all the dashed style says it once for all
+          const ls = el.querySelector('.ls'); if (ls) ls.textContent = byHealth && h.why && S.live.connected ? ' · ' + h.why : '';
         }
       } else if (rec.cat === 'shelf') {
         if (!S.moveItem) rec.edges.forEach(e => e.material.color.set(shelfColor(rec)));
@@ -815,13 +847,26 @@
     if (p.status === 'unconfigured') return 'Not configured';
     return 'Unknown';
   }
+  // What the live KVM status says about one console port: 'inuse' (a console opened from Lab Manager holds it),
+  // 'free', or 'unknown' with a reason (status not loaded yet, KVM unreachable, sign-in failed, port missing).
+  // The marker only covers consoles opened from Lab Manager — never SSH, RDP or someone at the KVM itself.
+  function kvmPortState(kvmId, port) {
+    const st = S.live.kvm?.[kvmId];
+    if (!st) return { s: 'unknown', why: 'loading' };
+    if (st.reachable === false) return { s: 'unknown', why: 'unreachable' };
+    if (st.error) return { s: 'unknown', why: 'sign-in' };
+    const p = (st.ports || []).find(x => x.number === port);
+    if (!p) return { s: 'unknown', why: 'no port' };
+    return { s: p.in_use ? 'inuse' : 'free', why: '' };
+  }
   function consoleText(it) {
     if (!S.live.connected) return 'No live data';
     const kv = kvmTargets(it); if (!kv.length) return 'No KVM';
-    const st = S.live.kvm?.[kv[0].kvm];
-    if (st?.reachable === false) return 'KVM unreachable';
-    if (st?.error) return 'KVM sign-in failed';
-    return kv.some(k => kvmPort(k.kvm, Number(k.port))?.in_use) ? 'In use' : 'Free';
+    const states = kv.map(k => kvmPortState(k.kvm, Number(k.port)));
+    if (states.some(x => x.s === 'inuse')) return 'In use';
+    const u = states.find(x => x.s === 'unknown');
+    if (u) return u.why === 'unreachable' ? 'KVM unreachable' : u.why === 'sign-in' ? 'KVM sign-in failed' : 'Unknown';
+    return 'Free';
   }
   const healthBadge = h => h ? `<span class="hdot h-${h.h}" aria-hidden="true"></span>${esc(HEALTH[h.h].t)}` : '';
 
@@ -887,12 +932,19 @@
       });
       bySetup(opts.filter(o => o.live?.inDcim && o.setup && o.placementConfidence === 'low')).forEach((list, sid) => add('info', 'auto-u', sid, list.length === 1 ? `${list[0].name} auto-placed (no explicit U)` : `${list.length} OPTs auto-placed (no explicit U)`, at(sid, `shelf set by order, not by rack_slots — confirm with Move: ${names(list)}`), list.length === 1 ? list[0].id : sid, sid));
     } else {
-      if (live?.signedOut) add('info', 'offline', 'live', 'Signed out — sign in to resume live data', 'Sign in to Lab Manager again; live data comes back on its own');
-      else add('info', 'offline', 'live', 'Live data off — connect the backend', 'Only the static lab-data.json is shown (state, power and scans need the backend)');
+      // why there is no live data: signed out, still connecting, the backend failed, or switched off on purpose
+      const st = live?.signedOut ? 'signedout' : live?.connecting ? 'connecting' : live?.error ? 'error' : 'off';
+      const [text, hint] = {
+        signedout: ['Signed out — sign in to resume live data', 'Sign in to Lab Manager again; live data comes back on its own'],
+        connecting: ['Connecting to Lab Manager…', 'Live state, power and scans appear in a moment'],
+        error: [`Lab Manager did not answer${live.errorStatus ? ` (HTTP ${live.errorStatus})` : ''}`, `Showing saved layout${live.retrying ? ' · retrying every 15 s' : ''}`],
+        off: ['Live data off — connect the backend', 'Only the static lab-data.json is shown (state, power and scans need the backend)'],
+      }[st];
+      add('info', 'offline', st === 'off' || st === 'signedout' ? 'live' : st, text, hint); out[out.length - 1].state = st;
     }
     // static checks (also offline)
     [...(recs ? recs.values() : [])].filter(r => r.unplaced).forEach(r => add('warn', 'unplaced', r.id, `${r.def?.name || r.id} has no position`, 'No place in 3D — place it with Edit layout (Move) or in Lab Manager', r.id, r.setup));
-    (model.unmappedRacks || []).forEach(rack => add('warn', 'unmapped-rack', rack, `DCIM rack ${rack} has no physical setup`, 'Assign it to a rack in the rack details (DCIM rack mapping)'));
+    (model.unmappedRacks || []).forEach(rack => add('warn', 'unmapped-rack', rack, `DCIM rack ${rack} has no physical setup`, 'Assign it to a rack with Edit layout › rack details › DCIM rack'));
     const lowMap = (model.setups || []).filter(s => s.dcimMappingConfidence === 'low');
     if (lowMap.length) add('info', 'mapping', 'setups', lowMap.length === 1 ? `${lowMap[0].id} rack mapping unverified` : `${lowMap.length} rack mappings unverified`, `Physical rack ↔ Rack-0X not verified: ${lowMap.map(s => s.id).join(', ')}`, lowMap[0].id);
     const rank = e => { const i = ATTN_ORDER.indexOf(e.severity + ':' + e.kind); return i < 0 ? ATTN_ORDER.length : i; };
@@ -989,7 +1041,7 @@
       const hits = searchHits(q).slice(0, 14); const ql = q.toLowerCase();
       res.innerHTML = hits.map((r, n) => { const owner = ownerOf(r); const byOwner = owner && owner.toLowerCase().includes(ql) && searchRank(r, q) === 5;
         const kind = r.cat === 'item' ? ITEM_KIND[r.item?.type] || 'Item' : CAT_LABEL[r.cat] || r.cat;
-        return `<div class="sr" role="option" id="sr-${n}" aria-selected="false" data-id="${esc(r.id)}"><span class="nm">${esc(r.def.name || r.id)}${byOwner ? `<small class="ow"> · owner ${esc(owner)}</small>` : ''}</span><span class="id">${esc(r.id)}</span><span class="cat">${esc(kind)}</span></div>`; }).join('') || '<div class="sr" role="option" aria-disabled="true"><span class="nm muted">No matches</span></div>';
+        return `<div class="sr" role="option" id="sr-${n}" aria-selected="false" data-id="${esc(r.id)}"><span class="nm"><bdi>${esc(r.def.name || r.id)}</bdi>${byOwner ? `<small class="ow"> · owner <bdi>${esc(owner)}</bdi></small>` : ''}</span><span class="id">${esc(r.id)}</span><span class="cat">${esc(kind)}</span></div>`; }).join('') || '<div class="sr" role="option" aria-disabled="true"><span class="nm muted">No matches</span></div>';
       res.classList.remove('hidden'); inp.setAttribute('aria-expanded', 'true');
       options().forEach((el, n) => { el.onclick = () => choose(el); el.onmouseenter = () => setActive(n); });
       setActive(0); return true;
@@ -1021,7 +1073,8 @@
     if (isPhone()) setSearchRow(true);
     const inp = $('#search'); inp.focus({ preventScroll: true }); inp.select();
   }
-  const isPhone = () => window.matchMedia('(max-width: 720px)').matches;
+  const phoneQuery = window.matchMedia('(max-width: 720px)');
+  const isPhone = () => phoneQuery.matches;
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   // ───────────────────────────────────────────────────────────── sidebar: tree / inventory / unplaced
@@ -1039,7 +1092,7 @@
   }
   function renderTree() {
     const d = S.data; const el = $('#tree'); const open = LS.get('treeOpen', {});
-    const node = (rec, cls, extra = '', label = null) => `<div class="tn ${rec.filtered ? 'dim' : ''} ${S.selected === rec.id ? 'sel' : ''}" data-id="${esc(rec.id)}" tabindex="0" role="button">${dot(rec)}<span class="nm ${cls}">${esc(label ?? (rec.def.name || rec.id))}</span>${extra}</div>`;
+    const node = (rec, cls, extra = '', label = null) => `<div class="tn ${rec.filtered ? 'dim' : ''} ${S.selected === rec.id ? 'sel' : ''}" data-id="${esc(rec.id)}" tabindex="0" role="button">${dot(rec)}<span class="nm ${cls}" dir="auto">${esc(label ?? (rec.def.name || rec.id))}</span>${extra}</div>`;
     let html = '';
     d.zones.forEach(zn => {
       const racks = recsOf(r => r.cat === 'setup' && r.zone === zn.id), stores = recsOf(r => r.cat === 'storage' && r.zone === zn.id);
@@ -1086,7 +1139,7 @@
   }
   function renderInventory() {
     const el = $('#inv'); const rows = [...S.recs.values()].filter(r => r.cat !== 'zone').sort((a, b) => a.id.localeCompare(b.id));
-    el.innerHTML = `<div class="inv-row inv-h"><span>Name</span><span>ID</span><span style="text-align:right">Where</span></div>` + rows.map(r => `<div class="inv-row ${r.filtered ? 'dim' : ''} ${S.selected === r.id ? 'sel' : ''}" data-id="${esc(r.id)}" tabindex="0" role="button"><span class="nm">${dot(r)} ${esc(r.def.name || r.id)}</span><span class="id">${esc(r.id)}</span><span class="loc">${esc(r.shelf ? rackName(S.recs.get(r.setup)?.def) + ' · S' + shelfToU(r.setup, r.shelf) : r.cat === 'setup' ? rackName(r.def) : r.setup ? rackName(S.recs.get(r.setup)?.def) : r.item?.storage ? storageName({ id: r.item.storage }) : r.unplaced ? '—' : 'room')}</span></div>`).join('');
+    el.innerHTML = `<div class="inv-row inv-h"><span>Name</span><span>ID</span><span style="text-align:right">Where</span></div>` + rows.map(r => `<div class="inv-row ${r.filtered ? 'dim' : ''} ${S.selected === r.id ? 'sel' : ''}" data-id="${esc(r.id)}" tabindex="0" role="button"><span class="nm">${dot(r)} <bdi>${esc(r.def.name || r.id)}</bdi></span><span class="id">${esc(r.id)}</span><span class="loc">${esc(r.shelf ? rackName(S.recs.get(r.setup)?.def) + ' · S' + shelfToU(r.setup, r.shelf) : r.cat === 'setup' ? rackName(r.def) : r.setup ? rackName(S.recs.get(r.setup)?.def) : r.item?.storage ? storageName({ id: r.item.storage }) : r.unplaced ? '—' : 'room')}</span></div>`).join('');
     $$('.inv-row[data-id]', el).forEach(n => { n.onclick = () => activateTreeRow(n.dataset.id); n.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTreeRow(n.dataset.id); } }; });
   }
   function setRacksList(mode) {
@@ -1098,7 +1151,7 @@
     const el = $('#unplaced'); const list = [...S.recs.values()].filter(r => r.unplaced); const m = S.model;
     let html = '';
     if (m.unmappedRacks.length) html += `<div class="zone-h">DCIM racks without a physical rack</div>` + m.unmappedRacks.map(r => `<div class="tn static"><span class="st" style="background:#fbbf24"></span><span class="nm">${esc(r)}</span><span class="tag">assign in rack details</span></div>`).join('');
-    if (list.length) html += `<div class="zone-h">Objects with no place in 3D</div>` + list.map(r => `<div class="tn" data-id="${esc(r.id)}" tabindex="0" role="button">${dot(r)}<span class="nm item">${esc(r.def.name)}</span><span class="tag">${esc(ITEM_KIND[r.item.type] || r.item.type)}</span></div>`).join('');
+    if (list.length) html += `<div class="zone-h">Objects with no place in 3D</div>` + list.map(r => `<div class="tn" data-id="${esc(r.id)}" tabindex="0" role="button">${dot(r)}<span class="nm item" dir="auto">${esc(r.def.name)}</span><span class="tag">${esc(ITEM_KIND[r.item.type] || r.item.type)}</span></div>`).join('');
     if (!html) html = `<div class="muted small" style="padding:8px">Everything is placed.</div>`;
     el.innerHTML = html;
     $$('.tn[data-id]', el).forEach(n => { n.onclick = () => activateTreeRow(n.dataset.id); n.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTreeRow(n.dataset.id); } }; });
@@ -1113,13 +1166,21 @@
     return { text: ageText(t), title: e.since ? (e.kind === 'ping-down' ? `Last answered ping at ${fmtTs(e.since)}` : `Since ${fmtTs(e.since)}`) : `First noticed by this page at ${hhmm(t)}` };
   }
   function attnCard(e, i, compact) {
-    const off = e.kind === 'offline'; const w = off || e.group === 'dq' ? { text: '', title: '' } : issueWhen(e);   // data-quality findings have no age
+    const off = e.kind === 'offline';
+    if (off && e.state === 'error') {   // not a button: it holds its own "Retry now"
+      return `<div class="attn-row sev-err${compact ? ' compact' : ''}" data-key="${esc(e.key)}" role="status"><span class="ey">Live data</span><span class="tt">${esc(e.text)}</span>` +
+        `${compact ? '' : `<span class="sub">${esc(e.hint)}</span>`}<button type="button" class="kbtn secondary small attn-act" data-retry>Retry now</button></div>`;
+    }
+    if (off && e.state === 'connecting') {
+      return `<button type="button" class="attn-row sev-off${compact ? ' compact' : ''}" data-attn="${i}" data-key="${esc(e.key)}"><span class="ey">Live data</span><span class="tt"><span class="spinner" aria-hidden="true"></span>${esc(e.text)}</span>${e.hint && !compact ? `<span class="sub">${esc(e.hint)}</span>` : ''}</button>`;
+    } const w = off || e.group === 'dq' ? { text: '', title: '' } : issueWhen(e);   // data-quality findings have no age
     const eyebrow = off ? 'Live data' : `${SEV_LABEL[e.severity]}${w.text ? ' · ' + w.text : ''}`;
     return `<button type="button" class="attn-row ${off ? 'sev-off' : 'sev-' + e.severity}${e.group === 'dq' ? ' dq' : ''}${compact ? ' compact' : ''}" data-attn="${i}" data-key="${esc(e.key)}"${w.title ? ` title="${esc(w.title)}"` : ''}>` +
-      `<span class="ey">${esc(eyebrow)}</span><span class="tt">${esc(e.text)}</span>${e.hint && !compact ? `<span class="sub">${esc(e.hint)}${w.text ? `<span class="when-m"> · ${esc(w.text)}</span>` : ''}</span>` : ''}</button>`;
+      `<span class="ey">${esc(eyebrow)}</span><span class="tt" dir="auto">${esc(e.text)}</span>${e.hint && !compact ? `<span class="sub" dir="auto">${esc(e.hint)}${w.text ? `<span class="when-m"> · ${esc(w.text)}</span>` : ''}</span>` : ''}</button>`;
   }
   function bindAttnRows(root) {
     $$('[data-attn]', root).forEach(r => { r.onclick = () => focusAttention(S.attention[+r.dataset.attn]); });
+    $$('[data-retry]', root).forEach(b => { b.onclick = () => connect(); });
   }
   // The move banner (while moving) sits under the breadcrumb, then the Issues dock (lab screen mode only). Neither covers
   // a control: the banner narrows before the save bar / environment panel / zoom bar, or drops below them.
@@ -1157,7 +1218,11 @@
     const fa = document.activeElement; const host = fa && fa.dataset && fa.dataset.key ? fa.closest('#attn, #attnDock, #dqList') : null;
     const focusKey = host ? [host.id, fa.dataset.key] : null;
     const el = $('#attn');
-    if (el) { el.innerHTML = issues.map(([e, i]) => attnCard(e, i)).join('') || '<div class="empty">No issues right now.</div>'; bindAttnRows(el); }
+    if (el) {
+      el.innerHTML = (issues.map(([e, i]) => attnCard(e, i)).join('') || '<div class="empty">No issues right now.</div>') +
+        `<button type="button" class="dq-footer dq-inline${dq.length ? '' : ' none'}" data-dq-inline><span>Data quality: ${dq.length} item${dq.length === 1 ? '' : 's'}</span><span class="link">Review</span></button>`;
+      bindAttnRows(el); const dqi = $('[data-dq-inline]', el); if (dqi) dqi.onclick = () => showTab('dq');
+    }
     const real = issues.filter(([e]) => e.kind !== 'offline').map(([e]) => e); const c = attnCounts(real);
     const badge = $('#attnCount'); if (badge) { badge.textContent = real.length; badge.className = 'cnt' + (c.crit ? ' sev-crit' : c.warn ? ' sev-warn' : ''); }
     // data quality: corrections for the inventory, separate from what is wrong in the lab
@@ -1189,6 +1254,7 @@
       if (!mine.length) { rec.attnEl.style.display = 'none'; continue; }
       const w = worstSeverity(mine); rec.attnEl.className = 'attn-badge sev-' + w; rec.attnEl.textContent = `⚠ ${mine.length}`;
     }
+    S.issueIds = new Set(real.flatMap(e => [e.id, e.setup]).filter(Boolean));
     renderIssuesBadge(real); renderSheetHead();
   }
   // Header badge: what is wrong in the lab now (never data quality); hidden without live data
@@ -1202,7 +1268,7 @@
   }
   function focusAttention(e) {
     if (!e) return;
-    if (e.kind === 'offline') { $('#btnSettings').click(); return; }
+    if (e.kind === 'offline') { openSettings(document.activeElement); return; }
     if (e.id && S.recs.has(e.id)) { if (S.front) hideRackFront(); select(e.id, { fly: true }); return; }
     if (e.setup && S.recs.has(e.setup)) { if (S.front) hideRackFront(); select(e.setup, { fly: true }); return; }
     showTab('unplaced');
@@ -1263,11 +1329,11 @@
     if (rec.group) {
       scene.updateMatrixWorld(true);   // groups rebuilt a moment ago have not been rendered yet: their world matrices are stale
       const b = new THREE.Box3(); rec.meshes.forEach(m => b.expandByObject(m)); if (rec.cat === 'setup' || rec.cat === 'storage') b.setFromObject(rec.group);
-      if (!b.isEmpty()) { b.expandByScalar(0.02); selectionHelper = new THREE.Box3Helper(b, new THREE.Color(SELECT_COLOR)); selectionHelper.material.transparent = true; selectionHelper.material.opacity = .95; scene.add(selectionHelper); }
+      if (!b.isEmpty()) { b.expandByScalar(0.02); selectionHelper = selectionOutline(b); scene.add(selectionHelper); }
     }
     $$('.lbl.sel').forEach(l => l.classList.remove('sel')); if (rec.label) rec.label.classList.add('sel');
     if (refresh && detailBusy()) S.detailStale = true; else renderPanel(rec, refresh);
-    renderTree(); renderRackBar();
+    renderTree(); renderRackBar(); renderCrumb();
     $('#detail').classList.remove('hidden');
     if (!refresh) setSheet(S.sheet.size === 'peek' ? 'half' : null, 'details'); else updateSheetTabs();
     resize();
@@ -1277,7 +1343,7 @@
   }
   function closeDetail() {
     S.selected = null; S.pwMenuOpen = false; $('#vFocus').disabled = true; clearSelectionHelper(); $('#detail').classList.add('hidden');
-    $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); renderRackBar();
+    $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); renderRackBar(); renderCrumb();
     if (S.front) renderRackFront();
     if (S.sheet.tab === 'details') setSheet(null, S.sideTab === 'tree' ? 'racks' : 'issues'); else updateSheetTabs();
     resize();
@@ -1311,12 +1377,14 @@
   function renderDetailHead(rec) {
     const it = rec.item; const def = rec.def;
     $('#dName').textContent = rec.cat === 'setup' ? rackName(def) : rec.cat === 'shelf' ? `${rackName(S.recs.get(rec.setup)?.def)} · ${shelfCaption(rec)}` : def.name || rec.id;
-    $('#dId').textContent = it?.type === 'opt' && it.live?.inDcim ? `Server · host ${pingKey(it.name)}` : `${kindOf(rec)} · ${rec.id}`;
+    const sub = rec.cat === 'setup' || rec.cat === 'storage' ? rowLabel(zoneRec(rec)) : rec.cat === 'shelf' ? rackName(S.recs.get(rec.setup)?.def)
+      : it?.serial_number ? `SN ${it.serial_number}` : rec.cat === 'item' && it?.live?.inDcim === false ? 'not in live DCIM' : '';
+    $('#dId').textContent = it?.type === 'opt' && it.live?.inDcim ? `Server · host ${pingKey(it.name)}` : `${kindOf(rec)}${sub ? ' · ' + sub : ''}`;
     const h = healthOfRec(rec); const hb = $('#dHealth');
     hb.className = 'hbadge' + (h ? ' h-' + h.h : ' hidden'); hb.textContent = h ? HEALTH[h.h].t : ''; hb.title = h?.why || '';
     $('#detail').setAttribute('aria-label', `${$('#dName').textContent} details`);
   }
-  const cell = (label, value, cls = '') => `<div class="scell${cls ? ' ' + cls : ''}"><div class="sl">${esc(label)}</div><div class="sv">${esc(value)}</div></div>`;
+  const cell = (label, value, cls = '') => `<div class="scell${cls ? ' ' + cls : ''}"><div class="sl">${esc(label)}</div><div class="sv" dir="auto">${esc(value)}</div></div>`;
   const section = (title, body) => `<section class="sec"><h3 class="sec-h">${title}</h3>${body}</section>`;
   const more = (key, title, body) => `<details class="more" data-more="${esc(key)}"${S.drawerOpen[key] ? ' open' : ''}><summary>${title}</summary><div class="more-b">${body}</div></details>`;
   function inventoryKv(rec) {
@@ -1332,7 +1400,7 @@
       ${it?.tracking?.count ? `<span class="k">Tracking</span><span class="v">${it.tracking.count} event${it.tracking.count === 1 ? '' : 's'}${it.tracking.last ? ` · last: ${esc(it.tracking.last.action || '?')}${it.tracking.last.at ? ' ' + esc(ago(it.tracking.last.at)) : ''}` : ''}</span>` : ''}
       <span class="k">Lifecycle</span><span class="v">${statusPill(rec.status)}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(def.dcimMappingConfidence)}` : ''}</span>
-      ${it?.type !== 'opt' ? `<span class="k">Owner</span><span class="v">${esc(it?.owner || def.owner || '—')}${it?.live?.owner ? ' <span class="muted small">(Lab Manager)</span>' : ''}</span>` : ''}
+      ${it?.type !== 'opt' ? `<span class="k">Owner</span><span class="v"><bdi>${esc(it?.owner || def.owner || '—')}</bdi>${it?.live?.owner ? ' <span class="muted small">(Lab Manager)</span>' : ''}</span>` : ''}
       <span class="k">Location</span><span class="v">${locationOf(rec)}</span>
     </div>`;
   }
@@ -1347,7 +1415,7 @@
     const dq = dqOf(rec); const notes = cleanNotes(rec.item?.notes || rec.def.notes);
     return `<div class="more-list">${more('inv', 'Inventory', inventoryKv(rec))}` +
       more('dq', `Data quality · ${dq.length} issue${dq.length === 1 ? '' : 's'}`, dq.length ? `<ul class="dq-ul">${dq.map(x => `<li>${x}</li>`).join('')}</ul>` : '<div class="muted small">Nothing to correct.</div>') +
-      more('photos', 'Photos &amp; notes', `${notes ? `<div class="note">${esc(notes)}</div>` : ''}${photosHtml(rec.def.photos)}${rec.tpl?.source ? `<div class="muted small" style="margin-top:6px">Dimensions: ${esc(rec.tpl.source)}</div>` : ''}`) + '</div>';
+      more('photos', 'Photos &amp; notes', `${notes ? `<div class="note" dir="auto">${esc(notes)}</div>` : ''}${photosHtml(rec.def.photos)}${rec.tpl?.source ? `<div class="muted small" style="margin-top:6px">Dimensions: ${esc(rec.tpl.source)}</div>` : ''}`) + '</div>';
   }
   const locationSec = rec => section('Location', `<div class="loc-row"><span>${esc(placeLabel(rec))}</span>${rec.group ? '<button type="button" class="link" data-focus>Show in 3D</button>' : ''}</div>`);
 
@@ -1370,15 +1438,23 @@
         const consoleBtns = kvLive.length
           ? kvLive.map(k => `<button type="button" class="kbtn primary md" data-kvm="${esc(k.kvm)}" data-port="${esc(k.port)}" title="Open the KVM console · ${esc(k.kvmName)} port ${esc(k.port)}">Open console${kvLive.length > 1 ? ` · ${esc(k.kvmName)} p${esc(k.port)}` : ''}</button>`).join('')
           : `<button type="button" class="kbtn primary md" disabled title="${esc(!live ? 'Connect the backend first' : stale ? 'Not in live DCIM — console disabled' : 'No KVM port is mapped to this server')}">Open console</button>`;
-        const dis = pw ? '' : ' disabled'; const mt = maint ? ' disabled title="PDU in maintenance mode"' : '';
+        // Power… menu: which outlet it switches and its state on top; the action that matches the state is off
+        // (with the reason in view), Off / Cycle in red, and a maintenance block explained inside the menu.
+        const tit = why ? ` title="${esc(why)}"` : '';
+        const item = (a, label, off, note) => `<button type="button" role="menuitem" data-pw="${a}"${off ? ' disabled' : ''}${off && note ? ' aria-describedby="pwMenuNote"' : ''}${tit}>${esc(label)}</button>`;
+        const isOn = pw?.state === 'on', isOff = pw?.state === 'off';
+        const menuHead = pw ? `${pw.pduName} · outlet ${pw.outlet} · ${STATE_TEXT(pw.state)}` : '';
+        const confirmOn = window.DCIM_ACCOUNT_PREFS?.confirm_power !== false;
         act = `${stale ? `<div class="warn-box" role="status"><b>Not in live DCIM — power disabled</b><br/>This server is not in the live PDU labels, so the outlet and KVM port saved in lab-data.json may belong to another machine. Power and console stay disabled until it appears in Lab Manager.</div>` : ''}
-          <div class="act-row">${consoleBtns}<div class="pw-wrap"><button type="button" class="kbtn danger-secondary md" data-power-menu aria-haspopup="menu" aria-expanded="false" aria-controls="pwMenu"${dis}${why ? ` title="${esc(why)}"` : ''}>Power…</button>
-            <div class="menu pw-menu hidden" id="pwMenu" role="menu" aria-label="Power">
-              <button type="button" role="menuitem" data-pw="on"${dis || mt}${why ? ` title="${esc(why)}"` : ''}>Power on</button>
-              <button type="button" role="menuitem" data-pw="off"${dis}${why ? ` title="${esc(why)}"` : ''}>Power off</button>
-              <button type="button" role="menuitem" data-pw="cycle"${dis || mt}${why ? ` title="${esc(why)}"` : ''}>Power cycle</button>
+          <div class="act-row">${consoleBtns}<div class="pw-wrap"><button type="button" class="kbtn danger-secondary md" data-power-menu aria-haspopup="menu" aria-expanded="false" aria-controls="pwMenu"${pw ? '' : ' disabled'}${tit}>Power…</button>
+            <div class="menu pw-menu hidden" id="pwMenu" role="menu" aria-label="${esc(menuHead ? 'Power · ' + menuHead : 'Power')}">
+              ${menuHead ? `<div class="menu-head" aria-hidden="true" dir="auto">${esc(menuHead)}</div>` : ''}
+              ${item('on', isOn ? 'Power on · already on' : 'Power on', !pw || maint || isOn, maint)}
+              ${item('off', isOff ? 'Power off · already off' : 'Power off', !pw || isOff, false)}
+              ${item('cycle', 'Power cycle', !pw || maint, maint)}
+              ${maint ? '<div class="menu-note" id="pwMenuNote" aria-hidden="true">Blocked: PDU in maintenance — Power on and Power cycle stay off until it is restored in Lab Manager.</div>' : ''}
             </div></div></div>
-          <div class="act-note">Power actions always ask for confirmation and show the exact PDU and outlet.</div>
+          <div class="act-note">${confirmOn ? 'Power actions always ask for confirmation and show the exact PDU and outlet.' : 'Power off and Power cycle ask for confirmation; Power on runs at once (your account preference).'}</div>
           ${maint ? '<div class="note">This PDU is in maintenance mode: Power on and Power cycle stay blocked until it is restored in Lab Manager.</div>' : ''}
           ${live ? '' : '<div class="note">Connect the Lab Manager backend (More › Backend connection) to switch outlets and open the KVM console.</div>'}
           ${it.unmappedRack ? `<div class="warn-box">This server is in DCIM rack <b>${esc(it.live.rack)}</b>, which is not mapped to a physical rack yet.</div>` : ''}`;
@@ -1393,8 +1469,10 @@
         rows.push(`<div class="crow"><span>${pid ? link(pid, `${dc.pduName || dc.pdu} · outlet ${dc.outlet ?? '?'}`) : esc(`${dc.pduName || dc.pdu} · outlet ${dc.outlet ?? '?'}`)}</span><span class="cst ${cls}">${esc(st)}</span></div>`);
       }
       (live ? kvLive : (dc.kvm || [])).forEach(k => {
-        const p = live ? kvmPort(k.kvm, Number(k.port)) : null; const st = !live ? 'Unknown' : S.live.kvm?.[k.kvm]?.reachable === false ? 'Unreachable' : p?.in_use ? 'In use' : 'Free';
-        rows.push(`<div class="crow"><span>${esc(`${k.kvmName || k.kvm} · port ${k.port}`)}</span><span class="cst ${st === 'Free' ? 'free' : st === 'In use' ? 'busy' : 'unk'}">${esc(st)}</span></div>`);
+        // never "Free" without a loaded, signed-in KVM status that lists this port
+        const ps = live ? kvmPortState(k.kvm, Number(k.port)) : null;
+        const st = !ps ? 'Unknown' : ps.s === 'inuse' ? 'In use' : ps.s === 'free' ? 'Free' : ps.why === 'unreachable' ? 'Unreachable' : ps.why === 'sign-in' ? 'Sign-in failed' : 'Unknown';
+        rows.push(`<div class="crow"><span dir="auto">${esc(`${k.kvmName || k.kvm} · port ${k.port}`)}</span><span class="cst ${st === 'Free' ? 'free' : st === 'In use' ? 'inuse' : 'unk'}">${esc(st)}</span></div>`);
       });
       if (stale && (dc.kvm || []).length) rows.push(`<div class="crow muted"><span>KVM port in lab-data.json</span><span class="cst unk">not in live DCIM</span></div>`);
       if (it.live?.sw?.switch) rows.push(`<div class="crow"><span>${esc(it.live.sw.switch)}${it.live.sw.port ? ' · port ' + esc(it.live.sw.port) : ''}</span><span class="cst unk">Network</span></div>`);
@@ -1451,28 +1529,33 @@
       const pduTxt = !live ? '—' : !pdus.length ? 'None' : m && live ? (Number(m.started_at) ? `Maintenance since ${hhmm(Number(m.started_at) * 1000)}` : 'Maintenance') : pdus.some(p => S.live.pdu?.[p.id]?.reachable === false) ? 'Offline' : pdus.every(p => S.live.pdu?.[p.id]?.reachable) ? 'Reachable' : 'Loading…';
       html += section('Status', `<div class="sgrid">${cell('Power', power)}${cell('PDU', pduTxt, pduTxt === 'Offline' ? 'bad' : pduTxt === 'Reachable' ? 'ok' : /^Maint/.test(pduTxt) ? 'maint' : '')}${cell('Issues', open ? `${open} open` : 'None', open ? 'bad' : '')}${cell('Temperature', t?.temp != null ? `${t.temp.toFixed(1)} °C` : '—')}</div>`);
       html += section('Actions', `<div class="act-row"><button type="button" class="kbtn primary md" data-front="${esc(rec.id)}">Rack front</button><button type="button" class="kbtn secondary md" data-focus>Show in 3D</button></div>`);
-      const racks = [...new Set([...(S.data.dcim?.pdus || []).map(p => p.rack), ...S.model.liveRacks])].filter(Boolean).sort();
-      const cur = dcimRackOf(def) || '';
-      html += section('DCIM rack mapping', `<div class="edit-grid"><span>Rack in DCIM</span><select id="dRack" ${canOperate ? '' : 'disabled'} aria-label="Rack in DCIM"><option value="">— none —</option>${racks.map(r => `<option value="${esc(r)}" ${r === cur ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select></div><div class="muted small" style="margin-top:6px">The photos do not show which physical rack is which DCIM rack. Change it here and use More › Export layout (JSON) or Save to server to keep it.</div>`);
+      // DCIM rack mapping is read-only here; it is changed only in Edit layout (same save / If-Match path as every layout edit)
+      const conn = [`<div class="crow"><span>DCIM rack</span><span class="cst" dir="auto">${esc(dcimRackOf(def) || 'Not mapped')}</span></div>`];
+      pdus.forEach(p => {
+        const ps = S.live.pdu?.[p.id]; const pm = S.live.maintenance?.pdus?.[p.id]; const pid = pduItemId(p.id);
+        const st = !live ? 'Unknown' : pm ? 'Maintenance' : ps?.reachable === false ? 'Offline' : ps?.reachable ? 'Reachable' : 'Loading…';
+        conn.push(`<div class="crow"><span dir="auto">${pid ? link(pid, p.name || p.id) : esc(p.name || p.id)}</span><span class="cst ${st === 'Reachable' ? 'on' : st === 'Offline' ? 'off' : 'unk'}">${esc(st)}</span></div>`);
+      });
+      html += section('Connections', conn.join('') + (def.dcimMappingConfidence === 'low' ? '<div class="crow-foot">Mapping not verified — change it in Edit layout.</div>' : ''));
       const shelves = recsOf(r => r.cat === 'shelf' && r.setup === rec.id).sort((a, b) => b.level - a.level);
       html += section('Shelves', shelves.map(sh => {
         const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id);
-        return `<div class="srow" data-go="${esc(sh.id)}" tabindex="0" role="button"><span class="lvl">${esc(shelfCaption(sh))}</span><span class="sub">${its.length ? its.map(i => esc(i.item.name)).join(', ') : 'empty'}</span></div>`;
+        return `<div class="srow" data-go="${esc(sh.id)}" tabindex="0" role="button"><span class="lvl">${esc(shelfCaption(sh))}</span><span class="sub" dir="auto">${its.length ? its.map(i => esc(i.item.name)).join(', ') : 'empty'}</span></div>`;
       }).join(''));
       const bay = recsOf(r => r.cat === 'item' && r.setup === rec.id && !r.shelf);
-      if (bay.length) html += section('Rack-level equipment', bay.map(i => `<div class="srow" data-go="${esc(i.id)}" tabindex="0" role="button">${dot(i)}<span class="nm">${esc(i.item.name)}</span><span class="sub">${esc(ITEM_KIND[i.item.type] || i.item.type)}</span></div>`).join(''));
+      if (bay.length) html += section('Rack-level equipment', bay.map(i => `<div class="srow" data-go="${esc(i.id)}" tabindex="0" role="button">${dot(i)}<span class="nm" dir="auto">${esc(i.item.name)}</span><span class="sub">${esc(ITEM_KIND[i.item.type] || i.item.type)}</span></div>`).join(''));
       html += moreSections(rec);
     } else if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
-      html += section('On this shelf', `${its.length ? its.map(i => { const lv = i.item.live; return `<div class="srow" data-go="${esc(i.id)}" tabindex="0" role="button">${dot(i)}<span class="nm">${esc(i.item.name)}</span><span class="sub">${i.item.type === 'opt' ? `#${esc(i.item.dcim?.outlet ?? '?')}${lv?.sw ? ' · ' + esc(lv.sw.switch) + (lv.sw.port ? '·' + esc(lv.sw.port) : '') : ''}` : esc(ITEM_KIND[i.item.type] || i.item.type)}</span>${lv?.inDcim ? `<span class="stt ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'off' : 'unk'}">${esc(lv.state)}</span>` : ''}</div>`; }).join('') : '<div class="muted small">Nothing on this shelf.</div>'}
+      html += section('On this shelf', `${its.length ? its.map(i => { const lv = i.item.live; return `<div class="srow" data-go="${esc(i.id)}" tabindex="0" role="button">${dot(i)}<span class="nm" dir="auto">${esc(i.item.name)}</span><span class="sub">${i.item.type === 'opt' ? `#${esc(i.item.dcim?.outlet ?? '?')}${lv?.sw ? ' · ' + esc(lv.sw.switch) + (lv.sw.port ? '·' + esc(lv.sw.port) : '') : ''}` : esc(ITEM_KIND[i.item.type] || i.item.type)}</span>${lv?.inDcim ? `<span class="stt ${lv.state === 'on' ? 'on' : lv.state === 'off' ? 'off' : 'unk'}">${esc(lv.state)}</span>` : ''}</div>`; }).join('') : '<div class="muted small">Nothing on this shelf.</div>'}
         <div class="muted small" style="margin-top:6px">Which server is on which shelf comes from Lab Manager rack slots when connected; otherwise lab-data.json.</div>`);
       html += locationSec(rec) + moreSections(rec);
     } else if (rec.cat === 'storage') {
       const its = recsOf(r => r.cat === 'item' && r.item?.storage === rec.id);
-      html += section('Contents', its.length ? its.map(i => `<div class="srow" data-go="${esc(i.id)}" tabindex="0" role="button">${dot(i)}<span class="nm">${esc(i.item.name)}</span><span class="sub">×${esc(i.item.quantity || 1)}</span></div>`).join('') : '<div class="muted small">Empty.</div>');
+      html += section('Contents', its.length ? its.map(i => `<div class="srow" data-go="${esc(i.id)}" tabindex="0" role="button">${dot(i)}<span class="nm" dir="auto">${esc(i.item.name)}</span><span class="sub">×${esc(i.item.quantity || 1)}</span></div>`).join('') : '<div class="muted small">Empty.</div>');
       html += locationSec(rec) + moreSections(rec);
     } else {
-      html += section('About', inventoryKv(rec)) + (def.note || def.notes ? section('Notes', `<div class="note">${esc(def.note || def.notes)}</div>`) : '') + section('Photos', photosHtml(def.photos));
+      html += section('About', inventoryKv(rec)) + (def.note || def.notes ? section('Notes', `<div class="note" dir="auto">${esc(def.note || def.notes)}</div>`) : '') + section('Photos', photosHtml(def.photos));
     }
     const body = $('#dBody'); body.innerHTML = html;
 
@@ -1492,7 +1575,6 @@
     $$('[data-kvm]', body).forEach(b => b.onclick = () => openKvm(b.dataset.kvm, parseInt(b.dataset.port, 10), it.name));
     $$('[data-outlet]', body).forEach(c => c.onclick = e => outletMenu(e, it, parseInt(c.dataset.outlet, 10)));
     $$('[data-kport]', body).forEach(c => c.onclick = () => { if (!S.live.connected) { toast('Connect the backend to open the KVM console', 'err'); return; } if (!it.live?.device) { toast('Not in live DCIM — console disabled', 'err'); return; } openKvm(it.live.device.id, parseInt(c.dataset.kport, 10), c.title); });
-    const dr = $('#dRack'); if (dr) dr.onchange = () => { patchDef(rec.id, { dcimRack: dr.value || null, dcimMappingConfidence: 'medium' }); rebuildAll(); toast(`${rec.id} → ${dr.value || 'no DCIM rack'}`, 'ok'); };
   }
   // ── Power… menu in the drawer: the three actions, each still confirmed by outletAction
   function openPwMenu(last) {
@@ -1562,7 +1644,7 @@
   }
   async function saveToServer() {
     if (saveInFlight) return;
-    const b = $('#sbSave'); saveInFlight = true; b.disabled = true; b.innerHTML = '<span class="busy"></span> Saving…';
+    const b = $('#sbSave'); saveInFlight = true; b.disabled = true; b.innerHTML = '<span class="spinner" aria-hidden="true"></span> Saving…';
     try {
       // Refuse to overwrite a lab-data.json that someone else (another window, another person) saved after this page
       // read it; the ETag of that check then goes out as If-Match, so a save landing in between is refused too (409).
@@ -1667,25 +1749,37 @@
   async function readLiveInventory() {
     // Share the same inventory source on connection and every live refresh.
     // Failed requests must not clear previously loaded devices or placements.
+    inventoryErrors = {};
     const entries = await Promise.all(Object.entries(INVENTORY_PATHS).map(async ([key, path]) => {
-      try { return [key, await api(path)]; } catch { return null; }
+      try { return [key, await api(path)]; } catch (e) { inventoryErrors[key] = e.status || 0; return null; }
     }));
     return Object.fromEntries(entries.filter(entry => entry && entry[1] != null));
   }
-  let liveSession = 0;
+  let liveSession = 0, inventoryErrors = {};
   let refreshInFlight = null, refreshQueued = null;
-  async function connect() {
+  // Issues card + phone sheet title + rack labels for a change of the connection state alone (no model rebuild).
+  function refreshAttention() { if (!S.model) return; S.attention = computeAttention(S.model, S.live, S.recs); renderAttention(); paintRacks(); }
+  // A failed connection keeps the saved layout and tries again every 15 s (while polling is on); "Retry now" in the card.
+  function connectFailed(err, status, quiet) {
+    S.live.connected = false; S.live.connecting = false; S.live.error = String(err?.message || err || 'no answer'); S.live.errorStatus = status || null;
+    if (S.live.timer) clearInterval(S.live.timer);
+    S.live.retrying = S.settings.poll !== false; S.live.timer = S.live.retrying ? setInterval(() => connect({ retry: true }), POLL_MS) : null;
+    pill('error', 'Backend error'); $('#sStatus').textContent = 'Error: ' + S.live.error + (location.protocol === 'file:' ? ' — if you opened index.html from disk, make sure the URL includes http:// and the backend allows CORS (it does by default).' : '');
+    if (!quiet) toast('Backend connection failed: ' + S.live.error, 'err');
+  }
+  async function connect(opts = {}) {
     const session = ++liveSession;
     if (S.live.timer) clearInterval(S.live.timer);
     S.live.timer = null;
-    S.live.connected = false;
+    S.live.connected = false; S.live.connecting = true;
     pill('connecting', 'Connecting…'); $('#sStatus').textContent = 'Connecting…';
+    if (!opts.retry) { S.live.error = null; S.live.errorStatus = null; refreshAttention(); }   // a quiet retry keeps the error card until it succeeds
     try {
       await window.DCIM_ACCOUNT_REFRESH?.();   // a new sign-in has a new CSRF token and maybe another role
       const inventory = await readLiveInventory();
       if (session !== liveSession) return;
-      if (!Array.isArray(inventory.devices)) throw new Error('Could not load devices');
-      Object.assign(S.live, inventory, { connected: true, error: null, signedOut: false, updatedAt: null, ping: {} }); pingAt = 0;
+      if (!Array.isArray(inventory.devices)) throw Object.assign(new Error(inventoryErrors.devices ? `HTTP ${inventoryErrors.devices}` : 'Could not load devices'), { status: inventoryErrors.devices || null });
+      Object.assign(S.live, inventory, { connected: true, connecting: false, error: null, errorStatus: null, retrying: false, signedOut: false, updatedAt: null, ping: {} }); pingAt = 0;
       const devices = S.live.devices;
       pill('online', `${window.LAB_DEMO ? 'DEMO (simulated)' : 'Live'} · ${devices.filter(d => d.kind === 'pdu').length} PDU · ${devices.filter(d => d.kind === 'kvm').length} KVM`);
       $('#sStatus').textContent = `Connected — ${devices.length} devices.`;
@@ -1696,18 +1790,17 @@
       toast('Backend connected', 'ok');
     } catch (e) {
       if (session !== liveSession) return;
-      S.live.connected = false; S.live.error = String(e.message || e);
-      pill('error', 'Backend error'); $('#sStatus').textContent = 'Error: ' + S.live.error + (location.protocol === 'file:' ? ' — if you opened index.html from disk, make sure the URL includes http:// and the backend allows CORS (it does by default).' : '');
-      toast('Backend connection failed: ' + S.live.error, 'err');
+      if (S.live.signedOut) { S.live.connecting = false; refreshAttention(); return; }   // 401: signedOut() took over
+      connectFailed(e, e.status, !!opts.retry);
       computeModel(); buildItems();
     }
   }
-  function disconnect() { ++liveSession; S.live.connected = false; S.live.signedOut = false; S.live.updatedAt = null; S.live.ping = {}; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
+  function disconnect() { ++liveSession; S.live.connected = false; S.live.connecting = false; S.live.error = null; S.live.errorStatus = null; S.live.retrying = false; S.live.signedOut = false; S.live.updatedAt = null; S.live.ping = {}; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
   // 401 = the session expired or the user signed out: never keep showing frozen data as "Live".
   // Data polling stops; only the public auth status is checked until someone signs in again.
   function signedOut() {
     if (!S.live.signedOut) {
-      ++liveSession; S.live.signedOut = true; S.live.connected = false; S.live.updatedAt = null; S.live.ping = {}; S.live.pdu = {}; S.live.kvm = {};
+      ++liveSession; S.live.signedOut = true; S.live.connected = false; S.live.connecting = false; S.live.updatedAt = null; S.live.ping = {}; S.live.pdu = {}; S.live.kvm = {};
       if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null;
       pill('error', 'Signed out · sign in to resume'); $('#sStatus').textContent = 'Signed out — sign in to Lab Manager again; live data resumes automatically.';
       toast('Signed out — live data paused until you sign in again', 'err');
@@ -1863,8 +1956,12 @@
     const o = S.live.pdu?.[t.pduId]?.outlets?.find(x => x.number === t.outlet);
     const rec = it ? S.recs.get(it.id) : null; const feeds = it ? feedsOf(it.name).length : 0;
     const kv = it ? kvmTargets(it) : [];
-    const consoleTxt = !kv.length ? 'No KVM port mapped' : kv.some(k => kvmPort(k.kvm, Number(k.port))?.in_use) ? 'In use · someone may be working on it' : 'Free · nobody is using it';
-    return { watts: o?.watts ?? it?.live?.watts ?? null, where: rec ? placeLabel(rec) : '', feeds: Math.max(1, feeds), console: consoleTxt };
+    // Only what the data supports: a missing / unreachable / failed KVM status is "unknown", never "free"; and the
+    // in-use marker covers consoles opened from Lab Manager only (not SSH, RDP or someone at the KVM).
+    const states = kv.map(k => kvmPortState(k.kvm, Number(k.port)));
+    const consoleTxt = !kv.length ? 'No KVM port mapped' : states.some(x => x.s === 'inuse') ? 'In use · a Lab Manager console is open'
+      : states.some(x => x.s === 'unknown') ? 'Unknown · KVM state not available' : 'No Lab Manager console open';
+    return { watts: o?.watts ?? it?.live?.watts ?? null, where: rec ? placeLabel(rec) : '', feeds: Math.max(1, feeds), console: consoleTxt, consoleWarn: !!kv.length && states.some(x => x.s !== 'free') };
   }
   async function outletAction(target, action, btn) {
     if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return false; }
@@ -1883,7 +1980,7 @@
       const choice = await askChoice({
         title: `${ACTION_TEXT[action]} ${t.server}?`, alert: true,
         html: `<p class="cf-line">${esc(t.pduName)} · outlet ${esc(t.outlet)} · currently ${esc(STATE_TEXT(t.state))}${f.watts != null && t.state === 'on' ? ` (${Math.round(f.watts)} W)` : ''}. ${esc(consequence)}</p>
-          <div class="cf-facts">${row('Server', f.where ? `${t.server} · ${f.where}` : t.server)}${row('Feeds switched', `1 of ${f.feeds}`)}${f.feeds > 1 && action !== 'on' ? row('', 'Other feeds stay on — the server may keep running', 'warn') : ''}${row('Console', f.console)}</div>`,
+          <div class="cf-facts">${row('Server', f.where ? `${t.server} · ${f.where}` : t.server)}${row('Feeds switched', `1 of ${f.feeds}`)}${f.feeds > 1 && action !== 'on' ? row('', 'Other feeds stay on — the server may keep running', 'warn') : ''}${row('Console', f.console, f.consoleWarn ? 'warn' : '')}</div>`,
         choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'go', label: `${ACTION_TEXT[action]} ${t.server}`, cls: ACTION_BTN[action] }],
         footnote: 'Cancel has the focus. Escape closes without changing anything.',
       });
@@ -1893,7 +1990,7 @@
       if (action !== 'off' && inMaintenance(again.pduId)) { toast('This PDU is in maintenance mode — restore it in Lab Manager first', 'err'); return false; }
       t = again;
     }
-    const old = btn ? btn.innerHTML : null; if (btn) { btn.disabled = true; btn.innerHTML = `<span class="busy"></span> ${ACTION_TEXT[action]}…`; }
+    const old = btn ? btn.innerHTML : null; if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner" aria-hidden="true"></span> ${ACTION_TEXT[action]}…`; }
     try {
       await api(`/api/pdus/${encodeURIComponent(t.pduId)}/outlets/${t.outlet}/power`, { method: 'POST', body: JSON.stringify({ action }) });
       toast(`${t.server} · outlet #${t.outlet} → ${action}`, 'ok');
@@ -1994,12 +2091,41 @@
     setTimeout(() => document.addEventListener('click', function h(ev) { if (popEl && !popEl.contains(ev.target)) { popEl.remove(); popEl = null; } document.removeEventListener('click', h); }), 0);
   }
 
-  // settings modal
-  $('#btnSettings').onclick = () => { $('#sUrl').value = S.settings.url || ''; $('#sPass').value = S.settings.pass || ''; $('#sPoll').checked = S.settings.poll !== false; $('#settings').classList.remove('hidden'); $('#sUrl').focus(); };
-  $('#sClose').onclick = () => $('#settings').classList.add('hidden');
+  // Backend connection dialog (aria-modal): Escape and the backdrop close it, Tab stays inside, and the focus goes back
+  // to what opened it (the Live badge, the More menu's button or an Issues card).
+  let settingsOpen = null;
+  function openSettings(opener) {
+    const modal = $('#settings'), card = $('.modal-card', modal); if (settingsOpen) return;
+    const a = document.activeElement;
+    const back = opener || (a && a !== document.body && !a.closest('#moreMenu') ? a : $('#btnMore'));
+    $('#sUrl').value = S.settings.url || ''; $('#sPass').value = S.settings.pass || ''; $('#sPoll').checked = S.settings.poll !== false;
+    modal.classList.remove('hidden');
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSettings(); return; }
+      if (e.key === 'Tab') {
+        const f = $$('button, input, select, textarea, a[href]', card).filter(x => !x.disabled && x.getClientRects().length); const i = f.indexOf(document.activeElement);
+        if (e.shiftKey ? i <= 0 : i < 0 || i === f.length - 1) { e.preventDefault(); (e.shiftKey ? f[f.length - 1] : f[0]).focus(); }
+        return;
+      }
+      if (!card.contains(e.target)) e.stopPropagation();   // view shortcuts wait until the dialog is closed
+    };
+    settingsOpen = { back, onKey };
+    window.addEventListener('keydown', onKey, true);
+    modal.onclick = e => { if (e.target === modal) closeSettings(); };
+    $('#sUrl').focus();
+  }
+  function closeSettings() {
+    const modal = $('#settings'); modal.classList.add('hidden'); modal.onclick = null;
+    if (!settingsOpen) return; const { back, onKey } = settingsOpen; settingsOpen = null;
+    window.removeEventListener('keydown', onKey, true);
+    const target = back && back.isConnected && back.getClientRects().length ? back : $('#btnMore');
+    if (target) target.focus({ preventScroll: true });
+  }
+  $('#btnSettings').onclick = () => openSettings();
+  $('#sClose').onclick = () => closeSettings();
   $('#sConnect').onclick = () => { S.settings = { url: $('#sUrl').value.trim(), pass: $('#sPass').value, poll: $('#sPoll').checked }; LS.set('settings', S.settings); connect(); };
   $('#sDisconnect').onclick = () => { disconnect(); };
-  $('#livePill').onclick = () => $('#btnSettings').click();
+  $('#livePill').onclick = () => openSettings($('#livePill'));
 
   // export
   $('#btnExport').onclick = downloadJson;
@@ -2081,7 +2207,12 @@
     renderCrumb();
   }
   function setView(name) { if (name !== 'front') hideRackFront(); VIEWS[name](); markView(name); }
-  controls.addEventListener('start', () => markView(null));
+  // Only a real camera move leaves the preset: a plain click (select / clear the selection) keeps Overview checked.
+  let camAtStart = null;
+  const camMoved = () => !!camAtStart && (camera.position.distanceTo(camAtStart.p) > 1e-3 || controls.target.distanceTo(camAtStart.t) > 1e-3);
+  controls.addEventListener('start', () => { camAtStart = { p: camera.position.clone(), t: controls.target.clone() }; });
+  controls.addEventListener('change', () => { if (camMoved()) { camAtStart = null; markView(null); } });
+  controls.addEventListener('end', () => { if (camMoved()) markView(null); camAtStart = null; });
   // ── fly-to framing
   // Frame the target's bounding box inside the part of the viewport no overlay covers, from a camera position in free
   // space: inside the room, outside the target's own rack and in front of every other rack, cabinet or free item.
@@ -2100,7 +2231,8 @@
   // Boxes to frame, best first. A rack is tried whole (with its label), then just its shelves.
   function frameBoxes(rec) {
     if (rec.cat === 'setup') {
-      const full = visibleBox(rec.group); full.max.y = Math.max(full.max.y, (rec.tpl?.height || 2.2) + 0.2);
+      // the cap is the top of the box; the rack label sits above it in the frame area's top band (below the breadcrumb)
+      const full = visibleBox(rec.group); full.max.y = Math.max(full.max.y, (rec.tpl?.height || 2.2) + 0.03);
       const levels = recsOf(r => r.cat === 'shelf' && r.setup === rec.id).map(r => r.y);
       const shelves = full.clone(); if (levels.length) shelves.min.y = Math.max(full.min.y, Math.min(...levels) - 0.15);
       return [full, shelves];
@@ -2153,7 +2285,7 @@
   }
   function roomInnerBox() {
     const { width: W, depth: D, height: H } = S.data.room;
-    return new THREE.Box3(new THREE.Vector3(WX(W) + 0.15, 0.35, 0.15), new THREE.Vector3(WX(0) - 0.15, H - 0.1, D - 0.15));
+    return new THREE.Box3(new THREE.Vector3(WX(W) + 0.15, 0.35, 0.15), new THREE.Vector3(WX(0) - 0.15, H - 0.3, D - 0.15));   // under the ceiling lights
   }
   // Part of the canvas that no overlay covers, in NDC. Each overlay trims the side that leaves the most room for a target
   // of the given on-screen aspect (width / height): a tall rack keeps a tall area, a flat zone a wide one.
@@ -2173,6 +2305,25 @@
     }
     if (s.r - s.l < W * 0.3 || s.b - s.t < H * 0.3) s = { l: 0, t: 0, r: W, b: H };   // overlays cover too much: use the whole view
     return { l: s.l / W * 2 - 1, r: s.r / W * 2 - 1, t: 1 - s.t / H * 2, b: 1 - s.b / H * 2 };
+  }
+  // Where a flight frames its target (NDC): the 3D view below the breadcrumb (~80 px) and above the legend / zoom bar
+  // (~64 px), clear of the phone sheet and of any other overlay that reaches into it, with a 10 % margin (5 % a side).
+  function frameSafe() {
+    const vp = canvas.getBoundingClientRect(); const W = vp.width, H = vp.height; if (!W || !H) return { l: -1, r: 1, t: 1, b: -1 };
+    const shown = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    let l = 0, r = W, t = shown($('#crumb')) || shown($('#rfBar')) ? 80 : 16, b = H - (shown($('#legend')) || shown($('.zoombar')) ? 64 : 16);
+    for (const q of ['#crumb', '#rfBar', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend', '#sheet']) {
+      const el = $(q); if (!shown(el)) continue; const o = el.getBoundingClientRect(); if (!o.width || !o.height) continue;
+      const x0 = o.left - vp.left - 6, x1 = o.right - vp.left + 6, y0 = o.top - vp.top - 6, y1 = o.bottom - vp.top + 6;
+      if (x1 <= l || x0 >= r || y1 <= t || y0 >= b) continue;
+      const cy = (y0 + y1) / 2;
+      if (cy < H * 0.35) t = Math.max(t, y1); else if (cy > H * 0.65) b = Math.min(b, y0);
+      else if ((x0 + x1) / 2 > W / 2) r = Math.min(r, x0); else l = Math.max(l, x1);
+    }
+    if (r - l < W * 0.3) { l = 0; r = W; }
+    if (b - t < H * 0.3) { t = Math.min(80, H * 0.1); b = H - Math.min(64, H * 0.1); }
+    const mx = (r - l) * 0.05, my = (b - t) * 0.05; l += mx; r -= mx; t += my; b -= my;
+    return { l: l / W * 2 - 1, r: r / W * 2 - 1, t: 1 - t / H * 2, b: 1 - b / H * 2 };
   }
   // Camera at P: where to look so the box centre C sits in the middle of the safe area, and is the whole box inside it?
   function framing(P, C, box, safe) {
@@ -2194,7 +2345,7 @@
     scene.updateMatrixWorld(true);
     fitCam.fov = camera.fov; fitCam.aspect = camera.aspect; fitCam.near = camera.near; fitCam.far = camera.far; fitCam.up.set(0, 1, 0); fitCam.updateProjectionMatrix();
     const boxes = frameBoxes(rec).filter(b => !b.isEmpty()); if (!boxes.length) return null;
-    const sz0 = boxes[0].getSize(new THREE.Vector3()); const safe = safeArea(Math.max(0.2, Math.min(5, Math.max(sz0.x, sz0.z) / Math.max(0.05, sz0.y)))); const zone = rec.cat === 'zone';
+    const safe = frameSafe(); const zone = rec.cat === 'zone';
     const own = rec.setup && S.recs.get(rec.setup)?.group ? visibleBox(S.recs.get(rec.setup).group)
       : rec.item?.storage && S.recs.get(rec.item.storage)?.group ? visibleBox(S.recs.get(rec.item.storage).group) : boxes[0].clone();
     own.expandByScalar(0.12);
@@ -2208,8 +2359,8 @@
     if (!base && !zone) base = roomCenter().sub(C0);
     if (!base || zone) base = camera.position.clone().sub(controls.target);
     base.y = 0; if (base.lengthSq() < 1e-6) base.set(0, 0, -1); base.normalize();
-    const yaws = [0, 10, -10, 20, -20, 30, -30, 40, -40, 50, -50, 65, -65, 80, -80];
-    const elevs = zone ? [50, 62, 75] : rec.cat === 'setup' ? [12, 20, 30, 42] : [15, 25, 35, 50, 65];
+    const yaws = [0, 10, -10, 20, -20, 30, -30, 35, -35, 40, -40, 45, -45, 50, -50, 65, -65, 80, -80];
+    const elevs = zone ? [50, 62, 75] : rec.cat === 'setup' ? [6, 9, 12, 20, 30, 42] : [15, 25, 35, 50, 65];
     const prefElev = zone ? 62 : 20; const maxD = controls.maxDistance * 0.9;
     let best = null;
     boxes.forEach((box, bi) => {
@@ -2218,11 +2369,19 @@
         const h = base.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), THREE.MathUtils.degToRad(yaw));
         const dir = h.multiplyScalar(Math.cos(THREE.MathUtils.degToRad(elev))).setY(Math.sin(THREE.MathUtils.degToRad(elev))).normalize();
         // the camera must be outside the target (or its rack) …
-        const ownExit = slab(C, dir, own); let dmin = Math.max(controls.minDistance + 0.05, ownExit ? ownExit[1] : 0);
+        // a rack is never framed closer than 1.2 × its height (no extreme close-up of a few shelves)
+        const ownExit = slab(C, dir, own); let dmin = Math.max(controls.minDistance + 0.05, ownExit ? ownExit[1] : 0, rec.cat === 'setup' ? 1.2 * (rec.tpl?.height || 2.2) : 0);
         // … and in front of the first obstacle / inside the room
         let free = maxD;
         if (room) { const s = slab(C, dir, room); free = Math.min(free, s && s[1] > 0 ? s[1] : 0); }
-        for (const ob of obstacles) { const s = slab(C, dir, ob); if (s && s[0] > 0) free = Math.min(free, s[0] - 0.1); }
+        // A neighbour whose corner the sight line only clips right next to the target (a diagonal view along a rack
+        // row) does not stop the camera: the camera just must not stand inside it; what it hides is scored below.
+        const ownEnd = ownExit ? ownExit[1] : 0; const clipped = [];
+        for (const ob of obstacles) {
+          const s = slab(C, dir, ob); if (!s || s[0] <= 0) continue;
+          if (s[0] < ownEnd + 0.6 && s[1] - s[0] < 0.6) clipped.push([s[0] - 0.1, s[1] + 0.1]); else free = Math.min(free, s[0] - 0.1);
+        }
+        for (let moved = true; moved;) { moved = false; for (const [a, b] of clipped) if (dmin > a && dmin < b) { dmin = b; moved = true; } }
         if (free < dmin) continue;
         const fitsAt = d => framing(C.clone().addScaledVector(dir, d), C, box, safe).ok;
         let need = Infinity;
@@ -2365,25 +2524,65 @@
     if (k === 'r') setView('orbit'); if (k === 't') setView('top'); if (k === 'e') setView('eye'); if (k === 'f') setView('front');
     if (k === 'w') $('#tWalls').click(); if (k === 'l') $('#tLabels').click(); if (k === 'z') $('#tZones').click();
     if (k === 'k') toggleKiosk(); if (e.key === 'F2') toggleEdit();
-    if (e.key === 'Home') $('#vReset').click(); if (e.key === 'Escape') { closeDetail(); $('#settings').classList.add('hidden'); }
+    if (e.key === 'Home') $('#vReset').click(); if (e.key === 'Escape') closeDetail();
   });
 
   // ───────────────────────────────────────────────────────────── breadcrumb + legend
+  // Where you are: the rack front's rack, else the selected object's place (Lab › row › rack › object), else the view.
+  const zoneRec = rec => rec && S.data.zones.find(z => z.id === rec.zone);
+  const objName = rec => rec.cat === 'shelf' ? shelfCaption(rec) : rec.cat === 'setup' ? rackName(rec.def) : rec.cat === 'storage' ? storageName(rec.def) : rec.cat === 'structure' ? rec.id : rec.cat === 'zone' ? rowLabel(rec.def) : (rec.def.name || rec.id);
+  function crumbParts() {
+    const sel = S.selected ? S.recs.get(S.selected) : null;
+    if (S.front) {
+      const su = S.recs.get(S.front);
+      return ['Lab', rowLabel(zoneRec(su)), rackName(su?.def), sel && sel.id !== S.front && rackRecOf(sel)?.id === S.front ? objName(sel) : ''].filter(Boolean);
+    }
+    if (sel) {
+      if (sel.cat === 'zone') return ['Lab', objName(sel)];
+      const su = rackRecOf(sel); const st = sel.item?.storage ? S.recs.get(sel.item.storage) : null;
+      if (su) return ['Lab', rowLabel(zoneRec(su)), rackName(su.def), sel.id !== su.id ? objName(sel) : ''].filter(Boolean);
+      if (st) return ['Lab', rowLabel(zoneRec(st)), storageName(st.def), objName(sel)].filter(Boolean);
+      return ['Lab', rowLabel(zoneRec(sel)), objName(sel)].filter(Boolean);
+    }
+    return ['Lab', VIEW_LABEL[S.view] || '3D view'];
+  }
   function renderCrumb() {
     const el = $('#crumbPath'); if (!el || !S.data) return;
-    let parts;
-    if (S.front) { const su = S.recs.get(S.front); parts = ['Lab', rowLabel(S.data.zones.find(z => z.id === su?.zone)), rackName(su?.def)].filter(Boolean); }
-    else parts = ['Lab', VIEW_LABEL[S.view] || '3D view'];
-    el.innerHTML = parts.map((p, i) => `<span${i === parts.length - 1 ? ' class="cur"' : ''}>${esc(p)}</span>`).join('<span class="sep" aria-hidden="true">›</span>');
+    const parts = crumbParts();
+    el.innerHTML = parts.map((p, i) => `<span dir="auto"${i === parts.length - 1 ? ' class="cur"' : ''}>${esc(p)}</span>`).join('<span class="sep" aria-hidden="true">›</span>');
     $('#rfNav').classList.toggle('hidden', !S.front);
+    // phone: one 44 px row above the rack — previous rack · this rack · next rack · Overview
+    const bar = $('#rfBar'); if (!bar) return;
+    if (!S.front) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+    const ids = S.data.setups.map(x => x.id); const i = ids.indexOf(S.front); const n = ids.length;
+    const nameOf = id => rackName(S.recs.get(id)?.def || { id });
+    const prev = nameOf(ids[(i - 1 + n) % n]), cur = nameOf(S.front), next = nameOf(ids[(i + 1) % n]);
+    bar.innerHTML = `<button type="button" class="rfb-btn" data-rf="-1" aria-label="Previous rack: ${esc(prev)}" title="Previous rack ([)"><span aria-hidden="true">‹ </span><bdi>${esc(prev)}</bdi></button>` +
+      `<span class="rfb-cur" aria-current="location" dir="auto">${esc(cur)}</span>` +
+      `<button type="button" class="rfb-btn" data-rf="1" aria-label="Next rack: ${esc(next)}" title="Next rack (])"><bdi>${esc(next)}</bdi><span aria-hidden="true"> ›</span></button>` +
+      `<button type="button" class="rfb-btn rfb-ov" data-rf="leave" title="Back to the overview (Escape)">Overview</button>`;
+    bar.classList.remove('hidden');
+    $$('[data-rf]', bar).forEach(b => b.onclick = () => { if (b.dataset.rf === 'leave') leaveFront(); else stepFront(+b.dataset.rf); });
   }
   $('#rfPrev').onclick = () => stepFront(-1); $('#rfNext').onclick = () => stepFront(1);
   function renderLegend() {
     const lg = $('#legend'); if (!lg) return;
-    const sw = (cls, style, label) => `<span class="li"><span class="sw ${cls}"${style ? ` style="${style}"` : ''} aria-hidden="true"></span>${label}</span>`;
+    const sw = (cls, style, label) => `<span class="li" title="${label}" aria-label="${label}"><span class="sw ${cls}"${style ? ` style="${style}"` : ''} aria-hidden="true"></span><span class="li-t" aria-hidden="true">${label}</span></span>`;
     if (S.colorBy === 'health') lg.innerHTML = `<span class="lg-t">Health</span>${sw('dot', `background:${HEALTH.up.c}`, 'Up')}${sw('dot', `background:${HEALTH.down.c}`, 'Down')}${sw('dot unk', '', 'Unknown')}${sw('sq', `background:${HEALTH.maint.c}`, 'Maintenance')}${sw('sq sel', '', 'Selected')}`;
     else lg.innerHTML = `<span class="lg-t">Lifecycle</span>${STATUSES.map(st => sw('dot', `background:${STATUS_COLOR[st]}`, STATUS_LABEL[st])).join('')}${sw('sq dashed', '', 'Low confidence')}${sw('sq sel', '', 'Selected')}`;
     lg.title = S.colorBy === 'health' ? 'Dashed = health unknown (no live signal). Shelves stay neutral.' : 'Dashed outline = low placement confidence; faded = medium';
+    layoutLegend();
+  }
+  // Keep the legend on one row beside the zoom bar: full → no title (gap 10 px) → swatches only, as the view narrows.
+  function layoutLegend() {
+    const lg = $('#legend'), vp = $('#viewport'); if (!lg || !vp || !lg.offsetParent) return;
+    const zb = $('.zoombar'); const v = vp.getBoundingClientRect(); const z = zb ? zb.getBoundingClientRect() : null;
+    const sameRow = z && z.width > 0 && Math.abs((z.top + z.bottom) / 2 - lg.getBoundingClientRect().top - 16) < 24;
+    const room = (sameRow ? z.left - 12 : v.right - 16) - lg.getBoundingClientRect().left;
+    for (const mode of ['', 'lg-compact', 'lg-compact lg-swatches']) {
+      lg.classList.remove('lg-compact', 'lg-swatches'); if (mode) lg.classList.add(...mode.split(' '));
+      if (lg.scrollWidth <= room) break;
+    }
   }
 
   // ───────────────────────────────────────────────────────────── rack front view (one rack, shelf by shelf)
@@ -2394,14 +2593,22 @@
   }
   function showRackFront(sid) {
     const su = S.recs.get(sid); if (!su || su.cat !== 'setup') return;
-    if (!S.front) { S.viewBeforeFront = S.view; cancelNavigation(); }
+    const entering = !S.front;
+    if (entering) { S.viewBeforeFront = S.view; S.sheetBeforeFront = S.sheet.size; cancelNavigation(); }
     S.front = sid; controls.enabled = false;
+    if (S.pwMenuOpen) closePwMenu(false);
+    // the drawer stays open only for the rack shown or an object in it — never for a machine that is not on screen
+    const cur = S.selected ? S.recs.get(S.selected) : null;
+    if (cur && cur.id !== sid && rackRecOf(cur)?.id !== sid) closeDetail();
     document.body.classList.add('front'); $('#rackFront').classList.remove('hidden'); $('#vBack').classList.remove('hidden');
     markView('front'); renderRackFront(); renderRackBar(); resize(); placeAttnDock();
+    // phone: the sheet drops to its peek height so more of the rack shows; its tabs still open Issues / Racks / Details
+    if (entering && isPhone()) setSheet('peek', S.selected ? 'details' : null);
   }
   function hideRackFront() {
     if (!S.front) return; S.front = null; controls.enabled = true;
     document.body.classList.remove('front'); const el = $('#rackFront'); el.classList.add('hidden'); el.innerHTML = ''; $('#vBack').classList.add('hidden');
+    if (isPhone() && S.sheet.size === 'peek' && S.sheetBeforeFront && S.sheetBeforeFront !== 'peek') setSheet(S.sheetBeforeFront);
     markView(null); renderRackBar(); resize(); placeAttnDock();
   }
   function leaveFront() { const v = S.viewBeforeFront; hideRackFront(); markView(v); }
@@ -2422,20 +2629,25 @@
       const st = !hh ? ITEM_KIND[it.type] || 'Equipment' : hh.h === 'up' ? 'Up' : hh.h === 'maint' ? 'Maintenance' : hh.h === 'down' ? (hh.why === 'No ping' ? 'No ping' : hh.why === 'Off' ? 'Off' : 'Down') : 'Unknown';
       const noKvm = it.type === 'opt' && live && it.live?.inDcim && !kvmTargets(it).length;
       const dest = !!mover && r.id !== mover.id && ((it.type === 'opt') === moverPC);
-      return `<button type="button" class="rf-tile${sel ? ' sel' : ''}${dest ? ' dest' : ''}" data-id="${esc(r.id)}" aria-pressed="${sel}"${mover && !dest ? ' disabled' : ''} title="${esc(dest ? `Move ${mover.def.name || mover.id} here (asks first; ${r.def.name || r.id} can swap)` : `${r.def.name || r.id} · ${hh?.why || st}`)}"><span class="rf-name">${esc(r.def.name || r.id)}</span><span class="rf-st">${noKvm ? '<span class="rf-tag">No KVM</span>' : ''}${dotHtml(r)}${esc(st)}${sel ? ' · selected' : ''}</span></button>`;
+      return `<button type="button" class="rf-tile${sel ? ' sel' : ''}${dest ? ' dest' : ''}" data-id="${esc(r.id)}" aria-pressed="${sel}"${mover && !dest ? ' disabled' : ''} title="${esc(dest ? `Move ${mover.def.name || mover.id} here (asks first; ${r.def.name || r.id} can swap)` : `${r.def.name || r.id} · ${hh?.why || st}`)}"><span class="rf-name" dir="auto">${esc(r.def.name || r.id)}</span><span class="rf-st">${noKvm ? '<span class="rf-tag">No KVM</span>' : ''}${dotHtml(r)}${esc(st)}${sel ? ' · selected' : ''}</span></button>`;
     };
     const free = (sh, pc) => mover && moverPC === pc ? `<button type="button" class="rf-free dest" data-dest="${esc(sh.id)}" title="Move ${esc(mover.def.name || mover.id)} here (asks first)">Move here</button>` : `<div class="rf-free">Free</div>`;
     const shelves = recsOf(r => r.cat === 'shelf' && r.setup === su.id).sort((a, b) => b.level - a.level);
+    // Two columns per shelf, filled in order: servers, then equipment. One server + one unit = server left, unit right;
+    // two servers sit side by side; a third object starts a new row (smaller tiles). "Free" marks the empty server
+    // place and the empty equipment place of a row that is not full; while moving, it is the drop target.
     const rows = shelves.map(sh => {
       const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id); const pcs = its.filter(r => r.item?.type === 'opt'), eq = its.filter(r => r.item?.type !== 'opt');
-      return `<div class="rf-cap">${esc(shelfCaption(sh).toUpperCase())}</div><div class="rf-shelf" data-shelf="${esc(sh.id)}"><div class="rf-slot">${pcs.length ? pcs.map(tile).join('') : free(sh, true)}</div><div class="rf-slot">${eq.length ? eq.map(tile).join('') : free(sh, false)}</div></div>`;
+      const cells = pcs.length ? pcs.map(tile) : [free(sh, true)];
+      if (eq.length) cells.push(...eq.map(tile)); else if (cells.length % 2 || (mover && !moverPC)) cells.push(free(sh, false));
+      return `<div class="rf-cap">${esc(shelfCaption(sh).toUpperCase())}</div><div class="rf-shelf${cells.length > 2 ? ' dense' : ''}" data-shelf="${esc(sh.id)}">${cells.join('')}</div>`;
     }).join('');
     const bay = recsOf(r => r.cat === 'item' && r.setup === su.id && !r.shelf);
     el.setAttribute('aria-label', `${rackName(def)} front view`);
     el.className = 'rackfront' + (mover ? ' moving' : '');
     el.innerHTML = `<div class="rf-rack ${S.colorBy === 'health' ? 'h-' + h.h : 'h-status'}"><div class="rf-head" title="${esc(h.why ? `${HEALTH[h.h].t} · ${h.why}` : HEALTH[h.h].t)}"><span>${esc(rackName(def))}</span><span>${esc(right)}</span></div>` +
       `<div class="rf-body">${rows || '<div class="rf-cap">This rack has no shelves in lab-data.json.</div>'}` +
-      (bay.length ? `<div class="rf-cap">RACK LEVEL</div><div class="rf-bay">${bay.map(r => `<button type="button" class="rf-chip${S.selected === r.id ? ' sel' : ''}" data-id="${esc(r.id)}" aria-pressed="${S.selected === r.id}"${mover ? ' disabled' : ''}>${dotHtml(r)}${esc(r.def.name || r.id)}</button>`).join('')}</div>` : '') + `</div></div>`;
+      (bay.length ? `<div class="rf-cap">RACK LEVEL</div><div class="rf-bay">${bay.map(r => `<button type="button" class="rf-chip${S.selected === r.id ? ' sel' : ''}" data-id="${esc(r.id)}" aria-pressed="${S.selected === r.id}"${mover ? ' disabled' : ''}>${dotHtml(r)}<bdi>${esc(r.def.name || r.id)}</bdi></button>`).join('')}</div>` : '') + `</div></div>`;
     $$('[data-id]', el).forEach(b => b.onclick = () => {
       if (S.moveItem) { const sh = b.closest('[data-shelf]')?.dataset.shelf; if (sh) requestMove(S.recs.get(sh)); return; }
       select(b.dataset.id, { keepCamera: true });
@@ -2465,7 +2677,11 @@
   function renderSheetHead() {
     const t = $('#sheetTitle'); if (!t) return;
     const real = issuesOf(S.attention).filter(e => e.kind !== 'offline'); const c = attnCounts(real);
-    t.textContent = !S.live.connected ? (S.live.signedOut ? 'Signed out' : 'Live data off') : real.length ? `${c.crit ? c.crit + ' critical' : c.warn + ' warning' + (c.warn === 1 ? '' : 's')} · ${real[0].text}` : 'No issues';
+    // one issue: its text; more: the counts (the worst issue stays in the tooltip)
+    const counts = [c.crit ? `${c.crit} critical` : '', c.warn ? `${c.warn} warning${c.warn === 1 ? '' : 's'}` : '', c.info ? `${c.info} info` : ''].filter(Boolean).join(' · ');
+    t.textContent = !S.live.connected ? (S.live.signedOut ? 'Signed out' : S.live.connecting ? 'Connecting…' : S.live.error ? 'No live data' : 'Live data off')
+      : real.length === 1 ? `${counts} · ${real[0].text}` : real.length ? counts : 'No issues';
+    t.title = S.live.connected && real.length > 1 ? `Worst: ${real[0].text}` : '';
   }
   $$('[data-sheet]').forEach(t => t.onclick = () => setSheet(S.sheet.size === 'peek' ? 'half' : null, t.dataset.sheet));
   $('.sheet-tabs').addEventListener('keydown', e => {
@@ -2571,6 +2787,7 @@
       tmpV.copy(S.entrance.anchor).project(camera); const vis = S.labelMode !== 'none' && tmpV.z <= 1 && Math.abs(tmpV.x) <= 1 && Math.abs(tmpV.y) <= 1;
       S.entrance.el.style.display = vis ? '' : 'none'; if (vis) { S.entrance.el.style.left = ((tmpV.x + 1) / 2 * r.width) + 'px'; S.entrance.el.style.top = ((1 - tmpV.y) / 2 * r.height) + 'px'; }
     }
+    const telems = [];
     for (const rec of S.recs.values()) {
       const ab = rec.attnEl;
       if (ab) {
@@ -2585,25 +2802,53 @@
       if (!show) { el.style.display = 'none'; continue; }
       tmpV.copy(rec.telemAnchor); const dist = tmpV.distanceTo(camPos); tmpV.project(camera);
       if (tmpV.z > 1 || Math.abs(tmpV.x) > 1.1 || Math.abs(tmpV.y) > 1.1) { el.style.display = 'none'; continue; }
-      el.style.display = ''; el.style.left = ((tmpV.x + 1) / 2 * r.width) + 'px'; el.style.top = ((1 - tmpV.y) / 2 * r.height) + 'px'; el.style.opacity = dist > 16 ? .6 : 1; el.style.zIndex = Math.max(2, Math.round(110 - dist * 3));
+      const y = (1 - tmpV.y) / 2 * r.height;
+      el.style.display = ''; el.style.left = ((tmpV.x + 1) / 2 * r.width) + 'px'; el.style.top = y + 'px'; el.style.opacity = dist > 16 ? .6 : 1; el.style.zIndex = Math.max(2, Math.round(110 - dist * 3));
+      telems.push({ el, y });
     }
+    // Object labels: which are shown, where, and in which order they claim space (selected > issue > search hit > rack >
+    // storage > other, nearer first). The phone shows only selected racks, racks with an issue and search hits.
+    const phone = phoneQuery.matches; const q = S.filters.q; const issue = S.issueIds || new Set();
+    const selRack = S.selected ? rackRecOf(S.recs.get(S.selected))?.id : null;
+    const cands = [];
     for (const rec of S.recs.values()) {
       const el = rec.label; if (!el) continue;
-      let show = !rec.filtered || S.selected === rec.id;
+      const sel = S.selected === rec.id; const hit = !!q && !rec.filtered && rec.cat !== 'zone';
+      let show = !rec.filtered || sel;
       if (show) {
         if (rec.cat === 'zone') show = S.zonesVisible && S.labelMode === 'all';
-        else if (rec.cat === 'setup' || rec.cat === 'storage') show = S.labelMode !== 'none' || S.selected === rec.id;
-        else if (rec.cat === 'structure') show = S.wallsVisible && (S.labelMode === 'all' || S.selected === rec.id);
-        else show = S.labelMode === 'all' || S.selected === rec.id || (S.filters.q && !rec.filtered);
+        else if (rec.cat === 'setup' || rec.cat === 'storage') show = S.labelMode !== 'none' || sel;
+        else if (rec.cat === 'structure') show = S.wallsVisible && (S.labelMode === 'all' || sel);
+        else show = S.labelMode === 'all' || sel || hit;
       }
+      if (show && phone && !sel) show = rec.cat === 'setup' ? issue.has(rec.id) || rec.id === selRack || hit : hit && rec.cat !== 'structure';
       if (!show) { el.style.display = 'none'; continue; }
       const a = anchorOf(rec); if (!a) { el.style.display = 'none'; continue; }
       tmpV.copy(a); const dist = tmpV.distanceTo(camPos);
-      if ((rec.cat === 'item' || rec.cat === 'shelf') && dist > 9 && S.selected !== rec.id && !S.filters.q) { el.style.display = 'none'; continue; }
+      if ((rec.cat === 'item' || rec.cat === 'shelf') && dist > 9 && !sel && !q) { el.style.display = 'none'; continue; }
       tmpV.project(camera);
       if (tmpV.z > 1 || tmpV.x < -1.1 || tmpV.x > 1.1 || tmpV.y < -1.1 || tmpV.y > 1.1) { el.style.display = 'none'; continue; }
-      el.style.display = ''; el.style.left = ((tmpV.x + 1) / 2 * r.width) + 'px'; el.style.top = ((1 - tmpV.y) / 2 * r.height) + 'px';
+      const x = (tmpV.x + 1) / 2 * r.width, y = (1 - tmpV.y) / 2 * r.height;
+      el.style.display = ''; el.style.left = x + 'px'; el.style.top = y + 'px';
       el.style.opacity = rec.filtered ? .35 : (dist > 14 && rec.cat !== 'setup' ? .55 : 1); el.style.zIndex = Math.max(1, Math.round(100 - dist * 3));
+      const pri = sel ? 0 : issue.has(rec.id) ? 1 : hit ? 2 : rec.cat === 'setup' ? 3 : rec.cat === 'storage' ? 4 : 5;
+      cands.push({ el, x, y, dist, pri, mid: rec.cat === 'zone' });
+    }
+    // one layout read for every shown label and card, then the overlap pass
+    telems.forEach(t => { t.h = t.el.offsetHeight; });
+    cands.forEach(c => { c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; });
+    // a telemetry card cut by the top of the 3D view is hidden rather than half shown
+    telems.forEach(t => { t.el.style.visibility = t.y - t.h < 0 ? 'hidden' : ''; });
+    cands.sort((a, b) => a.pri - b.pri || a.dist - b.dist);
+    const placed = [];
+    const clash = (l, t, w, h) => placed.some(p => Math.min(l + w, p.l + p.w) - Math.max(l, p.l) > 2 && Math.min(t + h, p.t + p.h) - Math.max(t, p.t) > 2);
+    for (const c of cands) {
+      const l = c.x - c.w / 2, t0 = c.mid ? c.y - c.h / 2 : c.y - c.h; let k = 0;
+      while (k <= 3 && clash(l, t0 - k * (c.h + 2), c.w, c.h)) k++;
+      if (k > 3 && c.pri > 1) { c.el.style.visibility = 'hidden'; continue; }   // selection and issues are never hidden
+      if (k > 3) k = 0;
+      placed.push({ l, t: t0 - k * (c.h + 2), w: c.w, h: c.h });
+      c.el.style.visibility = ''; if (k) c.el.style.top = (c.y - k * (c.h + 2)) + 'px';
     }
   }
 
@@ -2619,7 +2864,6 @@
 
 
   // ───────────────────────────────────────────────────────────── EDIT MODE (touch-friendly editor for the lab screen)
-  const STATUS_ICON = { active: '●', building: '◐', inactive: '○', dismantled: '✕', unknown: '?' };
   function toggleEdit(force) { if (!window.DCIM_CAN_OPERATE) { toast('Viewer account: read only', 'err'); return; } S.editMode = force !== undefined ? force : !S.editMode; LS.set('editMode', S.editMode); document.body.classList.toggle('editmode', S.editMode); markEdit(); if (!S.editMode) cancelMove(); if (S.selected) select(S.selected, { keepCamera: true }); toast(S.editMode ? 'Edit mode — tap any rack, shelf or item' : 'Edit mode off', 'ok'); }
   function markEdit() {
     const b = $('#btnEdit'); b.classList.toggle('on', S.editMode); b.setAttribute('aria-pressed', String(S.editMode)); b.textContent = S.editMode ? 'Done editing' : 'Edit layout';
@@ -2646,8 +2890,8 @@
     sel.innerHTML = `<option value="">Destination…</option>` + S.data.setups.map(su => {
       const shelves = recsOf(r => r.cat === 'shelf' && r.setup === su.id).sort((a, b) => b.level - a.level);
       const who = sh => recsOf(r => r.cat === 'item' && r.shelf === sh.id).map(r => r.def.name || r.id).join(', ');
-      return `<optgroup label="${esc(su.id + (su.dcimRack ? ' · ' + su.dcimRack : ''))}">` + shelves.map(sh => opt(sh.id, `${sh.id} · L${sh.level}${who(sh) ? ' — ' + who(sh) : ' — empty'}`)).join('') + opt(su.id, `${su.id} · bottom bay`) + `</optgroup>`;
-    }).join('') + `<optgroup label="Storage">${S.data.storage.map(st => opt(st.id, `${st.id} · ${st.name}`)).join('')}</optgroup>`;
+      return `<optgroup label="${esc(rackName(su))}">` + shelves.map(sh => opt(sh.id, `${shelfCaption(sh)}${who(sh) ? ' — ' + who(sh) : ' — empty'}`)).join('') + opt(su.id, 'Bottom bay') + `</optgroup>`;
+    }).join('') + `<optgroup label="Storage">${S.data.storage.map(st => opt(st.id, `${storageName(st)} · ${st.name}`)).join('')}</optgroup>`;
   }
   // Tree rows: while moving, a shelf / rack / storage row (or a device row → its shelf) is the destination.
   function activateTreeRow(id) {
@@ -2742,23 +2986,26 @@
     }
     return dest.map(m => `${m.rack} · U${m.u}`);
   }
+  const setupName = id => rackName(S.data.setups.find(x => x.id === id) || { id });
+  const storeName = id => storageName(S.data.storage.find(x => x.id === id) || { id });
   function placeText(it) {
     if (!it) return 'not placed';
-    const u = it.live?.rack && it.live?.u != null ? ` (${it.live.rack} · U${it.live.u})` : '';
+    const u = it.live?.rack && it.live?.u != null ? ` · U${it.live.u}` : '';
     if (it.shelf) return shelfName(it.shelf) + u;
-    if (it.placement === 'bottom-bay' && it.setup) return `${it.setup} · bottom bay`;
-    if (it.placement === 'side-mount' && it.setup) return `${it.setup} · ${it.side || 'right'} side`;
-    if (it.placement === 'rack-strips' && it.setup) return `${it.setup} · power strips`;
-    if (it.storage) return it.storage;
+    if (it.placement === 'bottom-bay' && it.setup) return `${setupName(it.setup)} › bottom bay`;
+    if (it.placement === 'side-mount' && it.setup) return `${setupName(it.setup)} › ${it.side || 'right'} side`;
+    if (it.placement === 'rack-strips' && it.setup) return `${setupName(it.setup)} › power strips`;
+    if (it.storage) return storeName(it.storage);
     if (it.pos) return `free · x ${it.pos[0]} z ${it.pos[1]}`;
     if (it.live?.rack) return `${it.live.rack}${it.live.u != null ? ' · U' + it.live.u : ''} · no shelf`;
     return 'not placed';
   }
   function targetText(target, kind) {
     let u = '';
-    if (kind) { try { const d = dcimDestination(target); u = ` (${d.rack} · U${d.u})`; } catch { /* reported as plan.error */ } }
+    if (kind) { try { const d = dcimDestination(target); u = ` · U${d.u}`; } catch { /* reported as plan.error */ } }
     if (target.cat === 'shelf') return shelfName(target.id) + u;
-    if (target.cat === 'setup') return `${target.id} · bottom bay` + u;
+    if (target.cat === 'setup') return `${setupName(target.id)} › bottom bay` + u;
+    if (target.cat === 'storage') return storeName(target.id);
     return target.id;
   }
   function placementPatch(target) {
@@ -2852,8 +3099,8 @@
       if (plan.occupant) {
         const other = plan.occupant.def.name || plan.occupant.id;
         choice = await askChoice(plan.swappable
-          ? { title: `${plan.target.id} is occupied`, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div>${fromTo}<div class="note">Swap places: ${esc(other)} moves to ${esc(plan.from)}. Nothing else moves. ${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'swap', label: 'Swap places', cls: 'primary' }] }
-          : { title: `${plan.target.id} is occupied`, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div><div class="note">The two cannot swap places: ${esc(plan.swapWhy)} Choose a free shelf, or move ${esc(other)} first.</div>`, choices: [{ id: 'cancel', label: 'Choose another shelf' }] });
+          ? { title: `${plan.to.replace(/ · U\d+$/, '')} is occupied`, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div>${fromTo}<div class="note">Swap places: ${esc(other)} moves to ${esc(plan.from)}. Nothing else moves. ${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'swap', label: 'Swap places', cls: 'primary' }] }
+          : { title: `${plan.to.replace(/ · U\d+$/, '')} is occupied`, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div><div class="note">The two cannot swap places: ${esc(plan.swapWhy)} Choose a free shelf, or move ${esc(other)} first.</div>`, choices: [{ id: 'cancel', label: 'Choose another shelf' }] });
       } else {
         choice = await askChoice({ title: `Move ${plan.name}?`, html: `${fromTo}<div class="note">${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'move', label: 'Move here', cls: 'primary' }] });
       }
@@ -2864,69 +3111,71 @@
   }
   const finishMove = target => requestMove(target);   // kept name (debug handle, older notes): the same confirmed path
 
-  function bigChips(cur) { return `<div class="chips-lg">${STATUSES.map(st => `<button class="chip-lg ${cur === st ? 'on' : ''}" data-st="${st}" style="--c:${STATUS_COLOR[st]}"><span class="ic">${STATUS_ICON[st]}</span>${STATUS_LABEL[st]}</button>`).join('')}</div>`; }
-  function shelfName(id) { const sh = S.data.shelves.find(x => x.id === id); return sh ? `${sh.setup} · L${sh.level}` : id; }
+  function bigChips(cur) { return `<div class="chips-lg" role="group" aria-label="Lifecycle status">${STATUSES.map(st => `<button type="button" class="chip-lg ${cur === st ? 'on' : ''}" data-st="${st}" aria-pressed="${cur === st}" style="--c:${STATUS_COLOR[st]}"><span class="ic" aria-hidden="true"></span>${STATUS_LABEL[st]}</button>`).join('')}</div>`; }
+  // A shelf as people say it: "Rack-01 › Shelf 1 (top)" (shelf 1 = top, like Lab Manager) — never SETUP / SHELF ids or the geometric L4.
+  function shelfName(id) { const sh = S.data.shelves.find(x => x.id === id); if (!sh) return id; return `${rackName(S.data.setups.find(x => x.id === sh.setup) || { id: sh.setup })} › ${shelfCaption(sh)}`; }
 
   function renderEditor(rec) {
+    // The v3 drawer frame (same header, 12 px section headings), Kaizen-size controls; places are written like the
+    // drawer's Location ("Rack-01 › Shelf 1 › Left"), internal ids stay in the Inventory section of the drawer.
     const def = rec.def; const it = rec.item; const isLive = rec.id.startsWith('LIVE-');
-    let html = `<div class="edit-hint">EDIT MODE · tap another object in the 3D view to switch</div>`;
+    const H = t => `<h3 class="lbl-lg">${t}</h3>`;
+    const field = (t, id) => `<label class="lbl-lg" for="${id}">${t}</label>`;
+    const where = `<div class="where" dir="auto">${esc(placeLabel(rec))}</div>`;
+    const moveBtn = `<button type="button" class="kbtn secondary md" id="eMove" title="Then tap a shelf in the 3D view or the rack front, or choose one from the list">Move…</button>`;
+    const notes = v => `${field('Notes', 'eNotes')}<textarea class="in-lg" id="eNotes" dir="auto">${esc(v)}</textarea>`;
+    const status = cur => `${H('Status')}${bigChips(cur || 'unknown')}<input type="hidden" id="eStatus" value="${esc(cur || 'unknown')}" />`;
+    const save = `<div class="row-lg"><button type="button" class="kbtn primary md" id="eSave">Save</button></div>`;
+    let html = `<div class="edit-hint">Edit mode · tap another object in the 3D view to switch</div>`;
     if (rec.cat === 'item' && isLive) {
-      const loc = it.shelf ? shelfName(it.shelf) : it.setup ? `${it.setup} · ${it.live?.rack || ''} U${it.live?.u ?? '?'}` : it.live?.rack ? `${it.live.rack} (rack not mapped to a 3D setup)` : 'not placed';
-      html += `<div class="sec big"><div class="note">Live from Lab Manager (DCIM). Moving it here writes the rack / U slot back into Lab Manager.</div>
-        <label class="lbl-lg">Where</label><div class="where"><span class="where-txt">${esc(loc)}</span></div>
-        ${movesViaDcim(it) ? `<div class="row-lg"><button class="btn-lg btn-cyan" id="eMove">⇄ Move… (tap a shelf)</button></div>` : ''}
-        ${dcimOwnerKey(it) ? `<label class="lbl-lg">Owner (saved in Lab Manager)</label>${ownerPicker(it.owner)}` : ''}
-        <button class="btn-lg" id="eMaterialize">＋ Add a physical record of it here</button></div>`;
+      html += `<section class="sec big">${H('Where')}${where}
+          <div class="edit-note">Live from Lab Manager. Moving it writes the rack and U slot back into Lab Manager.</div>
+          ${movesViaDcim(it) ? `<div class="row-lg">${moveBtn}</div>` : ''}</section>
+        ${dcimOwnerKey(it) ? `<section class="sec big">${field('Owner (saved in Lab Manager)', 'eOwner')}${ownerPicker(it.owner)}</section>` : ''}
+        <div><button type="button" class="link" id="eMaterialize">Add a physical record of it here</button></div>`;
     } else if (rec.cat === 'item') {
-      const loc = it.shelf ? shelfName(it.shelf) : it.placement === 'side-mount' ? `${it.setup} · hung on the ${it.side || 'right'} side` : it.placement === 'bottom-bay' ? `${it.setup} · bottom bay` : it.placement === 'rack-strips' ? `${it.setup} · power strips` : it.storage ? it.storage : it.pos ? `free · x ${it.pos[0]} z ${it.pos[1]}` : 'not placed';
       const pdus = S.data.dcim?.pdus || [];
-      html += `<div class="sec big">
-        <label class="lbl-lg">Name</label><input class="in-lg" id="eName" value="${esc(it.name || '')}" />
-        <label class="lbl-lg">Status</label>${bigChips(it.status || 'unknown')}
-        <label class="lbl-lg">Where</label>
-        <div class="where"><span class="where-txt">${esc(loc)}</span></div>
-        <div class="row-lg"><button class="btn-lg btn-cyan" id="eMove">⇄ Move… (tap a shelf)</button><button class="btn-lg" id="eUnplace">Unplace</button></div>
-        ${it.setup ? `<div class="row-lg"><button class="btn-lg sm" data-side="left">⇤ Hang on left side</button><button class="btn-lg sm" data-side="right">Hang on right side ⇥</button><button class="btn-lg sm" data-side="bay">Bottom bay</button></div>` : ''}
-        <label class="lbl-lg">Type</label><select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
-        <label class="lbl-lg">Owner</label>${ownerPicker(it.owner)}
-        <label class="lbl-lg">PDU · outlet</label>
-        <div class="row-lg"><select class="in-lg" id="ePdu" style="flex:2"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${esc(x.id)}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
-          <div class="stepper"><button data-step="-1">−</button><input id="eOutlet" type="number" min="1" max="48" value="${esc(it.dcim?.outlet ?? '')}" placeholder="#" /><button data-step="1">＋</button></div></div>
-        ${it.liveWarning ? `<div class="warn-box" role="status">⚠ ${esc(it.liveWarning)} <span class="muted">(live check — not part of the notes)</span></div>` : ''}
-        <label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(cleanNotes(it.notes))}</textarea>
-        <input type="hidden" id="eStatus" value="${esc(it.status || 'unknown')}" />
-      </div>
-      <div class="sec big actions">
-        <button class="btn-lg btn-save" id="eSave">✓ Save</button>
-        <button class="btn-lg btn-amber" id="eReplace">⟳ Replace with new device</button>
-        <div class="row-lg"><button class="btn-lg" id="eDup">Duplicate</button><button class="btn-lg btn-danger" id="eDel">Delete</button></div>
-      </div>`;
+      html += `<section class="sec big">${field('Name', 'eName')}<input class="in-lg" id="eName" dir="auto" value="${esc(it.name || '')}" />${status(it.status)}</section>
+        <section class="sec big">${H('Where')}${where}
+          <div class="row-lg">${moveBtn}<button type="button" class="kbtn secondary md" id="eUnplace">Unplace</button></div>
+          ${it.setup ? `<div class="row-lg"><button type="button" class="kbtn secondary md" data-side="left">Hang on left side</button><button type="button" class="kbtn secondary md" data-side="right">Hang on right side</button><button type="button" class="kbtn secondary md" data-side="bay">Bottom bay</button></div>` : ''}</section>
+        <section class="sec big">${field('Type', 'eType')}<select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${esc(ITEM_KIND[t] ? `${ITEM_KIND[t]} (${t})` : t)}</option>`).join('')}</select>
+          ${field('Owner', 'eOwner')}${ownerPicker(it.owner)}
+          ${field('PDU · outlet', 'ePdu')}
+          <div class="row-lg"><select class="in-lg" id="ePdu"><option value="">— no PDU —</option>${pdus.map(x => `<option value="${esc(x.id)}" ${it.dcim?.pdu === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+            <div class="stepper"><button type="button" data-step="-1" aria-label="Outlet down">−</button><input id="eOutlet" type="number" min="1" max="48" value="${esc(it.dcim?.outlet ?? '')}" placeholder="#" aria-label="Outlet" /><button type="button" data-step="1" aria-label="Outlet up">+</button></div></div>
+          ${it.liveWarning ? `<div class="warn-box" role="status">${esc(it.liveWarning)} <span class="muted">(live check — not part of the notes)</span></div>` : ''}
+          ${notes(cleanNotes(it.notes))}</section>
+        <section class="sec big">${H('Actions')}
+          <div class="row-lg"><button type="button" class="kbtn primary md" id="eSave">Save</button><button type="button" class="kbtn secondary md" id="eReplace">Replace with new device…</button></div>
+          <div class="row-lg"><button type="button" class="kbtn secondary md" id="eDup">Duplicate</button><button type="button" class="kbtn danger-secondary md" id="eDel">Delete…</button></div></section>`;
     } else if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
-      html += `<div class="sec big"><div class="lbl-lg">On ${esc(rec.id)} · level L${esc(rec.level)} · ${esc(rec.setup)}</div>
-        ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>${esc(i.item.typeLabel || i.item.type)}${i.item.dcim?.outlet ? ' · outlet #' + esc(i.item.dcim.outlet) : ''}</small></span><button class="btn-lg sm" data-edit="${esc(i.id)}">Edit</button><button class="btn-lg sm btn-cyan" data-move="${esc(i.id)}">Move</button></div>`).join('') : '<div class="note">Shelf is empty.</div>'}
-        <button class="btn-lg btn-save" id="eAddHere">＋ Add device on this shelf</button></div>
-        <div class="sec big"><label class="lbl-lg">Shelf status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${esc(def.status || 'unknown')}"/><label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>`;
+      html += `<section class="sec big">${H('On this shelf')}${where}
+          ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>${esc(kindOf(i))}${i.item.dcim?.outlet ? ' · outlet ' + esc(i.item.dcim.outlet) : ''}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button><button type="button" class="kbtn secondary small" data-move="${esc(i.id)}">Move…</button></div>`).join('') : '<div class="edit-note">Nothing on this shelf.</div>'}
+          <div class="row-lg"><button type="button" class="kbtn secondary md" id="eAddHere">Add a device on this shelf</button></div></section>
+        <section class="sec big">${status(def.status)}${notes(def.notes || '')}${save}</section>`;
     } else if (rec.cat === 'setup') {
       const racks = [...new Set([...(S.data.dcim?.pdus || []).map(p => p.rack), ...S.model.liveRacks])].filter(Boolean).sort(); const cur = def.dcimRack || '';
       const shelves = recsOf(r => r.cat === 'shelf' && r.setup === rec.id).sort((a, b) => b.level - a.level);
-      html += `<div class="sec big"><label class="lbl-lg">Name</label><input class="in-lg" id="eName" value="${esc(def.name)}"/>
-        <label class="lbl-lg">DCIM rack (which Rack-0X is this physically?)</label><select class="in-lg" id="dRack"><option value="">— none —</option>${racks.map(r => `<option value="${esc(r)}" ${r === cur ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
-        <label class="lbl-lg">Status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${esc(def.status || 'unknown')}"/>
-        <label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>
-        <div class="sec big"><div class="lbl-lg">Shelves (tap to edit)</div>${shelves.map(sh => { const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id); return `<div class="itm-lg" data-go="${esc(sh.id)}"><span class="lvl-lg">L${esc(sh.level)}</span><span class="itm-name">${its.length ? its.map(i => esc(i.item.name)).join(', ') : '<i>empty</i>'}<small>${esc(sh.id)}</small></span><span class="chev">›</span></div>`; }).join('')}
-        <button class="btn-lg" id="eAddBay">＋ Add rack-level item (bottom bay)</button></div>`;
+      html += `<section class="sec big">${field('Name', 'eName')}<input class="in-lg" id="eName" dir="auto" value="${esc(def.name)}" />
+          ${field('DCIM rack', 'dRack')}<select class="in-lg" id="dRack"><option value="">— none —</option>${racks.map(r => `<option value="${esc(r)}" ${r === cur ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
+          <div class="edit-note">Which Lab Manager rack this physical rack is. The photos do not show it; a change is kept with Save to server.</div>
+          ${status(def.status)}${notes(def.notes || '')}${save}</section>
+        <section class="sec big">${H('Shelves')}${shelves.map(sh => { const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id); return `<div class="itm-lg" data-go="${esc(sh.id)}" role="button" tabindex="0"><span class="lvl-lg">${esc(shelfCaption(sh))}</span><span class="itm-name" dir="auto">${its.length ? its.map(i => esc(i.item.name)).join(', ') : '<i>empty</i>'}</span><span class="chev" aria-hidden="true">›</span></div>`; }).join('')}
+          <div class="row-lg"><button type="button" class="kbtn secondary md" id="eAddBay">Add a rack-level item (bottom bay)</button></div></section>`;
     } else if (rec.cat === 'storage') {
       const its = recsOf(r => r.cat === 'item' && r.item?.storage === rec.id);
-      html += `<div class="sec big"><label class="lbl-lg">Name</label><input class="in-lg" id="eName" value="${esc(def.name)}"/><label class="lbl-lg">Status</label>${bigChips(def.status || 'unknown')}<input type="hidden" id="eStatus" value="${esc(def.status || 'unknown')}"/><label class="lbl-lg">Notes</label><textarea class="in-lg" id="eNotes">${esc(def.notes || '')}</textarea><button class="btn-lg btn-save" id="eSave">✓ Save</button></div>
-        <div class="sec big"><div class="lbl-lg">Contents</div>${its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name">${esc(i.item.name)}<small>×${esc(i.item.quantity || 1)}</small></span><button class="btn-lg sm" data-edit="${esc(i.id)}">Edit</button></div>`).join('') || '<div class="note">Empty.</div>'}<button class="btn-lg" id="eAddStore">＋ Add item here</button></div>`;
+      html += `<section class="sec big">${field('Name', 'eName')}<input class="in-lg" id="eName" dir="auto" value="${esc(def.name)}" />${status(def.status)}${notes(def.notes || '')}${save}</section>
+        <section class="sec big">${H('Contents')}${its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>×${esc(i.item.quantity || 1)}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button></div>`).join('') || '<div class="edit-note">Empty.</div>'}
+          <div class="row-lg"><button type="button" class="kbtn secondary md" id="eAddStore">Add an item here</button></div></section>`;
     } else {
-      html += `<div class="sec big"><div class="note">${esc(def.notes || 'Nothing editable here — tap a rack, shelf or device.')}</div></div>`;
+      html += `<section class="sec big"><div class="edit-note" dir="auto">${esc(def.notes || 'Nothing editable here — tap a rack, shelf or device.')}</div></section>`;
     }
     $('#dBody').innerHTML = html;
     const body = $('#dBody');
-    $$('.chip-lg', body).forEach(c => c.onclick = () => { $$('.chip-lg', body).forEach(x => x.classList.remove('on')); c.classList.add('on'); $('#eStatus').value = c.dataset.st; });
-    $$('[data-go]', body).forEach(el => el.onclick = () => select(el.dataset.go, { keepCamera: true }));
+    $$('.chip-lg', body).forEach(c => c.onclick = () => { $$('.chip-lg', body).forEach(x => { x.classList.remove('on'); x.setAttribute('aria-pressed', 'false'); }); c.classList.add('on'); c.setAttribute('aria-pressed', 'true'); $('#eStatus').value = c.dataset.st; });
+    $$('[data-go]', body).forEach(el => { el.onclick = () => select(el.dataset.go, { keepCamera: true }); el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(el.dataset.go, { keepCamera: true }); } }; });
     $$('[data-edit]', body).forEach(el => el.onclick = e => { e.stopPropagation(); select(el.dataset.edit, { keepCamera: true }); });
     $$('[data-move]', body).forEach(el => el.onclick = e => { e.stopPropagation(); startMove(el.dataset.move); });
     $$('[data-step]', body).forEach(b => b.onclick = () => { const i = $('#eOutlet'); i.value = Math.min(48, Math.max(1, (parseInt(i.value, 10) || 0) + parseInt(b.dataset.step, 10))); });
@@ -3058,7 +3307,29 @@
       const id = b.dataset.jump; if (S.front && S.recs.get(id)?.cat === 'setup') { showRackFront(id); return; }
       select(id, { fly: true });
     });
+    // keep the signal in view: the selected chip when it changes, else the first chip with an issue when the issues change
+    const onId = $('.rb.on', bar)?.dataset.jump || ''; const issueKey = $$('.rb.crit, .rb.warn', bar).map(b => b.dataset.jump).join(',');
+    if (onId && onId !== S.rbShown?.on) revealChip($('.rb.on', bar)); else if (issueKey !== S.rbShown?.issues) revealChip($('.rb.crit', bar) || $('.rb.warn', bar));
+    S.rbShown = { on: onId, issues: issueKey };
+    rackBarEdges();
   }
+  // Scroll the rack bar (never the page: the twin may be embedded) so a chip is fully visible, clear of the edge fades.
+  function revealChip(chip) {
+    const bar = $('#rackBar'); if (!chip || !bar || bar.scrollWidth <= bar.clientWidth) return;
+    const pad = 44, l = chip.offsetLeft, r = l + chip.offsetWidth;
+    if (l - pad < bar.scrollLeft) bar.scrollLeft = Math.max(0, l - pad);
+    else if (r + pad > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = r + pad - bar.clientWidth;
+    rackBarEdges();
+  }
+  // Edge fades with ‹ › buttons only while the rack bar overflows on that side.
+  function rackBarEdges(resized) {
+    const bar = $('#rackBar'), wrap = $('#rackBarWrap'); if (!bar || !wrap) return;
+    if (resized) revealChip($('.rb.on', bar) || $('.rb.crit', bar) || $('.rb.warn', bar));
+    const max = bar.scrollWidth - bar.clientWidth;
+    wrap.classList.toggle('can-left', max > 1 && bar.scrollLeft > 1); wrap.classList.toggle('can-right', max > 1 && bar.scrollLeft < max - 1);
+  }
+  $('#rackBar').addEventListener('scroll', () => rackBarEdges(), { passive: true });
+  ['rbPrev', 'rbNext'].forEach((id, i) => { $('#' + id).onclick = () => { const bar = $('#rackBar'); bar.scrollBy({ left: (i ? 1 : -1) * Math.max(120, bar.clientWidth * 0.6), behavior: reducedMotion() ? 'auto' : 'smooth' }); }; });
   function zoomBy(f) { markView(null); const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
   $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4);   // rotate with a drag, pan with the arrow keys or a right drag
   window.addEventListener('keydown', e => { if (e.target !== canvas && e.target !== document.body) return; const k = e.key; if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1); else return; e.preventDefault(); });
@@ -3090,10 +3361,20 @@
     setInterval(renderLive, 1000);
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
-    if (S.settings.url) connect(); else if (auto) { api('/api/version').then(() => connect()).catch(() => {}); }
+    if (S.settings.url) connect();
+    else if (auto) {
+      S.live.connecting = true; pill('connecting', 'Connecting…'); refreshAttention();
+      api('/api/version').then(() => connect()).catch(e => {
+        S.live.connecting = false;
+        if (S.live.signedOut) { refreshAttention(); return; }
+        if (e.status === 404 || location.protocol === 'file:') pill('offline', 'Offline · static data');   // static file server: no backend here
+        else connectFailed(e, e.status, true);
+        refreshAttention();
+      });
+    }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, renderer, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf };
+  window.__twin = { S, scene, camera, controls, renderer, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);

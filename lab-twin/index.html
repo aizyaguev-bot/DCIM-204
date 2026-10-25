@@ -9,11 +9,11 @@
 <body>
   <!-- ─── Top bar (48 px): brand · search · camera view · layers · colour · live · issues · edit · more ─── -->
   <header class="hdr">
-    <button class="brand" id="btnHome" type="button" title="Back to the overview"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Lab Twin</span></button>
+    <button class="brand" id="btnHome" type="button" title="Back to the overview" aria-label="Lab Twin — back to the overview"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Lab Twin</span></button>
 
     <div class="search-wrap" id="searchWrap">
       <svg class="search-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-3.5-3.5"/></svg>
-      <input id="search" type="text" placeholder="Search racks, devices, owners… (/)" aria-keyshortcuts="/" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchResults" aria-label="Search the lab" />
+      <input id="search" type="text" dir="auto" placeholder="Search racks, devices, owners… (/)" aria-keyshortcuts="/" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchResults" aria-label="Search the lab" />
       <div id="searchResults" class="search-results hidden" role="listbox" aria-label="Search results"></div>
     </div>
     <button class="kbtn tertiary icon phone-only" id="btnSearch" type="button" aria-label="Search" aria-expanded="false" aria-controls="searchWrap">
@@ -92,7 +92,11 @@
   </header>
 
   <!-- ─── Rack bar (32 px): racks grouped by row, health dot, issue count ─── -->
-  <nav class="rackbar" id="rackBar" aria-label="Racks"></nav>
+  <div class="rackbar-wrap" id="rackBarWrap">
+    <nav class="rackbar" id="rackBar" aria-label="Racks"></nav>
+    <button type="button" class="rb-scroll prev" id="rbPrev" tabindex="-1" aria-label="Scroll the rack bar left">‹</button>
+    <button type="button" class="rb-scroll next" id="rbNext" tabindex="-1" aria-label="Scroll the rack bar right">›</button>
+  </div>
 
   <!-- ─── Main layout: side panel · 3D view · details drawer (phone: 3D view + bottom sheet) ─── -->
   <main class="layout">
@@ -102,8 +106,9 @@
 
       <nav class="crumb" id="crumb" aria-label="Location in the lab">
         <span id="crumbPath">Lab › Overview</span>
-        <span class="rf-nav hidden" id="rfNav"><button type="button" class="crumb-btn" id="rfPrev" title="Previous rack ([)">[ Previous</button><button type="button" class="crumb-btn" id="rfNext" title="Next rack (])">Next ]</button></span>
+        <span class="rf-nav hidden" id="rfNav"><button type="button" class="crumb-btn" id="rfPrev" title="Previous rack ([)" aria-label="Previous rack"><span class="fine-only" aria-hidden="true">‹ Previous</span><span class="coarse-only" aria-hidden="true">Previous rack</span></button><button type="button" class="crumb-btn" id="rfNext" title="Next rack (])" aria-label="Next rack"><span class="fine-only" aria-hidden="true">Next ›</span><span class="coarse-only" aria-hidden="true">Next rack</span></button></span>
       </nav>
+      <nav class="rf-bar hidden" id="rfBar" aria-label="Rack front"></nav>
       <div class="attn-dock" id="attnDock" aria-label="Issues"></div>
 
       <div class="movebanner hidden" id="moveBanner" role="region" aria-label="Move"><span class="mv-ic" aria-hidden="true">⇄</span><span id="moveText">Tap a shelf</span><select id="moveTarget" aria-label="Destination"></select><button type="button" class="kbtn primary small" id="moveGo" title="Move to the chosen destination (asks to confirm)">Move here</button><button type="button" class="kbtn secondary small" id="moveCancel" title="Stop moving (nothing is changed)">Cancel</button></div>
@@ -160,7 +165,7 @@
       <aside class="detail hidden" id="detail" aria-label="Details">
         <div class="detail-h">
           <div class="dh-text">
-            <div class="detail-name" id="dName">—</div>
+            <div class="detail-name" id="dName" dir="auto">—</div>
             <div class="detail-id" id="dId">—</div>
           </div>
           <div class="detail-actions">
