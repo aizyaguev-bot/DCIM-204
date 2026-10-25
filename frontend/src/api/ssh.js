@@ -492,11 +492,15 @@ export function overridesFromStatus(status) {
 // "address_changed" (allowed for an older address) or "none".
 export const APPROVAL_LABELS = {
   explicit: "Allowed", auto: "Allowed (every server)", denied: "Turned off", skipped: "No usable address",
-  address_changed: "Address changed", none: "Not allowed",
+  address_changed: "Needs address check", none: "Not allowed",
 };
 
 // Why the terminal cannot open for a server the status reports as not allowed (fixed sentences only).
 export function notAllowedText(server, label = server?.name || "this server") {
+  // The backend's own sentence (Operator+) is exact, e.g. an alias of a turned-off host or a server the Admin's
+  // "Check addresses again" pass has not seen yet; shown as plain text, never as markup.
+  const own = typeof server?.not_allowed_reason === "string" ? stripControls(server.not_allowed_reason).trim().slice(0, 400) : "";
+  if (own) return own;
   switch (server?.approval) {
     case "denied": return `An Admin turned SSH off for ${label}. An Admin can allow it again in Admin → SSH.`;
     case "skipped": return `Lab Manager cannot use the saved address of ${label}: the VM cannot resolve it, or it points to a local or VM address. Give ${label} its IP address in Ping Monitor (or fix its DNS name).`;

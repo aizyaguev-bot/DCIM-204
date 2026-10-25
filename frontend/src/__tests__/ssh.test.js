@@ -688,7 +688,9 @@ test("auto-allow: approval states, skipped servers and plain-text reasons", () =
   assert.equal(supportsAutoAllow(READY, { auto_allow: false }), true);
   const at = name => sshAvailability({ status, name, accountMode: "accounts", protocol: "https:" });
   assert.equal(at("opt12").enabled, true);
-  assert.match(at("opt13").reason, /cannot use the saved address of opt13/);
+  // The backend's own sentence wins when it sends one; the fixed text is the fallback.
+  assert.equal(at("opt13").reason, status.servers[1].not_allowed_reason);
+  assert.match(notAllowedText({ approval: "skipped" }, "opt13"), /cannot use the saved address of opt13/);
   assert.match(at("opt14").reason, /^An Admin turned SSH off for opt14\./);
   assert.match(notAllowedText({ approval: "address_changed" }, "opt9"), /address of opt9 changed/);
   assert.match(notAllowedText({ approval: "none" }, "opt9"), /not allowed for opt9/);

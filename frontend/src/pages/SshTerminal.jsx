@@ -311,7 +311,7 @@ function KeyInstallPanel({ serverKey, server, name, user, accountMode }) {
       </p>}
       {state.data && !row && <p className="text-xs text-zinc-500">Lab Manager has no install command for {name}: SSH is not allowed for it.</p>}
       {row && <>
-        {row.address_changed && <p className="text-xs text-amber-300">The address of {name} changed. An Admin must allow it again in Admin → SSH before Lab Manager can connect.</p>}
+        {row.address_changed && <p className="text-xs text-amber-300">{typeof row.reason === "string" && row.reason.trim() ? row.reason.trim().slice(0, 400) : `The address of ${name} changed. An Admin must allow it again in Admin → SSH before Lab Manager can connect.`}</p>}
         {placeholderIp && <p className="text-xs text-amber-300">Lab Manager could not work out its own address for {name}. Replace &lt;VM IP&gt; with the Lab Manager VM's address before running the command.</p>}
         <pre tabIndex={0} aria-label={`Key-install command for ${name}`}
           className="whitespace-pre-wrap break-all rounded border border-zinc-800 bg-black p-2 text-[11px] leading-relaxed font-mono text-zinc-200 select-all max-h-48 overflow-y-auto">{row.command}</pre>

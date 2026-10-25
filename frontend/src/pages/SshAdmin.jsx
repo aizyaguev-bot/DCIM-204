@@ -35,7 +35,8 @@ export default function SshAdmin() {
 
   useEffect(() => { if (canOperate && !legacy) sshStatusStore.refresh({ force: true }); }, [canOperate, legacy]);
 
-  const keyReady = !!(status?.key_exists && status?.installed !== false && canOperate);
+  // The all-servers key list is Admin-only; an Operator sees install commands on each terminal page instead.
+  const keyReady = !!(status?.key_exists && status?.installed !== false && canAdmin);
   async function loadKey() {
     const seq = ++keySeq.current;
     setKeyInfo(k => ({ ...k, loading: true }));
