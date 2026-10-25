@@ -31,6 +31,19 @@ SESSION_CHECK_SECONDS = 30
 USERNAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}", re.ASCII)
 SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}", re.ASCII)
 ADDRESS_CHANGED_REASON = "Server address changed - an Admin must approve it again"
+NOT_APPROVED_REASON = "An Admin must approve this SSH target first"
+TURNED_OFF_REASON = "SSH is not allowed for this server: an Admin turned it off"
+UNRESOLVED_DETAIL = "SSH target could not be resolved safely"
+PROHIBITED_DETAIL = "SSH target resolves to a prohibited address"
+NO_KEYS_REASON = ("No SSH key is available: the VM account has no usable key in ~/.ssh and the Lab Manager key "
+                  "has not been generated")
+CHECK_CONCURRENCY = 8         # Parallel DNS/address checks when many servers are evaluated at once.
+UNREACHABLE_ERRNOS = {getattr(errno, name) for name in ("EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT", "EHOSTDOWN", "ENETDOWN")
+                      if hasattr(errno, name)}
+UNREACHABLE_WINERRORS = {121, 1231, 1232, 10050, 10051, 10060, 10064, 10065}
+# Connection failures sent to the browser as these bare tokens (the page turns them into sentences) and audited as-is.
+TOKEN_REASONS = frozenset({"unreachable", "refused", "auth_failed", "host_key_changed", "connect_timeout",
+                           "connection_failed"})
 INSECURE_REASON = ("SSH terminal requires SSH_ALLOW_INSECURE_TRANSPORT=true: browser terminal traffic on HTTP "
                    "is unencrypted; enable this only after accepting that risk and plan HTTPS")
 REASONS = {
@@ -40,7 +53,16 @@ REASONS = {
     "connect_timeout": "SSH connection timed out", "connection_failed": "SSH connection failed",
     "invalid_message": "Invalid terminal message", "input_rate_limit": "Terminal input rate limit reached",
     "cancelled": "Terminal cancelled", "denied": "SSH action denied",
+    "unreachable": "unreachable", "refused": "refused", "auth_failed": "auth_failed",
 }
+
+
+class ConnectFailure(Exception):
+    """An SSH connection attempt failed for a fixed reason in TOKEN_REASONS; never carries library text."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class AddressFamilyUnavailable(OSError):
@@ -168,14 +190,51 @@ def user_for(server, config):
     return username(config["per_server_user"].get(server["key"], config["default_user"]))
 
 
-def approved_host(server, config):
-    host = config.get("targets", {}).get(server["key"])
+ALLOWED_STATES = ("explicit", "auto")
+
+
+def approval(server, config):
+    """Return (state, host, reason) for one known server.
+
+    state: "explicit" (an Admin approved it for its saved host), "auto" ("allow every server" is on), "denied"
+    (an Admin turned it off; wins over everything), "skipped" (the last "allow every server" pass could not use
+    its saved host), "address_changed" (approved for an older host) or "none". Only explicit/auto may connect,
+    and always to the host returned here: the server's saved host. Connect still resolves and checks the address."""
+    key = server["key"]
+    if key in config.get("denied", ()):
+        return "denied", "", TURNED_OFF_REASON
+    try:
+        saved = checked_host(server["host"])
+    except HTTPException:
+        return "none", "", "Invalid SSH host"
+    host = config.get("targets", {}).get(key)
+    if host and checked_host(host) == saved:
+        return "explicit", saved, ""
+    if config.get("auto_allow"):
+        skipped = config.get("auto_skipped", {}).get(key)
+        if skipped and skipped.get("host") == saved:
+            return "skipped", "", skip_text(skipped.get("reason"), saved)
+        return "auto", saved, ""
     if not host:
-        raise HTTPException(403, "An Admin must approve this SSH target first")
-    host = checked_host(host)
-    if host != checked_host(server["host"]):
-        raise HTTPException(403, ADDRESS_CHANGED_REASON)
+        return "none", "", NOT_APPROVED_REASON
+    return "address_changed", "", ADDRESS_CHANGED_REASON
+
+
+def approved_host(server, config):
+    state, host, reason = approval(server, config)
+    if state not in ALLOWED_STATES:
+        raise HTTPException(403, reason)
     return host
+
+
+async def limited(items, worker):
+    """Run worker over items with bounded concurrency, keeping their order."""
+    semaphore = asyncio.Semaphore(CHECK_CONCURRENCY)
+
+    async def run(item):
+        async with semaphore:
+            return await worker(item)
+    return await asyncio.gather(*(run(item) for item in items))
 
 
 @router.get("/status")
@@ -188,14 +247,15 @@ async def status(request: Request, response: Response, db: AsyncSession = Depend
     servers = []
     for server in await ssh_store.known_servers(db):
         pin = await ssh_store.run_file_op(ssh_store.host_info, server["key"])
-        approved = server["key"] in config.get("targets", {})
-        address_changed = approved and checked_host(config["targets"][server["key"]]) != checked_host(server["host"])
+        state, host, reason = approval(server, config)
+        allowed = state in ALLOWED_STATES
         entry = {"key": server["key"], "name": server["name"], **pin,
-                 "host_key": pin, "approved": approved and not address_changed,
-                 "allowed": approved and not address_changed, "address_changed": bool(address_changed)}
+                 "host_key": pin, "approved": allowed, "allowed": allowed, "approval": state,
+                 "address_changed": state == "address_changed"}
         if operator:
-            entry.update(host=server["host"], approved_host=config.get("targets", {}).get(server["key"], ""),
-                         user=user_for(server, config))
+            # approved_host is the host a connection would use: the approval, or the saved host when auto-allowed.
+            entry.update(host=server["host"], approved_host=host or config.get("targets", {}).get(server["key"], ""),
+                         user=user_for(server, config), not_allowed_reason=reason)
         servers.append(entry)
     transport_allowed = getattr(get_settings(), "ssh_allow_insecure_transport", False)
     result = {"enabled": bool(getattr(get_settings(), "ssh_terminal_enabled", True)),
@@ -203,9 +263,11 @@ async def status(request: Request, response: Response, db: AsyncSession = Depend
               "transport_allowed": bool(transport_allowed), "insecure_transport_allowed": bool(transport_allowed),
               "blocked_reason": "" if transport_allowed else INSECURE_REASON,
               "installed": await ssh_store.run_file_op(ssh_store.installed),
-              "key_exists": info["key_exists"], "public_key_fingerprint": info["fingerprint"], "servers": servers}
+              "key_exists": info["key_exists"], "public_key_fingerprint": info["fingerprint"],
+              "auto_allow": bool(config.get("auto_allow")), "servers": servers}
     if operator:
         result["default_user"] = config["default_user"]
+        result["key_source"] = config["key_source"]
     if current["user"]["role"] == "Admin":
         result["config_revision"] = ssh_store.config_etag(config)
     return result
@@ -226,7 +288,8 @@ def installation_source_ip(connected_ip=None):
     return "<VM IP>"
 
 
-async def public_key_response(db):
+async def public_key_response(db, only=None):
+    """Public key plus restricted install/revoke commands for every server SSH may reach (or just `only`)."""
     await ssh_store.run_file_op(ssh_store.load_asyncssh)
     info = await ssh_store.run_file_op(ssh_store.key_info)
     if not info["key_exists"]:
@@ -234,23 +297,30 @@ async def public_key_response(db):
     config = await ssh_store.run_file_op(ssh_store.read_config)
     servers = await ssh_store.known_servers(db)
     await db.rollback()  # Inventory is plain data; DNS/route lookups must not retain its read transaction.
-    install, revoke = [], []
+    rows = []
     for server in servers:
-        if server["key"] not in config.get("targets", {}):
+        if only is not None and server["key"] != only:
             continue
-        host = checked_host(config["targets"][server["key"]])
-        row_reason = ""
-        address_changed = False
+        state, host, _ = approval(server, config)
+        if state == "address_changed":
+            rows.append((server, checked_host(config["targets"][server["key"]]), True))
+        elif state in ALLOWED_STATES:
+            rows.append((server, host, False))
+
+    async def source_for(row):
+        server, host, address_changed = row
+        if address_changed:
+            return "<VM IP>", ADDRESS_CHANGED_REASON
         try:
-            host = approved_host(server, config)
             checked_ip = await resolve_target(host)
-            source_ip = await asyncio.to_thread(installation_source_ip, checked_ip)
-        except (HTTPException, OSError, asyncio.TimeoutError) as error:
-            source_ip = "<VM IP>"
-            address_changed = isinstance(error, HTTPException) and error.detail == ADDRESS_CHANGED_REASON
-            row_reason = (ADDRESS_CHANGED_REASON if address_changed else
-                          "Cannot determine the VM source address for this target; verify and replace <VM IP>")
-        options = f'from="{source_ip}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc'
+            return await asyncio.to_thread(installation_source_ip, checked_ip), ""
+        except (HTTPException, OSError, asyncio.TimeoutError):
+            return "<VM IP>", "Cannot determine the VM source address for this target; verify and replace <VM IP>"
+
+    sources = await limited(rows, source_for)
+    install, revoke = [], []
+    for (server, host, address_changed), (source_ip, row_reason) in zip(rows, sources):
+        options =f'from="{source_ip}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc'
         authorized = options + " " + info["public_key"].strip()
         destination = f"{user_for(server, config)}@{host}"
         manual = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\\n' " + shlex.quote(authorized) +
@@ -276,10 +346,13 @@ async def public_key_response(db):
 
 
 @router.get("/key")
-async def get_key(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+async def get_key(request: Request, response: Response, server: str | None = None, db: AsyncSession = Depends(get_db)):
+    """`?server=<key>` limits install/revoke rows to that server (the terminal page shows only its own command)."""
     principal(request, "Operator")
+    if server is not None and not SLUG.fullmatch(server):
+        raise HTTPException(404, "Server not found")
     response.headers["Cache-Control"] = "no-store"
-    return await public_key_response(db)
+    return await public_key_response(db, only=server)
 
 
 async def event(db, connection, action, key="", host="", reason="admin_action"):
@@ -320,13 +393,24 @@ async def generate_key(request: Request, response: Response, db: AsyncSession = 
     return await public_key_response(db)
 
 
+def vm_key_dir():
+    """Where the VM account's own keys live: ~/.ssh of the account running Lab Manager unless overridden."""
+    return getattr(get_settings(), "ssh_vm_key_dir", "") or None
+
+
+async def config_response(config, response):
+    """The stored configuration plus vm_keys (file names, key types, fixed reasons). The ETag covers only the
+    stored configuration, so the computed vm_keys never make an If-Match stale."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["ETag"] = ssh_store.config_etag(config)
+    return {**config, "vm_keys": await ssh_store.run_file_op(ssh_store.vm_key_report, vm_key_dir())}
+
+
 @router.get("/config")
 async def get_config(request: Request, response: Response):
     principal(request, "Admin")
     config = await ssh_store.run_file_op(ssh_store.read_config)
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["ETag"] = ssh_store.config_etag(config)
-    return config
+    return await config_response(config, response)
 
 
 @router.put("/config")
@@ -340,48 +424,124 @@ async def configure(request: Request, response: Response, db: AsyncSession = Dep
     if isinstance(body, dict) and "allowed" in body and "targets" not in body:
         body = {**body, "targets": body["allowed"]}
         del body["allowed"]
-    if not isinstance(body, dict) or set(body) != {"default_user", "per_server_user", "targets"}:
-        raise HTTPException(400, "Supply default_user, per_server_user and targets")
-    default = username(body["default_user"])
-    overrides, targets = body["per_server_user"], body["targets"]
+    if isinstance(body, dict):
+        # Computed, read-only fields may come back when a client echoes GET /config; they are never taken from it.
+        body = {name: value for name, value in body.items() if name not in ("auto_skipped", "skipped", "vm_keys")}
+    fields = {"default_user", "per_server_user", "targets", "auto_allow", "denied", "key_source"}
+    if not isinstance(body, dict) or not body or set(body) - fields:
+        raise HTTPException(400, "Supply default_user, per_server_user, targets, denied, auto_allow or key_source")
+    # Fields left out keep their saved values, so "Allow every server with an address" can send only auto_allow
+    # and the key switch only key_source.
+    expected = request.headers.get("if-match")
+    current = await ssh_store.run_file_op(ssh_store.read_config)
+    if expected is None:
+        raise HTTPException(428, "SSH configuration precondition is required")
+    if expected != ssh_store.config_etag(current):
+        raise HTTPException(412, "SSH configuration has changed")
+    default = username(body.get("default_user", current["default_user"]))
+    overrides = body.get("per_server_user", current["per_server_user"])
+    targets = body["targets"] if "targets" in body else dict(current["targets"])
     if any(not isinstance(value, dict) or len(value) > 10000 for value in (overrides, targets)):
         raise HTTPException(400, "Invalid SSH configuration")
+    auto_allow = body.get("auto_allow", current["auto_allow"])
+    if type(auto_allow) is not bool:
+        raise HTTPException(400, "auto_allow must be true or false")
+    key_source = body.get("key_source", current["key_source"])
+    if not isinstance(key_source, str) or key_source not in ssh_store.KEY_SOURCES:
+        raise HTTPException(400, 'key_source must be "vm" or "site"')
+    denied = body.get("denied", current["denied"])
+    if (not isinstance(denied, list) or len(denied) > 10000 or
+            not all(isinstance(key, str) and SLUG.fullmatch(key) for key in denied)):
+        raise HTTPException(400, "denied must be a list of server keys")
     servers = {s["key"]: s for s in await ssh_store.known_servers(db)}
-    if (set(overrides) | set(targets)) - set(servers):
+    await db.rollback()  # DNS checks below must not hold the inventory read transaction.
+    supplied = {name: body[name] for name in ("per_server_user", "targets") if name in body}
+    if "denied" in body:
+        supplied["denied"] = dict.fromkeys(denied)
+    # Only what this request supplies must name known servers; saved entries of a removed server stay inert.
+    if set().union(*supplied.values()) - set(servers):
         raise HTTPException(400, "Unknown server in SSH configuration")
     for value in overrides.values():
         username(value)
-    # Approvals are pinned to the saved host, so the config cannot become a free-form SSRF interface.
-    for key, value in targets.items():
-        host = checked_host(value)
-        if host != checked_host(servers[key]["host"]):
-            raise HTTPException(400, "Approved SSH host must match the saved server host")
-        targets[key] = host
-    # A server whose host the VM cannot resolve to a usable address is left unapproved, and named in `skipped`,
-    # instead of failing the whole save: one name-only server must not block approving every other server.
-    skipped = []
-    for key, host in list(targets.items()):
-        try:
-            await resolve_target(host)
-        except HTTPException as error:
-            del targets[key]
-            skipped.append({"key": key, "name": servers[key]["name"], "host": host, "reason": skip_reason(error.detail, host)})
-    await ssh_store.run_file_op(ssh_store.write_config, default, overrides, targets, request.headers.get("if-match"))
-    await event(db, request, "config_updated")
+    denied = set(denied)
+    if "targets" in body:
+        if "denied" not in body:
+            denied -= set(targets)  # Approving a server again lifts an earlier "not allowed".
+        # Approvals are pinned to the saved host, so the config cannot become a free-form SSRF interface.
+        for key, value in targets.items():
+            host = checked_host(value)
+            if host != checked_host(servers[key]["host"]):
+                raise HTTPException(400, "Approved SSH host must match the saved server host")
+            targets[key] = host
+    targets = {key: host for key, host in targets.items() if key not in denied}
+    # Hosts to check now: newly supplied approvals and, when "allow every server" is (re)applied, every saved
+    # server that is not turned off. Unresolvable ones are skipped with a reason instead of failing the save.
+    checks = dict(targets) if "targets" in body else {}
+    invalid = []
+    auto_pass = "auto_allow" in body and auto_allow
+    if auto_pass:
+        for key, server in servers.items():
+            if key in denied or key in checks:
+                continue
+            try:
+                checks[key] = checked_host(server["host"])
+            except HTTPException:
+                invalid.append(key)  # approval() never allows a server whose saved host is not a valid SSH host.
+    failures = dict(zip(checks, await limited(list(checks.values()), check_failure)))
+    skipped = [{"key": key, "name": servers[key]["name"], "host": checks[key], "reason": skip_text(code, checks[key])}
+               for key, code in failures.items() if code]
+    skipped += [{"key": key, "name": servers[key]["name"], "host": servers[key]["host"],
+                 "reason": skip_text("unchecked", servers[key]["host"])} for key in invalid]
+    for item in skipped:
+        targets.pop(item["key"], None)
+    if auto_pass:
+        auto_skipped = {key: {"host": checks[key], "reason": code} for key, code in failures.items() if code}
+    else:
+        auto_skipped = None if auto_allow else {}  # None keeps the last pass while the flag stays on.
+    await ssh_store.run_file_op(ssh_store.write_config, default, overrides, targets, expected,
+                                auto_allow=auto_allow, denied=sorted(denied), auto_skipped=auto_skipped,
+                                key_source=key_source)
+    actions = []
+    if auto_allow != current["auto_allow"]:
+        actions.append("auto_allow_on" if auto_allow else "auto_allow_off")
+    if key_source != current["key_source"]:
+        actions.append("key_source_changed")
+    if not actions or set(body) & {"default_user", "per_server_user", "targets", "denied"}:
+        actions.append("config_updated")
+    for action in actions:
+        await event(db, request, action)
     config = await ssh_store.run_file_op(ssh_store.read_config)
-    response.headers["ETag"] = ssh_store.config_etag(config)
-    response.headers["Cache-Control"] = "no-store"
-    return {**config, "skipped": skipped} if skipped else config
+    result = await config_response(config, response)
+    return {**result, "skipped": skipped} if skipped else result
+
+
+async def check_failure(host):
+    """None when the host resolves to a usable address now, else a fixed skip code (no resolver output)."""
+    try:
+        await resolve_target(host)
+        return None
+    except HTTPException as error:
+        return skip_code(error.detail)
+    except (OSError, asyncio.TimeoutError):
+        return "unchecked"
+
+
+def skip_code(detail):
+    return {UNRESOLVED_DETAIL: "unresolved", PROHIBITED_DETAIL: "prohibited"}.get(detail, "unchecked")
+
+
+def skip_text(code, host):
+    """Owner-facing reason a server was left unapproved; fixed texts only (no resolver output)."""
+    if code == "unresolved":
+        return (f"The VM cannot find an IP address for {host}. Give this server its IP address in Ping Monitor "
+                "(or fix its name in DNS), then approve it again.")
+    if code == "prohibited":
+        return f"{host} points to a loopback, link-local, multicast or VM address, which SSH may not use."
+    return f"{host} could not be checked as a safe SSH target from the VM."
 
 
 def skip_reason(detail, host):
-    """Owner-facing reason a server was left unapproved; fixed texts only (no resolver output)."""
-    if detail == "SSH target could not be resolved safely":
-        return (f"The VM cannot find an IP address for {host}. Give this server its IP address in Ping Monitor "
-                "(or fix its name in DNS), then approve it again.")
-    if detail == "SSH target resolves to a prohibited address":
-        return f"{host} points to a loopback, link-local, multicast or VM address, which SSH may not use."
-    return f"{host} could not be checked as a safe SSH target from the VM."
+    return skip_text(skip_code(detail), host)
 
 
 @router.post("/hosts/{key}/accept")
@@ -542,6 +702,50 @@ async def bridge(websocket, process, idle_seconds, current, counts, *, max_secon
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def client_keys_for(key_source, directory=None):
+    """[(name, key type, key)] in offer order: with "vm" the VM account's own default keys (as its `ssh` would
+    offer them), then the Lab Manager key; with "site" only the Lab Manager key. Key objects stay in memory for
+    this one connection; names are file names ("id_ed25519") or "lab-manager", never paths."""
+    offers = list(ssh_store.vm_keys(directory)[1]) if key_source == "vm" else []
+    try:
+        site = ssh_store.private_key()
+    except HTTPException as error:
+        if error.status_code != 409 or key_source != "vm":
+            raise
+        if not offers:
+            raise HTTPException(409, NO_KEYS_REASON) from None
+    else:
+        offers.append((ssh_store.SITE_KEY_NAME, ssh_store.key_type_of(site), site))
+    return offers
+
+
+def connect_failure(library, error, reached):
+    """Map a connection error to a fixed reason; the library's own text is never shown or stored."""
+    if isinstance(error, library.PermissionDenied):
+        return "auth_failed"
+    if isinstance(error, ConnectionRefusedError):
+        return "refused"
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return "connect_timeout" if reached else "unreachable"
+    if isinstance(error, OSError) and (error.errno in UNREACHABLE_ERRNOS or
+                                       getattr(error, "winerror", None) in UNREACHABLE_WINERRORS):
+        return "unreachable"
+    return "connection_failed"
+
+
+async def connect_target(host):
+    """resolve_target for a live connection: a name the VM cannot resolve is "unreachable" and a prohibited
+    address is "denied", as fixed reason tokens; other refusals keep their site sentence."""
+    try:
+        return await resolve_target(host)
+    except HTTPException as error:
+        if error.detail == UNRESOLVED_DETAIL:
+            raise ConnectFailure("unreachable") from None
+        if error.detail == PROHIBITED_DETAIL:
+            raise HTTPException(403, "denied") from None
+        raise
+
+
 @router.websocket("/{key}/terminal")
 async def terminal(key: str, websocket: WebSocket):
     session_started = time.monotonic()
@@ -550,6 +754,7 @@ async def terminal(key: str, websocket: WebSocket):
     reason, detail, code = "remote_closed", "", 1000
     connected_ip = fingerprint = ""
     counts = {"in": 0, "out": 0}
+    signed_in = []   # [(name, key type)] of the key the server accepted
     try:
         current = principal(websocket, "Operator")
         enabled()
@@ -575,8 +780,9 @@ async def terminal(key: str, websocket: WebSocket):
             server = await target_for(target_db, key)
         config = await ssh_store.run_file_op(ssh_store.read_config)
         host, user = approved_host(server, config), user_for(server, config)
-        connected_ip = await resolve_target(host)
-        private_key = await ssh_store.run_file_op(ssh_store.private_key)
+        key_source = config["key_source"]
+        connected_ip = await connect_target(host)
+        offers = await ssh_store.run_file_op(client_keys_for, key_source, vm_key_dir())
         settings = get_settings()
         if not await session_valid(websocket, current):
             raise HTTPException(401, "signed_out")
@@ -585,11 +791,25 @@ async def terminal(key: str, websocket: WebSocket):
                 audit = await ssh_store.start_session(reserve_db, current["user"]["username"], key, host,
                     max_per_user=getattr(settings, "ssh_max_sessions_per_user", 4), max_total=getattr(settings, "ssh_max_sessions_total", 20),
                     user_id=current["user"]["id"], user_name=current["user"]["name"], connected_ip=connected_ip,
-                    remote_user=user, client_ip=websocket.client.host if websocket.client else "")
+                    remote_user=user, client_ip=websocket.client.host if websocket.client else "", key_source=key_source)
         await websocket.send_json({"type": "status", "state": "connecting", "reason": ""})
-        pinned, changed, storage_errors = [], [], []
+        pinned, changed, storage_errors, reached, tried = [], [], [], [], []
 
         class Client(library.SSHClient):
+            def connection_made(self, conn):
+                reached.append(True)  # TCP is up: a later timeout is not "unreachable".
+
+            def public_key_auth_requested(self):
+                # The only source of client keys (client_keys=None): our explicit list, one per call, in order.
+                if len(tried) >= len(offers):
+                    return None
+                tried.append(offers[len(tried)])
+                return tried[-1][2]
+
+            def auth_completed(self):
+                if tried:
+                    signed_in.append(tried[-1][:2])
+
             def validate_host_public_key(self, ignored_host, addr, port, host_key):
                 nonlocal fingerprint
                 fingerprint = host_key.get_fingerprint()
@@ -609,24 +829,24 @@ async def terminal(key: str, websocket: WebSocket):
 
         async def connect():
             nonlocal connection
-            # Explicit args prevent ~/.ssh, ssh-agent, passwords, GSSAPI or tunnels from changing the target/auth policy.
-            connection = await library.connect(connected_ip, port=22, username=user, client_keys=[private_key], client_factory=Client,
+            # Explicit args keep ~/.ssh/config (ProxyCommand, Port, IdentityFile...), the ssh-agent, default key
+            # loading, passwords, GSSAPI and tunnels out of the target/auth policy. client_keys=None stops AsyncSSH
+            # loading ~/.ssh itself; Client.public_key_auth_requested offers exactly `offers`, in order.
+            connection = await library.connect(connected_ip, port=22, username=user, client_keys=None, client_factory=Client,
                 known_hosts=library.import_known_hosts(""), server_host_key_algs="default", config=None, agent_path=None,
-                x509_trusted_certs=None, x509_trusted_cert_paths=None,
-                gss_auth=False, gss_kex=False, password_auth=False, kbdint_auth=False, host_based_auth=False,
-                preferred_auth="publickey", agent_forwarding=False, x11_forwarding=False, connect_timeout=timeout,
-                login_timeout=timeout, encoding=None, keepalive_interval=30, keepalive_count_max=3)
+                agent_identities=None, pkcs11_provider=None, x509_trusted_certs=None, x509_trusted_cert_paths=None,
+                public_key_auth=True, gss_auth=False, gss_kex=False, password_auth=False, kbdint_auth=False,
+                host_based_auth=False, preferred_auth="publickey", agent_forwarding=False, x11_forwarding=False,
+                connect_timeout=timeout, login_timeout=timeout, encoding=None, keepalive_interval=30, keepalive_count_max=3)
+            # No command: the account's login shell only. Lab Manager never runs or writes anything on the server.
             return await connection.create_process(term_type="xterm-256color", term_size=(80, 24), encoding=None)
 
         try:
             process = await asyncio.wait_for(connect(), timeout)
-        except Exception:
+        except Exception as error:
             if storage_errors:
                 raise storage_errors[0] from None
-            if changed:
-                reason = "host_key_changed"
-                raise HTTPException(409, REASONS[reason]) from None
-            raise
+            raise ConnectFailure("host_key_changed" if changed else connect_failure(library, error, bool(reached))) from None
         await websocket.send_json({"type": "status", "state": "connected",
             "reason": f"new host key pinned {pinned[0]} (unconfirmed; compare using the KVM console)" if pinned else ""})
         maximum = min(getattr(settings, "ssh_max_session_seconds", 3600), getattr(settings, "accounts_session_hours", 12) * 3600)
@@ -636,9 +856,11 @@ async def terminal(key: str, websocket: WebSocket):
             max_seconds=remaining, audit_id=audit.id)
         if reason == "session_expired":
             code = 4401
+    except ConnectFailure as failure:
+        reason = failure.reason
+        code = 4409 if reason == "host_key_changed" else 1011
     except HTTPException as exc:
-        detail = exc.detail
-        reason = "host_key_changed" if exc.status_code == 409 and reason == "host_key_changed" else "denied"
+        detail, reason = exc.detail, "denied"
         code = {401: 4401, 403: 4403, 404: 4404, 409: 4409, 429: 4429, 503: 4503}.get(exc.status_code, 1011)
     except WebSocketDisconnect:
         reason = "browser_disconnected"
@@ -662,16 +884,23 @@ async def terminal(key: str, websocket: WebSocket):
                 if audit is not None:
                     async with AsyncSessionLocal() as audit_db:
                         await ssh_store.end_session(audit_db, audit.id, reason, counts["in"], counts["out"],
-                                                    connected_ip=connected_ip, host_key_fingerprint=fingerprint)
-                elif (reason == "denied" and getattr(websocket.state, "account", None) and
+                                                    connected_ip=connected_ip, host_key_fingerprint=fingerprint,
+                                                    key_name=signed_in[0][0] if signed_in else "",
+                                                    key_type=signed_in[0][1] if signed_in else "")
+                elif (reason in ("denied", "unreachable") and getattr(websocket.state, "account", None) and
                         accounts.same_origin(websocket)):
                     async with AsyncSessionLocal() as denial_db:
-                        await event(denial_db, websocket, "denied", key if SLUG.fullmatch(key) else "", reason="denied")
+                        # A refused request, or a target the VM could not resolve before any session was reserved.
+                        await event(denial_db, websocket, "denied" if reason == "denied" else "connect_failed",
+                                    key if SLUG.fullmatch(key) else "", reason=reason)
             with suppress(Exception, asyncio.CancelledError):
                 if audit is not None:
                     await ssh_store.run_file_op(ssh_store.release_session_lock, audit.id)
+            # Connection failures go out as bare tokens (unreachable, refused, auth_failed, host_key_changed...);
+            # site refusals as their fixed sentence. Library/exception text never reaches the browser.
+            final = reason if reason in TOKEN_REASONS else (detail or REASONS[reason])
             if accepted:
                 with suppress(Exception, asyncio.CancelledError):
-                    await websocket.send_json({"type": "status", "state": "closed", "reason": detail or REASONS[reason]})
+                    await websocket.send_json({"type": "status", "state": "closed", "reason": final})
             with suppress(Exception, asyncio.CancelledError):
-                await websocket.close(code=code, reason="signed_out" if code == 4401 else (detail or REASONS[reason])[:120])
+                await websocket.close(code=code, reason="signed_out" if code == 4401 else final[:120])
