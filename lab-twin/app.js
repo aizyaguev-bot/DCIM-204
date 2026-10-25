@@ -950,6 +950,7 @@
       rec.meshes.forEach(m => { if (m.material.userData.baseOpacity == null) m.material.userData.baseOpacity = m.material.opacity; m.material.opacity = m.material.userData.baseOpacity * fade; m.material.transparent = true; });
       rec.edges.forEach(e => { e.material.opacity = (e.userData.baseOpacity ?? .9) * (rec.filtered ? 0.15 : 1); });
       if (rec.cat === 'shelf' && rec.strip) { rec.strip.material.opacity = fade; rec.led.material.opacity = fade; }
+      if (rec.cap) { rec.cap.material.transparent = true; rec.cap.material.opacity = fade; }
     }
     renderTree(); renderInventory(); renderUnplaced(); renderRackBar();
   }
@@ -1211,7 +1212,8 @@
   const TAB_PANEL = { attn: '#attn', tree: '#racksPanel', dq: '#dqPanel' };
   function showTab(name) {
     let scrollTo = null;
-    if (name === 'inv') { name = 'tree'; setRacksList('inv'); } else if (name === 'tree') setRacksList('tree');
+    // 'racks' = the Racks tab as the user left it (By rack / All objects); 'tree' and 'inv' pick the list
+    if (name === 'racks') name = 'tree'; else if (name === 'inv') { name = 'tree'; setRacksList('inv'); } else if (name === 'tree') setRacksList('tree');
     if (name === 'unplaced') { name = 'dq'; scrollTo = '#unplaced'; }
     if (!TAB_PANEL[name]) name = 'attn';
     $$('.tab[data-tab]').forEach(b => { const on = b.dataset.tab === name; b.classList.toggle('active', on); b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; });
@@ -2339,7 +2341,7 @@
   $('.side-tabs').addEventListener('keydown', e => {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return; e.preventDefault();
     const tabs = $$('.tab[data-tab]'); const i = tabs.indexOf(document.activeElement); const n = tabs[(i + (e.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length];
-    showTab(n.dataset.tab); n.focus();
+    showTab(n.dataset.tab === 'tree' ? 'racks' : n.dataset.tab); n.focus();
   });
   $('#btnHelp').onclick = () => askChoice({ title: 'Mouse & keyboard help', choices: [{ id: 'cancel', label: 'Close', cls: 'primary' }],
     html: `<div class="help"><div><b>Left drag</b> or one finger: rotate</div><div><b>Right drag</b>: pan · <b>Wheel</b> or pinch: zoom</div><div><b>Click</b> an object: select it (the camera stays) · <b>Focus</b>: fly to it</div>
@@ -2451,7 +2453,7 @@
     document.documentElement.style.setProperty('--sheet-h', S.sheet.size === 'full' ? 'calc(100dvh - 56px)' : SHEET_PX[S.sheet.size] + 'px');
     $('#sheetHandle').setAttribute('aria-expanded', String(S.sheet.size === 'full'));
     $('#sheetHandle').setAttribute('aria-label', `Panel size: ${S.sheet.size} — tap to change`);
-    if (S.sheet.tab === 'racks' && S.sideTab !== 'tree') showTab('tree');
+    if (S.sheet.tab === 'racks' && S.sideTab !== 'tree') showTab('racks');
     else if (S.sheet.tab === 'issues' && S.sideTab === 'tree') showTab('attn');
     updateSheetTabs();
     if (isPhone()) placeAttnDock();
@@ -3063,7 +3065,7 @@
 
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }
-  $$('.tab').forEach(b => b.onclick = () => showTab(b.dataset.tab));
+  $$('.tab').forEach(b => b.onclick = () => showTab(b.dataset.tab === 'tree' ? 'racks' : b.dataset.tab));
 
   // ───────────────────────────────────────────────────────────── boot
   function init(data) {
@@ -3084,7 +3086,7 @@
     camera.far = controls.maxDistance + 50; camera.updateProjectionMatrix();
     VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
     previousCamera.copy(camera.position); previousTarget.copy(controls.target); markView('orbit');
-    setRacksList(S.racksList); setSheet('half', 'issues'); showTab(LS.get('sideTab', 'attn')); placeAttnDock();
+    const racksList = S.racksList; setSheet('half', 'issues'); showTab(LS.get('sideTab', 'attn')); setRacksList(racksList); placeAttnDock();
     setInterval(renderLive, 1000);
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
