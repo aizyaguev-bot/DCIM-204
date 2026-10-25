@@ -3,6 +3,7 @@
 No network, no real crontab, no real installer: the script's subprocess module, the
 downloads, the locks, the clock and the local backend probe are all substituted.
 """
+import argparse
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import importlib.util
@@ -1035,6 +1036,278 @@ def test_help_exits_zero_and_install_remove_run_refuse_outside_linux(ctx, monkey
     assert "only inside the Linux VM" in capsys.readouterr().err
     assert ctx.fake.calls == []
     assert main(ctx, "status") == 0
+
+
+def test_existing_subcommands_keep_accepting_exactly_their_arguments():
+    parser = vm.build_parser()
+
+    def options(owner):
+        return sorted(option for action in owner._actions for option in action.option_strings
+                      if option not in ("-h", "--help"))
+
+    subcommands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction)).choices
+    assert options(parser) == ["--branch", "--project"]
+    assert {name: options(sub) for name, sub in subcommands.items()} == {
+        "install": [], "remove": [], "status": ["--json"], "run": [], "prune": ["--dry-run"]}
+    for argv, command in ((["install"], "install"), (["remove"], "remove"), (["run"], "run"), (["status"], "status"),
+                          (["status", "--json"], "status"), (["--project", "/x", "--branch=b", "run"], "run"),
+                          (["--project=/x", "--branch", "b", "status", "--json"], "status"),
+                          (["prune"], "prune"), (["prune", "--dry-run"], "prune")):
+        assert parser.parse_args(argv).command == command
+    for argv in (["run", "--dry-run"], ["install", "--dry-run"], ["remove", "--json"], ["status", "--dry-run"],
+                 ["prune", "--json"], ["prune", "now"]):
+        with pytest.raises(SystemExit) as error:
+            parser.parse_args(argv)
+        assert error.value.code == 2
+
+
+def test_prune_is_refused_for_root_and_outside_linux(ctx, monkeypatch, capsys):
+    old = installer_backup(ctx, timedelta(days=90))
+    for index in range(KEEP):
+        installer_backup(ctx, timedelta(days=10 + index))
+    monkeypatch.setattr(vm, "effective_uid", lambda: 0)
+    assert main(ctx, "prune") == 1 and "as root" in capsys.readouterr().err
+    monkeypatch.setattr(vm, "effective_uid", lambda: 1000)
+    monkeypatch.setattr(vm, "is_linux", lambda: False)
+    with pytest.raises(SystemExit) as error:
+        main(ctx, "prune")
+    assert error.value.code == 2 and old.is_dir()
+
+
+# ---------------------------------------------------------------- backup retention
+
+KEEP = vm.KEEP_BACKUPS
+
+
+def installer_backup(ctx, age, commit=None, size=0):
+    """A folder named as install-monitoring.py names it: the VM's local time, then the commit's first 7 characters."""
+    moment = T0 - age
+    commit = commit or format(int(age.total_seconds()) % 0xFFFFFFF, "07x")
+    folder = ctx.root / ".monitor-backups" / (moment.astimezone().strftime("%Y%m%d-%H%M%S-%f") + "-" + commit[:7])
+    (folder / "source" / "backend").mkdir(parents=True)
+    (folder / "source.tar").write_bytes(b"x" * size)
+    (folder / "previous-commit.txt").write_bytes(OLD.encode() + b"\n")
+    return folder
+
+
+def crontab_backup(ctx, age):
+    parent = ctx.root / ".monitor-backups"
+    parent.mkdir(parents=True, exist_ok=True)
+    folder = Path(vm.tempfile.mkdtemp(prefix=(T0 - age).strftime(vm.FILE_STAMP) + "-crontab-", dir=str(parent)))
+    (folder / "crontab.txt").write_text("# saved crontab\n")
+    return folder
+
+
+def dir_link(link, target):
+    """A symbolic link to a directory, or a junction where Windows allows no symbolic links."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        if os.name != "nt":
+            pytest.skip("symbolic links are not available here")
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+
+
+def present(folders):
+    return [folder.is_dir() for folder in folders]
+
+
+def test_retention_keeps_the_newest_eight_and_recent_ones_up_to_the_cap(ctx):
+    assert (vm.KEEP_BACKUPS, vm.MAX_BACKUPS, vm.RECENT_BACKUPS) == (8, 12, timedelta(days=7))
+    recent = [installer_backup(ctx, timedelta(hours=1 + 12 * index)) for index in range(10)]  # all younger than 7 days
+    old = [installer_backup(ctx, timedelta(days=10 + index)) for index in range(5)]
+    crontabs = [crontab_backup(ctx, timedelta(days=20 + index)) for index in range(10)]
+    result = vm.prune_backups(ctx.root, now=T0)
+    assert sorted(name for name, _ in result["deleted"]) == sorted(folder.name for folder in old + crontabs[KEEP:])
+    assert result["failed"] == [] and result["kept"] == 10 + KEEP
+    assert present(recent) == [True] * 10 and present(old) == [False] * 5
+    assert present(crontabs) == [True] * KEEP + [False] * 2  # each kind keeps its own newest eight
+    # A burst of releases: the cap keeps 12, dropping the oldest first; the newest eight are never at risk.
+    burst = [installer_backup(ctx, timedelta(minutes=10 + index)) for index in range(15)]
+    vm.prune_backups(ctx.root, now=T0)
+    assert present(burst + recent) == [True] * vm.MAX_BACKUPS + [False] * 13
+    # Low on space, only the newest eight of each kind stay.
+    vm.prune_backups(ctx.root, low_disk=True, now=T0)
+    assert present(burst) == [True] * KEEP + [False] * 7 and present(crontabs[:KEEP]) == [True] * KEEP
+
+
+def test_retention_keeps_up_to_eight_old_backups(ctx):
+    folders = [installer_backup(ctx, timedelta(days=60 + index)) for index in range(KEEP)]
+    assert vm.prune_backups(ctx.root, low_disk=True, now=T0)["deleted"] == []
+    assert present(folders) == [True] * KEEP
+    assert vm.prune_backups(ctx.root / "missing", now=T0) == {"deleted": [], "failed": [], "kept": 0}  # no folder
+
+
+def test_retention_never_touches_foreign_names_files_links_or_auto_update(ctx, tmp_path):
+    parent = ctx.root / ".monitor-backups"
+    ancient = [installer_backup(ctx, timedelta(days=100 + index)) for index in range(KEEP + 2)]
+    (parent / "auto-update").mkdir()
+    (parent / "auto-update" / "cron.log").write_text("log")
+    stamp = (T0 - timedelta(days=400)).strftime("%Y%m%d-%H%M%S")
+    foreign = [stamp + "-crontab", stamp + "-restart", stamp + "-000000-env", stamp + "-000000-ABCDEF1",
+               stamp + "-000000-abcdef12", "x" + stamp + "-000000-abcdef1", stamp + "-000000-abcdef1.old",
+               stamp + "-00000-abcdef1", "20250101T000000Z-crontab-short", "20250101T000000Z-crontab-ABCDEFGH",
+               "20250101T000000Z-crontab", "20251399-000000-000000-abcdef1"]
+    for name in foreign:
+        (parent / name).mkdir()
+        (parent / name / "keep.txt").write_text("keep")
+    as_file = parent / (stamp + "-000000-fedcba9")
+    as_file.write_text("a file with a backup's name")
+    (parent / "before.json").write_text("{}")
+    outside = tmp_path / "outside"
+    (outside / "inner").mkdir(parents=True)
+    (outside / "keep.txt").write_text("outside")
+    link = parent / (stamp + "-000000-1234567")
+    dir_link(link, outside)
+    dir_link(ancient[-1] / "source" / "escape", outside)  # inside the oldest backup, which is deleted
+    assert sorted(folder.name for folder in vm.backup_folders(vm.backups_parent(ctx.root))) == sorted(
+        folder.name for folder in ancient)  # the link and the file are not even candidates
+    result = vm.prune_backups(ctx.root, now=T0)
+    assert sorted(name for name, _ in result["deleted"]) == sorted(folder.name for folder in ancient[KEEP:])
+    assert result["failed"] == [] and present(ancient) == [True] * KEEP + [False] * 2
+    assert all((parent / name / "keep.txt").read_text() == "keep" for name in foreign)
+    assert as_file.read_text() == "a file with a backup's name" and (parent / "before.json").is_file()
+    assert (parent / "auto-update" / "cron.log").read_text() == "log"
+    assert os.path.lexists(link) and (outside / "keep.txt").read_text() == "outside" and (outside / "inner").is_dir()
+
+
+def test_retention_refuses_a_backup_folder_that_leads_elsewhere(ctx, tmp_path, capsys):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    folders = []
+    for index in range(KEEP + 3):
+        folder = elsewhere / ((T0 - timedelta(days=30 + index)).astimezone().strftime("%Y%m%d-%H%M%S-%f") + "-abcdef1")
+        folder.mkdir()
+        folders.append(folder)
+    dir_link(ctx.root / ".monitor-backups", elsewhere)
+    with pytest.raises(vm.UpdateError):
+        vm.prune_backups(ctx.root, now=T0)
+    assert main(ctx, "prune", "--dry-run") == 1 and main(ctx, "prune") == 1
+    assert "must be a real directory" in capsys.readouterr().err
+    assert present(folders) == [True] * (KEEP + 3)
+
+
+def test_run_prunes_before_and_after_installing_but_never_the_deployed_or_target_backup(ctx, capsys):
+    deployed = installer_backup(ctx, timedelta(days=60), OLD)  # made when OLD was installed
+    earlier = installer_backup(ctx, timedelta(days=50), NEW)  # an earlier attempt at the commit being installed
+    others = [installer_backup(ctx, timedelta(days=10 + index), size=3 * 1024 * 1024) for index in range(KEEP + 2)]
+    crontab = crontab_backup(ctx, timedelta(days=90))
+    made = []
+    ctx.fake.during_wait = lambda process: made.append(installer_backup(ctx, timedelta(0), NEW))
+    assert main(ctx, "run") == 0
+    out = capsys.readouterr().out
+    assert present([deployed, earlier, crontab] + made) == [True] * 4
+    assert present(others) == [True] * (KEEP - 1) + [False] * 3
+    for folder in others[KEEP:]:
+        assert "deleted old backup " + folder.name + " (3 MiB)" in out
+        assert out.index(folder.name) < out.index("installing " + NEW[:12])
+    assert out.index("installed " + NEW[:12]) < out.index("deleted old backup " + others[KEEP - 1].name + " (3 MiB)")
+    assert "pruned 2 backups (6 MiB)" in out and "pruned 1 backup (3 MiB)" in out
+    assert deployed.name not in out and earlier.name not in out
+    saved = state(ctx)
+    assert saved["deployed_commit"] == NEW and saved["backup_prune"] == {
+        "at": vm.stamp(T0), "count": 1, "bytes": 3 * 1024 * 1024 + len(OLD) + 1}  # source.tar, previous-commit.txt
+    assert main(ctx, "status") == 0
+    assert "last backup prune: pruned 1 backup (3 MiB) at " + vm.stamp(T0) in capsys.readouterr().out
+    assert main(ctx, "status", "--json") == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["backup_prune"]["count"] == 1 and data["backup_prune_failed"] == []
+    later(ctx, minutes=2)
+    assert main(ctx, "run") == 0 and capsys.readouterr().out == ""  # up to date: nothing to prune, nothing printed
+
+
+def test_low_disk_prunes_recent_extras_and_still_pauses_when_that_is_not_enough(ctx, capsys, monkeypatch):
+    monkeypatch.setattr(vm, "free_bytes", lambda root: 100 * 1024 * 1024)
+    recent = [installer_backup(ctx, timedelta(hours=1 + index)) for index in range(KEEP + 3)]  # under the cap
+    assert main(ctx, "run") == 0
+    out = capsys.readouterr().out
+    assert present(recent) == [True] * KEEP + [False] * 3 and "pruned 3 backups" in out
+    assert out.count("paused: less than 1 GiB free") == 1 and out.index("pruned 3") < out.index("paused")
+    assert ctx.fake.installers() == [] and ctx.downloads == [] and state(ctx)["last_result"] == "low-disk"
+    later(ctx, minutes=2)
+    assert main(ctx, "run") == 0 and capsys.readouterr().out == ""  # still paused, quietly
+    assert present(recent) == [True] * KEEP + [False] * 3 and state(ctx)["last_result"] == "low-disk"
+    assert main(ctx, "status") == 0
+    text = capsys.readouterr().out
+    assert "paused: low disk (less than 1 GiB free)" in text and "last backup prune: pruned 3 backups" in text
+
+
+def test_pruning_that_frees_enough_space_lets_the_install_go_ahead(ctx, capsys, monkeypatch):
+    folders = [installer_backup(ctx, timedelta(hours=1 + index)) for index in range(vm.MAX_BACKUPS)]
+    monkeypatch.setattr(vm, "free_bytes",
+                        lambda root: int((2 if sum(present(folders)) <= KEEP else 0.5) * 1024 ** 3))
+    assert main(ctx, "run") == 0
+    out = capsys.readouterr().out
+    assert present(folders) == [True] * KEEP + [False] * (vm.MAX_BACKUPS - KEEP)
+    assert "paused" not in out and "installed " + NEW[:12] in out and state(ctx)["deployed_commit"] == NEW
+
+
+def test_a_backup_that_cannot_be_deleted_is_reported_once(ctx, capsys, monkeypatch):
+    monkeypatch.setattr(vm, "free_bytes", lambda root: 100 * 1024 * 1024)
+    folders = [installer_backup(ctx, timedelta(days=10 + index)) for index in range(KEEP + 1)]
+    real_rmtree = vm.shutil.rmtree
+
+    def refuse(path, *args, **kwargs):
+        if Path(path).parent == ctx.root / ".monitor-backups":
+            raise PermissionError("denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(vm.shutil, "rmtree", refuse)
+    for _ in range(2):
+        assert main(ctx, "run") == 0
+        later(ctx, minutes=2)
+    out = capsys.readouterr().out
+    assert out.count("could not delete: " + folders[-1].name) == 1 and "deleted old backup" not in out
+    assert state(ctx)["backup_prune_failed"] == [folders[-1].name] and folders[-1].is_dir()
+    assert main(ctx, "status") == 0
+    assert "backup prune problem: could not delete: " + folders[-1].name in capsys.readouterr().out
+    monkeypatch.setattr(vm.shutil, "rmtree", real_rmtree)
+    assert main(ctx, "run") == 0
+    assert not folders[-1].exists() and "backup_prune_failed" not in state(ctx)
+
+
+def test_prune_dry_run_deletes_nothing_and_prune_logs_every_deletion(ctx, capsys):
+    folders = [installer_backup(ctx, timedelta(days=10 + index), size=2 * 1024 * 1024) for index in range(KEEP + 3)]
+    deployed = installer_backup(ctx, timedelta(days=40), OLD)
+    crontabs = [crontab_backup(ctx, timedelta(days=50 + index)) for index in range(KEEP + 1)]
+    assert main(ctx, "prune", "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert present(folders + [deployed] + crontabs) == [True] * (2 * KEEP + 5)
+    for folder in folders[KEEP:]:
+        assert "would delete " + folder.name + " (2 MiB)" in out
+    assert "would delete " + crontabs[-1].name + " (0 KiB)" in out and deployed.name not in out
+    assert "would prune 4 backups (6 MiB)" in out and "nothing was deleted" in out
+    assert not ctx.directory.exists()  # a dry run writes nothing at all
+    assert main(ctx, "prune") == 0
+    out = capsys.readouterr().out
+    assert present(folders) == [True] * KEEP + [False] * 3 and deployed.is_dir()
+    assert present(crontabs) == [True] * KEEP + [False]
+    assert "pruned 4 backups (6 MiB)" in out
+    log = (ctx.directory / "cron.log").read_text(encoding="utf-8")
+    for folder in folders[KEEP:] + crontabs[KEEP:]:
+        assert "deleted old backup " + folder.name + " (" in log and folder.name in out
+    assert state(ctx)["backup_prune"]["count"] == 4
+    assert main(ctx, "prune") == 0 and "pruned 0 backups" in capsys.readouterr().out
+    ctx.lock.held = True
+    assert main(ctx, "prune") == 1 and "in progress" in capsys.readouterr().err
+
+
+def test_prune_refuses_when_the_deployed_commit_is_unknown(ctx, capsys):
+    folders = [installer_backup(ctx, timedelta(days=10 + index)) for index in range(KEEP + 2)]
+    ctx.fake.head = "not-a-commit"
+    assert main(ctx, "prune") == 1 and main(ctx, "prune", "--dry-run") == 1
+    assert "cannot read the deployed commit" in capsys.readouterr().err
+    assert present(folders) == [True] * (KEEP + 2)
+
+
+def test_prune_keeps_the_commit_of_an_install_in_progress(ctx, capsys):
+    folders = [installer_backup(ctx, timedelta(days=10 + index)) for index in range(KEEP)]
+    installing = installer_backup(ctx, timedelta(days=30), NEWER)
+    ctx.directory.mkdir(parents=True)
+    vm.save_state(ctx.directory, {"attempt": {"commit": NEWER, "started": vm.stamp(T0)}})
+    assert main(ctx, "prune") == 0
+    assert present(folders + [installing]) == [True] * (KEEP + 1)
 
 
 # ---------------------------------------------------------------- downloads

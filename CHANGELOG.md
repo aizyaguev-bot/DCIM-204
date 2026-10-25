@@ -2,6 +2,28 @@
 
 ---
 
+## v2.41.4 — 2026-10-22 — Old installer backups are cleaned up automatically
+
+### Changed
+- The VM's auto-updater now removes old installer backups on its own, so a full disk
+  can no longer stop updates (as happened today). It always keeps the newest 8
+  backups and every backup from the last 7 days (up to 12), never touches the backup
+  of the running version, and logs each removal. `vm-auto-update.py prune --dry-run`
+  shows what it would remove.
+
+---
+
+## v2.41.3 — 2026-10-22 — Approving SSH servers no longer fails on one unknown address
+
+### Fixed
+- **Admin → SSH:** saving the server approvals no longer fails as a whole when one
+  server has no address the VM can find ("SSH target could not be resolved safely").
+  The other servers are approved, and the page lists the skipped ones and why —
+  usually a server known only by its name: give it its IP address in Ping Monitor,
+  then approve it again.
+
+---
+
 ## v2.41.2 — 2026-10-22 — 41 more fixes from the full site check
 
 ### Fixed
