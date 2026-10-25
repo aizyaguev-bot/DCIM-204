@@ -30,7 +30,7 @@ All commands below run on the VM as the account that owns `~/DCIM-204`, unless a
 | Role | Can |
 |---|---|
 | Viewer | See whether SSH is available, the server list and the host-key state |
-| Operator | Everything a Viewer can, plus see the public key and install commands, and open terminals |
+| Operator | Everything a Viewer can, plus open terminals and see the public key and install command of the server they open (the full list of install commands is Admin-only) |
 | Admin | Everything an Operator can, plus generate or rotate the key, choose which keys are used, allow every server or single servers, turn SSH off for a server, set remote users, accept host-key fingerprints, end all sessions and read the session log |
 
 Generating or rotating the key, accepting a fingerprint and ending all sessions each ask for the Admin's password again.
@@ -78,6 +78,10 @@ A configuration saved before this setting existed uses **VM account keys**.
 - **Who gets this access.** Every Operator who can open a terminal uses the VM account's server access. Choose **Lab
   Manager key only** if Operators must reach only the servers that have the restricted Lab Manager key installed
   (section 4).
+- **Which servers get it.** The VM account's keys are offered only to a server an Admin allowed one by one, or to a saved
+  host the Admin's last **Check addresses again** pass checked (section 4). Operators can add servers and change saved
+  hosts in the inventory, so a new or changed address gets no keys and no connection until an Admin presses
+  **Check addresses again** once.
 - Tests point the key folder at a temporary fake home through the `SSH_VM_KEY_DIR` setting. On the VM, leave it unset:
   the default is `~/.ssh` of the account that runs Lab Manager.
 
@@ -86,13 +90,21 @@ A configuration saved before this setting existed uses **VM account keys**.
 1. **Admin → SSH → Servers.** Set the default remote user (`root` unless changed) and any per-server users (POSIX names:
    lowercase letters, digits, `_` and `-`, at most 32).
 2. **Allow every server with an address** is on by default, including for a configuration saved before this switch
-   existed. Every known server is then allowed to its **saved** host:
-   - Pressing the button (or `PUT /api/ssh/config` with `{"auto_allow": true}`) checks every saved host now. A server
-     whose host the VM cannot resolve, or that points to a loopback, link-local, multicast or VM address, is listed as
-     skipped with the reason, and stays off until its address is fixed and the check runs again.
-   - A server added later follows the switch. Each connection still resolves and checks the address first.
-   - Turning SSH off for a single server always wins: that server stays off whatever else is allowed.
-   - Turning the switch off leaves only the servers an Admin allowed one by one.
+   existed. It allows each known server for the **saved host an Admin's check saw**:
+   - Turning the switch on, or pressing **Check addresses again** (both send `PUT /api/ssh/config` with
+     `{"auto_allow": true}`), checks every saved host now and records the hosts that passed. A server whose host the
+     VM cannot resolve, or that points to a loopback, link-local, multicast or VM address, is listed as skipped with the
+     reason, and stays off until its address is fixed and the check runs again.
+   - **New or changed servers need one Admin click.** Until an Admin presses **Check addresses again**, a server added
+     to the inventory later, and a server whose saved host changed since the check, shows "Address changed" and
+     cannot be opened: the terminal says `This server is new or its address changed since an Admin last checked the
+     addresses ...`. After an upgrade, or on a new install, nothing is allowed this way before the first click.
+   - Each connection still resolves and checks the address first.
+   - Turning SSH off for a single server always wins: that server stays off whatever else is allowed. The site also
+     remembers that server's host. Any other server with the same host (case and a trailing dot do not matter) is off
+     too, and a connection is refused (`denied`) when its address is one the turned-off host resolves to. Another
+     inventory name for the same machine therefore cannot get around it.
+   - Turning the switch off leaves only the servers an Admin allowed one by one, and forgets the checked hosts.
 3. **Allowing single servers** (when the switch is off) works as before. An approval is accepted only when:
    - the host matches the server's saved host;
    - it resolves to an address that is not loopback, link-local, multicast or one of the VM's own addresses.
@@ -181,7 +193,7 @@ written to the session log. The SSH library's own error text is never shown or s
 | `refused` | Nothing listens on port 22 | `Port 22 on Opt106 is closed. Check that the SSH service (sshd) is running on it.` |
 | `auth_failed` | The server accepted none of the offered keys | `Opt106 did not accept the VM's keys or the Lab Manager key for root.` |
 | `host_key_changed` | The server's host key differs from the pin (section 6) | `The host key of Opt106 changed. ...` |
-| `denied` | The saved address points to a loopback, link-local, multicast or VM address | `Lab Manager did not allow this SSH session to Opt106. ...` |
+| `denied` | The saved address points to a loopback, link-local, multicast or VM address, or to an address SSH is turned off for (section 4) | `Lab Manager did not allow this SSH session to Opt106. ...` |
 | `connect_timeout` | The server answered but the SSH login did not finish in time | |
 | `connection_failed` | Any other SSH failure | |
 
@@ -223,6 +235,7 @@ grep -c 'dcim-204-' ~/.ssh/authorized_keys   # 0 when no DCIM-204 key is left
 | `SSH_MAX_SESSION_SECONDS` | `3600` | Hard limit on one terminal's lifetime |
 | `SSH_MAX_SESSIONS_PER_USER` | `4` | Open terminals per person |
 | `SSH_MAX_SESSIONS_TOTAL` | `20` | Open terminals on the whole site |
+| `SSH_MAX_CONNECT_ATTEMPTS_PER_MINUTE` | `12` | Terminal attempts per person per minute on all servers (sessions, failed connections and denials); checked before any lookup |
 | `SSH_VM_KEY_DIR` | empty | Folder of the VM account keys (section 3a); empty means `~/.ssh` of the account running Lab Manager |
 
 An open terminal re-checks its sign-in at least every 30 seconds. It closes when the user signs out, is disabled, loses
@@ -294,7 +307,8 @@ If pip refuses because a pinned package would have to change, stop there: that c
   `none`). Operators also get `default_user`, `key_source`, and per server `host`, `approved_host`, `user` and
   `not_allowed_reason`. Admins also get `config_revision` (the value for `If-Match`).
 - `GET /api/ssh/config` (Admin): `default_user`, `per_server_user`, `targets`, `denied`, `auto_allow`, `key_source`,
-  `auto_skipped` (computed) and `vm_keys` (`[{"name": "id_ed25519", "type": "ssh-ed25519", "usable": true,
+  `auto_skipped`, `auto_hosts` (the saved hosts the last check allowed), `denied_hosts` (the host of each
+  turned-off server, recorded when it was turned off; these three are kept by the site and ignored in a `PUT`) and `vm_keys` (`[{"name": "id_ed25519", "type": "ssh-ed25519", "usable": true,
   "reason": ""}]`, existing files only, by name). The `ETag` covers the saved settings only.
 - `PUT /api/ssh/config` (Admin, `If-Match` required): any subset of `default_user`, `per_server_user`, `targets`, `denied`,
   `auto_allow` and `key_source`; fields left out keep their saved values. `{"auto_allow": true}` alone re-runs the address
@@ -302,4 +316,8 @@ If pip refuses because a pinned package would have to change, stop there: that c
 - `WS /api/ssh/<server>/terminal` (Operator): the first message carries the CSRF token. The server sends
   `{"type": "status", "state": "connecting" | "connected" | "closed", "reason": ...}` and `{"type": "output", "data": ...}`.
   A failed connection closes with one of the reasons in section 6a. There is no password message.
+- `GET /api/ssh/key`: the public key with install and revoke commands. Without `?server=<key>` it lists every server
+  and is Admin-only. An Operator must name the server (`?server=<key>`, as the terminal page does). The VM's source
+  address per host is looked up in parallel with a 15-second total limit and remembered for 2 minutes. A row that
+  could not be looked up shows `<VM IP>` with a reason.
 - `GET /api/ssh/sessions` (Admin): the newest 200 log rows, including `key_source`, `key_type` and `key_name`.

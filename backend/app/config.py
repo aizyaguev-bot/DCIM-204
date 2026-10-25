@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     ssh_max_session_seconds: int = Field(default=3600, ge=1)
     ssh_max_sessions_per_user: int = Field(default=4, ge=1, le=100)
     ssh_max_sessions_total: int = Field(default=20, ge=1, le=1000)
+    # Terminal connection attempts (sessions, failed connections and denials) per user per minute, all servers.
+    ssh_max_connect_attempts_per_minute: int = Field(default=12, ge=1, le=1000)
     # Folder holding the VM account's own SSH keys (id_ed25519/id_ecdsa/id_rsa); empty = ~/.ssh of the account
     # running Lab Manager. Tests point it at a temporary fake home.
     ssh_vm_key_dir: str = ""

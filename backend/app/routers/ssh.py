@@ -2,6 +2,7 @@
 import asyncio
 import codecs
 from contextlib import suppress
+import contextvars
 import errno
 import ipaddress
 import json
@@ -33,6 +34,18 @@ SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}", re.ASCII)
 ADDRESS_CHANGED_REASON = "Server address changed - an Admin must approve it again"
 NOT_APPROVED_REASON = "An Admin must approve this SSH target first"
 TURNED_OFF_REASON = "SSH is not allowed for this server: an Admin turned it off"
+SAME_ADDRESS_REASON = ("SSH is not allowed for this server: an Admin turned SSH off for another server with the "
+                       "same address")
+AUTO_CHECK_REASON = ("This server is new or its address changed since an Admin last checked the addresses - "
+                     "an Admin must press \"Check addresses again\" in Admin -> SSH")
+RATE_REASON = "SSH connection rate limit reached"
+SOURCE_UNKNOWN_REASON = "Cannot determine the VM source address for this target; verify and replace <VM IP>"
+KEY_DEADLINE_SECONDS = 15     # GET /api/ssh/key: total time for every per-server address/route lookup.
+SOURCE_CACHE_SECONDS = 120    # Per-host install source address (or its failure), reused across requests.
+SOURCE_CACHE_MAX = 4096
+_SOURCE_CACHE: dict = {}
+# The VM's own addresses, read once per request (GET /api/ssh/key) instead of once per resolved host.
+_OWN_ADDRESSES = contextvars.ContextVar("ssh_own_addresses", default=None)
 UNRESOLVED_DETAIL = "SSH target could not be resolved safely"
 PROHIBITED_DETAIL = "SSH target resolves to a prohibited address"
 NO_KEYS_REASON = ("No SSH key is available: the VM account has no usable key in ~/.ssh and the Lab Manager key "
@@ -148,7 +161,9 @@ def allowed_address(value, own):
 
 async def resolve_target(host):
     host = checked_host(host)
-    own = await asyncio.to_thread(local_addresses)
+    own = _OWN_ADDRESSES.get()
+    if own is None:
+        own = await asyncio.to_thread(local_addresses)
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
@@ -177,13 +192,44 @@ async def resolve_target(host):
     return addresses[0]
 
 
-async def target_for(db, key):
+def server_in(servers, key):
     if not SLUG.fullmatch(key):
         raise HTTPException(404, "Server not found")
-    server = next((s for s in await ssh_store.known_servers(db) if s["key"] == key), None)
+    server = next((s for s in servers if s["key"] == key), None)
     if server is None:
         raise HTTPException(404, "Server not found")
     return server
+
+
+async def target_for(db, key):
+    if not SLUG.fullmatch(key):
+        raise HTTPException(404, "Server not found")
+    return server_in(await ssh_store.known_servers(db), key)
+
+
+def host_token(host):
+    """Comparison form of a host: case-folded, without a trailing dot; IPs canonical (IPv4-mapped -> IPv4)."""
+    value = str(host or "").strip().casefold().rstrip(".")
+    try:
+        address = ipaddress.ip_address(value.strip("[]"))
+    except ValueError:
+        return value
+    return str(getattr(address, "ipv4_mapped", None) or address)
+
+
+def denied_host_list(config, servers=()):
+    """Hosts SSH is turned off for: the host captured when an Admin turned each server off, plus the current
+    saved host of every turned-off server (an Operator may since have changed it)."""
+    hosts = dict.fromkeys(config.get("denied_hosts", {}).values())
+    denied = set(config.get("denied", ()))
+    for server in servers:
+        if server["key"] in denied and server.get("host"):
+            hosts.setdefault(server["host"], None)
+    return list(hosts)
+
+
+def blocked_hosts(config, servers=()):
+    return {host_token(host) for host in denied_host_list(config, servers)}
 
 
 def user_for(server, config):
@@ -193,13 +239,15 @@ def user_for(server, config):
 ALLOWED_STATES = ("explicit", "auto")
 
 
-def approval(server, config):
+def approval(server, config, blocked=None):
     """Return (state, host, reason) for one known server.
 
-    state: "explicit" (an Admin approved it for its saved host), "auto" ("allow every server" is on), "denied"
-    (an Admin turned it off; wins over everything), "skipped" (the last "allow every server" pass could not use
-    its saved host), "address_changed" (approved for an older host) or "none". Only explicit/auto may connect,
-    and always to the host returned here: the server's saved host. Connect still resolves and checks the address."""
+    state: "explicit" (an Admin approved it for its saved host), "auto" (the Admin's last "allow every server"
+    pass checked and allowed exactly this saved host), "denied" (an Admin turned it off, or turned off another
+    server with the same address; wins over everything), "skipped" (that pass could not use its saved host),
+    "address_changed" (approved for, or checked with, an older host; or new since the pass) or "none". Only
+    explicit/auto may connect, and always to the host returned here: the server's saved host. Connect still
+    resolves and checks the address. `blocked`: blocked_hosts(config, servers) when the caller has the list."""
     key = server["key"]
     if key in config.get("denied", ()):
         return "denied", "", TURNED_OFF_REASON
@@ -207,21 +255,27 @@ def approval(server, config):
         saved = checked_host(server["host"])
     except HTTPException:
         return "none", "", "Invalid SSH host"
+    if host_token(saved) in (blocked_hosts(config) if blocked is None else blocked):
+        return "denied", "", SAME_ADDRESS_REASON
     host = config.get("targets", {}).get(key)
     if host and checked_host(host) == saved:
         return "explicit", saved, ""
     if config.get("auto_allow"):
+        # Operators can add servers and change saved hosts: "every server" means the hosts the Admin's pass saw.
+        captured = config.get("auto_hosts", {}).get(key)
+        if captured and host_token(captured) == host_token(saved):
+            return "auto", saved, ""
         skipped = config.get("auto_skipped", {}).get(key)
         if skipped and skipped.get("host") == saved:
             return "skipped", "", skip_text(skipped.get("reason"), saved)
-        return "auto", saved, ""
+        return "address_changed", "", AUTO_CHECK_REASON
     if not host:
         return "none", "", NOT_APPROVED_REASON
     return "address_changed", "", ADDRESS_CHANGED_REASON
 
 
-def approved_host(server, config):
-    state, host, reason = approval(server, config)
+def approved_host(server, config, blocked=None):
+    state, host, reason = approval(server, config, blocked)
     if state not in ALLOWED_STATES:
         raise HTTPException(403, reason)
     return host
@@ -245,9 +299,11 @@ async def status(request: Request, response: Response, db: AsyncSession = Depend
     info = await ssh_store.run_file_op(ssh_store.key_info)
     operator = accounts.ROLES[current["user"]["role"]] >= accounts.ROLES["Operator"]
     servers = []
-    for server in await ssh_store.known_servers(db):
+    known = await ssh_store.known_servers(db)
+    blocked = blocked_hosts(config, known)
+    for server in known:
         pin = await ssh_store.run_file_op(ssh_store.host_info, server["key"])
-        state, host, reason = approval(server, config)
+        state, host, reason = approval(server, config, blocked)
         allowed = state in ALLOWED_STATES
         entry = {"key": server["key"], "name": server["name"], **pin,
                  "host_key": pin, "approved": allowed, "allowed": allowed, "approval": state,
@@ -298,28 +354,20 @@ async def public_key_response(db, only=None):
     servers = await ssh_store.known_servers(db)
     await db.rollback()  # Inventory is plain data; DNS/route lookups must not retain its read transaction.
     rows = []
+    blocked = blocked_hosts(config, servers)
     for server in servers:
         if only is not None and server["key"] != only:
             continue
-        state, host, _ = approval(server, config)
+        state, host, reason = approval(server, config, blocked)
         if state == "address_changed":
-            rows.append((server, checked_host(config["targets"][server["key"]]), True))
+            moved = config["targets"].get(server["key"]) or server["host"]
+            rows.append((server, checked_host(moved), reason))
         elif state in ALLOWED_STATES:
-            rows.append((server, host, False))
-
-    async def source_for(row):
-        server, host, address_changed = row
-        if address_changed:
-            return "<VM IP>", ADDRESS_CHANGED_REASON
-        try:
-            checked_ip = await resolve_target(host)
-            return await asyncio.to_thread(installation_source_ip, checked_ip), ""
-        except (HTTPException, OSError, asyncio.TimeoutError):
-            return "<VM IP>", "Cannot determine the VM source address for this target; verify and replace <VM IP>"
-
-    sources = await limited(rows, source_for)
+            rows.append((server, host, ""))
+    sources = await install_sources(rows)
     install, revoke = [], []
-    for (server, host, address_changed), (source_ip, row_reason) in zip(rows, sources):
+    for (server, host, moved_reason), (source_ip, row_reason) in zip(rows, sources):
+        address_changed = bool(moved_reason)
         options =f'from="{source_ip}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc'
         authorized = options + " " + info["public_key"].strip()
         destination = f"{user_for(server, config)}@{host}"
@@ -345,10 +393,52 @@ async def public_key_response(db, only=None):
             "warning": "Install only on approved remote servers, never on this VM. Operators share the remote account; the site audit identifies each person."}
 
 
+async def install_sources(rows):
+    """[(source_ip, reason)] for public_key_response rows: route lookups run in parallel under one total deadline,
+    reuse a per-host cache and read the VM's own addresses at most once for the whole request."""
+    results = [None] * len(rows)
+    now = time.monotonic()
+    pending = []
+    for index, (server, host, moved_reason) in enumerate(rows):
+        cached = _SOURCE_CACHE.get(host)
+        if moved_reason:
+            results[index] = ("<VM IP>", moved_reason)
+        elif cached and cached[0] > now:
+            results[index] = cached[1]
+        else:
+            pending.append((index, host))
+    if pending:
+        own = _OWN_ADDRESSES.set(await asyncio.to_thread(local_addresses))
+        semaphore = asyncio.Semaphore(CHECK_CONCURRENCY)
+
+        async def lookup(index, host):
+            async with semaphore:
+                try:
+                    value = (await asyncio.to_thread(installation_source_ip, await resolve_target(host)), "")
+                except (HTTPException, OSError, asyncio.TimeoutError):
+                    value = ("<VM IP>", SOURCE_UNKNOWN_REASON)
+            if len(_SOURCE_CACHE) >= SOURCE_CACHE_MAX:
+                _SOURCE_CACHE.clear()
+            _SOURCE_CACHE[host] = (time.monotonic() + SOURCE_CACHE_SECONDS, value)
+            results[index] = value
+
+        try:
+            tasks = [asyncio.ensure_future(lookup(index, host)) for index, host in pending]  # Copy the context.
+        finally:
+            _OWN_ADDRESSES.reset(own)
+        done, late = await asyncio.wait(tasks, timeout=KEY_DEADLINE_SECONDS)
+        for task in late:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    # A lookup that missed the deadline gets the same "verify and replace <VM IP>" row (not cached).
+    return [value or ("<VM IP>", SOURCE_UNKNOWN_REASON) for value in results]
+
+
 @router.get("/key")
 async def get_key(request: Request, response: Response, server: str | None = None, db: AsyncSession = Depends(get_db)):
-    """`?server=<key>` limits install/revoke rows to that server (the terminal page shows only its own command)."""
-    principal(request, "Operator")
+    """`?server=<key>` limits install/revoke rows to that server (the terminal page shows only its own command).
+    The full list, which resolves every server, is Admin-only."""
+    principal(request, "Operator" if server is not None else "Admin")
     if server is not None and not SLUG.fullmatch(server):
         raise HTTPException(404, "Server not found")
     response.headers["Cache-Control"] = "no-store"
@@ -426,7 +516,8 @@ async def configure(request: Request, response: Response, db: AsyncSession = Dep
         del body["allowed"]
     if isinstance(body, dict):
         # Computed, read-only fields may come back when a client echoes GET /config; they are never taken from it.
-        body = {name: value for name, value in body.items() if name not in ("auto_skipped", "skipped", "vm_keys")}
+        body = {name: value for name, value in body.items()
+                if name not in ("auto_skipped", "skipped", "vm_keys", "auto_hosts", "denied_hosts")}
     fields = {"default_user", "per_server_user", "targets", "auto_allow", "denied", "key_source"}
     if not isinstance(body, dict) or not body or set(body) - fields:
         raise HTTPException(400, "Supply default_user, per_server_user, targets, denied, auto_allow or key_source")
@@ -474,19 +565,34 @@ async def configure(request: Request, response: Response, db: AsyncSession = Dep
                 raise HTTPException(400, "Approved SSH host must match the saved server host")
             targets[key] = host
     targets = {key: host for key, host in targets.items() if key not in denied}
+    # The saved host of each server turned off now; an earlier capture is kept (the address the Admin turned off).
+    denied_hosts = {}
+    for key in sorted(denied):
+        captured = current["denied_hosts"].get(key)
+        if captured is None and key in servers:
+            with suppress(HTTPException):
+                captured = checked_host(servers[key]["host"])
+        if captured:
+            denied_hosts[key] = captured
+    blocked = blocked_hosts({"denied": sorted(denied), "denied_hosts": denied_hosts}, servers.values())
     # Hosts to check now: newly supplied approvals and, when "allow every server" is (re)applied, every saved
     # server that is not turned off. Unresolvable ones are skipped with a reason instead of failing the save.
     checks = dict(targets) if "targets" in body else {}
-    invalid = []
+    invalid, candidates = [], []
     auto_pass = "auto_allow" in body and auto_allow
     if auto_pass:
         for key, server in servers.items():
-            if key in denied or key in checks:
+            if key in denied:
                 continue
             try:
-                checks[key] = checked_host(server["host"])
+                host = checked_host(server["host"])
             except HTTPException:
                 invalid.append(key)  # approval() never allows a server whose saved host is not a valid SSH host.
+                continue
+            if host_token(host) in blocked:
+                continue  # Another server with this address is turned off.
+            checks.setdefault(key, host)
+            candidates.append(key)
     failures = dict(zip(checks, await limited(list(checks.values()), check_failure)))
     skipped = [{"key": key, "name": servers[key]["name"], "host": checks[key], "reason": skip_text(code, checks[key])}
                for key, code in failures.items() if code]
@@ -496,11 +602,13 @@ async def configure(request: Request, response: Response, db: AsyncSession = Dep
         targets.pop(item["key"], None)
     if auto_pass:
         auto_skipped = {key: {"host": checks[key], "reason": code} for key, code in failures.items() if code}
+        # Exactly the saved hosts this pass checked: a server added or re-addressed later waits for the next pass.
+        auto_hosts = {key: checks[key] for key in candidates if not failures.get(key)}
     else:
-        auto_skipped = None if auto_allow else {}  # None keeps the last pass while the flag stays on.
+        auto_skipped = auto_hosts = None if auto_allow else {}  # None keeps the last pass while the flag stays on.
     await ssh_store.run_file_op(ssh_store.write_config, default, overrides, targets, expected,
                                 auto_allow=auto_allow, denied=sorted(denied), auto_skipped=auto_skipped,
-                                key_source=key_source)
+                                key_source=key_source, denied_hosts=denied_hosts, auto_hosts=auto_hosts)
     actions = []
     if auto_allow != current["auto_allow"]:
         actions.append("auto_allow_on" if auto_allow else "auto_allow_off")
@@ -733,6 +841,33 @@ def connect_failure(library, error, reached):
     return "connection_failed"
 
 
+def canonical_ip(value):
+    address = ipaddress.ip_address(str(value).split("%")[0])
+    return str(getattr(address, "ipv4_mapped", None) or address)
+
+
+async def denied_addresses(hosts):
+    """Every address the turned-off hosts resolve to now (lookups that fail are left out)."""
+    timeout = min(5, getattr(get_settings(), "ssh_connect_timeout_seconds", 10))
+
+    async def lookup(host):
+        try:
+            return {canonical_ip(host)}
+        except ValueError:
+            pass
+        try:
+            answers = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(host, 22, type=socket.SOCK_STREAM), timeout)
+        except (OSError, asyncio.TimeoutError, UnicodeError):
+            return set()
+        found = set()
+        for answer in answers:
+            with suppress(ValueError):
+                found.add(canonical_ip(answer[4][0]))
+        return found
+    return set().union(*await limited(list(hosts), lookup)) if hosts else set()
+
+
 async def connect_target(host):
     """resolve_target for a live connection: a name the VM cannot resolve is "unreachable" and a prohibited
     address is "denied", as fixed reason tokens; other refusals keep their site sentence."""
@@ -775,13 +910,23 @@ async def terminal(key: str, websocket: WebSocket):
         token = first.get("csrf_token", first.get("csrf", first.get("X-DCIM-CSRF", "")))
         if not isinstance(token, str) or not token or not secrets.compare_digest(token.encode(), current["csrf_token"].encode()):
             raise HTTPException(403, "Refresh the page and retry (invalid CSRF token)")
+        # Per-user attempt limit before any DNS lookup, key file read or session row: sessions, failed
+        # connections and denials of the last minute, on every server.
+        async with AsyncSessionLocal() as rate_db:
+            attempts = await ssh_store.recent_attempts(rate_db, current["user"]["username"])
+        if attempts >= getattr(get_settings(), "ssh_max_connect_attempts_per_minute", 12):
+            raise HTTPException(429, RATE_REASON)
         library = await ssh_store.run_file_op(ssh_store.load_asyncssh)
         async with AsyncSessionLocal() as target_db:
-            server = await target_for(target_db, key)
+            known = await ssh_store.known_servers(target_db)
+        server = server_in(known, key)
         config = await ssh_store.run_file_op(ssh_store.read_config)
-        host, user = approved_host(server, config), user_for(server, config)
+        # Only explicit approvals and hosts captured by the Admin's pass get here (and so the VM account's keys).
+        host, user = approved_host(server, config, blocked_hosts(config, known)), user_for(server, config)
         key_source = config["key_source"]
         connected_ip = await connect_target(host)
+        if canonical_ip(connected_ip) in await denied_addresses(denied_host_list(config, known)):
+            raise HTTPException(403, "denied")  # Another name for an address an Admin turned SSH off for.
         offers = await ssh_store.run_file_op(client_keys_for, key_source, vm_key_dir())
         settings = get_settings()
         if not await session_valid(websocket, current):

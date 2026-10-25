@@ -506,13 +506,21 @@ def _skip(name: str, reason: str) -> dict:
 def _load_vm_key(asyncssh, path: Path, name: str):
     """(report row or None, key or None) for one default identity file; reasons are fixed texts, never library output."""
     try:
-        # Follows a symlink like ssh does; the opened object must be a regular file. O_NONBLOCK: a FIFO planted
-        # under that name cannot hang the worker.
+        # stat first (following a symlink like ssh does): a FIFO, device or directory is never opened.
+        before = os.stat(path)
+    except FileNotFoundError:
+        return None, None
+    except OSError:
+        return _skip(name, "not readable by the account running Lab Manager"), None
+    if not stat.S_ISREG(before.st_mode):
+        return _skip(name, "not a regular file"), None
+    try:
+        # O_NONBLOCK: a file swapped for a FIFO between stat and open cannot hang the worker.
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                return _skip(name, "not a regular file"), None
+            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
+                return _skip(name, "changed while Lab Manager was reading it"), None
             if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
                 # OpenSSH ignores such a key too ("UNPROTECTED PRIVATE KEY FILE").
                 return _skip(name, "readable by other users (chmod 600 it)"), None
@@ -620,7 +628,25 @@ def _config(directory: Path) -> dict:
         raise ValueError("Invalid SSH configuration")
     return {"default_user": default, "per_server_user": overrides, "targets": approved, "auto_allow": auto_allow,
             "key_source": key_source, "denied": _denied(config.get("denied", []), ValueError),
+            "denied_hosts": _host_map(config.get("denied_hosts", {}), ValueError),
+            "auto_hosts": _host_map(config.get("auto_hosts", {}), ValueError),
             "auto_skipped": _auto_skipped(config.get("auto_skipped", {}), ValueError)}
+
+
+def _host_map(value, error) -> dict:
+    """{server key: host}: denied_hosts (the saved host of each server an Admin turned off, captured then) and
+    auto_hosts (the saved hosts the Admin's last "allow every server" pass checked and allowed)."""
+    if not isinstance(value, dict) or len(value) > 10000:
+        raise error("Invalid SSH configuration")
+    result = {}
+    for key, host in value.items():
+        if not isinstance(key, str) or not _SERVER_KEY.fullmatch(key):
+            raise error("Invalid SSH configuration")
+        try:
+            result[key] = _host(host)
+        except HTTPException:
+            raise error("Invalid SSH configuration") from None
+    return result
 
 
 def _denied(value, error) -> list:
@@ -669,7 +695,8 @@ def _invalid_config(message):
 
 def write_config(default_user: str, per_server_user: dict, targets: dict,
                  expected_etag: str | None, *, auto_allow: bool | None = None,
-                 denied: list | None = None, auto_skipped: dict | None = None, key_source: str | None = None):
+                 denied: list | None = None, auto_skipped: dict | None = None, key_source: str | None = None,
+                 denied_hosts: dict | None = None, auto_hosts: dict | None = None):
     """Replace the configuration if it still matches expected_etag; None keeps that stored field."""
     if expected_etag is None:
         raise HTTPException(status_code=428, detail="SSH configuration precondition is required")
@@ -687,6 +714,8 @@ def write_config(default_user: str, per_server_user: dict, targets: dict,
     approved = {_server_key(key): _host(host) for key, host in targets.items()}
     denied = None if denied is None else _denied(denied, _invalid_config)
     auto_skipped = None if auto_skipped is None else _auto_skipped(auto_skipped, _invalid_config)
+    denied_hosts = None if denied_hosts is None else _host_map(denied_hosts, _invalid_config)
+    auto_hosts = None if auto_hosts is None else _host_map(auto_hosts, _invalid_config)
     with _storage() as directory:
         stored = _config(directory)
         if expected_etag != _etag(stored):
@@ -695,11 +724,14 @@ def write_config(default_user: str, per_server_user: dict, targets: dict,
                   "auto_allow": stored["auto_allow"] if auto_allow is None else auto_allow,
                   "key_source": stored["key_source"] if key_source is None else key_source,
                   "denied": stored["denied"] if denied is None else denied,
+                  "denied_hosts": stored["denied_hosts"] if denied_hosts is None else denied_hosts,
+                  "auto_hosts": stored["auto_hosts"] if auto_hosts is None else auto_hosts,
                   "auto_skipped": stored["auto_skipped"] if auto_skipped is None else auto_skipped}
         # An explicit "not allowed" always wins over an approval of the same server.
         config["targets"] = {key: host for key, host in approved.items() if key not in config["denied"]}
+        config["denied_hosts"] = {key: host for key, host in config["denied_hosts"].items() if key in config["denied"]}
         if not config["auto_allow"]:
-            config["auto_skipped"] = {}
+            config["auto_skipped"], config["auto_hosts"] = {}, {}
         _write(directory / "config.json", _json_bytes(config))
     return config
 
@@ -932,6 +964,16 @@ async def start_session(db, user: str, server_key: str, host: str, *,
             if session_id is not None:
                 await run_file_op(release_session_lock, session_id)
         raise
+
+
+ATTEMPT_EVENTS = ("terminal", "connect_failed", "denied")
+
+
+async def recent_attempts(db, user: str, seconds: float = 60) -> int:
+    """Terminal sessions, failed connections and denials of `user` in the last `seconds` (any server)."""
+    since = time.time() - seconds
+    return (await db.execute(select(func.count()).select_from(SshSession).where(
+        SshSession.user == user, SshSession.event.in_(ATTEMPT_EVENTS), SshSession.started_at > since))).scalar_one()
 
 
 def _reason(value: str) -> str:
