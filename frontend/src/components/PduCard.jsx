@@ -144,7 +144,7 @@ function OutletCell({ outlet, index, totalCount, locked, offline, onAction }) {
               <p className="text-xs text-rose-300 px-2 py-1">PDU is unreachable; outlet power actions are unavailable</p>
             ) : locked ? (
               <>
-                <p className="text-xs text-amber-300 px-2 py-1">PDU is in maintenance mode; restore it from the Maintenance column first</p>
+                <p className="text-xs text-amber-300 px-2 py-1">PDU is in maintenance mode; restore it first</p>
                 {isOn && <MI onClick={() => act("off")} icon="⏻" label="Turn off" danger />}
               </>
             ) : isOn ? (

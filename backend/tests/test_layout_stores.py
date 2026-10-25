@@ -23,6 +23,11 @@ CONFLICT = "This layout was changed in another session. Reload and try again."
 SAVED = {"Rack-01": {"opt11": 2}, "units": [{"id": "ch1", "rack": "Rack-01"}]}
 
 
+def keeping(url, body):
+    """Cooling units are never deleted (a chillers PUT that leaves a saved unit out is 422), so its bodies keep them."""
+    return {**body, "units": SAVED["units"]} if url == "/api/chillers" else body
+
+
 @pytest.fixture
 async def layout(db_session, tmp_path, monkeypatch):
     import app.main as main
@@ -64,14 +69,15 @@ async def test_put_with_the_current_etag_saves_and_returns_the_new_one(layout, u
     client, folder = layout
     store_file(url).write_text(json.dumps(SAVED))
     etag = (await client.get(url)).headers["etag"]
-    body = {"Rack-02": {"opt12": 3}}
+    body = keeping(url, {"Rack-02": {"opt12": 3}})
     r = await client.put(url, json=body, headers={"If-Match": etag})
     assert r.status_code == 200 and r.json() == {"ok": True}
     assert r.headers["etag"] == inventory_store.revision(body)
     assert json.loads(store_file(url).read_text()) == body
     assert (await client.get(url)).headers["etag"] == r.headers["etag"]
-    # Any lock or temporary file stays next to its store (the preview fixture redirects stores to a temp folder).
-    assert {p.name for p in folder.iterdir()} <= {store_file(url).name, store_file(url).with_suffix(".lock").name}
+    # Any lock, temporary or history file stays next to its store (the preview fixture redirects stores to a temp folder).
+    beside = {store_file(url).name, store_file(url).with_suffix(".lock").name, inventory_store.history_path(store_file(url)).name}
+    assert {p.name for p in folder.iterdir()} <= beside
 
 
 @pytest.mark.parametrize("url", STORES)
@@ -89,7 +95,7 @@ async def test_put_with_a_stale_etag_is_409_and_leaves_the_file_untouched(layout
 async def test_put_without_if_match_still_saves_for_old_pages(layout, url):
     client, _ = layout
     store_file(url).write_text(json.dumps(SAVED))
-    body = {"Rack-03": ["opt31"]}
+    body = keeping(url, {"Rack-03": ["opt31"]})
     r = await client.put(url, json=body)
     assert r.status_code == 200 and r.json() == {"ok": True}
     assert r.headers["etag"] == inventory_store.revision(body)

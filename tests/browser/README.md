@@ -22,6 +22,11 @@ DCIM_PREVIEW_URL=http://127.0.0.1:8770 node tests/browser/kvm-launch.cjs
 For a fixture on another port, set `DCIM_PREVIEW_URL` for every check; without it
 the checks use port 8770 (`kvm-launch.cjs` uses 8774).
 
+The Racks page check `racks-ui.cjs` needs protected outlets on its fixture, started fresh:
+`DCIM_TEST_ACCOUNTS=1 POWER_PROTECTED_OUTLETS=pdu1:4 python tests/browser/preview-server.py 8951`, then
+`node tests/browser/racks-ui.cjs` (default port 8951; `RACKS_UI_ONLY=4,5` runs some sections). It undoes its
+changes but adds four cooling units that are never deleted.
+
 The device name sync check `name-sync.cjs` needs its own fixture, started fresh for every run (it changes
 labels and the in-memory fake devices): `DCIM_TEST_ACCOUNTS=1 DCIM_FAKE_NAME_DEVICES=1 python tests/browser/preview-server.py 8840`,
 then `node tests/browser/name-sync.cjs` (default port 8840). No real PDU or KVM is contacted.

@@ -16,6 +16,7 @@ export function EngineersProvider({children}) {
   return <Directory.Provider value={{engineers,error,refresh,revision}}>{children}</Directory.Provider>;
 }
 
+// The owner field of the DCIM panels (English, like the rest of the site); the Engineers admin page stays Hebrew.
 export function OwnerSelect({owner="",onChange,label="Owner",disabled=false}) {
   const {engineers,error,refresh} = useEngineers();
   const [busy,setBusy] = useState(false);
@@ -32,14 +33,14 @@ export function OwnerSelect({owner="",onChange,label="Owner",disabled=false}) {
   return <div className="min-w-0">
     <select aria-label={label} value={current?.id || (owner?"__current__":"")} onChange={choose} disabled={disabled||busy||!engineers||!!error}
       className="w-full min-w-0 bg-zinc-900 border border-zinc-700 px-2 py-2 text-sm focus:outline-none focus:border-nv-400 disabled:opacity-50">
-      <option value="">ללא Owner</option>
-      {owner&&!current&&<option value="__current__" disabled>{owner} · בעלים קיים</option>}
-      {engineers?.filter(e=>e.active||e.id===current?.id).map(e=><option key={e.id} value={e.id} disabled={!e.active}>{e.name}{e.active?"":" · לא פעיל"}</option>)}
+      <option value="">No owner</option>
+      {owner&&!current&&<option value="__current__" disabled>{owner} · current owner</option>}
+      {engineers?.filter(e=>e.active||e.id===current?.id).map(e=><option key={e.id} value={e.id} disabled={!e.active}>{e.name}{e.active?"":" · inactive"}</option>)}
     </select>
-    {error&&<p role="alert" className="text-xs text-rose-300 mt-1">הרשימה לא נטענה. <button type="button" className="underline" onClick={()=>refresh().catch(()=>{})}>נסה שוב</button></p>}
+    {error&&<p role="alert" className="text-xs text-rose-300 mt-1">The engineer list did not load. <button type="button" className="underline" onClick={()=>refresh().catch(()=>{})}>Retry</button></p>}
     {saveError&&<p role="alert" className="text-xs text-rose-300 mt-1">{saveError}</p>}
-    {busy&&<span className="text-xs text-zinc-400">שומר…</span>}
-    {saved&&!busy&&<span role="status" className="text-xs text-nv-300">נשמר</span>}
+    {busy&&<span className="text-xs text-zinc-400">Saving…</span>}
+    {saved&&!busy&&<span role="status" className="text-xs text-nv-300">Saved</span>}
   </div>;
 }
 

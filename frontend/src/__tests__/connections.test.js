@@ -20,8 +20,9 @@ function navigationHarness(adminSection = "devices") {
     replaceState(value) { this.state = value; },
   };
   const setters = ["view", "mainTab", "editMode", "adminSection"].map(key => value => { state[key] = value; });
+  const mainTabRef = { get current() { return state.mainTab; } };
   const actions = () => new Function("window", "history", "setView", "setMainTab", "setEditMode", "setAdminSection", "adminSection", `${navigationSource}; return { navigate, navigateAdmin };`)(window, history, ...setters, state.adminSection);
-  const pop = new Function("location", "setView", "setMainTab", "setEditMode", "setAdminSection", `${popSource}; return onPop;`)(window.location, ...setters);
+  const pop = new Function("location", "setView", "setMainTab", "setEditMode", "setAdminSection", "mainTabRef", `${popSource}; return onPop;`)(window.location, ...setters, mainTabRef);
   return { state, window, history, actions, pop };
 }
 
@@ -330,4 +331,21 @@ test("Connections polls on the account refresh interval and isolates Hebrew text
   assert.match(source, /<span className="text-zinc-200" dir="auto">\{link\.device_name\}<\/span>/);
   assert.match(source, /<div className="text-xs text-zinc-500 break-words" dir="auto">\{link\.label\}<\/div>/);
   assert.doesNotMatch(view, /setData\(null\);\s*\n?\s*if \(e\.status === 403\)/, "a failed refresh no longer drops the rows");
+});
+
+test("Racks: ?rack= opens a rack; Back between a rack and all racks keeps Edit mode, other Back leaves it", () => {
+  const h = navigationHarness();
+  const { navigate } = h.actions();
+  navigate("racks", "Rack-04");
+  assert.equal(h.state.mainTab, "racks");
+  assert.match(h.window.location.search, /[?&]rack=Rack-04/);
+  // The open rack itself is App's rackParam (selectRack / onHistory, covered in app-shell.test.js).
+  h.state.editMode = true;
+  h.window.location.search = "?tab=racks";
+  h.pop({ state: { tab: "racks", view: { kind: "dashboard" }, adminSection: "devices" } });   // as selectRack pushes it
+  assert.equal(h.state.mainTab, "racks");
+  assert.equal(h.state.editMode, true, "closing the rack with Back stays in Edit mode");
+  h.window.location.search = "?tab=dashboard";
+  h.pop({ state: { tab: "dashboard", view: { kind: "dashboard" }, adminSection: "devices" } });
+  assert.equal(h.state.editMode, false, "leaving Racks with Back leaves Edit mode");
 });

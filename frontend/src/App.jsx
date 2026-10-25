@@ -50,6 +50,9 @@ export default function App() {
   const [pxeConfigError, setPxeConfigError] = useState("");
 
   const [editMode, setEditMode] = useState(false);
+  // onPop reads the tab shown before Back, so Back between a rack and all racks keeps Edit mode.
+  const mainTabRef = useRef(null);
+  mainTabRef.current = mainTab;
   const [summary, setSummary] = useState("");
   const [version, setVersion] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -113,10 +116,15 @@ export default function App() {
     const onPop = event => {
       const tab = event.state?.tab || new URLSearchParams(location.search).get("tab") || "dashboard";
       const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
-      setView(event.state?.view || { kind: "dashboard" });
-      setMainTab(tab === "dcim" ? "racks" : section ? "admin" : tab);
+      const nextTab = tab === "dcim" ? "racks" : section ? "admin" : tab;
+      const view = event.state?.view || { kind: "dashboard" };
+      // Back / Forward between a rack and all racks stays in Edit mode; anything else leaves it.
+      // The open rack itself is re-read from ?rack= by onHistory below.
+      const sameRacks = nextTab === "racks" && mainTabRef.current === "racks" && view.kind === "dashboard";
+      setView(view);
+      setMainTab(nextTab);
       setAdminSection(event.state?.adminSection || section || linkedAdminSection(location.search));
-      setEditMode(false);
+      if (!sameRacks) setEditMode(false);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -330,7 +338,10 @@ export default function App() {
     try {
       const data = await api.maintenanceList();
       if (seq !== maintenanceSeq.current) return;
-      setMaintenance({ password_mode: data?.password_mode || "unavailable", pdus: data?.pdus || {}, log: data?.log || [] });
+      // protection / protected (outlet numbers per PDU): Racks blocks Off of a protected outlet before anything is sent.
+      setMaintenance({ password_mode: data?.password_mode || "unavailable", pdus: data?.pdus || {}, log: data?.log || [],
+        protection: typeof data?.protection === "string" ? data.protection : null,
+        protected: data?.protected && typeof data.protected === "object" ? data.protected : {} });
       setMaintenanceError("");
     } catch (e) {
       if (seq === maintenanceSeq.current) setMaintenanceError(e.detail || (e.status ? `HTTP ${e.status}` : e.message));
@@ -401,6 +412,21 @@ export default function App() {
     } catch (e) {
       alert(`Action failed: ${e.detail || e.message}`);
     }
+  }
+
+  // Racks power: the page asked first (its own dialog), so this only switches the outlets in order and reports each
+  // one; after an Off failure the rest are not attempted. Every affected PDU is read again once.
+  async function switchFeeds(targets, action, { stopOnFailure = false } = {}) {
+    if (!canOperate) throw new Error("Viewer account: read only");
+    const results = [];
+    let stop = false;
+    for (const t of targets) {
+      if (stop) { results.push({ ...t, ok: false, notAttempted: true }); continue; }
+      try { await api.outletPower(t.pduId, t.outlet, action); results.push({ ...t, ok: true }); }
+      catch (e) { results.push({ ...t, ok: false, status: e.status, error: errorMessage(e) }); if (stopOnFailure) stop = true; }
+    }
+    await Promise.all([...new Set(targets.map(t => t.pduId))].map(loadPduStatus));
+    return results;
   }
 
   async function handleTurnOnAll(device, numbers) {
@@ -509,6 +535,8 @@ export default function App() {
           onRefresh={loadDevices}
           onOpenConsole={openKvmConsole}
           maintenance={maintenance}
+          onSwitchFeeds={switchFeeds}
+          onRequestEdit={canOperate ? () => setEditMode(true) : null}
         />
       )}
 

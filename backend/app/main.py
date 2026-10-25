@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 from contextlib import asynccontextmanager
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 import pathlib
 
 from .database import init_db, AsyncSessionLocal, get_db
@@ -290,13 +291,55 @@ async def save_opt_owners(payload: dict, db=Depends(get_db)):
     return await engineers.replace_legacy_owners(payload, db)
 
 
+_CHILLERS_EMPTY = {"units": [], "connections": []}
+
+
+def _account_username(request: Request):
+    """The signed-in account's username for the cooling history; None without accounts (shared password or open)."""
+    current = getattr(request.state, "account", None)
+    return (current or {}).get("user", {}).get("username")
+
+
+class ChillerRestore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: StrictInt = Field(ge=1)
+
+
 @app.get("/api/chillers")
 async def get_chillers(response: Response):
-    return _get_layout(_CHILLERS_FILE, {"units": [], "connections": []}, response)
+    return _get_layout(_CHILLERS_FILE, _CHILLERS_EMPTY, response)
 
 @app.put("/api/chillers")
-async def save_chillers(payload: dict, response: Response, if_match: str | None = Header(default=None)):
-    return _save_layout(_CHILLERS_FILE, {"units": [], "connections": []}, payload, if_match, response)
+async def save_chillers(payload: dict, request: Request, response: Response, if_match: str | None = Header(default=None)):
+    """Same contract as the other layout stores (optional If-Match, 409 when stale). Units are never deleted: a payload
+    that leaves out a unit id of the current document is 422 and changes nothing. The document it replaces is kept in
+    chillers_history.json; a chillers.json that exists but cannot be read is 503 and is never overwritten."""
+    response.headers["ETag"] = inventory_store.save_versioned(_CHILLERS_FILE, payload, if_match, _CHILLERS_EMPTY,
+                                                              _account_username(request))
+    return {"ok": True}
+
+@app.get("/api/chillers/history")
+async def get_chillers_history(response: Response):
+    """Operator (it names who saved). Newest first: {versions: [{revision, at, by, units, action, removed, places
+    [, restored_from]}]} where each version is a document a save or restore replaced; `units` is its unit count,
+    `places` its units ({id, name, rack, u}) and `removed` the units that the replacing write left out (only older
+    servers left units out)."""
+    response.headers["Cache-Control"] = "no-store"
+    history = inventory_store.read_history(_CHILLERS_FILE)
+    return {"versions": [inventory_store.public_version(v) for v in reversed(history["versions"])]}
+
+@app.post("/api/chillers/restore")
+async def restore_chillers(body: ChillerRestore, request: Request, response: Response,
+                           if_match: str | None = Header(default=None)):
+    """Operator. If-Match is the current ETag of GET /api/chillers (428 without it, 409 when stale, 404 unknown revision).
+    Writes that version as the current document, keeping every current unit the version does not hold where it is now
+    (a restore never deletes a unit); the replaced document becomes a new history version, so a restore can be undone.
+    Returns the written document with the new ETag."""
+    document, etag = inventory_store.restore_version(_CHILLERS_FILE, body.revision, if_match, _CHILLERS_EMPTY,
+                                                     _account_username(request))
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-store"
+    return document
 
 
 _TWIN_DATA_FILE = TWIN_DIR / "lab-data.json"

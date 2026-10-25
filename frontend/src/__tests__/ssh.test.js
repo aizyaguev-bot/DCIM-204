@@ -615,7 +615,7 @@ test("App: ?tab=ssh is a page, Admin -> SSH is Operator+ and ?tab=admin&section=
   assert.match(app, /\{!sshPage && <footer /);
 });
 
-test("Racks: an SSH button sits next to KVM in the rack diagram and the rack table, through ServerActionsContext", async () => {
+test("Racks: an SSH button sits next to KVM in the rack diagram, the rack table and the phone list, through the Racks v4 SSH slot", async () => {
   const { readFileSync } = await import("node:fs");
   const dcim = readFileSync(new URL("../pages/DcimView.jsx", import.meta.url), "utf8");
   const component = dcim.slice(dcim.indexOf("function RackSshButton("), dcim.indexOf("function Portal("));
@@ -623,10 +623,16 @@ test("Racks: an SSH button sits next to KVM in the rack diagram and the rack tab
   assert.match(component, /if \(!name \|\| !canOperate\) return null;/, "nothing for Viewers or non-server labels");
   assert.match(component, /<SshButton name=\{name\}/, "the shared SshButton (same server identity as the other SSH buttons)");
   assert.match(component, /onClick=\{e => e\.stopPropagation\(\)\} onKeyDown=\{e => e\.stopPropagation\(\)\}/, "never opens the server row");
-  assert.match(dcim, /createContext\(\{ kvmFor: \(\) => null, openConsole: null, sshFor: \(\) => null, canOperate: false \}\)/);
+  assert.match(dcim, /createContext\(\{ kvmFor: \(\) => null, openConsole: null, sshFor: \(\) => null, canOperate: false,/);
   assert.match(dcim, /sshFor: name => serverIdentity\(name\) \? name : null,/);
+  // Racks v4 draws SSH through its slot (data-ssh-slot); the DcimView root fills every slot with RackSshButton.
+  assert.match(dcim, /renderSsh: \(server, size\) => <RackSshButton server=\{server\} compact=\{size === "sm"\}\/>,/);
+  const slot = dcim.slice(dcim.indexOf("function SshSlot("), dcim.indexOf("\n}", dcim.indexOf("function SshSlot(")));
+  assert.match(slot, /renderSsh \? <span data-ssh-slot className="contents">\{renderSsh\(server, size\)\}<\/span> : null/);
   const cell = dcim.slice(dcim.indexOf("function ServerCell("), dcim.indexOf("\n}", dcim.indexOf("function ServerCell(")));
-  assert.match(cell, /<KvmButton server=\{server\} compact\/>\s*<RackSshButton server=\{server\} compact\/>/);
-  assert.match(dcim, /<KvmButton server=\{s\}\/><RackSshButton server=\{s\}\/>/);
-  assert.match(dcim, /<Th label="KVM \/ SSH"\/>/);
+  assert.match(cell, /<KvmButton server=\{server\} compact\/>\s*<SshSlot server=\{server\} size="sm"\/>/);
+  assert.match(dcim, /<KvmButton server=\{s\} compact\/><SshSlot server=\{s\} size="sm"\/>/, "rack detail table");
+  assert.match(dcim, /<KvmButton server=\{s\}\/><SshSlot server=\{s\} size="sm"\/>/, "phone list");
+  assert.match(dcim, /\["U","Name","Type","State","W","Owner","Outlet","Switch","Notes","Actions"\]/, "KVM and SSH share the Actions column");
+  assert.match(dcim, /sshSlot=\{<SshSlot server=\{selectedServer\} size="md"\/>\}/, "server details dialog");
 });

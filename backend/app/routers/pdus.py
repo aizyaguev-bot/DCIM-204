@@ -142,6 +142,10 @@ async def outlet_power(
         if body.action in ("off", "cycle"):
             # Outlets that feed the site itself (POWER_PROTECTED_OUTLETS) are never switched off from the UI either.
             protection = await power_protection.load(db, get_settings())
+            # A stale entry (renamed PDU, outlet out of range) is dropped by parse() and could be exactly the outlet it
+            # was meant to protect, so an invalid list refuses every off and cycle (the bulk actions' rule as well).
+            if protection.errors:
+                raise HTTPException(status_code=409, detail="Protected outlets setting is invalid; power off is unavailable")
             if protection.is_protected(device_id, outlet_number):
                 raise HTTPException(status_code=409, detail="This outlet is protected (POWER_PROTECTED_OUTLETS); it cannot be switched off here")
         try:

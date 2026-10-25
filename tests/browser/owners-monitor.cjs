@@ -15,7 +15,7 @@ const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
   await nav(p,'Inventory');await p.getByRole('button',{name:'✎ Edit',exact:true}).click();
   const owner=p.getByLabel('Owner for OPT11',{exact:true});await owner.waitFor();await owner.locator('option[value="__current__"]').waitFor({state:'attached'});
   assert.equal(await owner.locator('option').count(),12);assert.equal(await owner.inputValue(),'__current__');checks.push('10 names and preserved legacy owner');
-  await owner.selectOption({label:'Roy Mendelson'});await p.getByRole('status').filter({hasText:'נשמר'}).waitFor();
+  await owner.selectOption({label:'Roy Mendelson'});await p.getByRole('status').filter({hasText:'Saved'}).waitFor();
   assert.equal((await(await c.request.get(origin+'/api/opt-owners')).json()).opt11,'Roy Mendelson');checks.push('owner saved');
   // Owners load after the select renders; wait for the saved owner instead of reading the first paint.
   await p.reload();await p.getByRole('button',{name:'✎ Edit',exact:true}).click();await p.getByLabel('Owner for OPT11').locator('option:checked').filter({hasText:'Roy Mendelson'}).waitFor({state:'attached'});checks.push('owner survives reload');
@@ -28,7 +28,7 @@ const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
   await nav(p,'Admin');await p.getByRole('button',{name:'מהנדסים',exact:true}).click();
   const updated=p.getByRole('row').filter({has:p.getByText('Roy QA Updated',{exact:true})});await updated.getByRole('button',{name:'הפוך ללא פעיל',exact:true}).click();await updated.getByRole('cell',{name:'לא פעיל',exact:true}).waitFor();
   await nav(p,'Inventory');await p.getByRole('button',{name:'✎ Edit',exact:true}).click();
-  const select=p.getByLabel('Owner for OPT11');await select.locator('option:checked').filter({hasText:'Roy QA Updated · לא פעיל'}).waitFor({state:'attached'});
+  const select=p.getByLabel('Owner for OPT11');await select.locator('option:checked').filter({hasText:'Roy QA Updated · inactive'}).waitFor({state:'attached'});
   assert.equal(await select.locator('option:checked').isDisabled(),true);
   assert.equal(await p.getByLabel('Owner for OPT12').getByText('Roy QA Updated',{exact:false}).count(),0);checks.push('inactive preserves ownership and cannot be newly assigned');
   await nav(p,'Ping Monitor');await p.getByRole('button',{name:'View history for OPT11',exact:true}).click();

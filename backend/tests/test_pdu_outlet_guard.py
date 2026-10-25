@@ -65,3 +65,17 @@ async def test_unreadable_credentials_are_a_fixed_502(client, pdu_device):
     with patch.object(pdus_module, "get_creds", side_effect=ValueError("bad token secret-x")):
         r, factory, _ = await _post(client, pdu_device["id"], 1, "on")
     assert r.status_code == 502 and "secret-x" not in r.text and not factory.called
+
+
+async def test_an_invalid_protected_list_refuses_off_and_cycle_for_every_outlet(client, pdu_device):
+    """parse() drops a stale entry (renamed PDU, outlet out of range, empty entry); that entry could be the very outlet
+    it was meant to protect, so off and cycle are refused until the setting is fixed. On stays available."""
+    dev_id = pdu_device["id"]
+    for stale in ("PDU-Renamed:7", f"{dev_id}:99", f"{dev_id}:3,,"):
+        for action in ("off", "cycle"):
+            r, factory, _ = await _post(client, dev_id, 5, action, protected=stale)
+            assert r.status_code == 409, (stale, action)
+            assert r.json()["detail"] == "Protected outlets setting is invalid; power off is unavailable"
+            assert not factory.called
+    r, factory, driver = await _post(client, dev_id, 5, "on", protected="PDU-Renamed:7")
+    assert r.status_code == 200 and driver.set_outlet_state.await_count == 1
