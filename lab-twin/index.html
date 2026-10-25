@@ -3,139 +3,180 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Lab Manager — Digital Twin</title>
+  <title>Lab Twin</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- ─── Header (Lab Manager look) ─────────────────────────────────────── -->
+  <!-- ─── Top bar (48 px): brand · search · camera view · layers · colour · live · issues · edit · more ─── -->
   <header class="hdr">
-    <button class="brand" id="btnHome" title="Reset view">
-      <div class="brand-icon">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#76b900" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-7 4 14 2-7h7"/></svg>
-      </div>
-      <div class="brand-text">
-        <div class="brand-title">Lab Manager <span class="brand-sep">/</span> Digital Twin</div>
-        <div class="brand-sub">3D lab map · Raritan PDU + KVM control</div>
-      </div>
-    </button>
+    <button class="brand" id="btnHome" type="button" title="Back to the overview"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Lab Twin</span></button>
 
-    <div class="search-wrap">
-      <svg class="search-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-3.5-3.5"/></svg>
-      <input id="search" type="text" placeholder="Search ID, name, owner or SN — SETUP-003, Opt133, chiller, KVM…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchResults" aria-label="Search the lab" />
+    <div class="search-wrap" id="searchWrap">
+      <svg class="search-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-3.5-3.5"/></svg>
+      <input id="search" type="text" placeholder="Search racks, devices, owners… (/)" aria-keyshortcuts="/" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchResults" aria-label="Search the lab" />
       <div id="searchResults" class="search-results hidden" role="listbox" aria-label="Search results"></div>
     </div>
+    <button class="kbtn tertiary icon phone-only" id="btnSearch" type="button" aria-label="Search" aria-expanded="false" aria-controls="searchWrap">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+    </button>
 
-    <div class="hdr-right">
-      <div id="livePill" class="live-pill offline" title="Backend connection">
-        <span class="dot"></span><span id="liveText">Offline · static data</span>
+    <div class="seg desk-only" id="viewSeg" role="radiogroup" aria-label="Camera view">
+      <button type="button" role="radio" id="vOrbit" aria-checked="true" title="Overview from the entrance (R)">Overview</button>
+      <button type="button" role="radio" id="vFront" aria-checked="false" title="Front of one rack (F)">Rack front</button>
+      <button type="button" role="radio" id="vEye" aria-checked="false" title="Eye level in the aisle (E)">Aisle</button>
+      <button type="button" role="radio" id="vTop" aria-checked="false" title="Top view (T)">Top</button>
+    </div>
+    <button class="kbtn tertiary phone-only" id="btnViewMenu" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="viewMenu">Overview ▾</button>
+
+    <button class="kbtn tertiary small desk-only" id="btnLayers" type="button" aria-expanded="false" aria-controls="layersPanel">Layers</button>
+    <button class="kbtn tertiary small desk-only" id="btnColorBy" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="colorMenu">Color by: Health</button>
+    <span class="hdr-spacer"></span>
+
+    <button class="kbadge live offline desk-only" id="livePill" type="button" title="Backend connection"><span class="dot" aria-hidden="true"></span><span id="liveText">Offline · static data</span></button>
+    <button class="kbadge issues hidden desk-only" id="issuesBadge" type="button" title="Open the list of issues">No issues</button>
+    <button class="kbtn secondary small desk-only" id="btnEdit" type="button" title="Edit layout (F2): select an object, then Move or edit it">Edit layout</button>
+    <button class="kbtn tertiary small" id="btnMore" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="moreMenu" aria-label="More: lab screen mode, 2D floor plan, export layout"><span class="desk-only" aria-hidden="true">More</span><span class="phone-only more-dots" aria-hidden="true">⋯</span></button>
+
+    <!-- non-modal Layers popover: scene toggles, filters, confidence note -->
+    <div class="popover hidden" id="layersPanel" role="dialog" aria-label="Layers">
+      <div class="pop-sec">
+        <div class="pop-h">Show</div>
+        <div class="toggles">
+          <button type="button" class="tgl" id="tWalls" aria-pressed="true" title="Show / hide the walls (W)">Walls</button>
+          <button type="button" class="tgl" id="tZones" aria-pressed="true" title="Show / hide the zones (Z)">Zones</button>
+          <button type="button" class="tgl" id="tLabels" aria-pressed="true" title="Label density: racks / all / off (L)">Labels: racks</button>
+          <button type="button" class="tgl" id="tHeat" aria-pressed="false" title="Heat map under the racks and full telemetry cards (live PDU sensors)">Heat</button>
+          <button type="button" class="tgl" id="tPower" aria-pressed="false" title="Show kW and amps under each rack label">Power on labels</button>
+          <button type="button" class="tgl" id="tEnv" aria-pressed="false" title="Average temperature, humidity and leak state of the lab">Lab environment</button>
+        </div>
       </div>
-      <button class="btn btn-edit" id="btnEdit" title="Edit mode (F2) — tap objects to edit, move, replace">Edit</button>
-      <button class="btn btn-ghost" id="btnKiosk" title="Lab screen mode (K) — large touch UI, no sidebar; the camera never rotates on its own">Screen</button>
-      <button class="btn btn-ghost" id="btnPlan" title="Open the 2D floor plan (floorplan.svg)">2D plan</button>
-      <button class="btn btn-ghost" id="btnExport" title="Download the current lab-data.json (with your edits)">Export JSON</button>
-      <button class="btn btn-primary" id="btnSettings">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-        Backend
-      </button>
-      <span class="ver" id="ver">twin v0.1.0</span>
+      <div class="pop-sec filters">
+        <div class="pop-h">Filter</div>
+        <label>Zone <select id="fZone"><option value="">All zones</option></select></label>
+        <label>Setup <select id="fSetup"><option value="">All setups</option></select></label>
+        <div class="chips" id="fStatus" aria-label="Lifecycle status"></div>
+        <div class="row-btns">
+          <label class="chk"><input type="checkbox" id="fOnlyLow" /> Only low confidence</label>
+          <button class="kbtn secondary small" type="button" id="fClear">Clear filters</button>
+        </div>
+      </div>
+      <div class="pop-foot">Placement confidence (Lifecycle colouring): solid = high · faded = medium · dashed = low.</div>
+    </div>
+
+    <div class="menu hidden" id="colorMenu" role="menu" aria-label="Color by">
+      <button type="button" role="menuitemradio" id="cbHealth" data-color="health" aria-checked="true">Health <small>live state: up, down, unknown, maintenance</small></button>
+      <button type="button" role="menuitemradio" id="cbStatus" data-color="status" aria-checked="false">Lifecycle status <small>active, in construction, inactive …</small></button>
+    </div>
+
+    <div class="menu hidden" id="viewMenu" role="menu" aria-label="Camera view">
+      <button type="button" role="menuitem" data-proxy="vOrbit">Overview</button>
+      <button type="button" role="menuitem" data-proxy="vFront">Rack front</button>
+      <button type="button" role="menuitem" data-proxy="vEye">Aisle</button>
+      <button type="button" role="menuitem" data-proxy="vTop">Top</button>
+    </div>
+
+    <div class="menu hidden" id="moreMenu" role="menu" aria-label="More">
+      <button type="button" role="menuitem" class="phone-only" data-proxy="btnEdit" id="mEdit">Edit layout</button>
+      <button type="button" role="menuitem" class="compact-only" data-proxy="btnLayers">Layers…</button>
+      <button type="button" role="menuitem" class="compact-only" id="mColor">Color by lifecycle status</button>
+      <button type="button" role="menuitem" class="phone-only" data-proxy="vFit">Fit lab</button>
+      <button type="button" role="menuitem" class="phone-only" data-proxy="vReset">Reset view</button>
+      <div class="menu-sep compact-only" role="separator"></div>
+      <button type="button" role="menuitem" id="btnKiosk" title="Large touch UI without the side panel (K); the camera never rotates on its own">Lab screen mode</button>
+      <button type="button" role="menuitem" id="btnPlan" title="Open the 2D floor plan (floorplan.svg)">2D floor plan</button>
+      <button type="button" role="menuitem" id="btnExport" title="Download the current lab-data.json (with your edits)">Export layout (JSON)</button>
+      <button type="button" role="menuitem" id="btnSettings">Backend connection…</button>
+      <button type="button" role="menuitem" id="btnHelp">Mouse &amp; keyboard help</button>
+      <div class="menu-foot" id="ver">twin</div>
     </div>
   </header>
 
-  <!-- ─── Stats bar ────────────────────────────────────────────────────── -->
-  <div class="stats" id="stats"></div>
+  <!-- ─── Rack bar (32 px): racks grouped by row, health dot, issue count ─── -->
+  <nav class="rackbar" id="rackBar" aria-label="Racks"></nav>
 
-  <!-- ─── Main layout ──────────────────────────────────────────────────── -->
+  <!-- ─── Main layout: side panel · 3D view · details drawer (phone: 3D view + bottom sheet) ─── -->
   <main class="layout">
-    <!-- left sidebar -->
-    <aside class="side">
-      <section class="card">
-        <div class="card-h">Filters</div>
-        <div class="card-b filters">
-          <label>Zone <select id="fZone"><option value="">All zones</option></select></label>
-          <label>Setup <select id="fSetup"><option value="">All setups</option></select></label>
-          <div class="chips" id="fStatus"></div>
-          <div class="row-btns">
-            <button class="btn btn-xs" id="fClear">Clear filters</button>
-            <label class="chk"><input type="checkbox" id="fOnlyLow" /> only uncertain</label>
-          </div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-h">Legend</div>
-        <div class="card-b legend" id="legend"></div>
-      </section>
-
-      <section class="card grow">
-        <div class="card-h tabs">
-          <button class="tab active" data-tab="attn" title="What needs attention today">Attention <span class="badge" id="attnCount">0</span></button>
-          <button class="tab" data-tab="tree">Tree</button>
-          <button class="tab" data-tab="inv">Inventory</button>
-          <button class="tab" data-tab="unplaced">Unplaced <span class="badge" id="unplacedCount">0</span></button>
-        </div>
-        <div class="card-b list" id="attn"></div>
-        <div class="card-b list hidden" id="tree"></div>
-        <div class="card-b list hidden" id="inv"></div>
-        <div class="card-b list hidden" id="unplaced"></div>
-      </section>
-    </aside>
-
-    <!-- 3D viewport -->
     <section class="viewport" id="viewport">
       <canvas id="c" tabindex="0" aria-label="3D view of the lab"></canvas>
       <div id="labels" class="labels"></div>
 
-      <div class="toolbar">
-        <div class="tb-group">
-          <button class="tb" id="vOrbit" title="Overview from the entrance (R)">Overview</button>
-          <button class="tb" id="vTop" title="Top view (T)">Top</button>
-          <button class="tb" id="vEye" title="Eye-level view (E)">Eye level</button>
-        </div>
-        <div class="tb-group">
-          <button class="tb" id="tWalls" title="Show / hide the walls (W)">Walls</button>
-          <button class="tb" id="tLabels" title="Label density: racks / all / off (L)">Labels: setups</button>
-          <button class="tb" id="tZones" title="Show / hide the zones (Z)">Zones</button>
-          <button class="tb" id="tHeat" title="Heat map under the racks and full telemetry cards (live PDU sensors)">Heat</button>
-        </div>
-        <div class="tb-group">
-          <button class="tb tb-accent" id="vReset" title="Reset: close the selection and return to the overview (Home)">Reset</button>
-          <button class="tb" id="vFit" title="Show the whole lab without closing the selection">Fit lab</button>
-          <button class="tb" id="vFocus" title="Fly the camera to the selected object" disabled>Focus</button>
-        </div>
-      </div>
-      <div class="attn-dock" id="attnDock" aria-label="Attention" aria-live="polite"></div>
+      <nav class="crumb" id="crumb" aria-label="Location in the lab">
+        <span id="crumbPath">Lab › Overview</span>
+        <span class="rf-nav hidden" id="rfNav"><button type="button" class="crumb-btn" id="rfPrev" title="Previous rack ([)">[ Previous</button><button type="button" class="crumb-btn" id="rfNext" title="Next rack (])">Next ]</button></span>
+      </nav>
+      <div class="attn-dock" id="attnDock" aria-label="Issues"></div>
 
-      <div class="movebanner hidden" id="moveBanner" role="region" aria-label="Move"><span class="mv-ic" aria-hidden="true">⇄</span><span id="moveText">Tap a shelf</span><select id="moveTarget" aria-label="Destination"></select><button class="btn btn-xs btn-primary" id="moveGo" title="Move to the chosen destination (asks to confirm)">Move here</button><button class="btn btn-xs" id="moveCancel" title="Stop moving (nothing is changed)">Cancel</button></div>
-      <div class="savebar hidden" id="saveBar"><span class="sb-dot"></span><span>Unsaved edits</span><button class="btn btn-primary btn-xs" id="sbSave">Save to server</button><button class="btn btn-xs" id="sbDownload">Download JSON</button><button class="btn btn-xs" id="sbDiscard">Discard</button></div>
+      <div class="movebanner hidden" id="moveBanner" role="region" aria-label="Move"><span class="mv-ic" aria-hidden="true">⇄</span><span id="moveText">Tap a shelf</span><select id="moveTarget" aria-label="Destination"></select><button type="button" class="kbtn primary small" id="moveGo" title="Move to the chosen destination (asks to confirm)">Move here</button><button type="button" class="kbtn secondary small" id="moveCancel" title="Stop moving (nothing is changed)">Cancel</button></div>
+      <div class="savebar hidden" id="saveBar"><span class="sb-dot"></span><span>Unsaved edits</span><button type="button" class="kbtn primary small" id="sbSave">Save to server</button><button type="button" class="kbtn secondary small" id="sbDownload">Download JSON</button><button type="button" class="kbtn tertiary small" id="sbDiscard">Discard</button></div>
       <div class="envpanel hidden" id="envPanel"></div>
-      <div class="rackbar" id="rackBar"></div>
-      <div class="zoombar"><button class="zb" id="zIn" title="Zoom in">＋</button><button class="zb" id="zOut" title="Zoom out">−</button><button class="zb" id="zL" title="Rotate left">⟲</button><button class="zb" id="zR" title="Rotate right">⟳</button><span class="zb-sep"></span><button class="zb" id="pL" title="Pan left (←)">◀</button><button class="zb" id="pR" title="Pan right (→)">▶</button><button class="zb" id="pF" title="Pan forward (↑)">▲</button><button class="zb" id="pB" title="Pan back (↓)">▼</button></div>
-      <div class="hint" id="hint" dir="rtl" lang="he">שמאל + גרירה: סיבוב · ימין + גרירה: הזזת מבט · גלגלת: זום · הזזת ציוד: עריכה ← Move ← בחירת יעד</div>
-      <div class="compass" id="compass">ENTRANCE ↓</div>
+
+      <section class="rackfront hidden" id="rackFront" aria-label="Rack front view"></section>
+
+      <div class="vp-legend" id="legend" aria-label="Legend"></div>
+      <div class="zoombar">
+        <button type="button" class="kbtn secondary small zb" id="zIn" aria-label="Zoom in" title="Zoom in">+</button>
+        <button type="button" class="kbtn secondary small zb" id="zOut" aria-label="Zoom out" title="Zoom out">−</button>
+        <button type="button" class="kbtn secondary small zb zb-text" id="vFocus" title="Fly the camera to the selected object" disabled>Focus</button>
+        <button type="button" class="kbtn secondary small zb zb-text" id="vFit" title="Show the whole lab without closing the selection">Fit lab</button>
+        <button type="button" class="kbtn secondary small zb zb-text" id="vReset" title="Close the selection and return to the overview (Home)">Reset view</button>
+        <button type="button" class="kbtn secondary small zb zb-text hidden" id="vBack" title="Leave the rack front (Escape)">Back to overview</button>
+      </div>
     </section>
 
-    <!-- right details panel -->
-    <aside class="detail hidden" id="detail">
-      <div class="detail-h">
-        <div>
-          <div class="detail-id" id="dId">—</div>
-          <div class="detail-name" id="dName">—</div>
-        </div>
-        <div class="detail-actions">
-          <button class="btn btn-xs" id="dFocus" title="Fly camera to object">Focus</button>
-          <button class="icon-btn" id="dClose" title="Close (Esc)">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-          </button>
+    <div class="sheet" id="sheet">
+      <div class="sheet-head" id="sheetHead">
+        <button type="button" class="sheet-handle" id="sheetHandle" aria-expanded="false" aria-controls="sheet" aria-label="Resize the panel"><span class="bar" aria-hidden="true"></span></button>
+        <div class="sheet-row"><span class="sheet-title" id="sheetTitle">Live data off</span><span class="kbadge outline" id="sheetLive">Offline</span></div>
+        <div class="seg sheet-tabs" role="tablist" aria-label="Panel">
+          <button type="button" role="tab" data-sheet="issues" aria-selected="true">Issues</button>
+          <button type="button" role="tab" data-sheet="racks" aria-selected="false">Racks</button>
+          <button type="button" role="tab" data-sheet="details" aria-selected="false" disabled>Details</button>
         </div>
       </div>
-      <div class="detail-b" id="dBody"></div>
-    </aside>
+
+      <aside class="side" aria-label="Lab panel">
+        <div class="seg side-tabs" role="tablist" aria-label="Side panel">
+          <button type="button" class="tab active" role="tab" data-tab="attn" aria-controls="attn" aria-selected="true">Issues <span class="cnt" id="attnCount">0</span></button>
+          <button type="button" class="tab" role="tab" data-tab="tree" aria-controls="racksPanel" aria-selected="false">Racks</button>
+          <button type="button" class="tab" role="tab" data-tab="dq" aria-controls="dqPanel" aria-selected="false">Data quality</button>
+        </div>
+        <div class="panel" id="attn" role="tabpanel" aria-label="Issues"></div>
+        <div class="panel hidden" id="racksPanel" role="tabpanel" aria-label="Racks">
+          <div class="seg sub" role="radiogroup" aria-label="Racks list">
+            <button type="button" role="radio" data-rlist="tree" aria-checked="true">By rack</button>
+            <button type="button" role="radio" data-rlist="inv" aria-checked="false">All objects</button>
+          </div>
+          <div class="list" id="tree"></div>
+          <div class="list hidden" id="inv"></div>
+        </div>
+        <div class="panel hidden" id="dqPanel" role="tabpanel" aria-label="Data quality">
+          <div id="dqList"></div>
+          <div id="dqLow"></div>
+          <div class="list" id="unplaced"></div>
+        </div>
+        <button type="button" class="dq-footer" id="dqFooter"><span>Data quality: <span id="unplacedCount">0</span> items</span><span class="link">Review</span></button>
+      </aside>
+
+      <aside class="detail hidden" id="detail" aria-label="Details">
+        <div class="detail-h">
+          <div class="dh-text">
+            <div class="detail-name" id="dName">—</div>
+            <div class="detail-id" id="dId">—</div>
+          </div>
+          <div class="detail-actions">
+            <span class="hbadge hidden" id="dHealth"></span>
+            <button type="button" class="kbtn tertiary small" id="dClose" aria-label="Close details" title="Close (Esc)">Close</button>
+          </div>
+        </div>
+        <div class="detail-b" id="dBody"></div>
+      </aside>
+    </div>
   </main>
 
   <!-- ─── Settings modal ───────────────────────────────────────────────── -->
   <div class="modal hidden" id="settings">
-    <div class="modal-card">
-      <div class="modal-h">Backend connection <button class="icon-btn" id="sClose">✕</button></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="sTitle">
+      <div class="modal-h"><span id="sTitle">Backend connection</span> <button type="button" class="icon-btn" id="sClose" aria-label="Close">✕</button></div>
       <div class="modal-b">
         <p class="muted">Connect to the Lab Manager FastAPI backend (DCIM-204). Device IPs never reach this page — all control goes through the backend, like the main UI.</p>
         <label>Backend URL <input id="sUrl" placeholder="http://lab-manager-vm:8000  (empty = same origin)" /></label>
@@ -144,8 +185,8 @@
         <div id="sStatus" class="muted small"></div>
       </div>
       <div class="modal-f">
-        <button class="btn btn-ghost" id="sDisconnect">Disconnect</button>
-        <button class="btn btn-primary" id="sConnect">Connect</button>
+        <button type="button" class="kbtn secondary" id="sDisconnect">Disconnect</button>
+        <button type="button" class="kbtn primary" id="sConnect">Connect</button>
       </div>
     </div>
   </div>
@@ -165,11 +206,12 @@
   </div>
 
   <!-- ─── Confirmation for risky actions (power, move) — filled by askChoice() in app.js ─────────── -->
-  <div class="modal hidden" id="confirmModal" role="dialog" aria-modal="true" aria-labelledby="cfTitle" aria-describedby="cfBody">
-    <div class="modal-card confirm-card">
-      <div class="modal-h" id="cfTitle">Confirm</div>
-      <div class="modal-b" id="cfBody"></div>
-      <div class="modal-f" id="cfActions"></div>
+  <div class="modal hidden" id="confirmModal">
+    <div class="modal-card confirm-card" role="dialog" aria-modal="true" aria-labelledby="cfTitle" aria-describedby="cfBody">
+      <h2 class="cf-title" id="cfTitle">Confirm</h2>
+      <div class="cf-body" id="cfBody"></div>
+      <div class="cf-actions" id="cfActions"></div>
+      <div class="cf-foot hidden" id="cfFoot"></div>
     </div>
   </div>
 
@@ -179,7 +221,7 @@
       <div><strong id="kvmInlineTitle">KVM console</strong>
         <div class="small muted">The browser blocked a new tab, so the console opened here. Closing it frees the KVM port.</div>
       </div>
-      <button class="btn" type="button" id="kvmInlineClose" aria-label="Close KVM console">Close ✕</button>
+      <button class="kbtn secondary" type="button" id="kvmInlineClose" aria-label="Close KVM console">Close ✕</button>
     </div>
     <iframe id="kvmInlineFrame" title="KVM console viewer" src="about:blank" referrerpolicy="no-referrer" allowfullscreen></iframe>
   </div>

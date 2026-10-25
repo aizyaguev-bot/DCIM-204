@@ -36,6 +36,8 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     return { ctx, page, posts };
   }
   const dialogOpen = page => page.locator('#confirmModal:not(.hidden)');
+  // the drawer's single "Power…" button opens a menu with Power on / off / cycle (each still confirmed)
+  const pw = async (page, action) => { await page.locator('#dBody [data-power-menu]').click(); await page.locator(`#dBody [data-pw="${action}"]`).click(); };
   try {
     const { ctx, page, posts } = await open('admin');
     const idle = () => page.waitForFunction(() => !__twin.S.tween, null, { timeout: 8000 });
@@ -49,26 +51,26 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     // 2 — one confirmation for every power action, Cancel focused, Escape / Enter-on-Cancel do nothing
     await page.evaluate(() => __twin.select('LIVE-opt12', { keepCamera: true }));
     const before = posts.length;
-    await page.locator('#dBody [data-pw="off"]').click();
+    await pw(page, 'off');
     await dialogOpen(page).waitFor();
     assert.match(await page.locator('#cfTitle').innerText(), /^Power off OPT12\?$/);
     assert.match(await page.locator('#cfBody').innerText(), /PDU 01 · outlet 2 · currently On/);
     assert.equal(await page.evaluate(() => document.activeElement?.dataset.choice), 'cancel', 'Cancel has the focus');
     await page.keyboard.press('Escape'); await dialogOpen(page).waitFor({ state: 'detached' }).catch(() => {});
     assert.equal(await dialogOpen(page).count(), 0); assert.equal(posts.length, before, 'Escape cancels');
-    await page.locator('#dBody [data-pw="on"]').click(); await dialogOpen(page).waitFor();
+    await pw(page, 'on'); await dialogOpen(page).waitFor();
     assert.match(await page.locator('#cfTitle').innerText(), /^Power on OPT12\?$/, 'Power On asks too (confirm_power default)');
     await page.keyboard.press('Enter'); await page.waitForTimeout(200);
     assert.equal(posts.length, before, 'Enter on the focused Cancel does nothing');
-    await page.locator('#dBody [data-pw="cycle"]').click(); await dialogOpen(page).waitFor();
+    await pw(page, 'cycle'); await dialogOpen(page).waitFor();
     const cycled = page.waitForRequest(r => /\/api\/pdus\/pdu1\/outlets\/2\/power$/.test(r.url()));
     await page.locator('#cfActions [data-choice="go"]').click();
     assert.deepEqual(JSON.parse((await cycled).postData()), { action: 'cycle' });
     await page.evaluate(() => { window.DCIM_ACCOUNT_PREFS.confirm_power = false; });
     const on = page.waitForRequest(r => /\/api\/pdus\/pdu1\/outlets\/2\/power$/.test(r.url()) && JSON.parse(r.postData()).action === 'on');
-    await page.locator('#dBody [data-pw="on"]').click(); await on;
+    await pw(page, 'on'); await on;
     assert.equal(await dialogOpen(page).count(), 0, 'confirm_power=false skips Power On only');
-    await page.locator('#dBody [data-pw="off"]').click(); await dialogOpen(page).waitFor();
+    await pw(page, 'off'); await dialogOpen(page).waitFor();
     await page.locator('#cfActions [data-choice="cancel"]').click();
     await page.evaluate(() => { window.DCIM_ACCOUNT_PREFS.confirm_power = true; });
     pass('power: one dialog naming server/PDU/outlet/state, Cancel default, Escape cancels, preference skips only On');
@@ -89,6 +91,7 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
 
     // 4 — labels of mirrored geometry sit on their objects
     await page.evaluate(() => { __twin.closeDetail(); __twin.setView('top'); }); await idle();
+    await page.locator('#btnLayers').click();   // the label / wall / zone toggles live in the Layers popover
     await page.locator('#tLabels').click();   // setups -> all; labels are placed by the render loop
     await page.waitForFunction(() => ['DOOR-01', 'PILLAR-01'].every(id => __twin.S.recs.get(id).label.style.display !== 'none'), null, { timeout: 15000 }); await page.waitForTimeout(200);
     const offsets = await page.evaluate(() => {
@@ -102,7 +105,7 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     });
     assert.ok(Object.keys(offsets).length >= 5, 'labels shown');
     for (const [id, dx] of Object.entries(offsets)) assert.ok(dx < 40, `${id} label ${dx}px from its object`);
-    await page.locator('#tLabels').click(); await page.locator('#tLabels').click();
+    await page.locator('#tLabels').click(); await page.locator('#tLabels').click(); await page.keyboard.press('Escape');
     pass('labels of zones / doors / windows / pillar / E-stop follow the mirrored world');
 
     // 5 — live warnings are shown, never written into notes
@@ -205,7 +208,7 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     await port1Is(false);
     pass(`KVM: blocked or throwing popup opens an inline console; IN USE shows at once; closing frees the port (${lease1 ? 'own lease in the body' : 'server without leases: no body'})`);
 
-    // 8b — a port someone else uses asks first (advisory Hebrew dialog); Cancel opens and marks nothing
+    // 8b — a port someone else uses asks first (advisory dialog); Cancel opens and marks nothing
     await page.evaluate(() => { window.__opened = []; window.open = url => { const w = { closed: false, url }; window.__opened.push(w); return w; }; });
     const otherMarked = page.waitForResponse(r => isPortCall(r.request(), 'mark-in-use'));
     await page.locator('#dBody [data-kvm]').first().click(); await otherMarked;   // "another session": a console tab that stays open
@@ -213,10 +216,11 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     assert.equal(await dialogOpen(page).count(), 0, 'a free port opens without a question');
     const beforeAsk = posts.length;
     await page.locator('#dBody [data-kvm]').first().click(); await dialogOpen(page).waitFor();
-    assert.equal(await page.locator('#cfTitle').innerText(), 'הפורט כבר בשימוש');
+    assert.equal(await page.locator('#cfTitle').innerText(), 'Port already in use');
     assert.match(await page.locator('#cfBody').innerText(), /KVM 01 · Port 1 · OPT11/);
     assert.equal(await page.evaluate(() => document.activeElement?.dataset.choice), 'cancel', 'Cancel has the focus');
-    assert.deepEqual(await page.locator('#cfActions [data-choice]').allInnerTexts(), ['ביטול', 'פתח בכל זאת']);
+    assert.deepEqual(await page.locator('#cfActions [data-choice]').allInnerTexts(), ['Cancel', 'Open anyway']);
+    assert.match(await page.locator('#cfBody').innerText(), /Someone else is probably working on this server through the KVM/);
     await page.locator('#cfActions [data-choice="cancel"]').click(); await page.waitForTimeout(300);
     assert.equal(await dialogOpen(page).count(), 0);
     assert.equal(await page.evaluate(() => window.__opened.length), 1, 'Cancel opens no console');
@@ -227,7 +231,7 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     const secondMarked = page.waitForResponse(r => isPortCall(r.request(), 'mark-in-use'));
     await page.locator('#dBody [data-kvm]').first().click(); await dialogOpen(page).waitFor();
     await page.locator('#cfActions [data-choice="go"]').click(); await secondMarked;
-    assert.equal(await page.evaluate(() => window.__opened.length), 2, '"פתח בכל זאת" opens the console');
+    assert.equal(await page.evaluate(() => window.__opened.length), 2, '"Open anyway" opens the console');
     assert.match(await page.evaluate(() => window.__opened[1].url), /\/api\/kvms\/kvm1\/autologin\?port=1$/);
     const bothFreed = [], onFree = r => { if (isPortCall(r, 'mark-free')) bothFreed.push(r); };
     page.on('request', onFree);
@@ -242,7 +246,7 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     page.off('request', onFree);
     assert.equal(bothFreed.length, 2, 'each closed console tab frees its own lease once');
     await port1Is(false, 4000);
-    pass(`KVM: an in-use port asks first (Cancel focused); Cancel / Escape open and mark nothing; "פתח בכל זאת" opens; each tab frees once${lease1 ? '; one closed console keeps the port IN USE for the other' : ''}`);
+    pass(`KVM: an in-use port asks first (Cancel focused); Cancel / Escape open and mark nothing; "Open anyway" opens; each tab frees once${lease1 ? '; one closed console keeps the port IN USE for the other' : ''}`);
 
     // 8c — the mark-free body carries the lease from mark-in-use and the URL still ends in mark-free (no query string)
     const LEASE = '0123456789abcdef0123456789abcdef';

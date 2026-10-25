@@ -40,13 +40,13 @@ const SIZES = [[1440, 900], [375, 812]];
       await page.waitForTimeout(800);
       await page.evaluate(() => { clearInterval(__twin.S.live.timer); __twin.S.live.timer = null; });   // no 15 s refresh in the middle of a check
 
-      // a — the move banner sits under the toolbar and covers no control
+      // a — the move banner sits under the breadcrumb and covers no control
       await page.evaluate(() => { __twin.toggleEdit(true); __twin.select('LIVE-opt11', { keepCamera: true }); __twin.startMove('LIVE-opt11'); });
       await page.waitForTimeout(250);
       const banner = await rectOf(page, '#moveBanner'); const vp = await rectOf(page, '#viewport');
       assert.ok(banner, 'move banner shown');
       assert.ok(banner.l >= vp.l && banner.r <= vp.r + 0.5 && banner.t >= vp.t, 'banner inside the 3D view');
-      const controls = await page.evaluate(() => [...document.querySelectorAll('.toolbar .tb, #attnDock, .zoombar .zb, #rackBar button, #saveBar, #envPanel')]
+      const controls = await page.evaluate(() => [...document.querySelectorAll('#crumb, #attnDock, .zoombar .zb, #rackBar button, #saveBar, #envPanel, #legend')]
         .map(e => { const r = e.getBoundingClientRect(); return { id: e.id || e.textContent.trim().slice(0, 16), l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width }; }).filter(c => c.w > 0));
       const covered = controls.filter(c => overlaps(banner, c)).map(c => c.id);
       assert.deepEqual(covered, [], `${w}px: the move banner covers ${covered.join(', ')}`);
@@ -54,7 +54,7 @@ const SIZES = [[1440, 900], [375, 812]];
       await page.locator('#moveCancel').click();
       assert.equal(await page.evaluate(() => __twin.S.moveItem), null); assert.equal(await page.locator('#moveBanner.hidden').count(), 1);
       await page.evaluate(() => __twin.toggleEdit(false));
-      pass(`${w}px: move banner below the toolbar, clear of ${controls.length} controls`);
+      pass(`${w}px: move banner below the breadcrumb, clear of ${controls.length} controls`);
 
       // b — an unreachable PDU: its own outlet count, unknown state, never 24
       const cells = async () => page.evaluate(() => ({ all: document.querySelectorAll('#dBody .ogrid .ocell').length, unknown: document.querySelectorAll('#dBody .ogrid .ocell.unknown').length,
@@ -80,6 +80,7 @@ const SIZES = [[1440, 900], [375, 812]];
       const search = page.locator('#search'); const active = () => page.evaluate(() => document.querySelector('#searchResults .sr.active')?.dataset.id || null);
       const ids = () => page.evaluate(() => [...document.querySelectorAll('#searchResults .sr[data-id]')].map(e => e.dataset.id));
       const open_ = () => page.evaluate(() => !document.querySelector('#searchResults').classList.contains('hidden'));
+      if (w <= 720) await page.locator('#btnSearch').click();   // phones: the search row opens from the header icon
       await search.click(); await search.fill('OPT1'); await page.waitForTimeout(100);
       const list = await ids(); assert.ok(list.length >= 3, 'several results');
       assert.equal(await active(), list[0]);
@@ -100,10 +101,12 @@ const SIZES = [[1440, 900], [375, 812]];
       // c — visible focus ring on the Zone / Setup dropdowns (desktop; on phones the lists sit below the 3D view)
       if (w > 720) {
         const ring = id => page.evaluate(id => { const s = getComputedStyle(document.getElementById(id)); return { focused: document.activeElement?.id === id, style: s.outlineStyle, width: parseFloat(s.outlineWidth) }; }, id);
+        await page.locator('#btnLayers').click();   // the filters live in the Layers popover
         await page.locator('#fSetup').focus(); await page.keyboard.press('Shift+Tab');
         let r = await ring('fZone'); assert.ok(r.focused && r.style === 'solid' && r.width >= 2, `Zone focus ring: ${JSON.stringify(r)}`);
         await page.keyboard.press('Tab');
         r = await ring('fSetup'); assert.ok(r.focused && r.style === 'solid' && r.width >= 2, `Setup focus ring: ${JSON.stringify(r)}`);
+        await page.keyboard.press('Escape');
         pass(`${w}px: Zone and Setup dropdowns show a focus ring`);
       }
       await ctx.close();
