@@ -1642,7 +1642,8 @@ async def test_vm_account_key_signs_in_like_the_vm_shell_without_config_agent_or
     monkeypatch.setattr(ssh_store, "_LOGGED_SKIPS", set())
     vm_key = library.generate_private_key("ssh-ed25519")
     write_vm_key(api.vm_keys, "id_ed25519", vm_key)
-    # A ~/.ssh/config that would run a command, change the port and add an identity if anything honoured it.
+    # A ~/.ssh/config that would run a command or change the port if anything but IdentityFile were honoured
+    # (its IdentityFile names a missing file, which is left out).
     marker = api.home / "proxycommand-ran"
     command = f"{sys.executable} -c \"open(r'{marker}', 'w').close()\""
     (api.vm_keys / "config").write_text(f"Host *\n  ProxyCommand {command}\n  Port 2222\n  IdentityFile ~/.ssh/other\n")
@@ -2090,6 +2091,125 @@ def test_vm_key_fifo_is_skipped_without_opening_it(tmp_path, monkeypatch):
     folder.mkdir()
     os.mkfifo(folder / "id_ecdsa")
     assert ssh_store.vm_keys(folder)[0] == [{"name": "id_ecdsa", "type": "", "usable": False, "reason": "not a regular file"}]
+
+
+# ─── IdentityFile lines of the VM account's ~/.ssh/config (and nothing else from it) ───────────────────────────────
+
+async def test_config_identity_file_for_the_server_signs_in_and_nothing_else_in_the_config_is_used(
+        api, library, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(ssh_store, "_LOGGED_SKIPS", set())
+    keys = {name: library.generate_private_key("ssh-ed25519") for name in ("lab_key", "other_key", "match_key", "included_key")}
+    (api.home / "keys").mkdir()
+    write_vm_key(api.home / "keys", "lab_key", keys["lab_key"])  # Outside ~/.ssh: any file the config names.
+    for name in ("other_key", "match_key", "included_key"):
+        write_vm_key(api.vm_keys, name, keys[name])
+    marker = api.home / "config-command-ran"
+    command = f"{sys.executable} -c \"open(r'{marker}', 'w').close()\""
+    (api.vm_keys / "included.conf").write_text("Host *\n  IdentityFile ~/.ssh/included_key\n")
+    (api.vm_keys / "config").write_text(
+        "Include ~/.ssh/included.conf\n"
+        "IdentityFile ~/.ssh/missing_key\n"
+        "Host other-server *.example.com\n  IdentityFile ~/.ssh/other_key\n"
+        f"Host web-* 127.0.0.? !10.*\n  ProxyCommand {command}\n  ProxyJump jump.example.com\n"
+        f"  PermitLocalCommand yes\n  LocalCommand {command}\n  Port 2222\n  User nobody\n"
+        "  IdentityAgent ~/.ssh/agent.sock\n  CertificateFile ~/.ssh/other_key.pub\n  IdentityFile ~/keys/lab_key\n"
+        "Match host 127.0.0.1\n  IdentityFile ~/.ssh/match_key\n")
+    messages = []
+    accept = [key.convert_to_public() for key in keys.values()]
+    with browser(api, "operator") as client, fake_server(client, monkeypatch, library, accept=accept) as events:
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            messages.append(until(sock, "connected"))
+            assert sock.receive_json()["data"] == "ready\n"
+            sock.send_json({"type": "input", "data": "exit"})
+            messages.append(until(sock, "closed"))
+        # Only the key of the matching Host block: not the other block's, the Match block's or the Include's.
+        assert events["offered"] == [("ssh-ed25519", keys["lab_key"].get_fingerprint())]
+        assert events["connections"] == 1 and events["shells"] == 1 and events["exec"] == []
+    assert not marker.exists()  # Neither ProxyCommand nor LocalCommand ran.
+    rows = await terminal_rows(api)
+    assert (rows[0]["key_source"], rows[0]["key_type"], rows[0]["key_name"]) == ("vm", "ssh-ed25519", "config:lab_key")
+    with browser(api) as admin:
+        config = admin.get("/api/ssh/config").json()
+        texts = [json.dumps(config), admin.get("/api/ssh/sessions").text, json.dumps(messages), caplog.text]
+    # Admin → SSH (no server): every Host block's keys, never a Match block's or an included file's.
+    assert config["vm_keys"] == [{"name": "config:other_key", "type": "ssh-ed25519", "usable": True, "reason": ""},
+                                 {"name": "config:lab_key", "type": "ssh-ed25519", "usable": True, "reason": ""}]
+    for text in texts:
+        assert "PRIVATE KEY" not in text and "keys/lab_key" not in text
+        assert str(api.home) not in text and json.dumps(str(api.home))[1:-1] not in text
+        assert not any(line in text for key in keys.values() for line in key_body_lines(key))
+
+
+def test_config_identity_files_follow_host_rules_order_and_dedup_without_paths(tmp_path, monkeypatch, caplog):
+    asyncssh = pytest.importorskip("asyncssh")
+    monkeypatch.setattr(ssh_store, "_LOGGED_SKIPS", set())
+    caplog.set_level(logging.DEBUG)
+    folder = tmp_path / "home" / ".ssh"
+    folder.mkdir(parents=True)
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    for name in ("global_key", "id_rsa", "id_ed25519", "optn118_root", "negated_key", "quoted key", "match_key"):
+        write_vm_key(folder, name, key)
+    (folder / "config").write_text(
+        "# The global section counts for every server.\n"
+        "IdentityFile ~/.ssh/global_key\n"
+        "Host optn118 LAB-*\n"
+        "  IdentityFile %d/.ssh/id_rsa\n"       # A default file: offered here, by its own name, and not again.
+        "  IdentityFile ~/.ssh/global_key\n"    # Named twice: offered once.
+        "  IdentityFile ~/.ssh/%h_%r\n"
+        "  IdentityFile ~/.ssh/missing\n"       # Missing: left out.
+        "  IdentityFile ~/.ssh/%C_key\n"        # A token Lab Manager does not expand: listed with the reason.
+        "Host * !optn118\n"
+        "  IdentityFile ~/.ssh/negated_key\n"
+        "HOST=OPTN1?8\n"
+        "  IdentityFile=\"~/.ssh/quoted key\"\n"
+        "Match all\n"
+        "  IdentityFile ~/.ssh/match_key\n")
+    token_row = {"name": "config:_C_key", "type": "", "usable": False, "reason": "uses a % token Lab Manager does not expand"}
+
+    def names(target):
+        report, usable = ssh_store.vm_keys(folder, target)
+        assert [name for name, _, _ in usable] == [row["name"] for row in report if row["usable"]]
+        return [row["name"] if row["usable"] else row for row in report]
+
+    # By saved host (several patterns, ?, case-insensitive; the negated block is ruled out).
+    assert names({"host": "optn118", "name": "Rack 3 server", "user": "root"}) == [
+        "config:global_key", "id_rsa", "config:optn118_root", token_row, "config:quoted_key", "id_ed25519"]
+    # By name only; %h_%r names a missing file here.
+    assert names({"host": "10.0.0.5", "name": "lab-7", "user": "admin"}) == [
+        "config:global_key", "id_rsa", token_row, "config:negated_key", "id_ed25519"]
+    # A server no Host block names: the global section, the "every server but optn118" block and the defaults.
+    assert names({"host": "10.0.0.9", "name": "Other", "user": "root"}) == [
+        "config:global_key", "config:negated_key", "id_ed25519", "id_rsa"]
+    # Admin → SSH (no server): every Host block, entries naming the server (%h, %r) left out, never a Match block.
+    assert names(None) == ["config:global_key", "id_rsa", token_row, "config:negated_key", "config:quoted_key",
+                           "id_ed25519"]
+    logged = caplog.text
+    assert "config:_C_key" in logged and str(tmp_path) not in logged and "PRIVATE KEY" not in logged
+
+    # At most 16 files from the config, in its order.
+    capped = tmp_path / "capped" / ".ssh"
+    capped.mkdir(parents=True)
+    for index in range(20):
+        write_vm_key(capped, f"k{index:02}", key)
+    (capped / "config").write_text("".join(f"IdentityFile ~/.ssh/k{index:02}\n" for index in range(20)))
+    assert [name for name, _, _ in ssh_store.vm_keys(capped)[1]] == [f"config:k{index:02}" for index in range(16)]
+    assert "more than 16" in caplog.text
+
+    # A config that cannot be used is listed by name with the reason; the default files still work.
+    unsafe = tmp_path / "unsafe" / ".ssh"
+    unsafe.mkdir(parents=True)
+    write_vm_key(unsafe, "id_ed25519", key)
+    (unsafe / "config").mkdir()
+    report, usable = ssh_store.vm_keys(unsafe, {"host": "optn118", "name": "", "user": "root"})
+    assert report[0] == {"name": "config", "type": "", "usable": False, "reason": "not a regular file"}
+    assert [name for name, _, _ in usable] == ["id_ed25519"]
+    if os.name != "nt":
+        (unsafe / "config").rmdir()
+        (unsafe / "config").write_text("IdentityFile ~/.ssh/id_ed25519\n")
+        (unsafe / "config").chmod(0o666)
+        assert ssh_store.vm_keys(unsafe)[0][0]["reason"] == "writable by other users (chmod 600 it)"
 
 
 def test_connection_failures_map_to_fixed_reason_tokens(library):

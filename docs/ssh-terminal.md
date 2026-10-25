@@ -58,7 +58,7 @@ site therefore signs in the same way. Admin → SSH shows the key source in use 
 
 | Key source | Keys offered, in this order |
 |---|---|
-| **VM account keys** (`"vm"`, the default) | `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa` of the account running Lab Manager (each one that exists and can be used), then the Lab Manager key from section 3 |
+| **VM account keys** (`"vm"`, the default) | The key files that `IdentityFile` lines in `~/.ssh/config` name for this server (below), then `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa` of the account running Lab Manager (each one that exists and can be used, and only once), then the Lab Manager key from section 3 |
 | **Lab Manager key only** (`"site"`) | Only the Lab Manager key |
 
 A configuration saved before this setting existed uses **VM account keys**.
@@ -69,12 +69,30 @@ A configuration saved before this setting existed uses **VM account keys**.
   for or uses a passphrase.
 - With the VM account keys, a terminal works before the Lab Manager key is generated. If no key can be used at all, the
   terminal says `No SSH key is available: ...`.
-- Only those three files are read. `~/.ssh/config` is never read, so its `ProxyCommand`, `Port`, `User`, `IdentityFile`
-  and `Host` aliases have no effect. The ssh-agent, agent forwarding, X11 forwarding, port forwarding, password and
-  keyboard-interactive logins are never used. The host-key pinning (sections 5 and 6) and every address check (section
-  4) apply unchanged.
+- **`~/.ssh/config`: `IdentityFile` only.** Many servers are reached with a key that `~/.ssh/config` names, not one of
+  the three default files. From that file (in the same folder as the default keys) the site uses only the
+  `IdentityFile` lines, the way the VM account's `ssh root@server` picks them:
+  - lines before the first `Host` count for every server; a `Host` block counts when one of its patterns matches the
+    server's saved host or its name (`*`, `?`, several patterns, case-insensitive; a matching `!pattern` rules the
+    block out); `Match` blocks never count;
+  - `~/` and the tokens `%d` (home folder), `%u` (local user), `%h` (the saved host), `%r` (the remote user) and `%%`
+    are expanded; an entry with any other token, `${...}`, `~user` or a relative path is listed with the reason and
+    not used;
+  - keys are offered in the file's order, each file once, at most 16 from the config, then the default files the
+    config did not already name; a file that does not exist is left out;
+  - each file goes through the same checks as a default key (a regular file, not readable by other users, not
+    passphrase-protected, a private key), so an unusable file is skipped with its reason;
+  - every other line has no effect: `Include` is not followed, and `ProxyCommand`, `ProxyJump`, `LocalCommand`,
+    `IdentityAgent`, `CertificateFile`, `HostName`, `Port`, `User` and the rest are never used or run;
+  - a config that is writable by other users or owned by another account (OpenSSH refuses it too) is not read; Admin
+    → SSH lists it as `config` with the reason, and the default files still work.
+- The ssh-agent, agent forwarding, X11 forwarding, port forwarding, password and keyboard-interactive logins are never
+  used. The host-key pinning (sections 5 and 6) and every address check (section 4) apply unchanged.
 - The key files never leave the VM. The API, the audit log and the service log carry only the file name (for example
-  `id_ed25519`) and the key type (for example `ssh-ed25519`), never key material or a path.
+  `id_ed25519`, or `config:id_lab` for a file `~/.ssh/config` names) and the key type (for example `ssh-ed25519`),
+  never key material or a path.
+- Admin → SSH (no particular server) lists the keys of every `Host` block of the config; entries that depend on the
+  server (`%h`, `%r`) are checked when a terminal to that server opens.
 - **Who gets this access.** Every Operator who can open a terminal uses the VM account's server access. Choose **Lab
   Manager key only** if Operators must reach only the servers that have the restricted Lab Manager key installed
   (section 4).
@@ -248,7 +266,8 @@ the Operator role or the login expires.
 - the server, its host and the address actually connected;
 - the host-key fingerprint;
 - the key source in use (`vm` or `site`), and the type and file name of the key the server accepted (for example
-  `ssh-ed25519` and `id_ed25519`, or `lab-manager` for the site key), never the key itself;
+  `ssh-ed25519` and `id_ed25519`, `config:id_lab` for a file `~/.ssh/config` names, or `lab-manager` for the site
+  key), never the key itself;
 - start and end time, and why it ended (section 6a);
 - how many bytes went each way.
 
@@ -309,7 +328,8 @@ If pip refuses because a pinned package would have to change, stop there: that c
 - `GET /api/ssh/config` (Admin): `default_user`, `per_server_user`, `targets`, `denied`, `auto_allow`, `key_source`,
   `auto_skipped`, `auto_hosts` (the saved hosts the last check allowed), `denied_hosts` (the host of each
   turned-off server, recorded when it was turned off; these three are kept by the site and ignored in a `PUT`) and `vm_keys` (`[{"name": "id_ed25519", "type": "ssh-ed25519", "usable": true,
-  "reason": ""}]`, existing files only, by name). The `ETag` covers the saved settings only.
+  "reason": ""}]`, existing files only, by name; a key that `~/.ssh/config` names is `"config:<file name>"`, and an
+  unusable config itself is a row named `"config"`). The `ETag` covers the saved settings only.
 - `PUT /api/ssh/config` (Admin, `If-Match` required): any subset of `default_user`, `per_server_user`, `targets`, `denied`,
   `auto_allow` and `key_source`; fields left out keep their saved values. `{"auto_allow": true}` alone re-runs the address
   check. The answer is the same shape as `GET`, plus `skipped: [{key, name, host, reason}]` when servers were left out.
