@@ -235,11 +235,11 @@
     // doors
     (d.structure.doors || []).forEach(dr => {
       const onZ = dr.wall === 'WALL-L' || dr.wall === 'WALL-R';
-      const m = onZ ? box(0.12, dr.height, dr.width, mat('#cbb994', { rough: .8 }), dr.pos[0], dr.height / 2, dr.pos[1] + dr.width / 2)
-                    : box(dr.width, dr.height, 0.12, mat('#cbb994', { rough: .8 }), dr.pos[0] + dr.width / 2, dr.height / 2, dr.pos[1]);
+      const m = onZ ? box(0.12, dr.height, dr.width, mat('#4b4f57', { rough: .8, opacity: .7 }), dr.pos[0], dr.height / 2, dr.pos[1] + dr.width / 2)
+                    : box(dr.width, dr.height, 0.12, mat('#4b4f57', { rough: .8, opacity: .7 }), dr.pos[0] + dr.width / 2, dr.height / 2, dr.pos[1]);
       const low = dr.confidence === 'low';
-      if (low) m.material = mat('#cbb994', { rough: .8, opacity: .5, unique: true });
-      wallsGroup.add(m); wallsGroup.add(edges(m, low ? '#f43f5e' : '#a8977a', low));
+      if (low) m.material = mat('#4b4f57', { rough: .8, opacity: .45, unique: true });
+      wallsGroup.add(m); wallsGroup.add(edges(m, low ? '#f87171' : '#71717a', low));
       const rec = reg({ id: dr.id, cat: 'structure', def: dr, group: m, meshes: [m], edges: [], status: 'active', conf: dr.confidence, zone: null, anchor: W3(m.position.x, dr.height + 0.05, m.position.z) });
       makeLabel(rec, 'item' + (low ? ' low' : ''), `${esc(dr.id)}<small>door${low ? ' — verify' : ''}</small>`);
     });
@@ -1112,8 +1112,8 @@
     return { text: ageText(t), title: e.since ? (e.kind === 'ping-down' ? `Last answered ping at ${fmtTs(e.since)}` : `Since ${fmtTs(e.since)}`) : `First noticed by this page at ${hhmm(t)}` };
   }
   function attnCard(e, i, compact) {
-    const off = e.kind === 'offline'; const w = off ? { text: '', title: '' } : issueWhen(e);
-    const eyebrow = off ? 'Live data' : `${e.group === 'dq' ? 'Data · ' : ''}${SEV_LABEL[e.severity]}${w.text ? ' · ' + w.text : ''}`;
+    const off = e.kind === 'offline'; const w = off || e.group === 'dq' ? { text: '', title: '' } : issueWhen(e);   // data-quality findings have no age
+    const eyebrow = off ? 'Live data' : `${SEV_LABEL[e.severity]}${w.text ? ' · ' + w.text : ''}`;
     return `<button type="button" class="attn-row ${off ? 'sev-off' : 'sev-' + e.severity}${e.group === 'dq' ? ' dq' : ''}${compact ? ' compact' : ''}" data-attn="${i}" data-key="${esc(e.key)}"${w.title ? ` title="${esc(w.title)}"` : ''}>` +
       `<span class="ey">${esc(eyebrow)}</span><span class="tt">${esc(e.text)}</span>${e.hint && !compact ? `<span class="sub">${esc(e.hint)}${w.text ? `<span class="when-m"> · ${esc(w.text)}</span>` : ''}</span>` : ''}</button>`;
   }
@@ -1128,7 +1128,7 @@
     const crumb = $('#crumb'); let top = shown(crumb) ? crumb.offsetTop + crumb.offsetHeight + 8 : 12;
     const mb = $('#moveBanner');
     if (mb && !mb.classList.contains('hidden')) {
-      const others = [$('#saveBar'), $('#envPanel'), $('.zoombar'), $('#legend'), $('#rackFront')].filter(shown);
+      const others = [$('#saveBar'), $('#envPanel'), $('.zoombar'), $('#legend')].filter(shown);
       let bTop = top;
       for (let pass = 0; pass < 6; pass++) {
         mb.style.top = bTop + 'px'; let right = W - 12; mb.style.maxWidth = Math.max(200, right - mb.offsetLeft) + 'px';
@@ -2053,8 +2053,10 @@
     const bounds = new THREE.Box3().setFromObject(world);
     const sphere = bounds.getBoundingSphere(new THREE.Sphere());
     const vertical = THREE.MathUtils.degToRad(camera.fov), horizontal = 2 * Math.atan(Math.tan(vertical / 2) * camera.aspect);
-    const safe = safeArea(1.2); const share = Math.max(0.35, Math.min((safe.r - safe.l) / 2, (safe.t - safe.b) / 2));
-    const distance = Math.min(controls.maxDistance * 0.9, sphere.radius / Math.sin(Math.min(vertical, horizontal) / 2) * 1.12 / share);
+    // the free part of the view (the phone sheet covers its lower third): fit the room's sphere into that rectangle
+    const safe = safeArea(1.2, ['#sheet']); const fw = Math.max(0.35, (safe.r - safe.l) / 2), fh = Math.max(0.35, (safe.t - safe.b) / 2);
+    const half = Math.atan(Math.min(Math.tan(vertical / 2) * fh, Math.tan(horizontal / 2) * fw));
+    const distance = Math.min(controls.maxDistance * 0.9, sphere.radius / Math.sin(half) * 1.12);
     const target = roomCenter();
     const direction = (top ? new THREE.Vector3(0, 1, -0.04) : new THREE.Vector3(0.45, 0.95, -1)).normalize();
     const P = target.clone().addScaledVector(direction, distance);
@@ -2153,10 +2155,10 @@
   }
   // Part of the canvas that no overlay covers, in NDC. Each overlay trims the side that leaves the most room for a target
   // of the given on-screen aspect (width / height): a tall rack keeps a tall area, a flat zone a wide one.
-  function safeArea(aspect = 1) {
+  function safeArea(aspect = 1, only = null) {
     const vp = canvas.getBoundingClientRect(); const W = vp.width, H = vp.height; if (!W || !H) return { l: -1, r: 1, t: 1, b: -1 };
     const area = q => Math.max(0, q.r - q.l) * Math.max(0, q.b - q.t);
-    const rects = ['#crumb', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend', '#layersPanel', '#sheet']
+    const rects = (only || ['#crumb', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend', '#layersPanel', '#sheet'])
       .map(q => $(q)).filter(Boolean).map(el => el.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0)
       .map(r => ({ l: r.left - vp.left - 6, t: r.top - vp.top - 6, r: r.right - vp.left + 6, b: r.bottom - vp.top + 6 }))
       .sort((a, b) => area(b) - area(a));
@@ -2445,7 +2447,7 @@
   function setSheet(size, tab) {
     if (size) S.sheet.size = size;
     if (tab) S.sheet.tab = tab === 'details' && !S.selected ? 'issues' : tab;
-    const b = document.body; b.dataset.sheet = S.sheet.size; b.dataset.stab = S.sheet.tab;
+    const b = document.body; b.dataset.sheetSize = S.sheet.size; b.dataset.stab = S.sheet.tab;
     document.documentElement.style.setProperty('--sheet-h', S.sheet.size === 'full' ? 'calc(100dvh - 56px)' : SHEET_PX[S.sheet.size] + 'px');
     $('#sheetHandle').setAttribute('aria-expanded', String(S.sheet.size === 'full'));
     $('#sheetHandle').setAttribute('aria-label', `Panel size: ${S.sheet.size} — tap to change`);

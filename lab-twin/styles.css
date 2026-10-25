@@ -29,7 +29,7 @@ code { font-family: var(--mono); font-size: 11px; background: var(--surface-2); 
 .kbtn.primary { background: var(--brand); color: var(--bg); }
 .kbtn.primary:hover:not(:disabled) { background: #8fd400; }
 .kbtn.secondary { border-color: var(--line-3); }
-.kbtn.secondary:hover:not(:disabled), .kbtn.tertiary:hover:not(:disabled) { background: var(--line); }
+.kbtn.secondary:hover:not(:disabled), .kbtn.tertiary:hover:not(:disabled), .kbtn.tertiary[aria-expanded="true"] { background: var(--line); }
 .kbtn.danger { background: #dc2626; color: #fff; }
 .kbtn.danger:hover:not(:disabled) { background: #b91c1c; }
 .kbtn.danger-secondary { border-color: #f87171; color: #fca5a5; }
@@ -426,7 +426,7 @@ details.more summary:hover { color: var(--text); }
 
 /* ─── modals: settings, power / move confirmation, inline KVM console, toasts ─── */
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: grid; place-items: center; z-index: 100; padding: 12px; }
-.modal-card { width: 460px; max-width: 100%; max-height: calc(100dvh - 24px); overflow: auto; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.7); }
+.modal-card { width: 460px; max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); overflow: auto; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.7); }
 .modal-h { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; font-weight: 700; font-size: 15px; border-bottom: 1px solid var(--line); }
 .modal-b { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; color: var(--z-300); }
 .modal-b label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
@@ -537,7 +537,14 @@ body.embed .brand, body.embed #btnSettings, body.embed #ver { display: none !imp
   #viewSeg { display: none !important; }
   #btnViewMenu.phone-only { display: inline-flex !important; }
   .brand { min-width: 0; }
+  .vp-legend { max-width: calc(100% - 32px); bottom: 56px; }
 }
+@media (max-width: 900px) and (min-width: 721px) {
+  .hdr { gap: 8px; padding: 0 12px; }
+  .search-wrap { min-width: 120px; }
+  .brand-name { display: none; }
+}
+body.moving .rackfront { padding-top: 120px; }
 
 /* ─── phone (≤ 720 px): 3D view under a 48 px header, bottom sheet with Issues · Racks · Details ─── */
 @media (max-width: 720px) {
@@ -572,7 +579,7 @@ body.embed .brand, body.embed #btnSettings, body.embed #ver { display: none !imp
   .crumb-btn { height: 44px; padding: 0 12px; background: rgba(18,19,22,.95); }
   .vp-legend { display: none; }
   .zoombar { right: 12px; bottom: calc(var(--sheet-h) + 12px); flex-direction: column; }
-  .zoombar .zb { width: 44px; height: 44px; border-radius: 8px; font-size: 20px; }
+  .zoombar .zb, .zoombar .zb:not(.zb-text) { width: 44px; height: 44px; border-radius: 8px; font-size: 20px; }
   .zoombar .zb-text { display: none; }
   body.front .zoombar #vBack { display: inline-flex; width: auto; padding: 0 12px; font-size: 13px; }
   .savebar { left: 8px; right: 8px; top: 8px; flex-wrap: wrap; }
@@ -595,9 +602,11 @@ body.embed .brand, body.embed #btnSettings, body.embed #ver { display: none !imp
   .sheet-handle .bar { width: 40px; height: 4px; border-radius: 2px; background: var(--line-3); }
   .sheet-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 22px; }
   .sheet-title { font-weight: 700; font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sheet-tabs { width: 100%; height: 44px; }
+  .seg { height: auto; }
+  .seg > button { min-height: 44px; }
+  .sheet-tabs { width: 100%; }
   .sheet-tabs > button { flex: 1 1 0; justify-content: center; font-size: 13px; }
-  body[data-sheet="peek"] .sheet .side, body[data-sheet="peek"] .sheet .detail { visibility: hidden; }
+  body[data-sheet-size="peek"] .sheet .side, body[data-sheet-size="peek"] .sheet .detail { visibility: hidden; }
   .side { width: auto; flex: 1 1 auto; padding: 0; border: 0; background: transparent; gap: 8px; }
   .side-tabs { display: none; }
   .detail, body.editmode .detail, body.kiosk .detail { width: auto; flex: 1 1 auto; min-height: 0; border: 0; background: transparent; }
@@ -610,7 +619,7 @@ body.embed .brand, body.embed #btnSettings, body.embed #ver { display: none !imp
   .attn-row .when-m { display: inline; }
   .dq-footer { min-height: 44px; }
   .tn, .inv-row, .srow { min-height: 44px; }
-  .panel .seg.sub { height: 44px; } .panel .seg.sub > button { padding: 0 16px; }
+  .panel .seg.sub > button { padding: 0 16px; }
   .dq-low .link { min-height: 44px; }
   .kbtn.md, .detail .kbtn, .detail select, .detail input, .modal input, .modal .kbtn, .cf-actions .kbtn { height: 44px; min-height: 44px; }
   details.more summary { min-height: 44px; }
@@ -619,6 +628,7 @@ body.embed .brand, body.embed #btnSettings, body.embed #ver { display: none !imp
   .confirm-card { padding: 20px; }
   .cf-actions .kbtn { flex: 1 1 auto; }
   .toast { max-width: calc(100vw - 24px); }
+  .toasts { bottom: calc(var(--sheet-h) + 12px); }
   body:not(.kiosk) .attn-dock { display: none; }
   .icon-btn { width: 44px; height: 44px; }
 }
