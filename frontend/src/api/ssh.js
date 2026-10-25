@@ -38,15 +38,17 @@ const hostPath = (key, action) => `/hosts/${encodeURIComponent(key)}/${action}`;
 
 export const sshApi = {
   status: () => req("GET", "/status"),
-  key:    () => req("GET", "/key"),
+  // `server` (a status row key) limits the install/revoke commands to that server.
+  key:    (server) => req("GET", server ? `/key?server=${encodeURIComponent(server)}` : "/key"),
   // Rotation is a compare-and-swap: the server replaces the key only if it is still `expectedFingerprint`.
   generateKey: (password, { rotate = false, expectedFingerprint = "", endSessions = false } = {}) =>
     req("POST", "/key", rotate
       ? { password, rotate: true, expected_fingerprint: expectedFingerprint, ...(endSessions ? { end_sessions: true } : {}) }
       : { password, rotate: false }),
-  // Admin: the exact saved settings {default_user, per_server_user, targets}.
+  // Admin: the exact saved settings {default_user, per_server_user, targets, denied, auto_allow, key_source[, vm_keys]}.
   config: () => req("GET", "/config"),
-  // payload from buildConfigPayload; `revision` (status.config_revision) is sent as If-Match.
+  // payload from buildConfigPayload, or one setting alone ({auto_allow} / {key_source}): fields left out keep their
+  // saved values. `revision` (status.config_revision) is sent as If-Match.
   saveConfig: (payload, revision) => req("PUT", "/config", payload, revision ? { "If-Match": revision } : undefined),
   // Trust `fingerprint` for this server (marks it confirmed) if the pin is still `expected` ("" = no pin).
   acceptHostKey: (key, password, fingerprint, expected) =>
@@ -201,9 +203,19 @@ export function safeLinkUrl(text) {
 }
 
 // ─── Errors: a fixed vocabulary ───────────────────────────────────────────────────────────────────
+// The backend's fixed failure reasons (also written to the audit log), sent as the final status reason.
+export const FAILURE_REASONS = {
+  unreachable: "no-answer", refused: "port-closed", auth_failed: "auth-failed", host_key_changed: "host-key-changed", denied: "denied",
+  connect_timeout: "timeout", connection_failed: "failed",
+};
+
 export function classifyReason(reason) {
   const text = String(reason ?? "");
   if (!text) return "";
+  const token = text.trim().toLowerCase();
+  if (Object.hasOwn(FAILURE_REASONS, token)) return FAILURE_REASONS[token];
+  // "No SSH key is available: ..." (key source "vm": no usable VM account key and no Lab Manager key).
+  if (/^no ssh key is available/i.test(text.trim())) return "no-key";
   if (/host key changed|host key mismatch/i.test(text)) return "host-key-changed";
   if (/not installed/i.test(text)) return "not-installed";
   if (/requires user accounts|accounts are not enabled/i.test(text)) return "no-accounts";
@@ -223,7 +235,11 @@ export function classifyReason(reason) {
   if (/generate the ssh key|has not been generated|no ssh key/i.test(text)) return "no-key";
   if (/not found/i.test(text)) return "not-found";
   if (/session ended|browser disconnected|cancelled/i.test(text)) return "ended";
-  if (/connection failed|could not connect|refused|unreachable|permission denied|authentication/i.test(text)) return "failed";
+  if (/did not answer|unreachable|no route to host/i.test(text)) return "no-answer";
+  if (/port 22\b.*\bclosed|connection refused/i.test(text)) return "port-closed";
+  if (/did not accept|permission denied|authentication failed|auth_failed/i.test(text)) return "auth-failed";
+  if (/^ssh action denied$/i.test(text.trim())) return "denied";
+  if (/connection failed|could not connect|refused|authentication/i.test(text)) return "failed";
   return "other";
 }
 
@@ -243,12 +259,31 @@ const CLOSE_CODES = {
   4503: NOT_INSTALLED_TEXT,
 };
 
+// Which keys Lab Manager offers when it signs in (Admin → SSH): "vm" = the SSH keys of the VM account that runs
+// Lab Manager (~/.ssh/id_ed25519, id_ecdsa, id_rsa), then the Lab Manager key; "site" = only the Lab Manager key.
+export const KEY_SOURCES = ["vm", "site"];
+export const normalizeKeySource = value => KEY_SOURCES.includes(value) ? value : "";
+export const KEY_SOURCE_TEXT = {
+  vm: "Keys used: this VM account's SSH keys, then the Lab Manager key",
+  site: "Keys used: only the Lab Manager key",
+};
+// The Admin's exact settings win over the status copy; "" when this Lab Manager version has no key source setting.
+export const keySourceOf = (status, config) => normalizeKeySource(config?.key_source) || normalizeKeySource(status?.key_source);
+export const VM_NO_KEY_TEXT = "Lab Manager has no SSH key to sign in with: the VM account that runs it has no usable key in ~/.ssh and the Lab Manager key has not been generated. An Admin can generate the Lab Manager key in Admin → SSH.";
+// The keys a refused sign-in tried. A status without key_source is treated as the default ("vm").
+const triedKeys = keySource => normalizeKeySource(keySource) === "site" ? "the Lab Manager key" : "the VM's keys or the Lab Manager key";
+
 // What to show after a terminal closes. `reason` is the server's final status reason (or the close
-// frame's reason) and is only classified, never displayed; `server`/`user` come from /api/ssh/status.
-export function describeClose({ code, reason, opened, server, user } = {}) {
+// frame's reason) and is only classified, never displayed; `server`/`user`/`keySource` come from /api/ssh/status.
+export function describeClose({ code, reason, opened, server, user, keySource } = {}) {
   const kind = classifyReason(reason) || (code === 4409 ? "host-key-changed" : code === 4503 ? "not-installed" : "");
   const who = server || "this server";
+  const account = user && isPosixUser(user) ? user : "the SSH user";
   const fixed = {
+    "no-answer": ["error", `${who} did not answer. Check that it is powered on and connected to the network.`],
+    "port-closed": ["error", `Port 22 on ${who} is closed. Check that the SSH service (sshd) is running on it.`],
+    "auth-failed": ["error", `${who} did not accept ${triedKeys(keySource)} for ${account}. Install the Lab Manager key on ${who} with the command on this page, or check the SSH user in Admin → SSH.`],
+    "denied": ["error", `Lab Manager did not allow this SSH session to ${who}: its address is not allowed (for example it points to the Lab Manager VM or a local address) or SSH is turned off for it. An Admin can check the server in Admin → SSH.`],
     "host-key-changed": ["error", `The host key of ${who} changed. If the server was reinstalled, an Admin can compare and accept the new key in Admin → SSH, then you can reconnect. If it was not reinstalled, do not connect: someone may be intercepting the connection.`],
     "not-installed": ["error", NOT_INSTALLED_TEXT],
     "no-accounts": ["error", NO_ACCOUNTS_TEXT],
@@ -265,10 +300,10 @@ export function describeClose({ code, reason, opened, server, user } = {}) {
     "auth": ["error", "Your sign-in session ended or your access changed. Sign in again, then reconnect."],
     "not-allowed": ["error", `SSH is not allowed for ${who}. An Admin can allow it in Admin → SSH.`],
     "timeout": ["error", `${who} did not answer in time. Check that it is powered on and reachable on port 22.`],
-    "no-key": ["error", NO_KEY_TEXT],
+    "no-key": ["error", normalizeKeySource(keySource) === "site" ? NO_KEY_TEXT : VM_NO_KEY_TEXT],
     "not-found": ["error", CLOSE_CODES[4404]],
     "ended": ["info", "The SSH session ended."],
-    "failed": ["error", `Could not open an SSH session to ${who}. Check that the server is up, that the Lab Manager public key is installed for ${user ? `user "${user}"` : "the SSH user"}, and that the SSH user in Admin → SSH is right.`],
+    "failed": ["error", `Could not open an SSH session to ${who}. Check that the server is up, that it accepts ${triedKeys(keySource)} for ${account}, and that the SSH user in Admin → SSH is right.`],
     "other": ["error", "The terminal connection was refused or closed by Lab Manager."],
   }[kind];
   if (fixed) return { tone: fixed[0], kind, text: fixed[1] };
@@ -282,11 +317,16 @@ export function describeClose({ code, reason, opened, server, user } = {}) {
 // from a socket that was already replaced (Reconnect) are ignored.
 // phase: idle → opening (handshake) → authorizing (CSRF sent) → connecting (SSH) → connected → closed
 export const INITIAL_CONNECTION = { phase: "idle", attempt: 0, opened: false, finalReason: "", notice: "", closed: null };
+export const BUSY_PHASES = ["opening", "authorizing", "connecting"];
+
+const PINNED_NOTICE = fp => `First connection: the server's host key ${fp} is now pinned but not yet confirmed. Ask an Admin to compare it with the key shown on the server's console (Admin → SSH).`;
 
 export function connectionReducer(state, event) {
   if (event.type === "start") {
     return { ...INITIAL_CONNECTION, phase: "opening", attempt: event.attempt };
   }
+  // Another server (or a remount) starts from scratch; the attempt counter keeps growing.
+  if (event.type === "reset") return { ...INITIAL_CONNECTION, attempt: state.attempt };
   if (event.attempt !== state.attempt || state.phase === "closed") return state;
   switch (event.type) {
     case "open":
@@ -295,13 +335,13 @@ export function connectionReducer(state, event) {
       if (event.state === "connecting") return { ...state, phase: "connecting" };
       if (event.state === "connected") {
         const fp = pinnedFingerprint(event.reason);
-        return { ...state, phase: "connected",
-          notice: fp ? `First connection: the server's host key ${fp} is now pinned but not yet confirmed. Ask an Admin to compare it with the key shown on the server's console (Admin → SSH).` : state.notice };
+        return { ...state, phase: "connected", notice: fp ? PINNED_NOTICE(fp) : state.notice };
       }
       return { ...state, finalReason: event.reason || state.finalReason };
     case "close":
       return { ...state, phase: "closed", closed: describeClose({
-        code: event.code, reason: state.finalReason || event.reason, opened: state.opened, server: event.server, user: event.user }) };
+        code: event.code, reason: state.finalReason || event.reason, opened: state.opened, server: event.server, user: event.user,
+        keySource: event.keySource }) };
     case "local-close":
       return { ...state, phase: "closed", closed: { tone: "info", kind: "local", text: "Disconnected." } };
     default:
@@ -313,6 +353,43 @@ export const PHASE_LABEL = {
   idle: "Not connected", opening: "Connecting…", authorizing: "Connecting…", connecting: "Opening SSH session…",
   connected: "Connected", closed: "Disconnected",
 };
+
+// The terminal page connects by itself once, when the status says SSH is available for this server.
+// A failed or missing status never auto-connects (the Connect button stays available).
+export function shouldAutoConnect({ status, availability, phase, alreadyStarted }) {
+  return !!status && !!availability?.enabled && phase === "idle" && !alreadyStarted;
+}
+
+// The install row of GET /api/ssh/key for one server (matched by id, then by name).
+export function installRowFor(keyData, server) {
+  const rows = Array.isArray(keyData?.install) ? keyData.install : [];
+  const valid = rows.filter(row => row && typeof row.command === "string" && row.command);
+  if (!server) return null;
+  return valid.find(row => server.key && row.key === server.key)
+    || valid.find(row => !row.key && server.name && row.server === server.name) || null;
+}
+
+// navigator.clipboard where the page may use it (HTTPS/localhost); on plain HTTP a temporary selection
+// with execCommand("copy"). Returns true when the text was copied.
+export async function copyText(text, { nav = globalThis.navigator, win = globalThis.window, doc = globalThis.document } = {}) {
+  try {
+    if (nav?.clipboard?.writeText && win?.isSecureContext) { await nav.clipboard.writeText(text); return true; }
+  } catch {}
+  if (!doc?.createElement || !doc.body) return false;
+  const area = doc.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.setAttribute("aria-hidden", "true");
+  area.style.position = "fixed"; area.style.top = "0"; area.style.left = "0"; area.style.opacity = "0";
+  const previous = doc.activeElement;
+  doc.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try { ok = !!doc.execCommand("copy"); } catch {}
+  area.remove();
+  try { if (previous && typeof previous.focus === "function") previous.focus(); } catch {}
+  return ok;
+}
 
 // REST errors from sshApi, in plain English for the Admin page and dialogs.
 export function httpErrorText(err, { accountMode } = {}) {
@@ -373,11 +450,12 @@ export function sshAvailability({ status, error, loading, name, accountMode, pro
   if (status.enabled === false) return { enabled: false, reason: DISABLED_TEXT };
   if (status.installed === false) return { enabled: false, reason: NOT_INSTALLED_TEXT };
   if (transportBlocked(status, protocol)) return { enabled: false, reason: INSECURE_TEXT };
-  if (!status.key_exists) return { enabled: false, reason: NO_KEY_TEXT };
+  // With the VM account's keys ("vm") a terminal can sign in before the Lab Manager key exists.
+  if (!status.key_exists && status.key_source !== "vm") return { enabled: false, reason: NO_KEY_TEXT };
   const server = findServer(status.servers, name);
   if (!server) return { enabled: false, reason: `Lab Manager does not know a host for ${name} yet.` };
   const label = server.name || name;
-  if (server.allowed === false) return { enabled: false, server, reason: `SSH is not allowed for ${label}. An Admin can allow it in Admin → SSH.` };
+  if (server.allowed === false) return { enabled: false, server, reason: notAllowedText(server, label) };
   if (hostKeyState(server).state === "changed") return { enabled: false, server, reason: `The host key of ${label} changed. An Admin must check and accept the new key in Admin → SSH.` };
   const target = server.user && (server.approved_host || server.host) ? ` as ${server.user}@${server.approved_host || server.host}` : "";
   return { enabled: true, server, reason: `Open an SSH terminal to ${label}${target} (new tab)` };
@@ -408,33 +486,95 @@ export function overridesFromStatus(status) {
     .map(s => [s.key, s.user]));
 }
 
-// Editable copy of the saved settings: { default_user, servers: { key: { allowed, approved_host, user } } }.
-// `config` (Admin: GET /api/ssh/config) gives the exact per-server users and approved targets.
+// ─── "Allow every server with an address" (auto_allow) ───────────────────────────────────────────
+// status.servers[].approval: "explicit" (an Admin allowed it), "auto" (allowed by "allow every server"),
+// "denied" (an Admin turned it off; wins over everything), "skipped" (its saved address could not be used),
+// "address_changed" (allowed for an older address) or "none".
+export const APPROVAL_LABELS = {
+  explicit: "Allowed", auto: "Allowed (every server)", denied: "Turned off", skipped: "No usable address",
+  address_changed: "Needs address check", none: "Not allowed",
+};
+
+// Why the terminal cannot open for a server the status reports as not allowed (fixed sentences only).
+export function notAllowedText(server, label = server?.name || "this server") {
+  // The backend's own sentence (Operator+) is exact, e.g. an alias of a turned-off host or a server the Admin's
+  // "Check addresses again" pass has not seen yet; shown as plain text, never as markup.
+  const own = typeof server?.not_allowed_reason === "string" ? stripControls(server.not_allowed_reason).trim().slice(0, 400) : "";
+  if (own) return own;
+  switch (server?.approval) {
+    case "denied": return `An Admin turned SSH off for ${label}. An Admin can allow it again in Admin → SSH.`;
+    case "skipped": return `Lab Manager cannot use the saved address of ${label}: the VM cannot resolve it, or it points to a local or VM address. Give ${label} its IP address in Ping Monitor (or fix its DNS name).`;
+    case "address_changed": return `The address of ${label} changed. An Admin must allow it again in Admin → SSH.`;
+    default: return `SSH is not allowed for ${label}. An Admin can allow it in Admin → SSH.`;
+  }
+}
+
+// The backend supports "allow every server" when its status or config reports the flag.
+export const supportsAutoAllow = (status, config) =>
+  typeof config?.auto_allow === "boolean" || typeof status?.auto_allow === "boolean";
+
+// Servers the "allow every server" pass left out, with the backend's owner-facing reason (shown as plain text).
+export function skippedServers(status) {
+  if (!status?.auto_allow) return [];
+  return (status.servers || []).filter(s => s?.key && s.approval === "skipped")
+    .map(s => ({ key: s.key, name: String(s.name || s.key), reason: typeof s.not_allowed_reason === "string" ? s.not_allowed_reason.slice(0, 400) : "" }));
+}
+
+// Editable copy of the saved settings:
+// { default_user, auto_allow, servers: { key: { allowed, approved_host, user, explicit, denied } } }.
+// `explicit`: the server is in the Admin's own list (targets); `denied`: an Admin turned it off.
+// `config` (Admin: GET /api/ssh/config) gives the exact per-server users, approvals and turned-off servers.
 export function formFromStatus(status, config) {
   const exact = !!(config && typeof config === "object" && config.per_server_user && typeof config.per_server_user === "object");
   const overrides = exact ? overridesFromStatus({ per_server_user: config.per_server_user }) : overridesFromStatus(status);
   const targets = exact && config.targets && typeof config.targets === "object" ? config.targets : null;
+  const deniedList = exact && Array.isArray(config.denied) ? config.denied : null;
+  const autoAllow = exact && typeof config.auto_allow === "boolean" ? config.auto_allow : status?.auto_allow === true;
   const servers = {};
   for (const s of status?.servers || []) {
     if (!s?.key) continue;
-    const allowed = targets ? typeof targets[s.key] === "string" && !!targets[s.key] : s.allowed === true;
-    servers[s.key] = { allowed, approved_host: allowed ? (targets ? targets[s.key] : s.approved_host || "") : "", user: overrides[s.key] || "" };
+    const denied = deniedList ? deniedList.includes(s.key) : s.approval === "denied";
+    const explicit = !denied && (targets ? typeof targets[s.key] === "string" && !!targets[s.key]
+      : s.approval ? s.approval === "explicit" || s.approval === "address_changed" : s.allowed === true);
+    // Auto-allowed servers follow the backend's verdict (it alone checks the address).
+    const allowed = !denied && (explicit || (autoAllow && s.allowed === true));
+    const approved = explicit ? (targets ? targets[s.key] : s.approved_host || "") : "";
+    servers[s.key] = { allowed, approved_host: approved, user: overrides[s.key] || "", explicit, denied };
   }
-  return { default_user: (exact && config.default_user) || status?.default_user || "", servers };
+  return { default_user: (exact && config.default_user) || status?.default_user || "", auto_allow: autoAllow, servers };
+}
+
+// The form change for ticking/unticking "Allow SSH" on one server. With "allow every server" on, unticking
+// turns SSH off for that server (an explicit "not allowed") and ticking removes that; without it, ticking adds
+// the server (to its saved host) to the Admin's list and unticking removes it.
+export function allowChange(entry, on, { autoAllow = false, host = "" } = {}) {
+  const current = { allowed: false, approved_host: "", user: "", explicit: false, denied: false, ...entry };
+  if (autoAllow) {
+    return on ? { ...current, allowed: true, denied: false }
+      : { ...current, allowed: false, denied: true, explicit: false, approved_host: "" };
+  }
+  return on ? { ...current, allowed: true, explicit: true, denied: false, approved_host: current.approved_host || host }
+    : { ...current, allowed: false, explicit: false, approved_host: "" };
 }
 
 // Approved hosts are compared like the backend does after normalisation (case-insensitive).
 export const sameHost = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
 
 // Validates the form for PUT /api/ssh/config. Blank users mean "use the default" and are dropped;
-// servers that disappeared are dropped; an allowed server keeps its approved host (or approves the
-// currently discovered one when it is newly allowed). Hosts never come from free text.
-export function buildConfigPayload(form, servers, { optIn = false } = {}) {
+// servers that disappeared are dropped; a server in the Admin's list keeps its approved host (or approves
+// the currently discovered one when it is newly added). Hosts never come from free text.
+// `autoAllow` (a boolean, when the backend supports "allow every server") is the saved mode the form was edited in;
+// the turned-off servers are then sent as `denied`. With it on, an Admin approval whose host moved is dropped: the
+// server is covered by its saved host. auto_allow and key_source are saved only by their own switches, never here,
+// so a form opened before one of them changed cannot switch it back.
+export function buildConfigPayload(form, servers, { optIn = false, autoAllow } = {}) {
   const errors = {};
   const def = String(form?.default_user ?? "").trim();
   if (!isPosixUser(def)) errors.default_user = "Use a lowercase POSIX user name (letters, digits, _ or -, at most 32 characters).";
+  const auto = typeof autoAllow === "boolean";
   const per = {};
   const allowed = {};
+  const denied = [];
   for (const s of servers || []) {
     if (!s?.key) continue;
     const entry = form?.servers?.[s.key] || {};
@@ -443,29 +583,60 @@ export function buildConfigPayload(form, servers, { optIn = false } = {}) {
       if (isPosixUser(user)) per[s.key] = user;
       else errors[s.key] = "Use a lowercase POSIX user name.";
     }
-    if (optIn && entry.allowed) {
+    if (auto && entry.denied) { denied.push(s.key); continue; }
+    // Older forms have no `explicit` flag: every allowed server is in the Admin's list.
+    const listed = entry.allowed && (entry.explicit ?? true);
+    if (optIn && listed) {
       const host = entry.approved_host || s.host || "";
+      const moved = !!(s.host && !sameHost(host, s.host));
       if (!host) errors[`${s.key}:host`] = "Lab Manager has no host for this server.";
-      else if (s.host && !sameHost(host, s.host)) errors[`${s.key}:host`] = "The server's host changed. Approve the new host or turn SSH off for this server.";
+      else if (moved && autoAllow === true) continue;
+      else if (moved) errors[`${s.key}:host`] = "The server's host changed. Approve the new host or turn SSH off for this server.";
       else allowed[s.key] = host;
     }
   }
-  const payload = { default_user: def, per_server_user: per, ...(optIn ? { allowed } : {}) };
+  const payload = { default_user: def, per_server_user: per, ...(optIn ? { allowed } : {}), ...(optIn && auto ? { denied } : {}) };
   return { ok: Object.keys(errors).length === 0, errors, payload };
 }
 
 export const EVENT_LABELS = {
   terminal: "Terminal", key_generated: "Key generated", key_rotated: "Key replaced", config_updated: "Settings saved",
   host_key_accepted: "Host key accepted", sessions_revoked: "Sessions ended", denied: "Denied",
+  auto_allow_on: "Every server allowed", auto_allow_off: "Allow every server turned off", key_source_changed: "Key source changed",
 };
 export const END_REASON_LABELS = {
   remote_closed: "Session ended", browser_disconnected: "Browser closed", idle_timeout: "Idle timeout", session_expired: "Signed out or ended by an Admin",
   lifetime_limit: "Maximum length", disabled: "SSH turned off", host_key_changed: "Host key changed", connect_timeout: "Connection timed out",
   connection_failed: "Connection failed", invalid_message: "Invalid message", input_rate_limit: "Input rate limit", cancelled: "Cancelled",
   denied: "Denied", service_interrupted: "Service restarted", admin_action: "—",
+  unreachable: "No answer", refused: "Port 22 closed", auth_failed: "Keys not accepted",
 };
 export const eventLabel = event => EVENT_LABELS[event] || (event ? String(event) : "Terminal");
 export const endReasonLabel = reason => reason ? END_REASON_LABELS[reason] || String(reason) : "—";
+
+// Which key signed a terminal in (audit: key type and key file name only, never key material or a path).
+const KEY_TEXT = /^[A-Za-z0-9@._+-]{1,64}$/;
+export function sessionKeyLabel(row) {
+  const name = typeof row?.key_name === "string" && KEY_TEXT.test(row.key_name) ? row.key_name : "";
+  const type = typeof row?.key_type === "string" && KEY_TEXT.test(row.key_type) ? row.key_type : "";
+  if (name || type) return [name, type].filter(Boolean).join(" · ");
+  const source = normalizeKeySource(row?.key_source);
+  return source === "vm" ? "VM account keys" : source === "site" ? "Lab Manager key" : "—";
+}
+
+// The VM account's default keys as Admin → SSH lists them (GET /api/ssh/config `vm_keys`): the key files that exist,
+// by file name, with the key type, whether Lab Manager can use it and why not when known. A bare file name
+// (string) is accepted too; `usable` is then unknown (null). Anything else is dropped.
+export function vmKeyRows(config) {
+  const rows = Array.isArray(config?.vm_keys) ? config.vm_keys : [];
+  return rows.map(row => typeof row === "string" ? { name: row } : row)
+    .filter(row => row && typeof row.name === "string" && KEY_TEXT.test(row.name)).slice(0, 10).map(row => ({
+      name: row.name,
+      type: typeof row.type === "string" && KEY_TEXT.test(row.type) ? row.type : "",
+      usable: typeof row.usable === "boolean" ? row.usable : null,
+      reason: typeof row.reason === "string" ? row.reason.slice(0, 200) : "",
+    }));
+}
 
 export function normalizeSessions(data) {
   const list = Array.isArray(data) ? data : Array.isArray(data?.sessions) ? data.sessions : [];

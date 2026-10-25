@@ -24,7 +24,7 @@ import time
 import anyio
 
 from fastapi import HTTPException
-from sqlalchemy import Float, Integer, String, case, func, insert, literal, select, update
+from sqlalchemy import Float, Integer, String, case, event as sa_event, func, insert, inspect as sa_inspect, literal, select, update
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import AsyncSessionLocal, Base
@@ -43,7 +43,22 @@ _SERVER_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
 END_REASONS = frozenset({"remote_closed", "browser_disconnected", "idle_timeout", "session_expired",
                          "lifetime_limit", "disabled", "host_key_changed", "connect_timeout",
                          "connection_failed", "invalid_message", "input_rate_limit", "cancelled",
-                         "service_interrupted", "admin_action", "denied"})
+                         "service_interrupted", "admin_action", "denied",
+                         # Fixed connection-failure reasons shared by the terminal and the audit log.
+                         "unreachable", "refused", "auth_failed"})
+# Which keys a terminal offers: "vm" = the VM account's own default keys, then the site key; "site" = only the site key.
+KEY_SOURCES = ("vm", "site")
+DEFAULT_KEY_SOURCE = "vm"
+# The VM account's default identity files, in the order OpenSSH offers them. Only file names ever leave this module.
+VM_KEY_NAMES = ("id_ed25519", "id_ecdsa", "id_rsa")
+SITE_KEY_NAME = "lab-manager"
+MAX_VM_KEY_BYTES = 64 * 1024
+_KEY_TYPE = re.compile(r"[a-z0-9@._+-]{1,64}")
+_KEY_NAMES = frozenset({*VM_KEY_NAMES, SITE_KEY_NAME})
+_logger = logging.getLogger(__name__)
+_LOGGED_SKIPS: set = set()
+# Why an "allow every server" pass left a server out; the owner-facing text is built from the code.
+SKIP_CODES = frozenset({"unresolved", "prohibited", "unchecked"})
 _UNAVAILABLE = "SSH support is not installed on the server"
 
 
@@ -89,6 +104,25 @@ class SshSession(Base):
     end_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     bytes_in: Mapped[int] = mapped_column(Integer, default=0)
     bytes_out: Mapped[int] = mapped_column(Integer, default=0)
+    # Which keys were offered ("vm"/"site"), and the type and file name of the key that signed in (never key material).
+    key_source: Mapped[str] = mapped_column(String, default="", server_default="")
+    key_type: Mapped[str] = mapped_column(String, default="", server_default="")
+    key_name: Mapped[str] = mapped_column(String, default="", server_default="")
+
+
+_ADDED_COLUMNS = ("key_source", "key_type", "key_name")
+
+
+@sa_event.listens_for(Base.metadata, "after_create")
+def _add_missing_columns(target, connection, **kwargs):
+    """create_all never alters an existing table: add columns newer releases introduced, in place."""
+    inspector = sa_inspect(connection)
+    if not inspector.has_table(SshSession.__tablename__):
+        return
+    columns = {column["name"] for column in inspector.get_columns(SshSession.__tablename__)}
+    for name in _ADDED_COLUMNS:  # Fixed identifiers only; nothing user-supplied reaches this DDL.
+        if name not in columns:
+            connection.exec_driver_sql(f"ALTER TABLE ssh_sessions ADD COLUMN {name} VARCHAR DEFAULT '' NOT NULL")
 
 
 def load_asyncssh():
@@ -457,6 +491,94 @@ def private_key():
         return asyncssh.import_private_key(data)
 
 
+def _vm_key_dir(directory) -> Path:
+    # The account running Lab Manager: the same ~/.ssh its own `ssh root@server` uses. ~/.ssh/config is never read.
+    return Path(directory) if directory else Path.home() / ".ssh"
+
+
+def _skip(name: str, reason: str) -> dict:
+    if (name, reason) not in _LOGGED_SKIPS:  # Once per file and reason; the file name only, never its path or content.
+        _LOGGED_SKIPS.add((name, reason))
+        _logger.warning("VM SSH key %s is not used: %s", name, reason)
+    return {"name": name, "type": "", "usable": False, "reason": reason}
+
+
+def _load_vm_key(asyncssh, path: Path, name: str):
+    """(report row or None, key or None) for one default identity file; reasons are fixed texts, never library output."""
+    try:
+        # stat first (following a symlink like ssh does): a FIFO, device or directory is never opened.
+        before = os.stat(path)
+    except FileNotFoundError:
+        return None, None
+    except OSError:
+        return _skip(name, "not readable by the account running Lab Manager"), None
+    if not stat.S_ISREG(before.st_mode):
+        return _skip(name, "not a regular file"), None
+    try:
+        # O_NONBLOCK: a file swapped for a FIFO between stat and open cannot hang the worker.
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
+                return _skip(name, "changed while Lab Manager was reading it"), None
+            if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+                # OpenSSH ignores such a key too ("UNPROTECTED PRIVATE KEY FILE").
+                return _skip(name, "readable by other users (chmod 600 it)"), None
+            data = stream.read(MAX_VM_KEY_BYTES + 1)
+    except FileNotFoundError:
+        return None, None
+    except OSError:
+        return _skip(name, "not readable by the account running Lab Manager"), None
+    if len(data) > MAX_VM_KEY_BYTES:
+        return _skip(name, "too large to be a private key"), None
+    encrypted, key = b"ENCRYPTED" in data, None
+    if not encrypted:
+        try:
+            key = asyncssh.import_private_key(data)  # Never with a passphrase: encrypted keys are skipped.
+        except Exception as error:
+            encrypted = "passphrase" in str(error).lower()
+    del data
+    if encrypted:
+        return _skip(name, "protected by a passphrase"), None
+    if key is None:
+        return _skip(name, "not a private key Lab Manager can read"), None
+    return {"name": name, "type": key_type_of(key), "usable": True, "reason": ""}, key
+
+
+def key_type_of(key) -> str:
+    try:
+        value = key.get_algorithm()
+        value = value.decode("ascii") if isinstance(value, bytes) else str(value)
+    except Exception:
+        return ""
+    return value if _KEY_TYPE.fullmatch(value) else ""
+
+
+def vm_keys(directory=None) -> tuple[list[dict], list]:
+    """The VM account's default private keys: (report rows, [(name, type, key), ...] usable, in offer order).
+
+    Only ~/.ssh/id_ed25519, id_ecdsa and id_rsa are considered; ~/.ssh/config, the agent and every other file
+    are ignored. Report rows hold file names, key types and fixed reasons only. Missing files are left out."""
+    asyncssh = load_asyncssh()
+    folder = _vm_key_dir(directory)
+    report, usable = [], []
+    for name in VM_KEY_NAMES:
+        row, key = _load_vm_key(asyncssh, folder / name, name)
+        if row is None:
+            continue
+        report.append(row)
+        if key is not None:
+            usable.append((name, row["type"], key))
+    return report, usable
+
+
+def vm_key_report(directory=None) -> list[dict]:
+    try:
+        return vm_keys(directory)[0]
+    except HTTPException:
+        return []  # asyncssh missing: the status already says SSH is not installed.
+
+
 def _valid_user(value) -> bool:
     return isinstance(value, str) and _USER.fullmatch(value) is not None
 
@@ -499,7 +621,56 @@ def _config(directory: Path) -> dict:
         if not isinstance(key, str) or not _SERVER_KEY.fullmatch(key):
             raise ValueError("Invalid SSH configuration")
         approved[key] = _host(host)
-    return {"default_user": default, "per_server_user": overrides, "targets": approved}
+    # Owner decision: a configuration that never set these allows every server and signs in like the VM's ssh.
+    auto_allow = config.get("auto_allow", True)
+    key_source = config.get("key_source", DEFAULT_KEY_SOURCE)
+    if type(auto_allow) is not bool or key_source not in KEY_SOURCES:
+        raise ValueError("Invalid SSH configuration")
+    return {"default_user": default, "per_server_user": overrides, "targets": approved, "auto_allow": auto_allow,
+            "key_source": key_source, "denied": _denied(config.get("denied", []), ValueError),
+            "denied_hosts": _host_map(config.get("denied_hosts", {}), ValueError),
+            "auto_hosts": _host_map(config.get("auto_hosts", {}), ValueError),
+            "auto_skipped": _auto_skipped(config.get("auto_skipped", {}), ValueError)}
+
+
+def _host_map(value, error) -> dict:
+    """{server key: host}: denied_hosts (the saved host of each server an Admin turned off, captured then) and
+    auto_hosts (the saved hosts the Admin's last "allow every server" pass checked and allowed)."""
+    if not isinstance(value, dict) or len(value) > 10000:
+        raise error("Invalid SSH configuration")
+    result = {}
+    for key, host in value.items():
+        if not isinstance(key, str) or not _SERVER_KEY.fullmatch(key):
+            raise error("Invalid SSH configuration")
+        try:
+            result[key] = _host(host)
+        except HTTPException:
+            raise error("Invalid SSH configuration") from None
+    return result
+
+
+def _denied(value, error) -> list:
+    """Servers an Admin explicitly turned SSH off for; this wins over every approval."""
+    if not isinstance(value, list) or len(value) > 10000 or not all(
+            isinstance(key, str) and _SERVER_KEY.fullmatch(key) for key in value):
+        raise error("Invalid SSH configuration")
+    return sorted(set(value))
+
+
+def _auto_skipped(value, error) -> dict:
+    """Servers the last "allow every server" pass left out, pinned to the saved host that failed its check."""
+    if not isinstance(value, dict) or len(value) > 10000:
+        raise error("Invalid SSH configuration")
+    result = {}
+    for key, item in value.items():
+        if (not isinstance(key, str) or not _SERVER_KEY.fullmatch(key) or not isinstance(item, dict) or
+                set(item) != {"host", "reason"} or item["reason"] not in SKIP_CODES):
+            raise error("Invalid SSH configuration")
+        try:
+            result[key] = {"host": _host(item["host"]), "reason": item["reason"]}
+        except HTTPException:
+            raise error("Invalid SSH configuration") from None
+    return result
 
 
 def _etag(config: dict) -> str:
@@ -518,8 +689,15 @@ def config_etag(config: dict | None = None) -> str:
         return _etag(_config(directory))
 
 
+def _invalid_config(message):
+    return HTTPException(status_code=422, detail="Invalid SSH configuration")
+
+
 def write_config(default_user: str, per_server_user: dict, targets: dict,
-                 expected_etag: str | None):
+                 expected_etag: str | None, *, auto_allow: bool | None = None,
+                 denied: list | None = None, auto_skipped: dict | None = None, key_source: str | None = None,
+                 denied_hosts: dict | None = None, auto_hosts: dict | None = None):
+    """Replace the configuration if it still matches expected_etag; None keeps that stored field."""
     if expected_etag is None:
         raise HTTPException(status_code=428, detail="SSH configuration precondition is required")
     if not _valid_user(default_user) or not isinstance(per_server_user, dict) or not all(
@@ -529,11 +707,31 @@ def write_config(default_user: str, per_server_user: dict, targets: dict,
         raise HTTPException(status_code=422, detail="Invalid SSH user")
     if not isinstance(targets, dict):
         raise HTTPException(status_code=422, detail="Invalid SSH targets")
+    if auto_allow is not None and type(auto_allow) is not bool:
+        raise HTTPException(status_code=422, detail="Invalid SSH configuration")
+    if key_source is not None and key_source not in KEY_SOURCES:
+        raise HTTPException(status_code=422, detail="Invalid SSH configuration")
     approved = {_server_key(key): _host(host) for key, host in targets.items()}
-    config = {"default_user": default_user, "per_server_user": dict(per_server_user), "targets": approved}
+    denied = None if denied is None else _denied(denied, _invalid_config)
+    auto_skipped = None if auto_skipped is None else _auto_skipped(auto_skipped, _invalid_config)
+    denied_hosts = None if denied_hosts is None else _host_map(denied_hosts, _invalid_config)
+    auto_hosts = None if auto_hosts is None else _host_map(auto_hosts, _invalid_config)
     with _storage() as directory:
-        if expected_etag != _etag(_config(directory)):
+        stored = _config(directory)
+        if expected_etag != _etag(stored):
             raise HTTPException(status_code=412, detail="SSH configuration has changed")
+        config = {"default_user": default_user, "per_server_user": dict(per_server_user), "targets": approved,
+                  "auto_allow": stored["auto_allow"] if auto_allow is None else auto_allow,
+                  "key_source": stored["key_source"] if key_source is None else key_source,
+                  "denied": stored["denied"] if denied is None else denied,
+                  "denied_hosts": stored["denied_hosts"] if denied_hosts is None else denied_hosts,
+                  "auto_hosts": stored["auto_hosts"] if auto_hosts is None else auto_hosts,
+                  "auto_skipped": stored["auto_skipped"] if auto_skipped is None else auto_skipped}
+        # An explicit "not allowed" always wins over an approval of the same server.
+        config["targets"] = {key: host for key, host in approved.items() if key not in config["denied"]}
+        config["denied_hosts"] = {key: host for key, host in config["denied_hosts"].items() if key in config["denied"]}
+        if not config["auto_allow"]:
+            config["auto_skipped"], config["auto_hosts"] = {}, {}
         _write(directory / "config.json", _json_bytes(config))
     return config
 
@@ -711,7 +909,8 @@ async def start_session(db, user: str, server_key: str, host: str, *,
                         max_per_user: int = 4, max_total: int = 20,
                         max_connects_per_minute: int = 6, user_id: str = "",
                         user_name: str = "", client_ip: str = "", connected_ip: str = "",
-                        host_key_fingerprint: str = "", remote_user: str = "") -> SshSession:
+                        host_key_fingerprint: str = "", remote_user: str = "",
+                        key_source: str = "") -> SshSession:
     """Reserve capacity and the connection rate in one conditional DB insert."""
     server_key = _server_key(server_key)
     host = _host(host)
@@ -734,7 +933,8 @@ async def start_session(db, user: str, server_key: str, host: str, *,
     fields = {"user": user, "user_id": user_id, "user_name": user_name, "remote_user": remote_user, "client_ip": client_ip,
               "connected_ip": connected_ip, "host_key_fingerprint": host_key_fingerprint,
               "event": "terminal", "server_key": server_key, "host": host, "started_at": started_at,
-              "ended_at": None, "end_reason": None, "bytes_in": 0, "bytes_out": 0}
+              "ended_at": None, "end_reason": None, "bytes_in": 0, "bytes_out": 0,
+              "key_source": key_source if key_source in KEY_SOURCES else "", "key_type": "", "key_name": ""}
     values = select(*(literal(value) for value in fields.values())).where(
         total < max(0, int(max_total)), user_count < max(0, int(max_per_user)),
         recent < max(0, int(max_connects_per_minute)),
@@ -766,6 +966,16 @@ async def start_session(db, user: str, server_key: str, host: str, *,
         raise
 
 
+ATTEMPT_EVENTS = ("terminal", "connect_failed", "denied")
+
+
+async def recent_attempts(db, user: str, seconds: float = 60) -> int:
+    """Terminal sessions, failed connections and denials of `user` in the last `seconds` (any server)."""
+    since = time.time() - seconds
+    return (await db.execute(select(func.count()).select_from(SshSession).where(
+        SshSession.user == user, SshSession.event.in_(ATTEMPT_EVENTS), SshSession.started_at > since))).scalar_one()
+
+
 def _reason(value: str) -> str:
     return value if value in END_REASONS else "connection_failed"
 
@@ -783,7 +993,8 @@ async def _save_session_end(db, statement):
 
 
 async def end_session(db, session_id: int, reason: str, bytes_in: int, bytes_out: int, *,
-                      connected_ip: str | None = None, host_key_fingerprint: str | None = None) -> bool:
+                      connected_ip: str | None = None, host_key_fingerprint: str | None = None,
+                      key_type: str | None = None, key_name: str | None = None) -> bool:
     """Try the caller's session, retry once in a fresh session, always release."""
     try:
         count_in, count_out = max(0, int(bytes_in)), max(0, int(bytes_out))
@@ -796,6 +1007,10 @@ async def end_session(db, session_id: int, reason: str, bytes_in: int, bytes_out
             values["connected_ip"] = connected_ip
         if host_key_fingerprint is not None:
             values["host_key_fingerprint"] = host_key_fingerprint
+        if key_type is not None:
+            values["key_type"] = key_type if _KEY_TYPE.fullmatch(key_type) else ""
+        if key_name is not None:
+            values["key_name"] = key_name if key_name in _KEY_NAMES else ""
         statement = update(SshSession).where(
             SshSession.id == session_id,
             (SshSession.ended_at.is_(None)) | (SshSession.end_reason == "session_expired"),
@@ -865,4 +1080,6 @@ async def list_sessions(db, *, denials: bool = False) -> list[dict]:
              "host_key_fingerprint": row.host_key_fingerprint, "event": row.event,
              "server_key": row.server_key, "host": row.host, "started_at": _iso(row.started_at),
              "ended_at": _iso(row.ended_at), "end_reason": row.end_reason,
-             "bytes_in": row.bytes_in, "bytes_out": row.bytes_out} for row in rows]
+             "bytes_in": row.bytes_in, "bytes_out": row.bytes_out,
+             "key_source": row.key_source or "", "key_type": row.key_type or "", "key_name": row.key_name or ""}
+            for row in rows]

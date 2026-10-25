@@ -5,15 +5,16 @@ import SshButton, { useSshStatus } from "../components/SshButton";
 import {
   sshApi, sshStatusStore, httpErrorText, formFromStatus, buildConfigPayload, hasOptIn, hostKeyState, transportBlocked, sameHost,
   normalizeSessions, toMillis, formatDuration, formatBytes, eventLabel, endReasonLabel, NOT_INSTALLED_TEXT, DISABLED_TEXT, INSECURE_TEXT,
+  supportsAutoAllow, skippedServers, allowChange, APPROVAL_LABELS, KEY_SOURCE_TEXT, keySourceOf, vmKeyRows, sessionKeyLabel, copyText,
 } from "../api/ssh";
 
 const inputCls = "h-8 w-full min-w-[120px] bg-zinc-950 border border-zinc-800 rounded px-2 text-xs font-mono text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-nv-400/60 disabled:opacity-60";
 const fmtTime = ms => ms == null ? "—" : new Date(ms).toLocaleString();
 const HOST_KEY_CHECK = "for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf \"$f\"; done";
 
-// Admin → SSH: the Lab Manager key, install/revoke commands, which servers allow SSH and as which user,
-// host key pins, and the session log. The private key never leaves the VM; only the public key and
-// fingerprints are shown.
+// Admin → SSH: which keys Lab Manager signs in with, the Lab Manager key, install/revoke commands, which servers
+// allow SSH ("allow every server with an address" or one by one) and as which user, host key pins, and the session
+// log. Private keys never leave the VM; only the public key, key file names/types and fingerprints are shown.
 export default function SshAdmin() {
   const { canOperate, canAdmin, mode } = useAccounts();
   const snapshot = useSshStatus();
@@ -23,6 +24,10 @@ export default function SshAdmin() {
   const [config, setConfig] = useState(null);   // Admin: exact saved settings, so editing never drops a value
   const [dialog, setDialog] = useState(null);   // { kind: "generate" | "rotate" | "accept" | "end-sessions", server?, pinned?, fingerprint? }
   const [notice, setNotice] = useState("");
+  // One-setting saves (key source, "allow every server"): { busy: kind | "", kind, message, error }.
+  const [setting, setSetting] = useState({ busy: "", kind: "", message: "", error: "" });
+  const [formDirty, setFormDirty] = useState(false);
+  const settingSeq = useRef(0);
   const keySeq = useRef(0);
   const sessionSeq = useRef(0);
   const configSeq = useRef(0);
@@ -30,7 +35,8 @@ export default function SshAdmin() {
 
   useEffect(() => { if (canOperate && !legacy) sshStatusStore.refresh({ force: true }); }, [canOperate, legacy]);
 
-  const keyReady = !!(status?.key_exists && status?.installed !== false && canOperate);
+  // The all-servers key list is Admin-only; an Operator sees install commands on each terminal page instead.
+  const keyReady = !!(status?.key_exists && status?.installed !== false && canAdmin);
   async function loadKey() {
     const seq = ++keySeq.current;
     setKeyInfo(k => ({ ...k, loading: true }));
@@ -72,6 +78,28 @@ export default function SshAdmin() {
   const servers = status?.servers || [];
   const optIn = hasOptIn(status);
   const keyStates = servers.map(hostKeyState);
+  const keySource = keySourceOf(status, config);
+
+  // Saves one setting on its own (PUT /config with only that field, If-Match = the shown revision). The table
+  // form never sends these, so neither can undo the other. A newer revision elsewhere (409/412) reloads the page data.
+  async function saveSetting(kind, patch, okText) {
+    if (setting.busy) return;
+    const seq = ++settingSeq.current;
+    setSetting({ busy: kind, kind, message: "", error: "" });
+    try {
+      const saved = await sshApi.saveConfig(patch, status?.config_revision);
+      await sshStatusStore.refresh({ force: true });
+      if (keyReady) loadKey();
+      if (canAdmin) loadSessions();   // the change is in the audit log
+      if (seq !== settingSeq.current) return;
+      const skipped = Array.isArray(saved?.skipped) ? saved.skipped.length : 0;
+      setSetting({ busy: "", kind, error: "",
+        message: okText + (skipped ? ` ${skipped} server${skipped === 1 ? " has" : "s have"} no usable address (listed below).` : "") });
+    } catch (err) {
+      if (err.status === 409 || err.status === 412) await sshStatusStore.refresh({ force: true });
+      if (seq === settingSeq.current) setSetting({ busy: "", kind, message: "", error: httpErrorText(err, { accountMode: mode }) });
+    }
+  }
 
   function dialogProps() {
     const { kind, server, pinned, fingerprint } = dialog;
@@ -132,7 +160,7 @@ export default function SshAdmin() {
     <div className="flex flex-wrap justify-between items-end gap-4 mb-5">
       <div>
         <h1 className="text-2xl font-bold text-white">SSH terminal</h1>
-        <p className="text-sm text-zinc-400 mt-2">Operators and Admins open an SSH terminal in the browser to servers an Admin allowed. Lab Manager connects with its own key; every session is logged without its contents.</p>
+        <p className="text-sm text-zinc-400 mt-2">Operators and Admins open an SSH terminal in the browser to servers an Admin allowed. Lab Manager signs in with the keys chosen under Sign-in keys; every session is logged without its contents.</p>
       </div>
       <button type="button" className="account-secondary" disabled={snapshot.loading} onClick={() => { sshStatusStore.refresh({ force: true }); if (keyReady) loadKey(); if (canAdmin) loadSessions(); }}>
         {snapshot.loading ? "Refreshing…" : "Refresh"}
@@ -146,6 +174,7 @@ export default function SshAdmin() {
       {[["Terminal", !status ? "—" : status.enabled === false ? "Off" : "On"],
         ["SSH support", !status ? "—" : status.installed === false ? "Missing" : "Installed"],
         ["Key", !status ? "—" : status.key_exists ? "Ready" : "None"],
+        ["Sign-in keys", !status ? "—" : keySource === "vm" ? "VM account + Lab Manager" : "Lab Manager only"],
         ["Servers allowed", !status ? "—" : optIn ? `${servers.filter(s => s.allowed).length} / ${servers.length}` : servers.length],
         ["Host keys to check", status ? keyStates.filter(k => k.state === "unconfirmed" || k.state === "changed").length : "—"]].map(([label, value]) =>
         <div key={label}><span>{label}</span><strong>{value}</strong></div>)}
@@ -154,6 +183,10 @@ export default function SshAdmin() {
     {status?.installed === false && <p role="alert" className="text-sm text-amber-300 mb-4">{NOT_INSTALLED_TEXT}</p>}
     {transportBlocked(status, window.location.protocol) && <p role="alert" className="text-sm text-amber-300 mb-4">{INSECURE_TEXT}</p>}
 
+    <KeySourceCard status={status} config={config} source={keySource} canAdmin={canAdmin} setting={setting}
+      onChange={vm => saveSetting("key_source", { key_source: vm ? "vm" : "site" },
+        vm ? "Lab Manager now signs in with this VM account's SSH keys, then the Lab Manager key." : "Lab Manager now signs in with the Lab Manager key only.")} />
+
     <div className="account-grid mb-4">
       <KeyCard status={status} keyInfo={keyInfo} canAdmin={canAdmin} onRetry={loadKey}
         onGenerate={() => setDialog({ kind: status?.key_exists ? "rotate" : "generate", fingerprint: status?.public_key_fingerprint || keyInfo.data?.fingerprint || "" })} />
@@ -161,6 +194,10 @@ export default function SshAdmin() {
     </div>
 
     <ServersCard status={status} config={config} servers={servers} optIn={optIn} canAdmin={canAdmin} accountMode={mode}
+      setting={setting} onDirtyChange={setFormDirty}
+      onAutoAllow={(on, again) => saveSetting("auto_allow", { auto_allow: on },
+        !on ? "Only the servers ticked below are allowed now." : again ? "Every server's address was checked again." : "Every server with an address is now allowed.")}
+      autoAllowLocked={formDirty}
       onAccept={(server, pinned, fingerprint) => setDialog({ kind: "accept", server, pinned, fingerprint })}
       onSaved={async () => { await sshStatusStore.refresh({ force: true }); if (keyReady) loadKey(); }} />
 
@@ -177,23 +214,6 @@ function Card({ title, hint, actions, children }) {
   </section>;
 }
 
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
-  } catch {}
-  // Plain-HTTP pages have no clipboard API; fall back to a temporary selection.
-  const area = document.createElement("textarea");
-  area.value = text;
-  area.setAttribute("readonly", "");
-  area.style.position = "fixed"; area.style.opacity = "0";
-  document.body.appendChild(area);
-  area.select();
-  let ok = false;
-  try { ok = document.execCommand("copy"); } catch {}
-  area.remove();
-  return ok;
-}
-
 function CopyButton({ text, what }) {
   const [state, setState] = useState("");
   const timer = useRef(null);
@@ -207,6 +227,67 @@ function CopyButton({ text, what }) {
 
 function CodeBlock({ text, label }) {
   return <pre tabIndex={0} aria-label={label} className="whitespace-pre-wrap break-all rounded border border-zinc-800 bg-zinc-950 p-2 text-[11px] leading-relaxed font-mono text-zinc-200 select-all">{text}</pre>;
+}
+
+// An on/off setting that saves when it is pressed (Space/Enter or click), so arrow keys never change it.
+function Switch({ checked, label, disabled, busy, describedBy, onChange }) {
+  return <button type="button" role="switch" aria-checked={checked} aria-describedby={describedBy} disabled={disabled}
+    onClick={() => onChange(!checked)}
+    className="inline-flex items-center gap-3 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm font-semibold text-white hover:border-nv-400/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-nv-400 disabled:opacity-60 disabled:cursor-not-allowed">
+    <span aria-hidden="true" className={`relative inline-block h-5 w-9 shrink-0 rounded-full transition ${checked ? "bg-nv-400" : "bg-zinc-700"}`}>
+      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${checked ? "left-[18px]" : "left-0.5"}`} />
+    </span>
+    <span>{label}</span>
+    <span aria-hidden="true" className={`text-xs font-normal ${checked ? "text-nv-300" : "text-zinc-500"}`}>{busy ? "Saving…" : checked ? "On" : "Off"}</span>
+  </button>;
+}
+
+function SettingResult({ setting, kind }) {
+  if (setting.kind !== kind) return null;
+  if (setting.error) return <p role="alert" className="account-error">{setting.error}</p>;
+  if (setting.message) return <p role="status" className="text-sm text-nv-300">{setting.message}</p>;
+  return null;
+}
+
+// Which private keys Lab Manager offers when it signs in: the VM account's own keys first (as `ssh root@server` on
+// the VM does), then the Lab Manager key; or only the Lab Manager key.
+function KeySourceCard({ status, config, source, canAdmin, setting, onChange }) {
+  const vmKeys = vmKeyRows(config);
+  const blocked = !status ? "" : status.installed === false ? NOT_INSTALLED_TEXT : status.enabled === false ? DISABLED_TEXT : "";
+  return <section className="account-card mb-4">
+    <header><h2>Sign-in keys</h2><p>The private keys Lab Manager offers when it signs in to a server. They never leave the VM.</p></header>
+    <div className="p-4 space-y-3 text-sm">
+      {!status ? <p className="text-zinc-500">Loading…</p>
+        : !source ? <p className="text-zinc-400">This Lab Manager version signs in with the Lab Manager key only.</p>
+        : <>
+          <p role="status" className="font-semibold text-white">{KEY_SOURCE_TEXT[source]}</p>
+          <p id="ssh-key-source-help" className="text-xs text-zinc-400">{source === "vm"
+            ? "Lab Manager first offers the SSH keys of the VM account it runs as (~/.ssh/id_ed25519, id_ecdsa, id_rsa: the keys a plain ssh root@server uses on the VM), then its own key. No password is needed where those keys are already accepted."
+            : "Lab Manager offers only its own key. Install it on each server with the commands below."}
+            {" "}It never uses ssh-agent, ~/.ssh/config or passwords, and connects only to allowed servers on port 22.</p>
+          {canAdmin
+            ? <Switch checked={source === "vm"} label="Use this VM account's SSH keys" busy={setting.busy === "key_source"}
+                disabled={!!setting.busy || !status.config_revision} describedBy="ssh-key-source-help" onChange={onChange} />
+            : <p className="text-xs text-zinc-500">Only an Admin can change which keys are used.</p>}
+          {blocked && <p className="text-xs text-amber-300">{blocked}</p>}
+          <SettingResult setting={setting} kind="key_source" />
+          {vmKeys.length > 0 && <div>
+            <div className="text-xs text-zinc-500 mb-1">Keys of this VM account</div>
+            <ul className="space-y-1 text-xs">
+              {vmKeys.map(k => <li key={k.name} className="flex flex-wrap gap-x-2">
+                <span className="font-mono text-zinc-200">{k.name}</span>
+                {k.type && <span className="font-mono text-zinc-500">{k.type}</span>}
+                {k.usable === true ? <span className="text-nv-300">Used</span>
+                  : k.usable === false ? <span className="text-amber-300">Not used{k.reason ? `: ${k.reason}` : ""}</span>
+                  : <span className="text-zinc-400">Found</span>}
+              </li>)}
+            </ul>
+          </div>}
+          {source === "vm" && config && Array.isArray(config.vm_keys) && vmKeys.every(k => k.usable === false) &&
+            <p className="text-xs text-amber-300">This VM account has no usable default SSH key (~/.ssh/id_ed25519, id_ecdsa or id_rsa without a passphrase), so only the Lab Manager key is offered.</p>}
+        </>}
+    </div>
+  </section>;
 }
 
 function KeyCard({ status, keyInfo, canAdmin, onGenerate, onRetry }) {
@@ -296,7 +377,7 @@ function HostKeyCell({ server, state, canAdmin, onAccept }) {
   </div>;
 }
 
-function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, onAccept, onSaved }) {
+function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, setting, onAutoAllow, autoAllowLocked, onDirtyChange, onAccept, onSaved }) {
   // Unsaved edits survive status refreshes; rows that appear later start from their saved values.
   const [form, setForm] = useState(null);
   const [errors, setErrors] = useState({});
@@ -306,14 +387,27 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, on
   const view = form || base;
   const entryFor = key => view.servers[key] || base.servers[key] || { allowed: false, approved_host: "", user: "" };
   const dirty = !!form;
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  const autoSupported = optIn && supportsAutoAllow(status, config);
+  const autoMode = autoSupported && !!view.auto_allow;   // the saved mode this form edits in
+  const savedAuto = autoSupported && !!base.auto_allow;
+  const skipped = autoSupported ? skippedServers(status) : [];
+  const settingBusy = !!setting?.busy;
 
   function edit(change) { setResult({}); setForm(f => change(f || JSON.parse(JSON.stringify(base)))); }
   function editServer(key, patch) { edit(f => ({ ...f, servers: { ...f.servers, [key]: { ...(f.servers[key] || base.servers[key] || {}), ...patch } } })); }
 
   async function save(e) {
     e.preventDefault();
-    if (!form || busy) return;
-    const { ok, errors: found, payload } = buildConfigPayload(form, servers, { optIn });
+    if (!form || busy || settingBusy) return;
+    // The table means different things with "allow every server" on or off; if it was switched elsewhere since these
+    // edits began, saving them could turn servers off or on by mistake.
+    if (autoSupported && !!form.auto_allow !== !!base.auto_allow) {
+      setForm(null); setErrors({});
+      setResult({ error: "“Allow every server with an address” was switched in the meantime, so your table changes were discarded. Review the table and make them again." });
+      return;
+    }
+    const { ok, errors: found, payload } = buildConfigPayload(form, servers, { optIn, autoAllow: autoSupported ? !!form.auto_allow : undefined });
     setErrors(found);
     if (!ok) { setResult({ error: "Fix the highlighted fields." }); return; }
     setBusy(true); setResult({});
@@ -336,9 +430,28 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, on
   return <section className="account-card mb-4">
     <header>
       <h2>Servers</h2>
-      <p>{optIn ? "SSH works only for servers an Admin allows, to the host approved here, on port 22." : "Lab Manager connects only to known servers, on port 22."} A blank user uses the default.</p>
+      <p>{optIn ? "SSH works only for servers an Admin allows, to the server's saved address, on port 22." : "Lab Manager connects only to known servers, on port 22."} A blank user uses the default.</p>
     </header>
     <form onSubmit={save} className="p-4 space-y-4" noValidate>
+      {autoSupported && <div className="rounded border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {canAdmin
+            ? <Switch checked={savedAuto} label="Allow every server with an address" busy={setting?.busy === "auto_allow"}
+                disabled={settingBusy || busy || autoAllowLocked || !status?.config_revision} describedBy="ssh-auto-help" onChange={on => onAutoAllow(on, false)} />
+            : <p className="text-sm font-semibold text-white">{savedAuto ? "Every server with an address is allowed" : "Only the servers ticked below are allowed"}</p>}
+          {canAdmin && savedAuto && <button type="button" className="account-secondary" disabled={settingBusy || busy || autoAllowLocked}
+            onClick={() => onAutoAllow(true, true)}>Check addresses again</button>}
+        </div>
+        <p id="ssh-auto-help" className="text-xs text-zinc-400">{savedAuto
+          ? "On: every known server whose saved address the VM can resolve is allowed, to that address only. New servers are allowed automatically. A server you turn off below stays off."
+          : "Off: only the servers ticked below are allowed. Turn this on to allow every known server whose saved address the VM can resolve."}</p>
+        {canAdmin && autoAllowLocked && <p className="text-xs text-amber-300">Save or discard the changes below before switching this.</p>}
+        <SettingResult setting={setting || {}} kind="auto_allow" />
+        {skipped.length > 0 && <div role="status" className="rounded border border-amber-800 bg-amber-950/30 p-2 text-xs text-amber-200">
+          <p className="font-semibold">Not allowed: no usable address ({skipped.length})</p>
+          <ul className="mt-1 list-disc pl-5 space-y-0.5">{skipped.map(item => <li key={item.key}><span className="font-mono">{item.name}</span>{item.reason ? `: ${item.reason}` : ""}</li>)}</ul>
+        </div>}
+      </div>}
       <label className="flex flex-col gap-1 text-xs text-zinc-400 max-w-xs">Default SSH user
         <input className={inputCls} value={view.default_user} disabled={!canAdmin || !status || busy} maxLength={33} autoComplete="off" spellCheck={false}
           aria-invalid={errors.default_user ? "true" : undefined} aria-describedby={errors.default_user ? "ssh-default-error" : undefined}
@@ -352,11 +465,16 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, on
             {servers.map(s => {
               const entry = entryFor(s.key);
               const approved = entry.allowed ? entry.approved_host || s.host : "";
-              const moved = optIn && entry.allowed && entry.approved_host && s.host && !sameHost(entry.approved_host, s.host);
+              const moved = optIn && !autoMode && entry.allowed && entry.approved_host && s.host && !sameHost(entry.approved_host, s.host);
+              const noAddress = autoMode && s.approval === "skipped" && !entry.explicit;
+              const approvalLabel = typeof s.approval === "string" ? APPROVAL_LABELS[s.approval] || "" : "";
               return <tr key={s.key}>
-                {optIn && <td><input type="checkbox" className="w-4 h-4 accent-[#76b900]" checked={!!entry.allowed} disabled={!canAdmin || busy}
-                  aria-label={`Allow SSH to ${s.name}`}
-                  onChange={e => editServer(s.key, e.target.checked ? { allowed: true } : { allowed: false, approved_host: "" })} /></td>}
+                {optIn && <td>
+                  <input type="checkbox" className="w-4 h-4 accent-[#76b900]" checked={!!entry.allowed} disabled={!canAdmin || busy || settingBusy || noAddress}
+                    aria-label={`Allow SSH to ${s.name}`} title={noAddress ? s.not_allowed_reason || undefined : undefined}
+                    onChange={e => editServer(s.key, allowChange(entry, e.target.checked, { autoAllow: autoMode, host: s.host }))} />
+                  {approvalLabel && <div className={`mt-1 text-[10px] ${s.allowed ? "text-nv-300" : "text-zinc-500"}`}>{approvalLabel}</div>}
+                </td>}
                 <td className="font-mono font-semibold text-white">{s.name}</td>
                 <td className="font-mono text-zinc-400 break-all">
                   {optIn ? (entry.allowed ? approved || "—" : <span className="text-zinc-600">{s.host || "—"}</span>) : s.host || "—"}
@@ -385,7 +503,7 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, on
         <ul className="mt-1 list-disc pl-5 space-y-0.5">{result.skipped.map((line, i) => <li key={i}>{line}</li>)}</ul>
       </div>}
       {canAdmin ? <div className="flex flex-wrap gap-2">
-        <button className="account-primary" disabled={!dirty || busy}>{busy ? "Saving…" : "Save changes"}</button>
+        <button className="account-primary" disabled={!dirty || busy || settingBusy}>{busy ? "Saving…" : "Save changes"}</button>
         <button type="button" className="account-secondary" disabled={!dirty || busy} onClick={() => { setForm(null); setErrors({}); setResult({}); }}>Discard changes</button>
       </div> : <p className="text-xs text-zinc-500">Only an Admin can change which servers allow SSH, SSH users and host keys.</p>}
     </form>
@@ -407,7 +525,7 @@ function SessionsCard({ sessions, accountMode, onRefresh, onEndAll }) {
       {sessions.error && <p role="alert" className="account-error">Sessions could not load: {httpErrorText(sessions.error, { accountMode })}</p>}
       <div className="user-table-wrap">
         <table className="user-table">
-          <thead><tr>{["Started", "Event", "User", "Server", "Host", "Duration", "Ended because", "Sent", "Received"].map(h => <th key={h}>{h}</th>)}</tr></thead>
+          <thead><tr>{["Started", "Event", "User", "Server", "Host", "Key", "Duration", "Ended because", "Sent", "Received"].map(h => <th key={h}>{h}</th>)}</tr></thead>
           <tbody>
             {rows.map((s, i) => {
               const start = toMillis(s.started_at), end = toMillis(s.ended_at);
@@ -418,14 +536,15 @@ function SessionsCard({ sessions, accountMode, onRefresh, onEndAll }) {
                 <td className="font-mono" title={s.user_name || undefined}>{s.user || "—"}</td>
                 <td className="font-mono text-white">{s.server_key || s.server || "—"}</td>
                 <td className="font-mono text-zinc-400 break-all">{s.host || "—"}</td>
+                <td className="font-mono text-zinc-400 whitespace-nowrap">{terminal ? sessionKeyLabel(s) : "—"}</td>
                 <td className="whitespace-nowrap">{!terminal ? "—" : end == null ? <span className="text-nv-300">Open</span> : formatDuration(start, end)}</td>
                 <td className="text-zinc-300">{endReasonLabel(s.end_reason)}</td>
                 <td className="font-mono whitespace-nowrap">{terminal ? formatBytes(s.bytes_in) : "—"}</td>
                 <td className="font-mono whitespace-nowrap">{terminal ? formatBytes(s.bytes_out) : "—"}</td>
               </tr>;
             })}
-            {sessions.data && rows.length === 0 && <tr><td colSpan={9} className="text-zinc-500 py-6 text-center">No SSH sessions yet.</td></tr>}
-            {!sessions.data && !sessions.error && <tr><td colSpan={9} className="text-zinc-500 py-6 text-center">Loading…</td></tr>}
+            {sessions.data && rows.length === 0 && <tr><td colSpan={10} className="text-zinc-500 py-6 text-center">No SSH sessions yet.</td></tr>}
+            {!sessions.data && !sessions.error && <tr><td colSpan={10} className="text-zinc-500 py-6 text-center">Loading…</td></tr>}
           </tbody>
         </table>
       </div>

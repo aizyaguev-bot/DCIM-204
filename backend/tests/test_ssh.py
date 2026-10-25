@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager, contextmanager
 import asyncio
 import ast
+import errno
 import logging
 from pathlib import Path
 import socket as socket_module
@@ -41,16 +42,24 @@ async def api(tmp_path, monkeypatch):
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+    # A fake home for "the VM account": never the real ~/.ssh of this machine (keys, config or agent).
+    home = tmp_path / "vm-home"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    for name in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(name, str(home))
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(home / "no-agent.sock"))
     settings = SimpleNamespace(accounts_enabled=True, accounts_registration_enabled=False,
         accounts_session_hours=12, accounts_secure_cookie=False, lab_manager_password="",
         ssh_terminal_enabled=True, ssh_allow_insecure_transport=True, ssh_idle_timeout_seconds=1800, ssh_connect_timeout_seconds=2,
-        ssh_max_sessions_per_user=4, ssh_max_sessions_total=20)
+        ssh_max_sessions_per_user=4, ssh_max_sessions_total=20, ssh_vm_key_dir=str(home / ".ssh"))
     monkeypatch.setattr(accounts, "AsyncSessionLocal", factory)
     monkeypatch.setattr(ssh, "AsyncSessionLocal", factory, raising=False)
     monkeypatch.setattr(ssh_store, "AsyncSessionLocal", factory, raising=False)
     monkeypatch.setattr(accounts, "get_settings", lambda: settings)
     monkeypatch.setattr(ssh, "get_settings", lambda: settings)
     monkeypatch.setattr(ssh_store, "SSH_DIR", tmp_path / "private-ssh")
+    monkeypatch.setattr(ssh, "_SOURCE_CACHE", {})
     async with factory() as db:
         for role in ("Viewer", "Operator", "Admin"):
             db.add(User(id=role.lower(), username=role.lower(), name=role, role=role,
@@ -58,7 +67,8 @@ async def api(tmp_path, monkeypatch):
         db.add(PingTarget(id="saved", source_key="server:local", name="Local",
                           host="127.0.0.1", source="manual"))
         await db.commit()
-    ssh_store.write_config("root", {}, {"local": "127.0.0.1"}, expected_etag=ssh_store.config_etag())
+    # Explicit approvals only here (the legacy contract these tests check); the defaults have their own tests.
+    ssh_store.write_config("root", {}, {"local": "127.0.0.1"}, expected_etag=ssh_store.config_etag(), auto_allow=False)
     app = FastAPI()
     app.add_middleware(accounts.AccountAccess)
     app.include_router(accounts.router)
@@ -70,7 +80,8 @@ async def api(tmp_path, monkeypatch):
 
     app.dependency_overrides[get_db] = database
     try:
-        yield SimpleNamespace(app=app, factory=factory, settings=settings, directory=tmp_path / "private-ssh")
+        yield SimpleNamespace(app=app, factory=factory, settings=settings, directory=tmp_path / "private-ssh",
+                              home=home, vm_keys=home / ".ssh")
     finally:
         # Capacity tests deliberately leave reservations active. Release their
         # Windows file handles before pytest attempts temporary-directory cleanup.
@@ -279,7 +290,8 @@ async def test_sessions_list_newest_200_metadata_only(api):
         rows = client.get("/api/ssh/sessions").json()
     assert len(rows) == 200
     assert rows[0]["id"] > rows[-1]["id"]
-    assert set(rows[0]) == {"id", "user", "server_key", "host", "started_at", "ended_at", "end_reason", "bytes_in", "bytes_out", "event", "user_id", "user_name", "client_ip", "connected_ip", "host_key_fingerprint", "remote_user"}
+    assert set(rows[0]) == {"id", "user", "server_key", "host", "started_at", "ended_at", "end_reason", "bytes_in", "bytes_out", "event", "user_id", "user_name", "client_ip", "connected_ip", "host_key_fingerprint", "remote_user",
+                            "key_source", "key_type", "key_name"}
 
 
 async def test_bridge_drains_stdout_after_stderr_eof(api):
@@ -316,10 +328,18 @@ def library():
 
 
 @contextmanager
-def fake_server(client, monkeypatch, library, *, host_key=None, reject_auth=False, target_host="127.0.0.1"):
-    """Real AsyncSSH listener on a random loopback port; production still requests port 22."""
-    events = {"resizes": [], "ptys": [], "connections": 0}
-    expected_key = ssh_store.private_key().convert_to_public()
+def fake_server(client, monkeypatch, library, *, host_key=None, reject_auth=False, target_host="127.0.0.1", accept=None):
+    """Real AsyncSSH listener on a random loopback port; production still requests port 22.
+
+    `accept`: the client public keys root may sign in with (default: the Lab Manager key, when generated)."""
+    events = {"resizes": [], "ptys": [], "connections": 0, "offered": [], "shells": 0, "exec": [], "subsystems": [],
+              "passwords": 0, "kbdint": 0, "forwards": 0}
+    if accept is None:
+        try:
+            accept = [ssh_store.private_key().convert_to_public()]
+        except HTTPException:
+            accept = []
+    accepted = {key.get_fingerprint() for key in accept}
     host_key = host_key or library.generate_private_key("ssh-ed25519")
 
     class Session(library.SSHServerSession):
@@ -331,7 +351,16 @@ def fake_server(client, monkeypatch, library, *, host_key=None, reject_auth=Fals
             return True
 
         def shell_requested(self):
+            events["shells"] += 1
             return True
+
+        def exec_requested(self, command):
+            events["exec"].append(command)
+            return False
+
+        def subsystem_requested(self, subsystem):
+            events["subsystems"].append(subsystem)
+            return False
 
         def session_started(self):
             self.channel.write("ready\n")
@@ -356,7 +385,32 @@ def fake_server(client, monkeypatch, library, *, host_key=None, reject_auth=Fals
             return True
 
         def validate_public_key(self, username, key):
-            return not reject_auth and username == "root" and key == expected_key
+            offered = (key.get_algorithm(), key.get_fingerprint())
+            if not events["offered"] or events["offered"][-1] != offered:
+                events["offered"].append(offered)
+            return not reject_auth and username == "root" and key.get_fingerprint() in accepted
+
+        def password_auth_supported(self):
+            return True  # Offered by the server; the client must never use it.
+
+        def validate_password(self, username, password):
+            events["passwords"] += 1
+            return False
+
+        def kbdint_auth_supported(self):
+            return True
+
+        def get_kbdint_challenge(self, username, lang, submethods):
+            events["kbdint"] += 1
+            return False
+
+        def connection_requested(self, dest_host, dest_port, orig_host, orig_port):
+            events["forwards"] += 1
+            return False
+
+        def server_requested(self, listen_host, listen_port):
+            events["forwards"] += 1
+            return False
 
         def session_requested(self):
             return Session()
@@ -384,9 +438,12 @@ def fake_server(client, monkeypatch, library, *, host_key=None, reject_auth=Fals
         assert kwargs["known_hosts"] is not None
         assert kwargs["config"] is None and kwargs["agent_path"] is None
         assert kwargs["x509_trusted_certs"] is None and kwargs["x509_trusted_cert_paths"] is None
-        assert kwargs["client_keys"] == [ssh_store.private_key()]
+        # No default key loading: keys come only from the terminal's explicit offer list (its client callback).
+        assert kwargs["client_keys"] is None and kwargs["agent_identities"] is None and kwargs["pkcs11_provider"] is None
+        assert kwargs["public_key_auth"] is True and kwargs["preferred_auth"] == "publickey"
         assert kwargs["username"] == "root"
-        for flag in ("gss_auth", "gss_kex", "password_auth", "kbdint_auth", "host_based_auth", "agent_forwarding"):
+        for flag in ("gss_auth", "gss_kex", "password_auth", "kbdint_auth", "host_based_auth", "agent_forwarding",
+                     "x11_forwarding"):
             assert kwargs[flag] is False
         assert kwargs["connect_timeout"] > 0 and kwargs["login_timeout"] > 0
         events["connections"] += 1
@@ -537,13 +594,15 @@ async def test_config_etag_and_explicit_target_approval(api, monkeypatch):
     with browser(api) as client:
         initial = client.get("/api/ssh/config")
         assert initial.status_code == 200
-        assert initial.json() == {"default_user": "root", "per_server_user": {}, "targets": {"local": "127.0.0.1"}}
+        assert initial.json() == {"default_user": "root", "per_server_user": {}, "targets": {"local": "127.0.0.1"},
+                                  "auto_allow": False, "key_source": "vm", "denied": [], "auto_skipped": {}, "vm_keys": [],
+                                  "denied_hosts": {}, "auto_hosts": {}}
         original = initial.headers["etag"]
         body = {"default_user": "deployer", "per_server_user": {"local": "operator"}, "targets": {"local": "127.0.0.1"}}
         assert client.put("/api/ssh/config", json=body).status_code == 428
         assert client.put("/api/ssh/config", json=body, headers={"If-Match": '"stale"'}).status_code == 412
         written = client.put("/api/ssh/config", json=body, headers={"If-Match": original})
-        assert written.status_code == 200 and written.json() == body
+        assert written.status_code == 200 and {name: written.json()[name] for name in body} == body
         assert written.headers["etag"] != original
         assert client.put("/api/ssh/config", json=body, headers={"If-Match": original}).status_code == 412
         assert client.get("/api/ssh/status").json()["servers"][0]["user"] == "operator"
@@ -568,7 +627,7 @@ async def test_config_rejects_freeform_host_port_or_unlisted_identity(api, chang
         body = {"default_user": "root", "per_server_user": {}, "targets": {"local": "127.0.0.1"}}
         result = client.put("/api/ssh/config", json={**body, **change}, headers={"If-Match": ssh_store.config_etag()})
         assert result.status_code == 400
-        assert ssh_store.read_config() == body
+        assert {name: value for name, value in ssh_store.read_config().items() if name in body} == body
 
 
 @pytest.mark.parametrize("kind", ["anonymous", "viewer", "cross-origin", "missing-origin", "no-csrf", "bad-csrf", "binary", "oversize"])
@@ -1550,3 +1609,558 @@ async def test_round3_cancelled_reservation_waits_for_worker_and_releases_its_le
     assert not (api.directory / f".session-{identifier}.lock").exists()
     async with api.factory() as db:
         assert (await db.execute(select(ssh_store.SshSession.id))).scalars().all() == []
+
+
+# ─── The VM account's own keys (key_source "vm"), "allow every server" and fixed failure reasons ─────────────────
+
+def write_vm_key(directory, name, key=None, *, data=None):
+    path = Path(directory) / name
+    path.write_bytes(data if data is not None else key.export_private_key("openssh"))
+    if os.name != "nt":
+        path.chmod(0o600)
+    return path
+
+
+def key_body_lines(key):
+    """Base64 lines of a private key export: none may ever appear in a response, the audit or a log."""
+    return [line for line in key.export_private_key("openssh").decode().splitlines() if line and "-----" not in line]
+
+
+async def terminal_rows(api):
+    async with api.factory() as db:
+        return [row for row in await ssh_store.list_sessions(db) if row["event"] == "terminal"]
+
+
+def closed_frame(sock):
+    with pytest.raises(WebSocketDisconnect) as error:
+        sock.receive_json()
+    return error.value
+
+
+async def test_vm_account_key_signs_in_like_the_vm_shell_without_config_agent_or_commands(api, library, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(ssh_store, "_LOGGED_SKIPS", set())
+    vm_key = library.generate_private_key("ssh-ed25519")
+    write_vm_key(api.vm_keys, "id_ed25519", vm_key)
+    # A ~/.ssh/config that would run a command, change the port and add an identity if anything honoured it.
+    marker = api.home / "proxycommand-ran"
+    command = f"{sys.executable} -c \"open(r'{marker}', 'w').close()\""
+    (api.vm_keys / "config").write_text(f"Host *\n  ProxyCommand {command}\n  Port 2222\n  IdentityFile ~/.ssh/other\n")
+    api.settings.ssh_vm_key_dir = ""  # The default: ~/.ssh of the account running Lab Manager (here the fake home).
+    assert ssh_store.read_config()["key_source"] == "vm"
+    messages = []
+    with browser(api, "operator") as client, fake_server(client, monkeypatch, library,
+                                                         accept=[vm_key.convert_to_public()]) as events:
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            messages.append(until(sock, "connected"))
+            assert sock.receive_json()["data"] == "ready\n"
+            sock.send_json({"type": "input", "data": "exit"})
+            messages.append(until(sock, "closed"))
+        # Only the VM key was needed; no site key exists. Only a shell ran: no exec, subsystem, forward or password.
+        assert events["offered"] == [("ssh-ed25519", vm_key.get_fingerprint())]
+        assert events["connections"] == 1 and events["shells"] == 1
+        assert events["exec"] == [] and events["subsystems"] == []
+        assert events["passwords"] == 0 and events["kbdint"] == 0 and events["forwards"] == 0
+    assert not marker.exists()
+    rows = await terminal_rows(api)
+    assert len(rows) == 1
+    assert (rows[0]["key_source"], rows[0]["key_type"], rows[0]["key_name"]) == ("vm", "ssh-ed25519", "id_ed25519")
+    assert rows[0]["end_reason"] == "remote_closed"
+    with browser(api) as admin:
+        config = admin.get("/api/ssh/config").json()
+        texts = [json.dumps(config), admin.get("/api/ssh/sessions").text, admin.get("/api/ssh/status").text,
+                 json.dumps(messages), caplog.text]
+    assert config["vm_keys"] == [{"name": "id_ed25519", "type": "ssh-ed25519", "usable": True, "reason": ""}]
+    for text in texts:
+        assert "PRIVATE KEY" not in text
+        assert str(api.home) not in text and json.dumps(str(api.home))[1:-1] not in text
+        assert not any(line in text for line in key_body_lines(vm_key))
+
+
+async def test_site_key_is_offered_after_the_vm_keys_the_server_refuses(api, library, monkeypatch):
+    ssh_store.generate_key()
+    site = ssh_store.private_key()
+    ed25519, ecdsa = library.generate_private_key("ssh-ed25519"), library.generate_private_key("ecdsa-sha2-nistp256")
+    write_vm_key(api.vm_keys, "id_ed25519", ed25519)
+    write_vm_key(api.vm_keys, "id_ecdsa", ecdsa)
+    with browser(api, "operator") as client, fake_server(client, monkeypatch, library) as events:
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            until(sock, "connected")
+            assert sock.receive_json()["data"] == "ready\n"
+            sock.send_json({"type": "input", "data": "exit"})
+            until(sock, "closed")
+        # The OpenSSH default order (id_ed25519, id_ecdsa, id_rsa), then the Lab Manager key.
+        assert [fingerprint for _, fingerprint in events["offered"]] == [
+            ed25519.get_fingerprint(), ecdsa.get_fingerprint(), site.get_fingerprint()]
+    rows = await terminal_rows(api)
+    assert (rows[0]["key_source"], rows[0]["key_type"], rows[0]["key_name"]) == ("vm", "ssh-ed25519", "lab-manager")
+
+
+async def test_key_source_site_never_offers_the_vm_keys(api, library, monkeypatch):
+    ssh_store.generate_key()
+    site = ssh_store.private_key()
+    vm_key = library.generate_private_key("ssh-ed25519")
+    write_vm_key(api.vm_keys, "id_ed25519", vm_key)
+    with browser(api) as admin:
+        revision = admin.get("/api/ssh/status").json()["config_revision"]
+        assert admin.put("/api/ssh/config", json={"key_source": "site"}).status_code == 428
+        assert admin.put("/api/ssh/config", json={"key_source": "agent"}, headers={"If-Match": revision}).status_code == 400
+        saved = admin.put("/api/ssh/config", json={"key_source": "site"}, headers={"If-Match": revision})
+        assert saved.status_code == 200 and saved.json()["key_source"] == "site"
+        assert saved.json()["targets"] == {"local": "127.0.0.1"} and saved.json()["default_user"] == "root"
+        assert admin.get("/api/ssh/config").json()["key_source"] == "site"
+        assert admin.get("/api/ssh/status").json()["key_source"] == "site"
+    # The server only knows the VM key: with "site" Lab Manager never offers it, so the sign-in is refused.
+    with browser(api, "operator") as client, fake_server(client, monkeypatch, library,
+                                                         accept=[vm_key.convert_to_public()]) as events:
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            assert until(sock, "closed")["reason"] == "auth_failed"
+            frame = closed_frame(sock)
+            assert frame.code == 1011 and frame.reason == "auth_failed"
+        assert [fingerprint for _, fingerprint in events["offered"]] == [site.get_fingerprint()]
+        assert events["passwords"] == 0 and events["kbdint"] == 0
+    rows = await terminal_rows(api)
+    assert (rows[0]["end_reason"], rows[0]["key_source"], rows[0]["key_type"], rows[0]["key_name"]) == (
+        "auth_failed", "site", "", "")
+    async with api.factory() as db:
+        events = [row["event"] for row in await ssh_store.list_sessions(db)]
+    assert "key_source_changed" in events
+
+
+def test_vm_keys_skip_encrypted_unreadable_and_invalid_files_with_a_logged_reason(tmp_path, monkeypatch, caplog):
+    asyncssh = pytest.importorskip("asyncssh")
+    monkeypatch.setattr(ssh_store, "_LOGGED_SKIPS", set())
+    caplog.set_level(logging.DEBUG)
+    folder = tmp_path / "vm-keys"
+    folder.mkdir()
+    usable_key = asyncssh.generate_private_key("ecdsa-sha2-nistp256")
+    encrypted_key = asyncssh.generate_private_key("ssh-ed25519")
+    write_vm_key(folder, "id_ecdsa", usable_key)
+    write_vm_key(folder, "id_ed25519", data=encrypted_key.export_private_key("pkcs8-pem", passphrase="not-known"))
+    (folder / "id_rsa").mkdir()  # Exists but cannot be read as a key file.
+    report, usable = ssh_store.vm_keys(folder)
+    assert report == [
+        {"name": "id_ed25519", "type": "", "usable": False, "reason": "protected by a passphrase"},
+        {"name": "id_ecdsa", "type": "ecdsa-sha2-nistp256", "usable": True, "reason": ""},
+        {"name": "id_rsa", "type": "", "usable": False, "reason": "not a regular file"},  # stat first: never opened
+    ]
+    assert [(name, kind) for name, kind, _ in usable] == [("id_ecdsa", "ecdsa-sha2-nistp256")]
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "id_rsa").write_text("not a key")
+    assert ssh_store.vm_key_report(other) == [
+        {"name": "id_rsa", "type": "", "usable": False, "reason": "not a private key Lab Manager can read"}]
+    assert ssh_store.vm_key_report(tmp_path / "missing") == []
+    if os.name != "nt":
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        write_vm_key(loose, "id_rsa", asyncssh.generate_private_key("ssh-rsa")).chmod(0o644)
+        assert ssh_store.vm_key_report(loose)[0]["reason"] == "readable by other users (chmod 600 it)"
+    logged = caplog.text
+    assert "id_ed25519" in logged and "passphrase" in logged and "id_rsa" in logged
+    assert str(tmp_path) not in logged and "PRIVATE KEY" not in logged
+    assert not any(line in logged for line in key_body_lines(usable_key) + key_body_lines(encrypted_key))
+    # Logged once per file and reason, not on every connection.
+    lines = len(caplog.records)
+    ssh_store.vm_keys(folder)
+    assert len(caplog.records) == lines
+
+
+@pytest.mark.parametrize("source", ["vm", "site"])
+async def test_no_usable_key_refuses_before_any_connection(api, library, monkeypatch, source):
+    if source == "site":
+        ssh_store.write_config("root", {}, {"local": "127.0.0.1"}, ssh_store.config_etag(), key_source="site")
+    write_vm_key(api.vm_keys, "id_ed25519", data=b"not a key")
+
+    async def local_resolution(host):
+        return "127.0.0.1"
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Lab Manager connected without a usable key")
+    monkeypatch.setattr(ssh, "resolve_target", local_resolution)
+    monkeypatch.setattr(library, "connect", forbidden)
+    with browser(api, "operator") as client:
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            reason = until(sock, "closed")["reason"]
+    expected = ssh.NO_KEYS_REASON if source == "vm" else "SSH key has not been generated"
+    assert reason == expected
+
+
+async def test_allow_every_server_covers_only_the_hosts_the_admin_pass_checked(api, monkeypatch):
+    (api.directory / "config.json").unlink()  # A configuration that never set auto_allow or key_source.
+    config = ssh_store.read_config()
+    assert config["auto_allow"] is True and config["key_source"] == "vm" and config["targets"] == {}
+    assert config["auto_hosts"] == {} and config["denied_hosts"] == {}
+    async with api.factory() as db:
+        db.add(PingTarget(id="far", source_key="server:far", name="Far", host="far.invalid", source="manual"))
+        await db.commit()
+    resolved = []
+
+    async def fake_resolution(host):
+        resolved.append(host)
+        if host == "far.invalid":
+            raise HTTPException(403, ssh.UNRESOLVED_DETAIL)
+        return host
+    monkeypatch.setattr(ssh, "resolve_target", fake_resolution)
+
+    def rows(client):
+        status = client.get("/api/ssh/status").json()
+        return status, {server["key"]: server for server in status["servers"]}
+
+    async def inventory(statement):
+        async with api.factory() as db:
+            await db.execute(statement) if not isinstance(statement, PingTarget) else db.add(statement)
+            await db.commit()
+
+    with browser(api) as client:
+        status, servers = rows(client)
+        assert status["auto_allow"] is True and status["key_source"] == "vm"
+        # Nothing is allowed until an Admin's first "Check addresses again" pass has seen the saved hosts.
+        assert servers["local"]["approval"] == "address_changed" and servers["local"]["allowed"] is False
+        assert servers["local"]["not_allowed_reason"] == ssh.AUTO_CHECK_REASON and servers["local"]["approved_host"] == ""
+        assert resolved == []  # The status never resolves names.
+        saved = client.put("/api/ssh/config", json={"auto_allow": True}, headers={"If-Match": status["config_revision"]})
+        assert saved.status_code == 200 and saved.json()["auto_hosts"] == {"local": "127.0.0.1"}
+        assert [(item["key"], item["name"], item["host"]) for item in saved.json()["skipped"]] == [("far", "Far", "far.invalid")]
+        assert "cannot find an IP address for far.invalid" in saved.json()["skipped"][0]["reason"]
+        assert sorted(resolved) == ["127.0.0.1", "far.invalid"]
+        status, servers = rows(client)
+        assert servers["far"]["approval"] == "skipped" and servers["far"]["allowed"] is False
+        assert "cannot find an IP address" in servers["far"]["not_allowed_reason"]
+        assert servers["local"]["approval"] == "auto" and servers["local"]["approved_host"] == "127.0.0.1"
+        # A server an Operator adds later, or a saved host an Operator changes, waits for the next Admin pass.
+        client.portal.call(inventory, PingTarget(id="new", source_key="server:new", name="New", host="10.20.30.40",
+                                                 source="manual"))
+        client.portal.call(inventory, update(PingTarget).where(PingTarget.id == "saved").values(host="10.20.30.41"))
+        status, servers = rows(client)
+        for key in ("new", "local"):
+            assert servers[key]["approval"] == "address_changed" and servers[key]["allowed"] is False
+            assert servers[key]["not_allowed_reason"] == ssh.AUTO_CHECK_REASON and servers[key]["approved_host"] == ""
+        # "Check addresses again" (auto_allow sent again) captures the current saved hosts.
+        saved = client.put("/api/ssh/config", json={"auto_allow": True}, headers={"If-Match": status["config_revision"]})
+        assert saved.status_code == 200 and saved.json()["auto_hosts"] == {"local": "10.20.30.41", "new": "10.20.30.40"}
+        status, servers = rows(client)
+        assert servers["new"]["approval"] == servers["local"]["approval"] == "auto"
+        assert servers["local"]["approved_host"] == "10.20.30.41"
+        # An explicit "not allowed" wins, even over an approval sent in the same request; its host is captured.
+        body = {"targets": {"local": "10.20.30.41"}, "denied": ["local"]}
+        saved = client.put("/api/ssh/config", json=body, headers={"If-Match": status["config_revision"]})
+        assert saved.status_code == 200 and saved.json()["denied"] == ["local"] and "local" not in saved.json()["targets"]
+        assert saved.json()["denied_hosts"] == {"local": "10.20.30.41"}
+        status, servers = rows(client)
+        assert servers["local"]["approval"] == "denied" and servers["local"]["allowed"] is False
+        assert servers["local"]["approved_host"] == "" and servers["local"]["not_allowed_reason"] == ssh.TURNED_OFF_REASON
+        # Turning the flag off leaves only explicit approvals and forgets the pass.
+        saved = client.put("/api/ssh/config", json={"auto_allow": False}, headers={"If-Match": status["config_revision"]})
+        assert saved.status_code == 200 and saved.json()["auto_allow"] is False
+        assert saved.json()["auto_skipped"] == {} and saved.json()["auto_hosts"] == {}
+        status, servers = rows(client)
+        assert servers["new"]["approval"] == "none" and servers["far"]["approval"] == "none"
+        assert servers["local"]["approval"] == "denied"
+        assert client.put("/api/ssh/config", json={"auto_allow": "yes"},
+                          headers={"If-Match": status["config_revision"]}).status_code == 400
+        # Captured hosts are never taken from a request body (an echoed GET is fine).
+        echoed = {**client.get("/api/ssh/config").json(), "auto_hosts": {"new": "10.20.30.40"}, "denied_hosts": {}}
+        assert client.put("/api/ssh/config", json=echoed, headers={"If-Match": status["config_revision"]}).status_code == 200
+        assert ssh_store.read_config()["auto_hosts"] == {} and ssh_store.read_config()["denied_hosts"] == {"local": "10.20.30.41"}
+    async with api.factory() as db:
+        events = [row["event"] for row in await ssh_store.list_sessions(db)]
+    assert "auto_allow_off" in events and "config_updated" in events
+    # Viewer rules are unchanged: no hosts, users, key source or reasons, and no configuration access.
+    with browser(api, "viewer") as viewer:
+        result = viewer.get("/api/ssh/status").json()
+        assert "key_source" not in result and "default_user" not in result and "config_revision" not in result
+        assert not {"host", "user", "approved_host", "not_allowed_reason"}.intersection(result["servers"][0])
+        assert viewer.get("/api/ssh/config").status_code == 403
+        assert viewer.put("/api/ssh/config", json={"auto_allow": True}, headers={"If-Match": "x"}).status_code == 403
+    with browser(api, "operator") as operator:
+        assert operator.get("/api/ssh/config").status_code == 403
+        assert operator.get("/api/ssh/status").json()["key_source"] == "vm"
+
+
+async def test_auto_allowed_server_connects_to_its_captured_saved_host_only(api, library, monkeypatch):
+    ssh_store.generate_key()
+    ssh_store.write_config("root", {}, {}, ssh_store.config_etag(), auto_allow=True, auto_hosts={"local": "127.0.0.1"})
+    with browser(api, "operator") as client, fake_server(client, monkeypatch, library) as events:
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            until(sock, "connected")
+            assert sock.receive_json()["data"] == "ready\n"
+        assert events["connections"] == 1
+
+
+@pytest.mark.parametrize("case", ["new", "changed"])
+async def test_uncaptured_server_never_gets_dns_vm_keys_or_a_connection(api, library, monkeypatch, case):
+    write_vm_key(api.vm_keys, "id_ed25519", library.generate_private_key("ssh-ed25519"))
+    captured = {} if case == "new" else {"local": "10.9.9.9"}  # "changed": the pass saw an older saved host.
+    ssh_store.write_config("root", {}, {}, ssh_store.config_etag(), auto_allow=True, auto_hosts=captured)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("An uncaptured server reached DNS, the VM keys or a connection")
+
+    async def forbidden_async(*args, **kwargs):
+        forbidden()
+    monkeypatch.setattr(ssh, "resolve_target", forbidden_async)
+    monkeypatch.setattr(library, "connect", forbidden_async)
+    monkeypatch.setattr(ssh_store, "vm_keys", forbidden)
+    with browser(api, "operator") as client:
+        server = client.get("/api/ssh/status").json()["servers"][0]
+        assert server["approval"] == "address_changed" and server["allowed"] is False
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            assert until(sock, "closed")["reason"] == ssh.AUTO_CHECK_REASON
+            assert closed_frame(sock).code == 4403
+    assert await terminal_rows(api) == []
+
+
+async def test_turned_off_server_cannot_be_reached_through_an_alias_with_the_same_host(api, library, monkeypatch):
+    ssh_store.generate_key()
+    async with api.factory() as db:
+        await db.execute(update(PingTarget).where(PingTarget.id == "saved").values(host="opt106.lab"))
+        await db.commit()
+
+    async def resolution(host):
+        return "10.0.0.5"
+    monkeypatch.setattr(ssh, "resolve_target", resolution)
+    with browser(api) as admin:
+        revision = admin.get("/api/ssh/status").json()["config_revision"]
+        saved = admin.put("/api/ssh/config", json={"auto_allow": True, "denied": ["local"]}, headers={"If-Match": revision})
+        assert saved.status_code == 200 and saved.json()["denied_hosts"] == {"local": "opt106.lab"}
+    # An Operator adds another inventory name for the same machine (case and a trailing dot do not matter).
+    async with api.factory() as db:
+        db.add(PingTarget(id="alias", source_key="server:opt106x", name="opt106x", host="OPT106.lab.", source="manual"))
+        await db.commit()
+    with browser(api) as admin:
+        status = admin.get("/api/ssh/status").json()
+        # Neither "Check addresses again" nor an explicit approval of the alias lifts the turned-off address.
+        again = admin.put("/api/ssh/config", json={"auto_allow": True}, headers={"If-Match": status["config_revision"]})
+        assert again.status_code == 200 and "opt106x" not in again.json()["auto_hosts"]
+        approve = admin.put("/api/ssh/config", json={"targets": {"opt106x": "opt106.lab."}},
+                            headers={"If-Match": again.headers["etag"]})
+        assert approve.status_code == 200 and approve.json()["denied"] == ["local"]
+        alias = next(item for item in admin.get("/api/ssh/status").json()["servers"] if item["key"] == "opt106x")
+        assert alias["approval"] == "denied" and alias["allowed"] is False
+        assert alias["not_allowed_reason"] == ssh.SAME_ADDRESS_REASON
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("A turned-off address was connected")
+    monkeypatch.setattr(library, "connect", forbidden)
+    with browser(api, "operator") as client:
+        with client.websocket_connect("/api/ssh/opt106x/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            assert until(sock, "closed")["reason"] == ssh.SAME_ADDRESS_REASON
+            assert closed_frame(sock).code == 4403
+    assert await terminal_rows(api) == []
+
+
+async def test_turned_off_address_is_refused_under_another_name(api, library, monkeypatch):
+    async with api.factory() as db:
+        db.add(PingTarget(id="alias", source_key="server:alias", name="Alias", host="alias.example", source="manual"))
+        await db.commit()
+    ssh_store.write_config("root", {}, {"alias": "alias.example"}, ssh_store.config_etag(), auto_allow=False,
+                           denied=["local"], denied_hosts={"local": "127.0.0.1"})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Keys were read for a turned-off address")
+    monkeypatch.setattr(ssh_store, "vm_keys", forbidden)
+    with browser(api, "operator") as client, fake_server(client, monkeypatch, library, target_host="alias.example") as events:
+        assert client.get("/api/ssh/status").json()["servers"][0]["allowed"] is True  # Alias: a different host name.
+        with client.websocket_connect("/api/ssh/alias/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            assert until(sock, "closed")["reason"] == "denied"  # It resolves to the turned-off 127.0.0.1.
+            assert closed_frame(sock).code == 4403
+        assert events["connections"] == 0
+
+
+def test_denied_host_comparison_ignores_case_trailing_dot_and_ipv4_mapping():
+    config = {"denied": ["a"], "denied_hosts": {"a": "OPT106.LAB"}, "targets": {}, "auto_allow": True,
+              "auto_hosts": {"b": "opt106.lab.", "c": "10.0.0.5"}}
+    assert ssh.approval({"key": "b", "host": "opt106.lab."}, config)[0] == "denied"
+    assert ssh.host_token("::ffff:10.0.0.5") == ssh.host_token("10.0.0.5")
+    config["denied_hosts"] = {"a": "::ffff:10.0.0.5"}
+    assert ssh.approval({"key": "c", "host": "10.0.0.5"}, config)[0] == "denied"
+    assert ssh.approval({"key": "b", "host": "opt106.lab."}, config)[0] == "auto"
+
+
+async def test_key_list_is_admin_only_bounded_cached_and_reads_own_addresses_once(api, monkeypatch):
+    ssh_store.generate_key()
+    async with api.factory() as db:
+        db.add(PingTarget(id="b", source_key="server:b", name="B", host="198.51.100.7", source="manual"))
+        await db.commit()
+    ssh_store.write_config("root", {}, {"local": "127.0.0.1", "b": "198.51.100.7"}, ssh_store.config_etag(),
+                           auto_allow=False)
+    own_reads, routes = [], []
+    monkeypatch.setattr(ssh, "local_addresses", lambda: own_reads.append(1) or {"127.0.0.1", "::1"})
+    monkeypatch.setattr(ssh, "installation_source_ip", lambda address: routes.append(address) or "192.0.2.10")
+    with browser(api) as admin:
+        first = admin.get("/api/ssh/key")
+        assert first.status_code == 200
+        rows = {row["key"]: row for row in first.json()["install"]}
+        assert rows["b"]["source_ip"] == "192.0.2.10" and rows["b"]["reason"] == ""
+        assert rows["local"]["source_ip"] == "<VM IP>" and rows["local"]["reason"] == ssh.SOURCE_UNKNOWN_REASON
+        assert own_reads == [1] and routes == ["198.51.100.7"]  # Two servers, one read of the VM's addresses.
+        assert admin.get("/api/ssh/key").json()["install"] == first.json()["install"]
+        assert own_reads == [1] and routes == ["198.51.100.7"]  # Served from the per-host cache.
+    with browser(api, "operator") as operator:
+        assert operator.get("/api/ssh/key").status_code == 403  # The full list resolves every server.
+        mine = operator.get("/api/ssh/key?server=b")
+        assert mine.status_code == 200 and [row["key"] for row in mine.json()["install"]] == ["b"]
+        assert operator.get("/api/ssh/key?server=Bad!").status_code == 404
+    # One total deadline for every lookup; a lookup that misses it is not cached.
+    ssh._SOURCE_CACHE.clear()
+    monkeypatch.setattr(ssh, "KEY_DEADLINE_SECONDS", 0.3)
+
+    async def slow(host):
+        await asyncio.sleep(30)
+    monkeypatch.setattr(ssh, "resolve_target", slow)
+    with browser(api) as admin:
+        started = time.monotonic()
+        late = admin.get("/api/ssh/key")
+        assert time.monotonic() - started < 5
+    assert late.status_code == 200
+    assert {row["source_ip"] for row in late.json()["install"]} == {"<VM IP>"}
+    assert ssh._SOURCE_CACHE == {}
+
+
+async def test_connect_attempt_limit_runs_before_dns_keys_or_session_rows(api, library, monkeypatch):
+    api.settings.ssh_max_connect_attempts_per_minute = 3
+    operator = {"username": "operator", "id": "operator", "name": "Operator"}
+    async with api.factory() as db:
+        await ssh_store.audit_event(db, operator, "connect_failed", server_key="local", end_reason="unreachable")
+        await ssh_store.audit_event(db, operator, "connect_failed", server_key="other", end_reason="unreachable")
+        await ssh_store.audit_event(db, operator, "denied", end_reason="denied")
+        await ssh_store.audit_event(db, {"username": "admin"}, "connect_failed", end_reason="unreachable")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A rate-limited attempt reached DNS, the inventory, the keys or a connection")
+
+    async def forbidden_async(*args, **kwargs):
+        forbidden()
+    monkeypatch.setattr(ssh, "resolve_target", forbidden_async)
+    monkeypatch.setattr(ssh_store, "known_servers", forbidden_async)
+    monkeypatch.setattr(ssh_store, "vm_keys", forbidden)
+    monkeypatch.setattr(ssh_store, "private_key", forbidden)
+    monkeypatch.setattr(ssh_store, "start_session", forbidden_async)
+    monkeypatch.setattr(library, "connect", forbidden_async)
+    with browser(api, "operator") as client:
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            assert until(sock, "closed")["reason"] == ssh.RATE_REASON
+            assert closed_frame(sock).code == 4429
+    async with api.factory() as db:
+        rows = await ssh_store.list_sessions(db)
+        assert await ssh_store.recent_attempts(db, "operator") == 4  # The refusal itself counts as well.
+        assert await ssh_store.recent_attempts(db, "admin") == 1
+    assert [row for row in rows if row["event"] == "terminal"] == []
+
+
+def test_vm_key_file_swapped_between_stat_and_open_is_skipped(tmp_path, monkeypatch):
+    asyncssh = pytest.importorskip("asyncssh")
+    monkeypatch.setattr(ssh_store, "_LOGGED_SKIPS", set())
+    folder = tmp_path / "keys"
+    folder.mkdir()
+    write_vm_key(folder, "id_ed25519", asyncssh.generate_private_key("ssh-ed25519"))
+    real_stat = os.stat
+
+    def other_inode(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if Path(path).name != "id_ed25519":
+            return result
+        fields = list(result[:10])
+        fields[1] = result.st_ino + 1  # st_ino: another file than the one open() then returns.
+        return os.stat_result(fields)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "stat", other_inode)
+        report, usable = ssh_store.vm_keys(folder)
+    assert report == [{"name": "id_ed25519", "type": "", "usable": False,
+                       "reason": "changed while Lab Manager was reading it"}]
+    assert usable == []
+    assert [name for name, _, _ in ssh_store.vm_keys(folder)[1]] == ["id_ed25519"]  # Unchanged file: used.
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
+def test_vm_key_fifo_is_skipped_without_opening_it(tmp_path, monkeypatch):
+    pytest.importorskip("asyncssh")
+    monkeypatch.setattr(ssh_store, "_LOGGED_SKIPS", set())
+    folder = tmp_path / "keys"
+    folder.mkdir()
+    os.mkfifo(folder / "id_ecdsa")
+    assert ssh_store.vm_keys(folder)[0] == [{"name": "id_ecdsa", "type": "", "usable": False, "reason": "not a regular file"}]
+
+
+def test_connection_failures_map_to_fixed_reason_tokens(library):
+    failure = ssh.connect_failure
+    assert failure(library, library.PermissionDenied("Permission denied for user root on host x"), True) == "auth_failed"
+    assert failure(library, ConnectionRefusedError(errno.ECONNREFUSED, "Connect call failed"), False) == "refused"
+    assert failure(library, asyncio.TimeoutError(), False) == "unreachable"
+    assert failure(library, asyncio.TimeoutError(), True) == "connect_timeout"
+    assert failure(library, OSError(errno.EHOSTUNREACH, "No route to host"), False) == "unreachable"
+    assert failure(library, library.ConnectionLost("Connection lost"), True) == "connection_failed"
+    assert failure(library, RuntimeError("library text with secrets"), True) == "connection_failed"
+
+
+@pytest.mark.parametrize("case", ["auth_failed", "refused", "unreachable-route", "unreachable-dns", "denied", "host_key_changed"])
+async def test_terminal_sends_fixed_failure_tokens_and_audits_them(api, library, monkeypatch, case):
+    ssh_store.generate_key()
+    if case == "host_key_changed":
+        ssh_store.pin_host("local", "127.0.0.1", library.generate_private_key("ssh-ed25519"))
+    with browser(api, "operator") as client, fake_server(client, monkeypatch, library,
+                                                         accept=[] if case == "auth_failed" else None) as events:
+        if case in ("refused", "unreachable-route"):
+            async def failing(*args, **kwargs):
+                if case == "refused":
+                    raise ConnectionRefusedError(errno.ECONNREFUSED, "Connect call failed ('10.0.0.1', 22)")
+                raise OSError(errno.EHOSTUNREACH, "No route to host")
+            monkeypatch.setattr(library, "connect", failing)
+        if case in ("unreachable-dns", "denied"):
+            async def refusing(host):
+                raise HTTPException(403, ssh.UNRESOLVED_DETAIL if case == "unreachable-dns" else ssh.PROHIBITED_DETAIL)
+            monkeypatch.setattr(ssh, "resolve_target", refusing)
+        with client.websocket_connect("/api/ssh/local/terminal", headers=socket_headers()) as sock:
+            authenticate(sock, client)
+            reason = until(sock, "closed")["reason"]
+            frame = closed_frame(sock)
+        token = case.split("-")[0]
+        assert reason == token and frame.reason == token
+        assert frame.code == {"host_key_changed": 4409, "denied": 4403}.get(token, 1011)
+        assert events["shells"] == 0 and events["exec"] == []
+    async with api.factory() as db:
+        rows = await ssh_store.list_sessions(db)
+        denials = await ssh_store.list_sessions(db, denials=True)
+    terminal = [row for row in rows if row["event"] == "terminal"]
+    if case in ("unreachable-dns", "denied"):
+        # Refused before a session was reserved: recorded as a single event row, never a terminal session.
+        assert terminal == []
+        recorded = denials if case == "denied" else [row for row in rows if row["event"] == "connect_failed"]
+        assert [row["end_reason"] for row in recorded] == [token]
+    else:
+        assert [row["end_reason"] for row in terminal] == [token]
+    assert "Connect call failed" not in json.dumps(rows) and "No route" not in json.dumps(rows)
+
+
+async def test_existing_session_table_gains_the_key_columns(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'old.db'}")
+    try:
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql(
+                "CREATE TABLE ssh_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, user VARCHAR NOT NULL, "
+                "user_id VARCHAR NOT NULL, user_name VARCHAR NOT NULL, remote_user VARCHAR NOT NULL, "
+                "client_ip VARCHAR NOT NULL, connected_ip VARCHAR NOT NULL, host_key_fingerprint VARCHAR NOT NULL, "
+                "event VARCHAR NOT NULL, server_key VARCHAR NOT NULL, host VARCHAR NOT NULL, started_at FLOAT NOT NULL, "
+                "ended_at FLOAT, end_reason VARCHAR, bytes_in INTEGER NOT NULL, bytes_out INTEGER NOT NULL)")
+            await connection.exec_driver_sql(
+                "INSERT INTO ssh_sessions (user, user_id, user_name, remote_user, client_ip, connected_ip, "
+                "host_key_fingerprint, event, server_key, host, started_at, ended_at, end_reason, bytes_in, bytes_out) "
+                "VALUES ('operator', 'operator', 'Operator', 'root', '', '', '', 'terminal', 'local', '127.0.0.1', "
+                "1.0, 2.0, 'remote_closed', 1, 2)")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+            rows = await ssh_store.list_sessions(db)
+        assert [(row["key_source"], row["key_type"], row["key_name"]) for row in rows] == [("", "", "")]
+    finally:
+        await engine.dispose()
