@@ -7,6 +7,9 @@ import {
   hasOptIn, overridesFromStatus, formFromStatus, buildConfigPayload, normalizeSessions, toMillis, formatDuration,
   formatBytes, createStatusStore, STATUS_MAX_AGE, NOT_INSTALLED_TEXT, DISABLED_TEXT, NO_ACCOUNTS_TEXT, INSECURE_TEXT,
   sameHost, eventLabel, endReasonLabel, createOutputFlow, OUTPUT_HIGH_WATER, OUTPUT_LOW_WATER,
+  BUSY_PHASES, PHASE_LABEL, shouldAutoConnect, installRowFor, copyText, FAILURE_REASONS, KEY_SOURCE_TEXT, normalizeKeySource,
+  APPROVAL_LABELS, notAllowedText, supportsAutoAllow, skippedServers, allowChange, sessionKeyLabel, vmKeyRows,
+  keySourceOf, VM_NO_KEY_TEXT, NO_KEY_TEXT,
 } from "../api/ssh.js";
 
 // Reason texts exactly as backend/app/routers/ssh.py and ssh_store.py send them (2026-10-21).
@@ -249,7 +252,7 @@ test("backend reasons are classified", () => {
     "SSH connection rate limit reached": "connect-rate",
     "Terminal input rate limit reached": "input-rate",
     "Maximum session length reached": "lifetime",
-    "SSH action denied": "other",
+    "SSH action denied": "denied",
     "Browser disconnected": "ended",
     "": "",
   };
@@ -279,7 +282,7 @@ test("close messages come from a fixed vocabulary, never the raw reason", () => 
   assert.equal(describeClose({ code: 4429, reason: "SSH session limit reached", opened: true }).kind, "limit");
   assert.equal(describeClose({ code: 1000, reason: "Idle timeout", opened: true }).tone, "info");
   assert.equal(describeClose({ code: 1000, reason: "SSH session ended", opened: true }).text, "The SSH session ended.");
-  assert.match(describeClose({ code: 1011, reason: "SSH connection failed", opened: true, server: "opt12", user: "lab" }).text, /user "lab"/);
+  assert.match(describeClose({ code: 1011, reason: "SSH connection failed", opened: true, server: "opt12", user: "lab" }).text, /for lab, and that/);
   assert.equal(describeClose({ code: 4401, reason: "", opened: true }).kind, "code-4401");
   assert.equal(describeClose({ code: 1006, reason: "", opened: false }).kind, "unreachable");
   assert.equal(describeClose({ code: 1006, reason: "", opened: true }).kind, "lost");
@@ -419,9 +422,10 @@ test("per-server overrides prefer the explicit map", () => {
 test("the settings form starts from the saved values", () => {
   const form = formFromStatus(READY);
   assert.equal(form.default_user, "lab");
-  assert.deepEqual(form.servers.opt12, { allowed: true, approved_host: "opt12.lab", user: "" });
-  assert.deepEqual(form.servers.opt13, { allowed: false, approved_host: "", user: "" });
-  assert.deepEqual(form.servers.opt14, { allowed: true, approved_host: "opt14.lab", user: "root" });
+  assert.deepEqual(form.servers.opt12, { allowed: true, approved_host: "opt12.lab", user: "", explicit: true, denied: false });
+  assert.deepEqual(form.servers.opt13, { allowed: false, approved_host: "", user: "", explicit: false, denied: false });
+  assert.deepEqual(form.servers.opt14, { allowed: true, approved_host: "opt14.lab", user: "root", explicit: true, denied: false });
+  assert.equal(form.auto_allow, false);
 });
 
 test("the config payload validates users and approves only discovered hosts", () => {
@@ -449,8 +453,8 @@ test("the config payload validates users and approves only discovered hosts", ()
 test("the exact Admin config wins over values derived from the status", () => {
   const config = { default_user: "lab", per_server_user: { opt12: "lab", opt14: "root" }, targets: { opt12: "opt12.lab" } };
   const form = formFromStatus(READY, config);
-  assert.deepEqual(form.servers.opt12, { allowed: true, approved_host: "opt12.lab", user: "lab" }, "an override equal to the default is kept");
-  assert.deepEqual(form.servers.opt14, { allowed: false, approved_host: "", user: "root" });
+  assert.deepEqual(form.servers.opt12, { allowed: true, approved_host: "opt12.lab", user: "lab", explicit: true, denied: false }, "an override equal to the default is kept");
+  assert.deepEqual(form.servers.opt14, { allowed: false, approved_host: "", user: "root", explicit: false, denied: false });
   assert.equal(formFromStatus(READY, null).servers.opt12.user, "");
 });
 
@@ -587,6 +591,257 @@ test("REST failures carry status and detail; network failures are flagged", asyn
   try {
     await assert.rejects(sshApi.status(), err => err.network === true && httpErrorText(err).includes("did not answer"));
   } finally { m.restore(); }
+});
+
+// ─── v2.42: VM account keys, direct terminal, "allow every server", fixed failure reasons ───────
+test("the backend's fixed failure reasons map to their own kinds", () => {
+  assert.deepEqual(Object.keys(FAILURE_REASONS).sort(),
+    ["auth_failed", "connect_timeout", "connection_failed", "denied", "host_key_changed", "refused", "unreachable"]);
+  const cases = {
+    unreachable: "no-answer", refused: "port-closed", auth_failed: "auth-failed", host_key_changed: "host-key-changed", denied: "denied",
+    connect_timeout: "timeout", connection_failed: "failed", " AUTH_FAILED ": "auth-failed",
+    "Opt106 did not answer": "no-answer", "No route to host": "no-answer",
+    "Port 22 on Opt106 is closed": "port-closed", "Connection refused": "port-closed",
+    "Opt106 did not accept the Lab Manager key for root": "auth-failed", "Permission denied (publickey)": "auth-failed",
+    "SSH connection failed": "failed",
+  };
+  for (const [reason, kind] of Object.entries(cases)) assert.equal(classifyReason(reason), kind, reason);
+});
+
+test("failure sentences name the server, the user and the keys that were tried, never the raw reason", () => {
+  const base = { opened: true, server: "Opt106", user: "root" };
+  const vm = describeClose({ ...base, code: 1011, reason: "auth_failed", keySource: "vm" });
+  assert.equal(vm.kind, "auth-failed");
+  assert.match(vm.text, /^Opt106 did not accept the VM's keys or the Lab Manager key for root\. /);
+  assert.match(describeClose({ ...base, code: 1011, reason: "auth_failed" }).text,
+    /^Opt106 did not accept the VM's keys or the Lab Manager key for root\./, "a status without key_source means the default (vm)");
+  assert.match(describeClose({ ...base, code: 1011, reason: "auth_failed", keySource: "site" }).text,
+    /^Opt106 did not accept the Lab Manager key for root\. /);
+  assert.equal(describeClose({ ...base, code: 1011, reason: "refused" }).text, "Port 22 on Opt106 is closed. Check that the SSH service (sshd) is running on it.");
+  assert.equal(describeClose({ ...base, code: 1011, reason: "unreachable" }).text, "Opt106 did not answer. Check that it is powered on and connected to the network.");
+  assert.match(describeClose({ ...base, code: 4403, reason: "denied" }).text, /^Lab Manager did not allow this SSH session to Opt106[:.]/);
+  assert.match(describeClose({ ...base, code: 4409, reason: "host_key_changed" }).text, /^The host key of Opt106 changed\./);
+  assert.match(describeClose({ ...base, code: 1011, reason: "connect_timeout" }).text, /^Opt106 did not answer in time/);
+  assert.match(describeClose({ ...base, code: 1011, reason: "connection_failed", keySource: "vm" }).text, /accepts the VM's keys or the Lab Manager key for root/);
+  for (const kind of ["auth_failed", "refused", "unreachable", "denied", "host_key_changed"]) assert.equal(describeClose({ ...base, code: 1011, reason: kind }).tone, "error");
+  // A user name that is not a POSIX name is never shown, and no sentence mentions a password.
+  assert.match(describeClose({ ...base, user: "<b>x</b>", code: 1011, reason: "auth_failed" }).text, /for the SSH user\./);
+  assert.match(describeClose({ opened: true, code: 1011, reason: "unreachable" }).text, /^this server did not answer/);
+  for (const kind of Object.keys(FAILURE_REASONS)) assert.ok(!/password/i.test(describeClose({ ...base, code: 1011, reason: kind }).text), kind);
+});
+
+test("the close event carries the key source into the sentence", () => {
+  let s = connectionReducer(INITIAL_CONNECTION, { type: "start", attempt: 1 });
+  s = connectionReducer(s, { type: "open", attempt: 1 });
+  s = connectionReducer(s, { type: "status", attempt: 1, state: "connecting", reason: "" });
+  s = connectionReducer(s, { type: "status", attempt: 1, state: "closed", reason: "auth_failed" });
+  const closed = connectionReducer(s, { type: "close", attempt: 1, code: 1011, reason: "", server: "Opt106", user: "root", keySource: "site" });
+  assert.equal(closed.phase, "closed");
+  assert.match(closed.closed.text, /^Opt106 did not accept the Lab Manager key for root\./);
+});
+
+test("the terminal protocol has no password step any more", () => {
+  assert.equal(parseServerMessage('{"type":"auth_needed","methods":["password"]}'), null);
+  assert.deepEqual(BUSY_PHASES, ["opening", "authorizing", "connecting"]);
+  assert.deepEqual(Object.keys(PHASE_LABEL).sort(), ["authorizing", "closed", "connected", "connecting", "idle", "opening"]);
+  assert.ok(!("passwordSent" in INITIAL_CONNECTION));
+  const s = connectionReducer(connectionReducer(INITIAL_CONNECTION, { type: "start", attempt: 1 }), { type: "open", attempt: 1 });
+  assert.equal(connectionReducer(s, { type: "auth_needed", attempt: 1, methods: ["password"] }), s);
+});
+
+test("the page connects by itself only when the status says SSH is available", () => {
+  const status = { servers: [] };
+  assert.equal(shouldAutoConnect({ status, availability: { enabled: true }, phase: "idle", alreadyStarted: false }), true);
+  assert.equal(shouldAutoConnect({ status: null, availability: null, phase: "idle", alreadyStarted: false }), false, "status still loading or failed");
+  assert.equal(shouldAutoConnect({ status, availability: { enabled: false }, phase: "idle", alreadyStarted: false }), false, "unavailable: reason only");
+  assert.equal(shouldAutoConnect({ status, availability: { enabled: true }, phase: "closed", alreadyStarted: false }), false, "after a close: Reconnect");
+  assert.equal(shouldAutoConnect({ status, availability: { enabled: true }, phase: "idle", alreadyStarted: true }), false, "only once per page");
+});
+
+test("key source texts, defaults and availability without the Lab Manager key", () => {
+  assert.equal(KEY_SOURCE_TEXT.vm, "Keys used: this VM account's SSH keys, then the Lab Manager key");
+  assert.equal(KEY_SOURCE_TEXT.site, "Keys used: only the Lab Manager key");
+  assert.equal(normalizeKeySource("vm"), "vm");
+  assert.equal(normalizeKeySource("site"), "site");
+  for (const bad of ["", "VM", "agent", null, undefined, 1]) assert.equal(normalizeKeySource(bad), "", String(bad));
+  // With the VM account's keys the terminal works before the Lab Manager key exists; with "site" (or an older
+  // status) it still needs that key.
+  assert.equal(avail({ key_exists: false, key_source: "vm" }).enabled, true);
+  assert.match(avail({ key_exists: false, key_source: "site" }).reason, /no SSH key/);
+  assert.match(avail({ key_exists: false }).reason, /no SSH key/);
+});
+
+test("auto-allow: approval states, skipped servers and plain-text reasons", () => {
+  assert.equal(APPROVAL_LABELS.auto, "Allowed (every server)");
+  assert.equal(APPROVAL_LABELS.denied, "Turned off");
+  assert.equal(APPROVAL_LABELS.skipped, "No usable address");
+  const status = { ...READY, auto_allow: true, servers: [
+    { key: "opt12", name: "opt12", host: "opt12.lab", allowed: true, approval: "auto" },
+    { key: "opt13", name: "opt13", host: "opt13", allowed: false, approval: "skipped", not_allowed_reason: "The VM cannot find an IP address for opt13. Give this server its IP address in Ping Monitor (or fix its name in DNS), then approve it again." },
+    { key: "opt14", name: "opt14", host: "opt14.lab", allowed: false, approval: "denied", not_allowed_reason: "SSH is not allowed for this server: an Admin turned it off" },
+    { key: "opt15", name: "opt15", host: "opt15.lab", allowed: true, approval: "explicit" },
+  ] };
+  assert.deepEqual(skippedServers(status), [{ key: "opt13", name: "opt13", reason: status.servers[1].not_allowed_reason }]);
+  assert.deepEqual(skippedServers({ ...status, auto_allow: false }), [], "the list belongs to auto-allow only");
+  assert.equal(supportsAutoAllow(status, null), true);
+  assert.equal(supportsAutoAllow(READY, null), false, "an older backend has no switch");
+  assert.equal(supportsAutoAllow(READY, { auto_allow: false }), true);
+  const at = name => sshAvailability({ status, name, accountMode: "accounts", protocol: "https:" });
+  assert.equal(at("opt12").enabled, true);
+  assert.match(at("opt13").reason, /cannot use the saved address of opt13/);
+  assert.match(at("opt14").reason, /^An Admin turned SSH off for opt14\./);
+  assert.match(notAllowedText({ approval: "address_changed" }, "opt9"), /address of opt9 changed/);
+  assert.match(notAllowedText({ approval: "none" }, "opt9"), /not allowed for opt9/);
+});
+
+test("the servers form follows auto-allow: turned-off servers become `denied`, auto_allow is never sent by the form", () => {
+  const status = { ...READY, auto_allow: true, servers: [
+    { key: "opt12", name: "opt12", host: "opt12.lab", allowed: true, approval: "auto" },
+    { key: "opt13", name: "opt13", host: "opt13.lab", allowed: false, approval: "denied" },
+    { key: "opt14", name: "opt14", host: "opt14-new.lab", allowed: true, approval: "auto" },
+  ] };
+  const config = { default_user: "lab", per_server_user: {}, targets: { opt14: "opt14-old.lab" }, denied: ["opt13"], auto_allow: true, key_source: "vm" };
+  const form = formFromStatus(status, config);
+  assert.equal(form.auto_allow, true);
+  assert.deepEqual(form.servers.opt12, { allowed: true, approved_host: "", user: "", explicit: false, denied: false });
+  assert.deepEqual(form.servers.opt13, { allowed: false, approved_host: "", user: "", explicit: false, denied: true });
+  assert.equal(form.servers.opt14.explicit, true);
+  // Turning one server off with auto-allow on denies it; turning a denied one on lifts that.
+  form.servers.opt12 = allowChange(form.servers.opt12, false, { autoAllow: true, host: "opt12.lab" });
+  assert.deepEqual(form.servers.opt12, { allowed: false, approved_host: "", user: "", explicit: false, denied: true });
+  form.servers.opt13 = allowChange(form.servers.opt13, true, { autoAllow: true, host: "opt13.lab" });
+  assert.equal(form.servers.opt13.denied, false);
+  const result = buildConfigPayload(form, status.servers, { optIn: true, autoAllow: true });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.deepEqual(result.payload, { default_user: "lab", per_server_user: {}, allowed: {}, denied: ["opt12"] },
+    "a moved explicit approval is covered by the saved host; auto_allow and key_source are not part of the form");
+  // Without auto-allow, ticking adds the server to the Admin's list at its saved host; unticking removes it.
+  const added = allowChange({ allowed: false }, true, { autoAllow: false, host: "opt9.lab" });
+  assert.deepEqual(added, { allowed: true, approved_host: "opt9.lab", user: "", explicit: true, denied: false });
+  assert.deepEqual(allowChange(added, false, { autoAllow: false }), { allowed: false, approved_host: "", user: "", explicit: false, denied: false });
+  const manual = buildConfigPayload({ default_user: "lab", auto_allow: false, servers: { opt12: added } },
+    [{ key: "opt12", name: "opt12", host: "opt9.lab" }], { optIn: true, autoAllow: false });
+  assert.deepEqual(manual.payload, { default_user: "lab", per_server_user: {}, allowed: { opt12: "opt9.lab" }, denied: [] });
+  assert.ok(!("auto_allow" in manual.payload) && !("key_source" in manual.payload));
+});
+
+test("one-setting saves send only that field with If-Match, and the key-install command can be limited to one server", async () => {
+  const m = mockFetch(() => json(200, { ok: true }));
+  try {
+    await sshApi.saveConfig({ auto_allow: true }, "rev-1");
+    await sshApi.saveConfig({ key_source: "site" }, "rev-2");
+    await sshApi.key("opt 106");
+    await sshApi.key();
+  } finally { m.restore(); }
+  const [auto, source, one, all] = m.calls;
+  assert.deepEqual([auto.method, auto.url, auto.headers["If-Match"], auto.body], ["PUT", "/api/ssh/config", "rev-1", { auto_allow: true }]);
+  assert.deepEqual([source.headers["If-Match"], source.body], ["rev-2", { key_source: "site" }]);
+  assert.deepEqual([one.method, one.url], ["GET", "/api/ssh/key?server=opt%20106"]);
+  assert.equal(all.url, "/api/ssh/key");
+});
+
+test("audit rows show which key signed in, by type and file name only", () => {
+  assert.equal(sessionKeyLabel({ key_type: "ssh-ed25519", key_name: "id_ed25519" }), "id_ed25519 · ssh-ed25519");
+  assert.equal(sessionKeyLabel({ key_type: "ssh-rsa" }), "ssh-rsa");
+  assert.equal(sessionKeyLabel({ key_source: "vm" }), "VM account keys");
+  assert.equal(sessionKeyLabel({ key_source: "site" }), "Lab Manager key");
+  assert.equal(sessionKeyLabel({}), "—");
+  assert.equal(sessionKeyLabel({ key_name: "/home/lab/.ssh/id_rsa", key_type: "<b>x</b>" }), "—", "paths and markup are dropped");
+  assert.deepEqual(vmKeyRows({ vm_keys: [
+    { name: "id_ed25519", type: "ssh-ed25519", usable: true, reason: "" },
+    { name: "id_rsa", type: "ssh-rsa", usable: false, reason: "The key is encrypted with a passphrase" },
+    { name: "../../etc/passwd", type: "x", usable: true },
+    null,
+  ] }), [
+    { name: "id_ed25519", type: "ssh-ed25519", usable: true, reason: "" },
+    { name: "id_rsa", type: "ssh-rsa", usable: false, reason: "The key is encrypted with a passphrase" },
+  ]);
+  assert.deepEqual(vmKeyRows(null), []);
+  assert.equal(eventLabel("auto_allow_on"), "Every server allowed");
+  assert.equal(eventLabel("key_source_changed"), "Key source changed");
+  assert.equal(endReasonLabel("auth_failed"), "Keys not accepted");
+  assert.equal(endReasonLabel("unreachable"), "No answer");
+  assert.equal(endReasonLabel("refused"), "Port 22 closed");
+});
+
+test("the terminal finds its server's key-install command", () => {
+  const data = { install: [
+    { server: "Opt105", key: "opt105", command: "cmd-105" },
+    { server: "Opt106", key: "opt106", command: "cmd-106" },
+    { server: "Legacy", command: "cmd-legacy" },
+    { server: "Empty", key: "empty", command: "" },
+    null,
+  ] };
+  assert.equal(installRowFor(data, { key: "opt106", name: "Opt106" }).command, "cmd-106");
+  assert.equal(installRowFor(data, { key: "zzz", name: "Legacy" }).command, "cmd-legacy");
+  assert.equal(installRowFor(data, { key: "zzz", name: "Opt106" }), null, "a keyed row is matched by key only");
+  assert.equal(installRowFor(data, { key: "empty", name: "Empty" }), null);
+  assert.equal(installRowFor(null, { key: "opt106" }), null);
+  assert.equal(installRowFor(data, null), null);
+});
+
+test("copy uses navigator.clipboard on secure pages and a selection on plain HTTP", async () => {
+  const written = [];
+  const nav = { clipboard: { writeText: async text => { written.push(text); } } };
+  assert.equal(await copyText("cmd", { nav, win: { isSecureContext: true }, doc: null }), true);
+  assert.deepEqual(written, ["cmd"]);
+  // Plain HTTP: no clipboard API, fall back to execCommand on a temporary hidden textarea.
+  const appended = [], commands = [];
+  let focused = 0;
+  const previous = { focus: () => { focused++; } };
+  const doc = {
+    activeElement: previous,
+    body: { appendChild: el => appended.push(el) },
+    createElement: () => ({ value: "", style: {}, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, select() { this.selected = true; }, remove() { this.removed = true; } }),
+    execCommand: command => { commands.push(command); return true; },
+  };
+  assert.equal(await copyText("cmd2", { nav, win: { isSecureContext: false }, doc }), true);
+  assert.deepEqual(written, ["cmd"], "no clipboard API call on an insecure page");
+  assert.equal(appended[0].value, "cmd2");
+  assert.ok(appended[0].selected && appended[0].removed && appended[0].attrs.readonly === "");
+  assert.deepEqual(commands, ["copy"]);
+  assert.equal(focused, 1, "focus returns to the Copy button");
+  const failing = { clipboard: { writeText: async () => { throw new Error("denied"); } } };
+  assert.equal(await copyText("cmd3", { nav: failing, win: { isSecureContext: true }, doc: { ...doc, execCommand: () => false } }), false);
+  assert.equal(await copyText("cmd4", { nav: {}, win: {}, doc: null }), false);
+});
+
+test("the SSH page sources keep their safety rules", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../pages/SshTerminal.jsx", import.meta.url), "utf8");
+  const admin = readFileSync(new URL("../pages/SshAdmin.jsx", import.meta.url), "utf8");
+  for (const [name, source] of [["SshTerminal", page], ["SshAdmin", admin]]) {
+    assert.ok(!/innerHTML|dangerouslySetInnerHTML/.test(source), `${name}: no HTML injection`);
+    assert.ok(!/console\.(log|info|debug|warn|error)/.test(source), `${name}: nothing is logged`);
+    assert.ok(!/localStorage|sessionStorage|indexedDB/.test(source), `${name}: nothing is stored`);
+  }
+  assert.ok(!/addon-(clipboard|image|web-links)/.test(page), "no clipboard/image/web-links xterm addons");
+  // No password prompt: the terminal never asks for or sends a server password.
+  assert.ok(!/type="password"|passwordMessage|auth_needed|PasswordPrompt/.test(page), "no password step in the terminal");
+  // Keystrokes and size changes are sent only while the SSH session is open.
+  assert.match(page, /phaseRef\.current === "connected"\) ws\.send\(text\)/);
+  // The CSRF message is still the first frame.
+  assert.match(page, /ws\.onopen = \(\) => \{[\s\S]*?ws\.send\(authMessage\(currentCsrf\(\)\)\);\s*\};/);
+  // Links from the Admin page open without opener.
+  for (const link of admin.match(/<a [^>]*target="_blank"[^>]*>/g) || []) assert.match(link, /rel="noopener noreferrer"/);
+  // The switches save on press only, as real switches.
+  assert.match(admin, /role="switch" aria-checked=\{checked\}/);
+  assert.match(admin, /label="Allow every server with an address"/);
+  assert.match(admin, /label="Use this VM account's SSH keys"/);
+});
+
+test("no usable key at all, the Admin's key source and a fresh start for another server", () => {
+  const reason = "No SSH key is available: the VM account has no usable key in ~/.ssh and the Lab Manager key has not been generated";
+  assert.equal(classifyReason(reason), "no-key");
+  assert.equal(describeClose({ code: 1011, reason, opened: true, keySource: "vm" }).text, VM_NO_KEY_TEXT);
+  assert.equal(describeClose({ code: 1011, reason, opened: true, keySource: "site" }).text, NO_KEY_TEXT);
+  assert.equal(keySourceOf({ key_source: "vm" }, { key_source: "site" }), "site", "the Admin's exact config wins");
+  assert.equal(keySourceOf({ key_source: "vm" }, null), "vm");
+  assert.equal(keySourceOf({}, {}), "", "an older backend has no key source setting");
+  let s = connectionReducer(INITIAL_CONNECTION, { type: "start", attempt: 4 });
+  s = connectionReducer(s, { type: "close", attempt: 4, code: 1011, reason: "refused", server: "Opt106" });
+  const fresh = connectionReducer(s, { type: "reset" });
+  assert.deepEqual(fresh, { ...INITIAL_CONNECTION, attempt: 4 }, "idle again, so the next server connects by itself");
 });
 
 // ─── App.jsx integration (v2.40.0 Admin sub-pages + SSH, merged) ──────────────────────────────
