@@ -226,7 +226,8 @@ const SKIP_REASON = 'The VM cannot find an IP address for opt13. Give this serve
     // A server without a usable address: the reason is shown and nothing connects.
     const count = sim.sockets.length;
     await term.goto(origin + '/?tab=ssh&server=opt13');
-    await term.getByText('Lab Manager cannot use the saved address of OPT13', { exact: false }).first().waitFor();
+    // The backend's own sentence (not_allowed_reason) is shown for a server without a usable address.
+    await term.getByText(SKIP_REASON, { exact: false }).first().waitFor();
     await term.waitForTimeout(800);
     assert.equal(sim.sockets.length, count, 'no connection for an unavailable server');
     assert.equal(await term.getByRole('button', { name: 'Connect' }).isDisabled(), true);

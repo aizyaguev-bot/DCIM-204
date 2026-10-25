@@ -2,6 +2,27 @@
 
 ---
 
+## v2.42.2 — 2026-10-25 — SSH works like `ssh root@server` on the VM
+
+### Changed
+- **SSH signs in like the VM's own shell.** The terminal now uses the SSH keys of the
+  VM account that runs Lab Manager (the same keys `ssh root@optn118` uses on the VM),
+  then the Lab Manager key — no password and nothing to install on servers that the
+  VM already reaches. Admin → SSH shows which keys are used and can switch back to
+  "Only the Lab Manager key". Graphical forwarding (`-X`) is not available in a
+  browser terminal.
+- **The terminal opens connected.** Clicking SSH opens the terminal and connects at
+  once; "Reconnect" after a close.
+- **One click for every server.** Admin → SSH → "Allow every server with an
+  address" allows all servers whose address the VM can find; servers without one are
+  listed with the reason. A server added later, or whose address changed, waits for
+  one more click on "Check addresses again". A server an Admin turned off stays off,
+  also under any other name for the same address.
+- **Clear failure messages:** "did not answer", "port 22 is closed", "did not accept
+  the keys", and more, instead of one generic message.
+
+---
+
 ## v2.42.1 — 2026-10-25 — Polished unit tiles on every rack shelf
 
 ### Changed
