@@ -810,11 +810,12 @@ async def bridge(websocket, process, idle_seconds, current, counts, *, max_secon
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def client_keys_for(key_source, directory=None):
-    """[(name, key type, key)] in offer order: with "vm" the VM account's own default keys (as its `ssh` would
-    offer them), then the Lab Manager key; with "site" only the Lab Manager key. Key objects stay in memory for
-    this one connection; names are file names ("id_ed25519") or "lab-manager", never paths."""
-    offers = list(ssh_store.vm_keys(directory)[1]) if key_source == "vm" else []
+def client_keys_for(key_source, directory=None, target=None):
+    """[(name, key type, key)] in offer order: with "vm" the VM account's own keys as its `ssh` would offer them to
+    `target` ({"host", "name", "user"}: the IdentityFile keys its ~/.ssh/config names for that server, then the
+    default files), then the Lab Manager key; with "site" only the Lab Manager key. Key objects stay in memory for
+    this one connection; names are file names ("id_ed25519", "config:id_lab") or "lab-manager", never paths."""
+    offers = list(ssh_store.vm_keys(directory, target)[1]) if key_source == "vm" else []
     try:
         site = ssh_store.private_key()
     except HTTPException as error:
@@ -927,7 +928,8 @@ async def terminal(key: str, websocket: WebSocket):
         connected_ip = await connect_target(host)
         if canonical_ip(connected_ip) in await denied_addresses(denied_host_list(config, known)):
             raise HTTPException(403, "denied")  # Another name for an address an Admin turned SSH off for.
-        offers = await ssh_store.run_file_op(client_keys_for, key_source, vm_key_dir())
+        offers = await ssh_store.run_file_op(client_keys_for, key_source, vm_key_dir(),
+                                             {"host": host, "name": server["name"], "user": user})
         settings = get_settings()
         if not await session_valid(websocket, current):
             raise HTTPException(401, "signed_out")
@@ -974,9 +976,10 @@ async def terminal(key: str, websocket: WebSocket):
 
         async def connect():
             nonlocal connection
-            # Explicit args keep ~/.ssh/config (ProxyCommand, Port, IdentityFile...), the ssh-agent, default key
-            # loading, passwords, GSSAPI and tunnels out of the target/auth policy. client_keys=None stops AsyncSSH
-            # loading ~/.ssh itself; Client.public_key_auth_requested offers exactly `offers`, in order.
+            # Explicit args keep AsyncSSH's own ~/.ssh/config handling (ProxyCommand, Port, HostName...), the ssh-agent,
+            # default key loading, passwords, GSSAPI and tunnels out of the target/auth policy. client_keys=None stops
+            # AsyncSSH loading ~/.ssh itself; Client.public_key_auth_requested offers exactly `offers` (ssh_store.vm_keys
+            # reads only the config's IdentityFile lines), in order.
             connection = await library.connect(connected_ip, port=22, username=user, client_keys=None, client_factory=Client,
                 known_hosts=library.import_known_hosts(""), server_host_key_algs="default", config=None, agent_path=None,
                 agent_identities=None, pkcs11_provider=None, x509_trusted_certs=None, x509_trusted_cert_paths=None,

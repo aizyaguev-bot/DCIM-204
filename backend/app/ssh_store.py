@@ -55,6 +55,11 @@ SITE_KEY_NAME = "lab-manager"
 MAX_VM_KEY_BYTES = 64 * 1024
 _KEY_TYPE = re.compile(r"[a-z0-9@._+-]{1,64}")
 _KEY_NAMES = frozenset({*VM_KEY_NAMES, SITE_KEY_NAME})
+# ~/.ssh/config is read for its IdentityFile lines only: "config:<file name>" names such a key, never its path.
+VM_CONFIG_NAME = "config"
+MAX_VM_CONFIG_BYTES = 256 * 1024
+MAX_CONFIG_KEYS = 16
+_CONFIG_KEY_NAME = re.compile(r"config:[A-Za-z0-9@._+-]{1,57}")
 _logger = logging.getLogger(__name__)
 _LOGGED_SKIPS: set = set()
 # Why an "allow every server" pass left a server out; the owner-facing text is built from the code.
@@ -492,45 +497,71 @@ def private_key():
 
 
 def _vm_key_dir(directory) -> Path:
-    # The account running Lab Manager: the same ~/.ssh its own `ssh root@server` uses. ~/.ssh/config is never read.
+    # The account running Lab Manager: the same ~/.ssh its own `ssh root@server` uses. Of ~/.ssh/config only the
+    # IdentityFile lines are read (_config_identities); nothing else in it has any effect.
     return Path(directory) if directory else Path.home() / ".ssh"
 
 
-def _skip(name: str, reason: str) -> dict:
+def _skip(name: str, reason: str, what: str = "VM SSH key") -> dict:
     if (name, reason) not in _LOGGED_SKIPS:  # Once per file and reason; the file name only, never its path or content.
         _LOGGED_SKIPS.add((name, reason))
-        _logger.warning("VM SSH key %s is not used: %s", name, reason)
+        _logger.warning("%s %s is not used: %s", what, name, reason)
     return {"name": name, "type": "", "usable": False, "reason": reason}
 
 
-def _load_vm_key(asyncssh, path: Path, name: str):
-    """(report row or None, key or None) for one default identity file; reasons are fixed texts, never library output."""
+def _read_vm_file(path: Path, limit: int, unsafe, too_large: str):
+    """(bytes, "") for a file of the VM account; (None, fixed reason) when it is skipped; (None, None) when missing.
+
+    stat first (following a symlink like ssh does), so a FIFO, device or directory is never opened; the open file
+    must be the one stat saw; `unsafe(info)` gives a refusal reason for its owner or mode, or ""."""
     try:
-        # stat first (following a symlink like ssh does): a FIFO, device or directory is never opened.
         before = os.stat(path)
     except FileNotFoundError:
         return None, None
-    except OSError:
-        return _skip(name, "not readable by the account running Lab Manager"), None
+    except (OSError, ValueError):
+        return None, "not readable by the account running Lab Manager"
     if not stat.S_ISREG(before.st_mode):
-        return _skip(name, "not a regular file"), None
+        return None, "not a regular file"
     try:
         # O_NONBLOCK: a file swapped for a FIFO between stat and open cannot hang the worker.
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
-                return _skip(name, "changed while Lab Manager was reading it"), None
-            if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
-                # OpenSSH ignores such a key too ("UNPROTECTED PRIVATE KEY FILE").
-                return _skip(name, "readable by other users (chmod 600 it)"), None
-            data = stream.read(MAX_VM_KEY_BYTES + 1)
+                return None, "changed while Lab Manager was reading it"
+            reason = unsafe(info)
+            if reason:
+                return None, reason
+            data = stream.read(limit + 1)
     except FileNotFoundError:
         return None, None
-    except OSError:
-        return _skip(name, "not readable by the account running Lab Manager"), None
-    if len(data) > MAX_VM_KEY_BYTES:
-        return _skip(name, "too large to be a private key"), None
+    except (OSError, ValueError):
+        return None, "not readable by the account running Lab Manager"
+    if len(data) > limit:
+        return None, too_large
+    return data, ""
+
+
+def _key_mode(info) -> str:
+    if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+        return "readable by other users (chmod 600 it)"  # OpenSSH ignores such a key too ("UNPROTECTED PRIVATE KEY FILE").
+    return ""
+
+
+def _config_mode(info) -> str:
+    # OpenSSH refuses such a config too ("Bad owner or permissions on ~/.ssh/config").
+    if os.name != "nt" and info.st_uid not in (os.getuid(), 0):
+        return "owned by another account"
+    if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o022:
+        return "writable by other users (chmod 600 it)"
+    return ""
+
+
+def _load_vm_key(asyncssh, path: Path, name: str):
+    """(report row or None, key or None) for one identity file; reasons are fixed texts, never library output."""
+    data, reason = _read_vm_file(path, MAX_VM_KEY_BYTES, _key_mode, "too large to be a private key")
+    if data is None:
+        return (None if reason is None else _skip(name, reason)), None
     encrypted, key = b"ENCRYPTED" in data, None
     if not encrypted:
         try:
@@ -554,16 +585,192 @@ def key_type_of(key) -> str:
     return value if _KEY_TYPE.fullmatch(value) else ""
 
 
-def vm_keys(directory=None) -> tuple[list[dict], list]:
-    """The VM account's default private keys: (report rows, [(name, type, key), ...] usable, in offer order).
+_CONFIG_LINE = re.compile(r"\s*([^\s=]+)\s*=?\s*(.*)", re.DOTALL)
 
-    Only ~/.ssh/id_ed25519, id_ecdsa and id_rsa are considered; ~/.ssh/config, the agent and every other file
-    are ignored. Report rows hold file names, key types and fixed reasons only. Missing files are left out."""
+
+def _config_words(line: str) -> list[str]:
+    """One ssh_config line split the way OpenSSH does: the keyword (optionally followed by "="), then arguments
+    with "..."/'...' quoting and \\" \\' \\\\ escapes; "#" outside quotes starts a comment. [] for a blank,
+    comment or unterminated-quote line."""
+    match = _CONFIG_LINE.match(line)
+    if not match or match[1].startswith("#"):
+        return []
+    rest, words, word, quote, started, index = match[2], [match[1]], [], "", False, 0
+    while index < len(rest):
+        char, following = rest[index], rest[index + 1:index + 2]
+        if char == "\\" and following and (following in "'\"\\" or (not quote and following == " ")):
+            word.append(following)
+            started, index = True, index + 2
+            continue
+        if not quote and char in " \t":
+            if started:
+                words.append("".join(word))
+                word, started = [], False
+        elif not quote and char == "#" and not started:
+            break
+        elif not quote and char in "'\"":
+            quote, started = char, True
+        elif quote and char == quote:
+            quote = ""
+        else:
+            word.append(char)
+            started = True
+        index += 1
+    if quote:
+        return []
+    if started:
+        words.append("".join(word))
+    return words
+
+
+def _wildcard_match(pattern: str, text: str) -> bool:
+    """`*` and `?` only, case-insensitive; no regex, so an inventory name cannot make it backtrack (O(len*len))."""
+    pattern, text = re.sub(r"\*+", "*", pattern.lower()), text.lower()
+    if len(pattern) - pattern.count("*") > len(text):
+        return False  # Exact: more characters to match than the text has.
+    p = t = 0
+    star, mark = -1, 0
+    while t < len(text):
+        if p < len(pattern) and pattern[p] in ("?", text[t]) and pattern[p] != "*":
+            p, t = p + 1, t + 1
+        elif p < len(pattern) and pattern[p] == "*":
+            star, mark, p = p, t, p + 1
+        elif star >= 0:
+            mark += 1
+            p, t = star + 1, mark
+        else:
+            return False
+    return all(char == "*" for char in pattern[p:])
+
+
+def _host_line_matches(patterns, names) -> bool:
+    """OpenSSH's `Host` rule (*, ?, !negation, several patterns, case-insensitive) against every name the target
+    is known by: a negated pattern that matches any of them rules the block out; otherwise any matching plain
+    pattern brings it in."""
+    matched = False
+    for pattern in patterns:
+        negated = pattern.startswith("!")
+        if any(_wildcard_match(pattern[1:] if negated else pattern, name) for name in names):
+            if negated:
+                return False
+            matched = True
+    return matched
+
+
+def _local_user():
+    try:
+        import getpass
+        return getpass.getuser() or None
+    except Exception:
+        return None
+
+
+def _expand_identity(value: str, home: Path, target: dict | None):
+    """(path, "") for one IdentityFile value, expanded the way ssh does but minimally: ~/, %d, %u, %h, %r and %%.
+    (None, fixed reason) for anything else (other % tokens, ${VAR}, ~user, a relative path); (None, "") when the
+    entry names no file ("none"), or names the server (%h, %r) and no server is given."""
+    if value.lower() == "none":
+        return None, ""
+    if "${" in value:
+        return None, "uses ${...}, which Lab Manager does not expand"
+    if value == "~" or value.startswith("~/"):
+        value = str(home) + value[1:]
+    elif value.startswith("~"):
+        return None, "uses ~user, which Lab Manager does not expand"
+    tokens = {"%": "%", "d": str(home), "u": _local_user(),
+              "h": (target or {}).get("host") or None, "r": (target or {}).get("user") or None}
+    parts, index = [], 0
+    while index < len(value):
+        if value[index] != "%":
+            parts.append(value[index])
+            index += 1
+            continue
+        token = value[index + 1:index + 2]
+        if not tokens.get(token):
+            if target is None and token in ("h", "r"):
+                return None, ""  # Depends on the server: checked when a terminal to it opens.
+            return None, "uses a % token Lab Manager does not expand"
+        parts.append(tokens[token])
+        index += 2
+    path = Path("".join(parts))
+    if not path.is_absolute():
+        return None, "not an absolute path"
+    return path, ""
+
+
+def _config_key_name(value: str) -> str:
+    """The name of an IdentityFile entry, "config:<file name>": the base name only (never a folder), safe characters."""
+    base = re.split(r"[\\/]", value.rstrip("\\/"))[-1]
+    return "config:" + (re.sub(r"[^A-Za-z0-9@._+-]", "_", base)[:57] or "key")
+
+
+def _same_file(path) -> str:
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _config_identities(folder: Path, target: dict | None) -> list:
+    """The IdentityFile entries of <folder>/config that apply to `target` ({"host", "name", "user"}), in file order,
+    each file once, at most MAX_CONFIG_KEYS: a path to load or a report row for an entry that cannot be used.
+
+    Lines before the first Host count for every server; a Host block counts when its patterns match the target's
+    saved host or name; Match blocks never count. Every other directive (Include, ProxyCommand, ProxyJump,
+    LocalCommand, IdentityAgent, CertificateFile, Port, User, HostName...) is ignored: never run, followed or used.
+    Without a target (Admin → SSH) every Host block counts and entries naming the server (%h, %r) are left out."""
+    data, reason = _read_vm_file(folder / VM_CONFIG_NAME, MAX_VM_CONFIG_BYTES, _config_mode,
+                                 "too large to be an SSH config")
+    if data is None:
+        return [] if reason is None else [_skip(VM_CONFIG_NAME, reason, "VM SSH")]
+    names = None if target is None else [  # A saved host is at most 253 characters; longer names are not matched.
+        value for value in (str(target.get(field) or "").strip() for field in ("host", "name")) if 0 < len(value) <= 255]
+    active, values = True, []
+    for line in data.decode("utf-8", "replace").splitlines():
+        words = _config_words(line)
+        keyword = words[0].lower() if words else ""
+        if keyword == "host":
+            active = names is None or _host_line_matches(words[1:], names)
+        elif keyword == "match":
+            active = False
+        elif keyword == "identityfile" and active and len(words) == 2:
+            values.append(words[1])
+    del data
+    entries, seen = [], set()
+    for value in values:
+        path, reason = _expand_identity(value, folder.parent, target)
+        if path is None and not reason:
+            continue
+        same = _same_file(path) if path is not None else "\0" + value
+        if same in seen:
+            continue
+        if len(seen) >= MAX_CONFIG_KEYS:
+            _skip(VM_CONFIG_NAME, f"names more than {MAX_CONFIG_KEYS} key files; the rest are not used", "VM SSH")
+            break
+        seen.add(same)
+        entries.append(path if path is not None else _skip(_config_key_name(value), reason))
+    return entries
+
+
+def vm_keys(directory=None, target=None) -> tuple[list[dict], list]:
+    """The VM account's own private keys: (report rows, [(name, type, key), ...] usable, in offer order).
+
+    In the order the VM account's `ssh` offers them: the IdentityFile keys its ~/.ssh/config names for `target`
+    (see _config_identities; named "config:<file name>"), then ~/.ssh/id_ed25519, id_ecdsa and id_rsa unless the
+    config already named them. The agent and every other file are ignored. Report rows hold file names, key types
+    and fixed reasons only, never a path. Missing files are left out."""
     asyncssh = load_asyncssh()
     folder = _vm_key_dir(directory)
+    defaults = {_same_file(folder / name): name for name in VM_KEY_NAMES}
+    candidates = [entry if isinstance(entry, dict) else
+                  (defaults.get(_same_file(entry)) or _config_key_name(str(entry)), entry)
+                  for entry in _config_identities(folder, target)]
+    named = {_same_file(entry[1]) for entry in candidates if isinstance(entry, tuple)}
+    candidates += [(name, folder / name) for name in VM_KEY_NAMES if _same_file(folder / name) not in named]
     report, usable = [], []
-    for name in VM_KEY_NAMES:
-        row, key = _load_vm_key(asyncssh, folder / name, name)
+    for entry in candidates:
+        if isinstance(entry, dict):
+            report.append(entry)
+            continue
+        name, path = entry
+        row, key = _load_vm_key(asyncssh, path, name)
         if row is None:
             continue
         report.append(row)
@@ -1010,7 +1217,7 @@ async def end_session(db, session_id: int, reason: str, bytes_in: int, bytes_out
         if key_type is not None:
             values["key_type"] = key_type if _KEY_TYPE.fullmatch(key_type) else ""
         if key_name is not None:
-            values["key_name"] = key_name if key_name in _KEY_NAMES else ""
+            values["key_name"] = key_name if key_name in _KEY_NAMES or _CONFIG_KEY_NAME.fullmatch(key_name) else ""
         statement = update(SshSession).where(
             SshSession.id == session_id,
             (SshSession.ended_at.is_(None)) | (SshSession.end_reason == "session_expired"),
