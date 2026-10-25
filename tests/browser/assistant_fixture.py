@@ -45,6 +45,7 @@ os.environ.setdefault('DCIM_TEST_ACCOUNTS', '1')
 os.environ.pop('ASSISTANT_ANTHROPIC_API_KEY', None)      # never a real key in the fixture
 os.environ['ASSISTANT_LLM_ENABLED'] = 'false'             # labelled demo mode, no network
 os.environ['ASSISTANT_ENABLED'] = 'true'
+os.environ['ASSISTANT_SHOW_IN_DEMO'] = 'true'              # the panel under test stays visible in demo mode
 os.environ.setdefault('ASSISTANT_PER_MINUTE', '30')       # browser checks ask several questions per user
 # Assistant actions: off unless the run asks for them; the protected outlet is the fixture's "core switch" feed.
 os.environ.setdefault('ASSISTANT_ACTIONS_ENABLED', 'false')

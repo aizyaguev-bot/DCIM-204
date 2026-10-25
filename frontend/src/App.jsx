@@ -25,6 +25,7 @@ import WhatsNew from "./components/WhatsNew";
 import RemoteInstallView from "./pages/RemoteInstallView";
 import { pxeApi, errorText as pxeErrorText } from "./api/pxe";
 import AssistantPanel from "./components/assistant/AssistantPanel";
+import useAssistantUseful from "./components/assistant/useAssistantUseful";
 import SshAdmin from "./pages/SshAdmin";
 // The terminal page (and xterm) loads only when an SSH tab is opened.
 const SshTerminal = lazy(() => import("./pages/SshTerminal"));
@@ -38,6 +39,8 @@ import { dashboardStats } from "./dashboardStats";
 
 export default function App() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
+  // The lab assistant appears only when a language model is connected or assistant actions are on.
+  const assistantShown = useAssistantUseful();
   const [devices, setDevices] = useState([]);
   const [pduStatuses, setPduStatuses] = useState({});   // { id: PduStatus }
   const [kvmStatuses, setKvmStatuses] = useState({});   // { id: KvmStatus }
@@ -692,7 +695,7 @@ export default function App() {
       )}
 
       <WhatsNew version={version} onOpenChangelog={() => goTo("changelog")} />
-      {!sshPage && <AssistantPanel context={{tab: mainTab, rack: mainTab === "racks" ? rackParam : null, detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={goTo} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />}
+      {!sshPage && assistantShown && <AssistantPanel context={{tab: mainTab, rack: mainTab === "racks" ? rackParam : null, detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={goTo} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />}
       {!sshPage && <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>}
     </div>
   );
