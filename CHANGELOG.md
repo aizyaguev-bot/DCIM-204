@@ -2,6 +2,20 @@
 
 ---
 
+## v2.42.1 — 2026-10-25 — Polished unit tiles on every rack shelf
+
+### Changed
+- **Racks: every unit on a shelf is a clean tile.** A coloured stripe shows its state
+  at a glance (green on, grey off, amber when only some feeds are on, purple in
+  maintenance, dashed grey when unknown or unreachable); the name is clear, with the
+  state, power draw and owner below it; power, KVM and SSH sit in one tidy row on the
+  right. Equipment shows a type chip, and empty shelves are dashed "Free" slots.
+- **A nicer power switch:** a pill toggle with ON/OFF inside, a smooth knob, an amber
+  "Mixed" state for split feeds, a dashed look when the state is unknown, a spinner
+  while a request runs, and a clear focus ring. Same confirmation as before.
+
+---
+
 ## v2.42.0 — 2026-10-25 — New Racks page: power without Edit mode, cooling units you can always bring back
 
 ### Added
