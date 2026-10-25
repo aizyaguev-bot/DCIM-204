@@ -2,6 +2,42 @@
 
 ---
 
+## v2.42.0 — 2026-10-25 — New Racks page: power without Edit mode, cooling units you can always bring back
+
+### Added
+- **Power from the Racks page without Edit mode.** Every server row has an ON/OFF
+  switch for Operators and Admins. Off and Cycle always ask first in a dialog that
+  names the server, PDU, outlet and the change; a server with two power supplies
+  switches both by default ("Only this feed" for one). A switch that cannot be used
+  says why: PDU unreachable, unknown state, maintenance, protected outlet, or a
+  request already running. A double click switches once. Viewers see no switches.
+- **Cooling units panel.** Every chiller is listed, including units not on a shelf
+  ("Not on a shelf" on their rack's card) and units without a rack ("Needs a rack").
+  Place, move and take a unit off a shelf from a dialog (keyboard and touch friendly)
+  or by dragging in Edit mode; every change has Undo, and "Change history" brings back
+  any earlier version or a single unit. No action deletes a unit. Two units on one
+  shelf are both drawn.
+- **KVM and SSH on every server row,** in the rack cards, the rack table, the phone
+  list and the server dialog.
+
+### Changed
+- **The Racks page is reorganised.** Summary tiles (draw, servers on, racks, what
+  needs attention) with shortcuts; a toolbar that stays on top with search (servers,
+  owners, switches, equipment, cooling units), filters (Off, No reading,
+  Maintenance), jump to rack, show empty shelves, collapse/expand all. Rack cards
+  show status, maintenance and a load bar and fold runs of empty shelves. On phones
+  cards start collapsed and the rack detail opens as a list. The detail table is in
+  U order, a failed load shows a banner with Retry, and opening a rack updates the
+  address so Back works.
+
+### Fixed
+- Saving equipment after a "changed in another session" warning no longer
+  overwrites the other session's barcode or location; U slots are checked; equipment
+  reloads on its own; non-server labels are not counted; servers on storage shelves
+  are drawn; automatically placed U numbers are marked as such.
+
+---
+
 ## v2.41.4 — 2026-10-22 — Old installer backups are cleaned up automatically
 
 ### Changed
