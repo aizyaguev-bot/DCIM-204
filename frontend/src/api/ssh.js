@@ -615,7 +615,8 @@ export const eventLabel = event => EVENT_LABELS[event] || (event ? String(event)
 export const endReasonLabel = reason => reason ? END_REASON_LABELS[reason] || String(reason) : "—";
 
 // Which key signed a terminal in (audit: key type and key file name only, never key material or a path).
-const KEY_TEXT = /^[A-Za-z0-9@._+-]{1,64}$/;
+// Key file names, incl. "config:<name>" for IdentityFile keys from the VM account's SSH config (never paths).
+const KEY_TEXT = /^[A-Za-z0-9@._+:-]{1,72}$/;
 export function sessionKeyLabel(row) {
   const name = typeof row?.key_name === "string" && KEY_TEXT.test(row.key_name) ? row.key_name : "";
   const type = typeof row?.key_type === "string" && KEY_TEXT.test(row.key_type) ? row.key_type : "";
@@ -630,7 +631,7 @@ export function sessionKeyLabel(row) {
 export function vmKeyRows(config) {
   const rows = Array.isArray(config?.vm_keys) ? config.vm_keys : [];
   return rows.map(row => typeof row === "string" ? { name: row } : row)
-    .filter(row => row && typeof row.name === "string" && KEY_TEXT.test(row.name)).slice(0, 10).map(row => ({
+    .filter(row => row && typeof row.name === "string" && KEY_TEXT.test(row.name)).slice(0, 24).map(row => ({
       name: row.name,
       type: typeof row.type === "string" && KEY_TEXT.test(row.type) ? row.type : "",
       usable: typeof row.usable === "boolean" ? row.usable : null,

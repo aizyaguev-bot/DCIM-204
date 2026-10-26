@@ -2,6 +2,32 @@
 
 ---
 
+## v2.43.0 — 2026-10-26 — New 3D Digital Twin, one row per server, SSH keys from the VM's SSH config
+
+### Added
+- **The redesigned 3D Digital Twin.** A top bar with search ("/"), Overview / Rack
+  front / Aisle / Top views, Layers and "Color by: Health", a live badge with the data
+  age and an issues badge; a rack bar grouped by row with a health dot per rack; a
+  left panel with Issues (click to fly to the problem), Racks and Data quality; a
+  health legend; a Rack front view with shelves, servers as tiles and Free slots,
+  previous/next rack; a server drawer with Power, Ping, Owner and Console, Open
+  console and Power…, location and connections; a power dialog that names the
+  server, PDU, outlet, current state, feeds and console; and a phone layout with a
+  bottom sheet. Power and console still work only for live DCIM mappings and always
+  ask first.
+- **SSH uses the keys named in the VM account's SSH config** (`IdentityFile` lines
+  only — nothing else from that file is used), before the default key files.
+
+### Changed
+- **Racks: one organised row per server on every shelf.** Each server has its own
+  row with aligned columns: state and power, PDU feeds (amber when they disagree),
+  KVM port, owner, address, and KVM / SSH / power on the right. Several servers on a
+  shelf stack under one shelf number; on phones a row wraps into two lines.
+- **The lab assistant stays hidden** until a language model is connected (Admin →
+  AI assistant) or assistant actions are turned on.
+
+---
+
 ## v2.42.2 — 2026-10-25 — SSH works like `ssh root@server` on the VM
 
 ### Changed
