@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { serverVisualState, rackSummary, withCoolingRows, compactRows, buildSearchIndex, searchIndex, matchesFilter, shelfOptions }
-  from "../components/racks/rackView.js";
+import { serverVisualState, rackSummary, withCoolingRows, compactRows, buildSearchIndex, searchIndex, matchesFilter, shelfOptions,
+  rackFloors, RACK_FLOORS } from "../components/racks/rackView.js";
 
 const server = (name, state = "on", pduId = "pdu4") => ({ id: name.toLowerCase(), name, state, pduId, pduName: `PDU ${pduId.slice(3)}`, outlet: 1, watts: 100 });
 const row = (u, names = [], kind = "server") => ({ u, items: names.map(name => ({ kind, data: { id: name.toLowerCase(), name } })), auto: false });
@@ -60,6 +60,22 @@ test("compactRows: empty runs fold, single empty rows stay, cooling shelves are 
   assert.deepEqual(cooled.map(x => x.kind === "gap" ? `${x.from}-${x.to}` : x.row.u), [1, 2, 3, 4, 5, 6, "7-8"]);
   // Edit mode: every shelf, even with a search active
   assert.deepEqual(compactRows(rows, { editMode: true, keep: () => false }).map(x => x.kind), Array(8).fill("row"));
+});
+
+test("rackFloors: always floors 1-4, other shelves only when they hold something, rack level last", () => {
+  assert.equal(RACK_FLOORS, 4);
+  const rows = [row(1, ["OPT1"]), row(2, ["OPT2"]), row(3), row(4), row(5), row(6), row(7, ["OPT7"]), row(8), row(0, ["PDU"], "custom")];
+  const { floors, other, level } = rackFloors(rows, new Set([6]));
+  assert.deepEqual(floors.map(r => r.u), [1, 2, 3, 4]);
+  assert.deepEqual(floors.map(r => r.items.length), [1, 1, 0, 0]);
+  assert.deepEqual(other.map(r => r.u), [6, 7], "U6 holds a cooling unit, U7 an OPT; empty U5 and U8 are dropped");
+  assert.deepEqual(level.map(r => r.u), [0]);
+  // a rack with nothing at all still has its four (empty) floors
+  const empty = rackFloors([]);
+  assert.deepEqual(empty.floors.map(r => [r.u, r.items.length]), [[1, 0], [2, 0], [3, 0], [4, 0]]);
+  assert.deepEqual([empty.other.length, empty.level.length], [0, 0]);
+  // empty floors are rows (one "Free" slot each), never folded
+  assert.deepEqual(compactRows(rackFloors([row(1, ["A"])]).floors, { showEmpty: true }).map(x => x.kind), ["row", "row", "row", "row"]);
 });
 
 test("compactRows: a search folds hidden rows with their empty neighbours; row 0 stays; sparse storage rows pass", () => {

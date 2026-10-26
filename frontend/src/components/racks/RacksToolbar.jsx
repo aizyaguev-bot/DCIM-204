@@ -38,7 +38,7 @@ export function RackKpis({ loading, totalKw, totalA, partial, serversOn, servers
 // Desktop: row 1 search and count; row 2 filters and options; row 3 every rack as a chip (wrapping, never cut).
 // Phone: row 1 the search box at full width (the count inside it); row 2 Show, Jump to rack and the cooling button.
 export function RacksToolbar({ phone, loading = false, searchRef, query, onQuery, onSearchKey, count, filter, onFilter, filterCounts, editMode,
-  rackChips, onJump, showEmpty, onShowEmpty, allCollapsed, onToggleAll, coolingOpen, onToggleCooling, coolingTotal, coolingNeeds }) {
+  rackChips, onJump, allCollapsed, onToggleAll, coolingOpen, onToggleCooling, coolingTotal, coolingNeeds }) {
   const filterOff = editMode ? "Filters are off in Edit mode so every shelf stays a drop target" : undefined;
   const coolingLabel = `Cooling units ${coolingTotal}${coolingNeeds ? `, ${coolingNeeds} need a place` : ""}`;
   const chipLoading = r => r.status === "loading";
@@ -77,8 +77,6 @@ export function RacksToolbar({ phone, loading = false, searchRef, query, onQuery
           onClick={() => { if (!editMode) onFilter(id); }}>{label} <small>{loading ? <Pending/> : filterCounts[id] ?? 0}</small></button>)}
       </div>
       <div className="racks-options">
-        <button type="button" className="racks-chip" aria-pressed={showEmpty} onClick={() => onShowEmpty(!showEmpty)}
-          title={editMode ? "Edit mode always shows every shelf" : undefined}>Empty shelves</button>
         <button type="button" className="racks-chip" onClick={onToggleAll}>{allCollapsed ? "Expand all" : "Collapse all"}</button>
         <button type="button" className="racks-chip racks-cooling-toggle" aria-expanded={coolingOpen} aria-controls="cooling-panel" onClick={onToggleCooling}>
           <span aria-hidden="true">❄</span> Cooling units <small>{coolingTotal}</small>

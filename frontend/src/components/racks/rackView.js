@@ -66,6 +66,21 @@ export function withCoolingRows(rows, coolingUs) {
   return [...merged, ...rows.filter(r => !(r.u > 0))];
 }
 
+// A rack has four floors (1 at the top … 4 at the bottom, like the 3D Twin's SHELF 1 (TOP) … SHELF 4 (BOTTOM)).
+export const RACK_FLOORS = 4;
+
+// The shelves a rack card draws: always floors 1-4 (an empty floor stays a row), then "other": a shelf above floor 4
+// that holds something (old or hand-edited data; shown so nothing is hidden), then the rack level (u 0). Empty shelves
+// above floor 4 are dropped. coolingUs: the shelves that hold a cooling unit.
+export function rackFloors(rows, coolingUs = new Set()) {
+  const byU = new Map((rows || []).map(r => [r.u, r]));
+  const floors = [];
+  for (let u = 1; u <= RACK_FLOORS; u++) floors.push(byU.get(u) || { u, items: [], auto: false });
+  const other = (rows || []).filter(r => r.u > RACK_FLOORS && (r.items.length || coolingUs.has(r.u)));
+  const level = (rows || []).filter(r => !(r.u > 0));
+  return { floors, other, level };
+}
+
 // Rows for display. Edit mode: every shelf (each one is a drop target). View: a run of two or more empty shelves is
 // one "empty" gap (unless showEmpty); with a search or filter (keep), rows it hides fold into "filtered" gaps together
 // with their empty neighbours. A shelf with a cooling unit is never empty; the rack-level row (u 0) is always a row.

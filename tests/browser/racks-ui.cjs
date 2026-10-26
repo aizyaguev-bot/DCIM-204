@@ -130,13 +130,10 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await p.locator('#cooling-panel').waitFor();
    assert.ok((await card(p,'Rack-01').boundingBox()).y<900,'a rack card is on the first screen');
    for(const t of await p.locator('[data-rack-id]').evaluateAll(els=>els.map(e=>e.querySelector('.rack-meta span')?.textContent)))assert.match(t,/^\d+ OPTs$/);
-   const gap=card(p,'Rack-01').locator('.shelf-gap[data-from="5"][data-to="8"]');
-   assert.equal(await gap.count(),1,'Rack-01 folds shelves 05-08');
-   assert.equal(await gap.innerText(),'05–08 · empty');
-   await p.getByRole('button',{name:'Empty shelves'}).click();
-   assert.equal(await card(p,'Rack-01').locator('.shelf-empty').count(),4,'Empty shelves shows 05-08');
-   await p.getByRole('button',{name:'Empty shelves'}).click();
-   assert.equal(await card(p,'Rack-01').locator('.shelf-empty').count(),0);
+   // a rack is its four floors: no shelves beyond floor 4, no fold line, no "Empty shelves" option
+   assert.deepEqual(await card(p,'Rack-01').locator('[data-u-slot]').evaluateAll(els=>els.map(e=>e.dataset.uSlot)),['1','2','3','4'],'Rack-01 shows floors 1-4');
+   assert.equal(await card(p,'Rack-01').locator('.shelf-gap, .shelf-empty, .floors-other').count(),0,'no extra empty shelves');
+   assert.equal(await p.getByRole('button',{name:'Empty shelves'}).count(),0,'no Empty shelves option');
    await noOverflow(p,'overview 1440');
    await shot(p,'op-grid-1440');
    await p.evaluate(()=>window.scrollTo(0,2000));await sleep(200);
@@ -176,7 +173,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     await m.getByRole('button',{name:'Cancel'}).click();
     await m.close();
    }
-   passed.push('1 layout: 9 racks, "N OPTs" first, tiles one height + one attention row, 9 rack chips whole, a card on the first screen, 05-08 folded, Empty shelves, sticky toolbar, phone toolbar <=104 px with a full-width search, panel folded on phones, no page scroll at 1440/390/375 (grid, Edit, panel, dialogs, detail)');
+   passed.push('1 layout: 9 racks, "N OPTs" first, tiles one height + one attention row, 9 rack chips whole, a card on the first screen, four floors (no extra empty shelves), sticky toolbar, phone toolbar <=104 px with a full-width search, panel folded on phones, no page scroll at 1440/390/375 (grid, Edit, panel, dialogs, detail)');
   }
 
   // ── 2. states ──
@@ -503,8 +500,10 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await heb.waitFor();
    assert.equal(await heb.getAttribute('dir'),'auto');
    assert.equal(await heb.evaluate(e=>getComputedStyle(e).direction),'rtl');
-   assert.equal(await card(p,'Rack-02').locator('.shelf-row[data-u-slot="6"][data-cooling-only]').count(),1,'U06 is shown, not folded');
-   assert.equal(await card(p,'Rack-02').locator('.shelf-gap[data-from="7"][data-to="8"]').count(),1);
+   assert.equal(await card(p,'Rack-02').locator('.shelf-row[data-u-slot="6"][data-cooling-only]').count(),1,'U06 is shown, not hidden');
+   // above floor 4 it is listed under "Other"; no empty shelves are drawn around it
+   assert.equal(await card(p,'Rack-02').locator('.floors-other').innerText(),'Other · not on floors 1–4');
+   assert.equal(await card(p,'Rack-02').locator('.shelf-gap, [data-u-slot="5"], [data-u-slot="7"], [data-u-slot="8"]').count(),0);
    // a stale undo changes nothing
    await setEdit(p,true);
    await card(p,'Rack-02').locator('[data-unit-id="ch-free"]').click();await dlg.waitFor();
