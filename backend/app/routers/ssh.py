@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import accounts, confirm, ssh_store
 from ..config import get_settings
 from ..database import AsyncSessionLocal, get_db
-from ..models import Device, PingTarget
+from ..models import Device
 from ..ping_monitor import validate_host
 
 router = APIRouter(prefix="/api/ssh", tags=["ssh"])
@@ -320,8 +320,9 @@ def configured_networks():
 
 
 async def lab_networks(db):
-    """The lab networks: around every saved PDU/KVM address and Ping Monitor server IP, plus SSH_ALLOWED_NETWORKS.
-    Cached for LAB_CACHE_SECONDS."""
+    """The lab networks: around every saved PDU/KVM address (Admin-managed devices), plus SSH_ALLOWED_NETWORKS.
+    Ping Monitor targets do not count: an Operator can add those, and must not be able to widen where the VM's own
+    SSH credentials are used. Cached for LAB_CACHE_SECONDS."""
     now = time.monotonic()
     cached = _LAB_CACHE.get("networks")
     if cached and cached[0] > now:
@@ -330,10 +331,6 @@ async def lab_networks(db):
     for (address,) in (await db.execute(select(Device.ip).where(Device.kind.in_(("pdu", "kvm"))))).all():
         with suppress(ValueError, TypeError):
             found.add(lab_network_of(address))
-    for source_key, address in (await db.execute(select(PingTarget.source_key, PingTarget.host))).all():
-        if str(source_key or "").startswith("server:"):
-            with suppress(ValueError, TypeError):
-                found.add(lab_network_of(address))
     value = frozenset(found)
     _LAB_CACHE["networks"] = (now + LAB_CACHE_SECONDS, value)
     return value

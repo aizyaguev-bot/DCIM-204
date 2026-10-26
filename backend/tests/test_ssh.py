@@ -2452,8 +2452,10 @@ def test_lab_networks_are_the_24_or_64_around_literal_ips(monkeypatch):
 async def test_system_mode_allows_every_lab_server_with_zero_clicks(api, monkeypatch):
     async with api.factory() as db:
         db.add(Device(id="pdu1", name="PDU 1", kind="pdu", ip="10.50.0.2"))
+        db.add(Device(id="kvm1", name="KVM 1", kind="kvm", ip="10.20.30.3"))
+        # "far" is only a Ping Monitor server target: an Operator can add those, so its network never counts.
         for key, host in (("opt1", "10.20.30.40"), ("lab", "lab-box"), ("corp", "corp-box"), ("ghost", "ghost-box"),
-                          ("off", "10.20.30.41")):
+                          ("off", "10.20.30.41"), ("far", "192.0.2.5")):
             db.add(PingTarget(id=key, source_key=f"server:{key}", name=key.title(), host=host, source="manual"))
         await db.commit()
     system_mode(api, monkeypatch, denied=["off"], addresses={
@@ -2468,6 +2470,7 @@ async def test_system_mode_allows_every_lab_server_with_zero_clicks(api, monkeyp
             assert (servers[key]["approval"], servers[key]["allowed"], servers[key]["approved_host"]) == (
                 "auto", True, host)
         assert (servers["corp"]["approval"], servers["corp"]["allowed"]) == ("outside", False)
+        assert (servers["far"]["approval"], servers["far"]["allowed"]) == ("outside", False)
         assert servers["corp"]["not_allowed_reason"] == ssh.OUTSIDE_REASON == \
             "Outside the lab networks (add it to SSH_ALLOWED_NETWORKS)"
         assert (servers["ghost"]["approval"], servers["ghost"]["allowed"]) == ("unresolved", False)
