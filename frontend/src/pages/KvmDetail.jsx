@@ -3,8 +3,10 @@ import StatusDot from "../components/StatusDot";
 import DeviceNamesPanel from "../components/DeviceNamesPanel";
 import NameSyncBadge, { NameSyncNotice, useNameSync } from "../components/NameSyncBadge";
 import {useAccounts} from "../accounts";
-import { deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
-import { labelChanges, labelEditState, labelMoveHints, labelPatchBody } from "../api/locations";
+import { api, deviceState, errorMessage, STATE_DOT, STATE_TEXT } from "../api/client";
+import { useRenameEverywhere } from "../components/RenameEverywhereDialog";
+import { chooseRenames, editorChanges, knownIdentities, renameCandidates, saveWithRenames } from "../api/renameEverywhere.js";
+import { labelChanges, labelEditState, labelMoveHints } from "../api/locations";
 import { LATEST_NOT_LOADED, latestDevice, rebaseLabelDraft, rebaseNote } from "../api/labelDraft";
 
 // The role reason comes first: a Viewer cannot act whatever the device state.
@@ -22,6 +24,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
   const nameSync = useNameSync(device?.id, device?.labels_revision);
+  const renameAsk = useRenameEverywhere("port");   // "Rename OPTN45 to OPTN46?" before a server rename is saved
   const [labelNote, setLabelNote] = useState("");        // after a 409: what changed elsewhere; the draft is kept
   const [needsRebase, setNeedsRebase] = useState(false); // a 409 came before the latest labels could be read
   const editSession = useRef(0);                         // a save answer for a closed or replaced editor is ignored
@@ -87,19 +90,26 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
     setSaving(true);
     setSaveError("");
     nameSync.clearNotice();
+    const state = { base, original, revision };   // what is saved so far (a rename everywhere changes it)
     try {
-      const saved = await onLabelsSave(labelPatchBody(base, draft, original), revision);
+      // A server renamed to a NEW name may take its other feeds, KVM port, rack position, monitor and owner along:
+      // previewed and asked before anything is written. An existing name or a default port name is not asked.
+      const groups = renameCandidates(editorChanges(draft, original), knownIdentities(devices, Object.values(original)));
+      const chosen = await chooseRenames(groups, g => api.renameOpt(g.old_name, g.new_name, { dryRun: true }), renameAsk.ask);
+      if (chosen === null || session !== editSession.current) return;   // Cancel: nothing saved, the editor stays open
+      const { saved, renamed, remaining } = await saveWithRenames(device.id, draft, state, chosen, api.renameOpt, onLabelsSave);
       // The name-sync note belongs to this device's save: skip it when the page moved to another device meanwhile.
       if (session === editSession.current) {
         closeEditor();
-        nameSync.afterSave(saved?.device_names, saved?.device_names_reason);
+        const names = renamed && !remaining ? renamed : saved;
+        nameSync.afterSave(names?.device_names, names?.device_names_reason);
       }
     } catch (e) {
       if (session !== editSession.current) return;
-      if (e.status === 409) {
+      if (e.status === 409 && e.step !== "rename") {
         // Never saved again on its own: the editor stays open with the draft for the user to review.
-        const latest = latestDevice(e, deviceRef.current, revision);
-        if (latest) applyRebase(latest, draft, original);
+        const latest = latestDevice(e, deviceRef.current, state.revision);
+        if (latest) applyRebase(latest, draft, state.original);
         else { setLabelNote(LATEST_NOT_LOADED); setNeedsRebase(true); }
       } else {
         setSaveError(errorMessage(e));
@@ -169,7 +179,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
             <NameSyncNotice notice={nameSync.notice} />
-            {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these port labels on {device.name}. To move a server with its PDU outlets, KVM port and rack position, use Admin → Locations → Move.</p>}
+            {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these port labels on {device.name}; renaming a server to a new name asks whether its other feeds, KVM port and rack position follow. To move a server, use Admin → Locations → Move.</p>}
             {ports.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
                 {state === "offline" ? `Cannot reach device: ${status.error}` : state === "error" ? "The port list is unavailable." : state === "unavailable" ? `Status unavailable: ${status.error}` : "Loading…"}
@@ -232,6 +242,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
           </div>
         </aside>
       </div>
+      {renameAsk.dialog}
     </main>
   );
 }

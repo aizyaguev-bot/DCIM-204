@@ -51,6 +51,8 @@ const run = id => !only.length || only.includes(String(id));
       const url = new URL(request.url());
       if (['GET', 'HEAD', 'OPTIONS'].includes(request.method()) || url.pathname === '/api/auth/login') return route.continue();
       if (request.method() === 'PATCH' && url.pathname === LABEL_WRITE) { writes.push(request.postDataJSON()); return route.continue(); }
+      // The "Rename X to Y?" preview (a dry run writes nothing); applying a rename everywhere stays unexpected here.
+      if (request.method() === 'POST' && url.pathname === '/api/devices/rename-opt' && request.postDataJSON()?.dry_run === true) return route.continue();
       unexpectedWrites.push(request.method() + ' ' + url.pathname);
       return route.abort();
     });
@@ -89,6 +91,9 @@ const run = id => !only.length || only.includes(String(id));
   const editButton = (page, name) => page.getByRole('button', { name: `Edit ${name}`, exact: true });
   const tableRow = (page, name) => page.locator('tr', { has: editButton(page, name) });
   const settle = page => page.waitForTimeout(600);
+  // A server typed over with a new name asks "Rename X to Y?" first (rename-everywhere.cjs covers that dialog); these
+  // cases test the single-outlet save, so they answer "Only this outlet".
+  const onlyThisOutlet = async page => page.locator('[data-dialog="rename-everywhere"] [data-choice="only"]').click({ timeout: 10000 });
 
   try {
     // ---- SYNC-1: a KVM port used by another server is taken over only after a confirm ----
@@ -131,12 +136,14 @@ const run = id => !only.length || only.includes(String(id));
       await editButton(b.page, 'PDU 03 outlet 1 (OPT31)').click();
       await b.page.getByLabel('OPT label for PDU 03 outlet 1', { exact: true }).fill('OPT31-B');
       await b.page.getByRole('button', { name: 'Save', exact: true }).click();
+      await onlyThisOutlet(b.page);
       await waitFor(() => b.writes.length === 1, 'session B save');
       assert.deepEqual(b.writes[0], { device_id: 'pdu3', port: '1', label: 'OPT31-B', expected: 'OPT31' });
       await editButton(b.page, 'PDU 03 outlet 1 (OPT31-B)').waitFor();
       // Let session A poll at least once (15 s refresh), so its table already holds B's label under the open edit row.
       await a.page.waitForTimeout(16000);
       await a.page.getByRole('button', { name: 'Save', exact: true }).click();
+      await onlyThisOutlet(a.page);
       await waitFor(() => a.dialogs.length === 1, 'the refusal message');
       assert.deepEqual(a.writes, [{ device_id: 'pdu3', port: '1', label: 'OPT31-A', expected: 'OPT31' }]);
       assert.equal(a.dialogs[0].type, 'alert');
@@ -160,6 +167,7 @@ const run = id => !only.length || only.includes(String(id));
       await editButton(s.page, 'PDU 01 outlet 1 (OPT11)').click();
       await s.page.getByLabel('OPT label for PDU 01 outlet 1', { exact: true }).fill('OPT11X');
       await s.page.getByRole('button', { name: 'Save', exact: true }).click();
+      await onlyThisOutlet(s.page);
       await waitFor(() => s.writes.length === 2, 'both renames');
       assert.deepEqual(s.writes, [
         { device_id: 'pdu1', port: '1', label: 'OPT11X', expected: 'OPT11' },
@@ -205,6 +213,7 @@ const run = id => !only.length || only.includes(String(id));
       await editButton(s.page, 'PDU 07 outlet 2 (OPT72)').click();
       await s.page.getByLabel('OPT label for PDU 07 outlet 2', { exact: true }).fill('OPT72X');
       await s.page.getByRole('button', { name: 'Save', exact: true }).click();
+      await onlyThisOutlet(s.page);
       await waitFor(() => s.writes.length === 1, 'the PDU 07 write');
       assert.deepEqual(s.writes[0], { device_id: 'pdu7', port: '2', label: 'OPT72X', expected: 'OPT72' });
       await editButton(s.page, 'PDU 07 outlet 2 (OPT72X)').waitFor();
@@ -223,6 +232,7 @@ const run = id => !only.length || only.includes(String(id));
       await editButton(s.page, 'PDU 01 outlet 3 (OPT13)').click();
       await s.page.getByLabel('OPT label for PDU 01 outlet 3', { exact: true }).fill('OPT13X');
       await s.page.getByRole('button', { name: 'Save', exact: true }).click();
+      await onlyThisOutlet(s.page);
       await waitFor(() => s.dialogs.length === 1, 'the partial-save message');
       assert.equal(s.dialogs[0].message, 'PDU 01 outlet 3 was updated, but KVM 01 port 3 could not be updated: Fixture: KVM write failed.');
       assert.deepEqual(s.writes, [{ device_id: 'pdu1', port: '3', label: 'OPT13X', expected: 'OPT13' }], 'the KVM write never reached the server');

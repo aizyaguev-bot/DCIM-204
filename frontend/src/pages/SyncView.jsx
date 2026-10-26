@@ -1,5 +1,7 @@
 import { useState, useMemo } from "react";
-import { api } from "../api/client";
+import { api, errorMessage } from "../api/client";
+import { useRenameEverywhere } from "../components/RenameEverywhereDialog";
+import { chooseRenames, knownIdentities, renameCandidates } from "../api/renameEverywhere.js";
 import {useAccounts} from "../accounts";
 import { syncClearPlan, clearPorts, clearFailureText, serverIdentity } from "../api/locations";
 import SshButton from "../components/SshButton";
@@ -85,6 +87,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
   const [clearing, setClearing] = useState(null); // editKey of the row being cleared
   const [search,  setSearch]  = useState("");
   const [filter,  setFilter]  = useState("all"); // "all" | "assigned" | "empty"
+  const renameAsk = useRenameEverywhere("outlet");   // "Rename OPTN45 to OPTN46?" before a server rename is saved
 
   const pdus = useMemo(() => devices.filter(d => d.kind === "pdu"), [devices]);
   const kvms = useMemo(() => devices.filter(d => d.kind === "kvm"), [devices]);
@@ -136,6 +139,24 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
     if (!writes.length) { setEditing(null); return; }
     setSaving(true);
     try {
+      // A server renamed to a NEW name (its KVM link unchanged) may take its other feed, KVM port, rack position,
+      // monitor and owner along: previewed and asked before any write. An existing name or a default name is not asked.
+      const shown = [...allRows.map(r => r.label), ...Object.values(kvmStatuses || {}).flatMap(s => (s?.ports || []).map(p => p.label))];
+      const groups = syncKvmChanged(row, draft) ? []
+        : renameCandidates([{ port: String(row.outlet_number), before: oldLabel, after: newLabel }], knownIdentities(devices, shown));
+      const chosen = await chooseRenames(groups, g => api.renameOpt(g.old_name, g.new_name, { dryRun: true }), renameAsk.ask);
+      if (chosen === null) return;   // Cancel: nothing written, the row stays open
+      if (chosen.length) {
+        const { group, preview } = chosen[0];
+        try {
+          await api.renameOpt(group.old_name, group.new_name, { planRevision: preview.plan_revision });
+          setEditing(null);
+        } catch (e) {
+          alert(`Rename failed: ${errorMessage(e)}`);
+        }
+        try { await onChanged?.(); } catch {}
+        return;
+      }
       const { done, failed } = await runSyncWrites(writes, api.setDirectLabel);
       if (failed) {
         // After a partial save, or a port changed in another session (409), the draft no longer matches what is
@@ -325,6 +346,7 @@ export default function SyncView({ devices, pduStatuses, kvmStatuses, onChanged 
           </tbody>
         </table>
       </div>
+      {renameAsk.dialog}
     </div>
   );
 }

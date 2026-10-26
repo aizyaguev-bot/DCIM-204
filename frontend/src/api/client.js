@@ -29,7 +29,10 @@ export const api = {
   updateDevice: (id, d)       => req("PUT",    `/api/devices/${id}`, d),
   // revision: labels_revision of the device the label map was built from; a stale one gets 409.
   updateLabels: (id, labels, revision) => req("PATCH", `/api/devices/${id}/labels`, labels, revision ? { "If-Match": revision } : undefined),
-  renameOpt:   (oldName, newName) => req("POST", "/api/devices/rename-opt", { old_name: oldName, new_name: newName }),
+  // Rename a server everywhere. { dryRun: true } previews it (plan_revision included); { planRevision } applies only
+  // if nothing changed since that preview (else 409).
+  renameOpt:   (oldName, newName, { dryRun, planRevision } = {}) => req("POST", "/api/devices/rename-opt", {
+    old_name: oldName, new_name: newName, ...(dryRun ? { dry_run: true } : {}), ...(planRevision ? { plan_revision: planRevision } : {}) }),
   deleteDevice: (id)          => req("DELETE", `/api/devices/${id}`),
   getSyncMap:   ()             => req("GET",    "/api/devices/sync-map"),
   getConnections: ()          => req("GET",    "/api/devices/connections"),

@@ -27,15 +27,17 @@ async def _one_label_writer():
         yield
 
 
-async def _rename_monitor_and_owner(db, old_name, new_name):
-    """Keep stable monitor IDs/history and owner assignments across inventory renames."""
+async def _rename_monitor_and_owner(db, old_name, new_name, apply=True):
+    """Keep stable monitor IDs/history and owner assignments across inventory renames. Returns what a rename changes
+    there ({"monitor": {before, after, host} | None, "owner": {name, before, after} | None}); writes only when apply."""
     from ..models import AssetOwner, PingTarget
     from ..ping_monitor import server_identity
     from ..engineers import owner_map
     old, new = server_identity(old_name), server_identity(new_name)
     if not old or not new:
-        return
+        return {"monitor": None, "owner": None}
     target = await db.scalar(select(PingTarget).where(PingTarget.source_key == "server:" + old[0]))
+    owner = None
     if old[0] != new[0]:
         collision = await db.scalar(select(PingTarget).where(PingTarget.source_key == "server:" + new[0]))
         if collision:
@@ -43,8 +45,10 @@ async def _rename_monitor_and_owner(db, old_name, new_name):
         owners = await owner_map(db)
         if new[0] in owners:
             raise HTTPException(409, "This server name already has an owner. Choose a different name.")
+        if old[0] in owners:
+            owner = {"name": owners[old[0]], "before": old[1], "after": new[1]}
         assignment = await db.get(AssetOwner, old[0])
-        if assignment or old[0] in owners:
+        if apply and (assignment or old[0] in owners):
             destination = await db.get(AssetOwner, new[0])
             if destination is None:
                 destination = AssetOwner(asset_key=new[0]); db.add(destination)
@@ -54,53 +58,63 @@ async def _rename_monitor_and_owner(db, old_name, new_name):
                 assignment = AssetOwner(asset_key=old[0]); db.add(assignment)
             # Tombstone prevents the old JSON fallback from resurrecting an owner.
             assignment.engineer_id, assignment.legacy_name = None, ""
-    if target:
+    monitor = None
+    if target and (target.source_key != "server:" + new[0] or target.name != new[1]):
+        monitor = {"before": target.name, "after": new[1], "host": target.host}
+    if apply and monitor:
         target.source_key, target.name = "server:" + new[0], new[1]
         target.revision += 1  # Ignore a probe still in flight for the old identity.
+    return {"monitor": monitor, "owner": owner}
 
 
-def _rename_server_ids_in_file(path: pathlib.Path, id_renames: dict[str, str]) -> None:
-    """Rename server IDs inside rack_positions / rack_slots / switch_assignments / rack_overrides JSON files,
-    with the same per-file lock and atomic writer as their PUT endpoints."""
-    if path.exists():
-        with inventory_store.locked_file(path, inventory_store.LAYOUT_SAVE_FAILED):
-            _rename_server_ids_locked(path, id_renames)
+def _renamed_ids(fname: str, data, id_renames: dict[str, str]):
+    """(data with the server ids renamed, changed) for one layout file: rack_positions {rack: [id]}, rack_slots
+    {rack: {id: U}}, switch_assignments / rack_overrides {id: value}. Entries of an unexpected shape stay as they are."""
+    if not isinstance(data, dict):
+        return data, False
+
+    def new(sid):
+        return id_renames.get(sid, sid) if isinstance(sid, str) else sid
+
+    if fname == "rack_positions.json":
+        out = {rack: [new(s) for s in ids] if isinstance(ids, list) else ids for rack, ids in data.items()}
+    elif fname == "rack_slots.json":
+        out = {rack: {new(k): v for k, v in slots.items()} if isinstance(slots, dict) else slots
+               for rack, slots in data.items()}
+    else:
+        out = {new(k): v for k, v in data.items()}
+    return out, out != data
 
 
-def _rename_server_ids_locked(path: pathlib.Path, id_renames: dict[str, str]) -> None:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+def _add_slot_pins(slots, pins) -> bool:
+    """In place: rack_slots entries for `pins` ({rack: {id: U}}) where none is saved yet. True when one was added."""
+    added = False
+    for rack in sorted(pins):
+        entries = slots.setdefault(rack, {})
+        if isinstance(entries, dict):
+            for sid, u in sorted(pins[rack].items()):
+                if entries.get(sid) is None:
+                    entries[sid] = u
+                    added = True
+    return added
+
+
+def _rename_server_ids_in_file(path: pathlib.Path, id_renames: dict[str, str], pins=None) -> None:
+    """Rename server IDs inside rack_positions / rack_slots / switch_assignments / rack_overrides JSON files (and pin
+    rack_slots U numbers), with the same per-file lock and atomic writer as their PUT endpoints. An unreadable file
+    is never overwritten."""
+    if not path.exists() and not pins:
         return
-
-    changed = False
-    name = path.name
-
-    if name == "rack_positions.json":
-        # { rack: [server_id, ...] }
-        for rack, ids in data.items():
-            new_ids = [id_renames.get(sid, sid) for sid in ids]
-            if new_ids != ids:
-                data[rack] = new_ids
-                changed = True
-
-    elif name == "rack_slots.json":
-        # { rack: { server_id: u_slot } }
-        for rack, slots in data.items():
-            new_slots = {id_renames.get(k, k): v for k, v in slots.items()}
-            if new_slots != slots:
-                data[rack] = new_slots
-                changed = True
-
-    elif name in ("switch_assignments.json", "rack_overrides.json"):
-        # { server_id: { switch, port } } / { server_id: rack }
-        new_data = {id_renames.get(k, k): v for k, v in data.items()}
-        if new_data != data:
-            data = new_data
-            changed = True
-
-    if changed:
-        inventory_store.write_json(path, data)
+    with inventory_store.locked_file(path, inventory_store.LAYOUT_SAVE_FAILED):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            return
+        new_data, changed = _renamed_ids(path.name, data, id_renames)
+        if pins and isinstance(new_data, dict):
+            changed = _add_slot_pins(new_data, pins) or changed
+        if changed:
+            inventory_store.write_json(path, new_data)
 
 
 @router.get("/", response_model=list[DeviceOut])
@@ -374,31 +388,35 @@ async def set_direct_label(body: dict, db: AsyncSession = Depends(get_db), _writ
     return {"ok": True, **names}
 
 
-@router.post("/rename-opt", status_code=200)
-async def rename_opt(body: dict, db: AsyncSession = Depends(get_db), _writer: None = Depends(_one_label_writer)):
-    """Rename a server globally across all PDUs, KVMs, and DCIM position files."""
-    raw_old, raw_new = body.get("old_name"), body.get("new_name")
-    if any(v is not None and not isinstance(v, str) for v in (raw_old, raw_new)):
-        raise HTTPException(status_code=400, detail="old_name and new_name must be text")
-    old_name = (raw_old or "").strip()
-    new_name = (raw_new or "").strip()
-    if not old_name or not new_name:
-        raise HTTPException(status_code=400, detail="old_name and new_name required")
-    if old_name.lower() == new_name.lower():
-        raise HTTPException(status_code=400, detail="Names are identical")
-    old_id, new_id = _identity(old_name), _identity(new_name)
-    if not old_id:
-        # A default port name ("Outlet 5") names no server: renaming it would relabel every cleared port with that
-        # number on every device. Nothing changes and nothing is pushed.
-        return {"ok": True, "updated_devices": [], **name_sync.not_queued(name_sync.PLACEHOLDER_RENAME)}
+_NOT_A_SERVER = '"{}" is not a server name (a default port name or placeholder). Change that port on its own page.'
+_RENAME_EXISTS = "{} already exists — use Locations to swap or move"
+_RENAME_CHANGED = "Changed since the preview. Preview again."
 
-    await _rename_monitor_and_owner(db, old_name, new_name)
+
+async def _plan_rename(db, old_name, new_name):
+    """Everything a rename changes, computed without writing: (plan, devices, new saved labels, id renames, pins).
+    Raises 409 when the new name is already another server (or its monitor / owner)."""
+    old_id, new_id = _identity(old_name), _identity(new_name)
+    whole_server = new_id[0] != old_id[0]
+    devices = sorted((await db.execute(select(Device))).scalars().all(), key=_device_order)
+    saved, readable = {}, set()
+    for dev in devices:
+        saved[dev.id], ok = _saved_labels(dev)
+        if ok:
+            readable.add(dev.id)
+    port_devices = [d for d in devices if d.kind in _PORT_KINDS]
+    shown = {d.id: _effective_labels(d, saved[d.id]) for d in port_devices}
+    layouts, _ = _read_layouts(strict=False)
+    index = _layout_ids(layouts)
+    servers = _all_servers(port_devices, shown, layouts, await _monitor_names(db))
+    if whole_server and (new_id[0] in servers or new_id[0] in index):
+        existing = servers.get(new_id[0], {}).get("name") or new_id[1]
+        raise HTTPException(409, _RENAME_EXISTS.format(existing))
+    people = await _rename_monitor_and_owner(db, old_name, new_name, apply=False)
 
     # The monitor and owner follow the server identity, so a rename to another server renames every port of it
     # ("OPTN45 (PSU1)", "OPTN45 (PSU2)", the KVM port "OPTN45"), each keeping its own feed suffix. The exact name
     # (any case) becomes new_name; within one server (same identity) only the exact name changes.
-    whole_server = new_id is not None and new_id[0] != old_id[0]
-
     def renamed(label):
         if not isinstance(label, str):
             return label
@@ -408,36 +426,122 @@ async def rename_opt(body: dict, db: AsyncSession = Depends(get_db), _writer: No
             return _relabel(label, new_id[1])
         return label
 
-    result = await db.execute(select(Device))
-    updated, changed = [], {}
-    id_renames = {old_name.lower(): new_name.lower()}
-    for dev in result.scalars().all():
-        labels, readable = _saved_labels(dev)
-        if not readable:
-            continue  # unreadable saved labels are never overwritten
-        new_labels = {p: renamed(v) for p, v in labels.items()}
-        if new_labels != labels:
-            dev.labels_json = json.dumps(new_labels)
-            updated.append(dev.name)
-            changed[dev.id] = {p for p in labels if new_labels[p] != labels[p]}
-            for p in changed[dev.id]:
-                id_renames.setdefault(labels[p].strip().lower(), new_labels[p].lower())
+    new_saved, changes, id_renames = {}, [], {old_name.lower(): new_name.lower()}
+    for dev in devices:
+        labels = saved[dev.id]
+        # Unreadable saved labels are never overwritten.
+        new_saved[dev.id] = {p: renamed(v) for p, v in labels.items()} if dev.id in readable else labels
+        for port in sorted(labels, key=_port_order):
+            before, after = labels[port], new_saved[dev.id][port]
+            if before != after:
+                changes.append({"device_id": dev.id, "device_name": dev.name, "kind": dev.kind, "port": port,
+                                "before": before, "after": after})
+                id_renames.setdefault(before.strip().lower(), after.lower())
     if whole_server:
         # Layout keys of this server with no port label left (DCIM keys them by the lower-case port label).
-        layouts, _ = _read_layouts(strict=False)
-        for sid in _layout_ids(layouts).get(old_id[0], ()):
+        for sid in sorted(index.get(old_id[0], ())):
             id_renames.setdefault(sid, _relabel(sid, new_id[1]).lower())
+    after_layouts = {f: _renamed_ids(f, data, id_renames)[0] for f, data in layouts.items()}
 
-    for fname in ("rack_positions.json", "rack_slots.json", "switch_assignments.json", "rack_overrides.json"):
-        _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames)
+    # The DCIM rack view numbers servers without a saved U by name: a new name could reorder them. Where any U would
+    # change, the automatic U numbers of that rack are pinned as they are now (under their new ids).
+    units = _dcim_units(port_devices, shown, layouts)
+    shown_after = {d.id: _effective_labels(d, new_saved[d.id]) for d in port_devices}
+    units_after = _dcim_units(port_devices, shown_after, after_layouts)
+    pins = {}
+    for rack, entries in units.items():
+        after_rack = units_after.get(rack, {})
+        if any(after_rack.get(id_renames.get(k, k), (None,))[0] != u for k, (u, _) in entries.items()):
+            auto = {id_renames.get(k, k): u for k, (u, automatic) in entries.items() if automatic}
+            if auto:
+                pins[rack] = auto
 
+    layout = []
+    for fname in _LAYOUT_FILES:
+        for key, value in sorted(layouts[fname].items(), key=lambda item: str(item[0])):
+            if fname == "rack_slots.json" and isinstance(value, dict):
+                pairs = [(key, k, _slot_value(v)) for k, v in value.items()]
+            elif fname == "rack_positions.json" and isinstance(value, list):
+                pairs = [(key, k, None) for k in value if isinstance(k, str)]
+            elif fname in ("rack_overrides.json", "switch_assignments.json"):
+                pairs = [(value if fname == "rack_overrides.json" and isinstance(value, str) else None, key, None)]
+            else:
+                continue
+            for rack, sid, slot in pairs:
+                if id_renames.get(sid, sid) != sid:
+                    entry = {"file": fname, "rack": rack, "before": sid, "after": id_renames[sid]}
+                    if fname == "rack_slots.json":
+                        entry["slot"] = slot
+                    layout.append(entry)
+    slots_after = after_layouts["rack_slots.json"]
+    for rack in sorted(pins):
+        for sid, u in sorted(pins[rack].items()):
+            if not isinstance(slots_after.get(rack), dict) or slots_after[rack].get(sid) is None:
+                layout.append({"file": "rack_slots.json", "rack": rack, "before": None, "after": sid, "slot": u})
+
+    position = None
+    server = servers.get(old_id[0])
+    if server:
+        found = _position(server, index.get(old_id[0], set()), layouts)
+        if found["rack"] is not None:
+            slot = found["slot"]
+            if slot is None:
+                in_rack = units.get(found["rack"], {})
+                slot = next((in_rack[i][0] for i in _dcim_ids(server) if i in in_rack), None)
+            position = {"rack": found["rack"], "slot": slot}
+    plan = {"old_name": old_name, "new_name": new_name, "changes": changes, "layout": layout, "position": position,
+            **people}
+    plan["plan_revision"] = inventory_store.revision(plan)
+    return plan, devices, new_saved, id_renames, pins
+
+
+@router.post("/rename-opt", status_code=200)
+async def rename_opt(body: dict, db: AsyncSession = Depends(get_db), _writer: None = Depends(_one_label_writer)):
+    """Rename a server everywhere: its PDU outlets and KVM ports (each keeping its feed suffix), its rack layout ids,
+    ping monitor and owner. dry_run returns what would change and a plan_revision; an Apply that sends it back is
+    refused (409) if anything changed since. A name that is already another server, or a default port name, is refused."""
+    raw_old, raw_new = body.get("old_name"), body.get("new_name")
+    if any(v is not None and not isinstance(v, str) for v in (raw_old, raw_new)):
+        raise HTTPException(status_code=400, detail="old_name and new_name must be text")
+    dry_run, expected_plan = body.get("dry_run", False), body.get("plan_revision")
+    if not isinstance(dry_run, bool):
+        raise HTTPException(400, "dry_run must be true or false")
+    if expected_plan is not None and not isinstance(expected_plan, str):
+        raise HTTPException(400, "plan_revision must be the token from the preview")
+    old_name = (raw_old or "").strip()
+    new_name = (raw_new or "").strip()
+    if not old_name or not new_name:
+        raise HTTPException(status_code=400, detail="old_name and new_name required")
+    if len(old_name) > _MAX_NAME or len(new_name) > _MAX_NAME:
+        raise HTTPException(400, "Server names are at most 200 characters.")
+    if old_name.lower() == new_name.lower():
+        raise HTTPException(status_code=400, detail="Names are identical")
+    for name in (old_name, new_name):
+        # A default port name ("Outlet 5") or placeholder names no server: renaming it would relabel every cleared
+        # port with that number on every device, and renaming to it would turn a server into a cleared port.
+        if not _identity(name):
+            raise HTTPException(400, _NOT_A_SERVER.format(name))
+
+    plan, devices, new_saved, id_renames, pins = await _plan_rename(db, old_name, new_name)
+    if dry_run:
+        return {"ok": True, "dry_run": True, **plan}
+    if expected_plan is not None and expected_plan != plan["plan_revision"]:
+        raise HTTPException(409, _RENAME_CHANGED)
+
+    await _rename_monitor_and_owner(db, old_name, new_name)
+    updated, changed, revisions = [], {}, {}
+    for dev in devices:
+        ports = {c["port"] for c in plan["changes"] if c["device_id"] == dev.id}
+        if ports:
+            dev.labels_json = json.dumps(new_saved[dev.id])
+            updated.append(dev.name)
+            changed[dev.id] = ports
+            revisions[dev.id] = inventory_store.revision(new_saved[dev.id])
+    for fname in _LAYOUT_FILES:
+        _rename_server_ids_in_file(_BACKEND_DIR / fname, id_renames, pins if fname == "rack_slots.json" else None)
     await db.commit()
-    # A rename to a default port name ("Outlet 5") is not a server rename: it is never pushed automatically.
-    if new_id:
-        names = await name_sync.queue(changed)
-    else:
-        names = name_sync.not_queued(name_sync.PLACEHOLDER_RENAME)
-    return {"ok": True, "updated_devices": updated, **names}
+    names = await name_sync.queue(changed)
+    return {"ok": True, "updated_devices": updated, "labels_revisions": revisions, **names}
 
 
 # ── Server locations: which PDU outlets / KVM ports / rack slot each server occupies, with an explicit move ──
