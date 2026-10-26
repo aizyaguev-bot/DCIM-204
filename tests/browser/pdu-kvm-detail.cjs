@@ -8,6 +8,7 @@ const PASSWORD = 'test-password-123';
 const ALLOWED_WRITES = [
   /^\/api\/auth\/login$/,
   /^\/api\/devices\/(pdu1|kvm1)\/labels$/,
+  /^\/api\/devices\/rename-opt$/,   // the rename preview (dry run); this check always answers "Only this outlet/port"
   /^\/api\/devices\/kvm1$/,
   /^\/api\/pdus\/pdu1\/outlets\/\d+\/power$/,
   /^\/api\/pdus\/pdu2\/maintenance\/(shutdown|restore)$/,
@@ -53,6 +54,18 @@ const ALLOWED_WRITES = [
     return { status: response.status, body: await response.json().catch(() => null) };
   }, { method, path, body, headers });
   const device = async (page, id) => (await call(page, 'GET', '/api/devices/')).body.find(d => d.id === id);
+  // Typing a new server name over a server asks "Rename X to Y?" (rename-everywhere.cjs covers it): answer each one with
+  // "Only this outlet/port" until the label PATCH is sent, so this check keeps testing the single-device save.
+  async function onlyThisPort(page, response) {
+    let done = false;
+    response.then(() => { done = true; }, () => { done = true; });
+    while (!done) {
+      const only = page.locator('[data-dialog="rename-everywhere"] [data-choice="only"]');
+      if (await only.count()) await only.click().catch(() => {});
+      else await page.waitForTimeout(100);
+    }
+    return response;
+  }
 
   async function openDetail(page, tab, name) {
     await page.goto(origin + '/?tab=' + tab);
@@ -73,7 +86,7 @@ const ALLOWED_WRITES = [
     assert.equal(changed.status, 200, 'the other session saves first');
     const conflict = page.waitForResponse(r => new URL(r.url()).pathname === `/api/devices/${id}/labels` && r.request().method() === 'PATCH');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
-    assert.equal((await conflict).status(), 409);
+    assert.equal((await onlyThisPort(page, conflict)).status(), 409);
     await page.waitForFunction(({ selector, value }) => document.querySelector(selector)?.value === value,
       { selector: `input[aria-label="Label for ${noun} ${theirsPort}"]`, value: theirs }, { timeout: 5000 });
     for (const [port, text] of Object.entries(typed)) assert.equal(await input(port).inputValue(), text, `${noun} ${port} keeps the typed text`);
@@ -83,7 +96,7 @@ const ALLOWED_WRITES = [
     assert.equal(await page.getByRole('alert').filter({ hasText: 'Labels were not saved' }).count(), 0);
     const saved = page.waitForResponse(r => new URL(r.url()).pathname === `/api/devices/${id}/labels` && r.request().method() === 'PATCH');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
-    assert.equal((await saved).status(), 200, 'the second Save is accepted');
+    assert.equal((await onlyThisPort(page, saved)).status(), 200, 'the second Save is accepted');
     await edit.waitFor();
     const after = await device(other, id);
     for (const [port, text] of Object.entries(typed)) assert.equal(after.labels[port], text);

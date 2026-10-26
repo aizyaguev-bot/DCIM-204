@@ -274,7 +274,7 @@ async def test_rename_opt_validates_both_names(lab, body, detail):
 
 
 @pytest.mark.parametrize("new_name,detail", [
-    ("OPTN45", "This server name already has a monitor. Choose a different name."),
+    ("OPTN45", "OPTN45 already exists — use Locations to swap or move"),                    # ports + monitor
     ("optn99", "This server name already has an owner. Choose a different name."),            # owner row
     ("optn98 (PSU1)", "This server name already has an owner. Choose a different name."),     # legacy owners file
 ])
@@ -302,11 +302,8 @@ async def test_rename_opt_carries_monitor_owner_labels_and_every_layout_file(lab
 
     r = await rename(lab, "WEB-1", "web-2")   # matched without regard to case
     assert r.status_code == 200, r.text
-    # v2.40 device name sync (ea3bd90, devices.py rename_opt -> name_sync.queue) adds "device_names" (and maybe
-    # "device_names_reason") to the answer; the rename result itself is unchanged.
-    body = r.json()
-    assert {k: body[k] for k in ("ok", "updated_devices")} == {"ok": True, "updated_devices": ["PDU-A"]}
-    assert "device_names" in body
+    assert r.json() == {"ok": True, "updated_devices": ["PDU-A"], "device_names": "off",   # name sync is off in tests
+                        "labels_revisions": {"pdu-a": inventory_store.revision({**LABELS["pdu-a"], "3": "web-2"})}}
     assert await saved_labels(lab.db) == {**LABELS, "pdu-a": {**LABELS["pdu-a"], "3": "web-2"}}
     targets, owners = await monitors_and_owners(lab.db)
     # Same monitor id and host; a new revision so a probe still in flight for the old name is ignored.

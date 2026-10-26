@@ -214,11 +214,10 @@ async def test_rename_opt_queues_the_renamed_ports_and_never_writes_the_kvm(env)
     assert env.state.drivers["kvm-a"].writes == []
 
 
-async def test_rename_of_a_default_port_name_is_not_pushed(env):
+async def test_rename_of_a_default_port_name_is_refused_and_not_pushed(env):
     r = await env.client.post("/api/devices/rename-opt", json={"old_name": "Outlet 5", "new_name": "optn55"})
-    assert r.status_code == 200, r.text
-    assert r.json()["device_names"] == "manual"
-    assert r.json()["device_names_reason"] == name_sync.PLACEHOLDER_RENAME
+    assert r.status_code == 400, r.text
+    assert "not a server name" in r.json()["detail"]
     assert env.state.calls == [] and await rows(env) == {}
 
 
