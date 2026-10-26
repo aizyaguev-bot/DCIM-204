@@ -2,6 +2,34 @@
 
 ---
 
+## v2.43.1 — 2026-10-26 — Rename a server everywhere at once, 20 more fixes
+
+### Added
+- **Rename a server everywhere at once.** Changing a server's name on the PDU, KVM or
+  PDU–KVM mapping page now asks "Rename OPT45 to OPT46?" and shows exactly what
+  follows the name: every PDU outlet (both feeds), the KVM port, the rack position,
+  the ping monitor and the owner. "Rename everywhere" keeps every port and position
+  and changes only the name (also on the PDU itself); "Only this outlet/port" changes
+  one port. Typing the name of another existing server still assigns that server to
+  the port without asking.
+
+### Fixed
+- Renaming one feed of a server renames all its feeds, its monitor, owner and rack
+  position together; a default port name can no longer be "renamed" on every PDU.
+- A PDU's status no longer shows the previous PDU for a while after its address
+  changes; one malformed inlet reading no longer marks the whole PDU unreachable.
+- A KVM whose REST address answers with a web page, or reports one port without a
+  name, is no longer shown as unreachable.
+- KVM console pages: redirects with a body, "303 See Other", stylesheet links and
+  Latin-1 pages now work through the site.
+- Equipment and layout saves refuse NaN/Infinity instead of breaking the page; a
+  forced password change cannot reuse the temporary password; the alert state no
+  longer stores a hash of the device password; a PXE install that may already have
+  started cannot be cancelled into a second install; and smaller fixes in the CSV
+  export, monitoring and the rack view.
+
+---
+
 ## v2.43.0 — 2026-10-26 — New 3D Digital Twin, one row per server, SSH keys from the VM's SSH config
 
 ### Added
