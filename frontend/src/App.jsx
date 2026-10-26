@@ -36,8 +36,9 @@ function linkedAdminSection(search) {
   return ADMIN_SECTIONS.includes(section) ? section : "devices";
 }
 import { dashboardStats } from "./dashboardStats";
+import LabDisplay from "./pages/LabDisplay";
 
-export default function App() {
+function LabManagerApp() {
   const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
   // The lab assistant appears only when a language model is connected or assistant actions are on.
   const assistantShown = useAssistantUseful();
@@ -699,6 +700,19 @@ export default function App() {
       {!sshPage && <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>}
     </div>
   );
+}
+
+// ?tab=display: the read-only lab display for the wall TV at the lab entrance. It replaces the whole page (no header,
+// footer, assistant panel, What's new or dialogs) and reads its own data, so the site's polling does not run behind it.
+const displayRequested = () => new URLSearchParams(window.location.search).get("tab") === "display";
+export default function App() {
+  const [display, setDisplay] = useState(displayRequested);
+  useEffect(() => {
+    const followUrl = () => setDisplay(displayRequested());
+    window.addEventListener("popstate", followUrl);
+    return () => window.removeEventListener("popstate", followUrl);
+  }, []);
+  return display ? <LabDisplay /> : <LabManagerApp />;
 }
 
 // A PDU or KVM detail page whose device was removed, here or in another session.
