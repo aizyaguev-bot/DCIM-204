@@ -1,5 +1,7 @@
 import json
 from sqlalchemy import String, Integer, Boolean, Float, ForeignKey, UniqueConstraint
+from sqlalchemy import event as sa_event, inspect as sa_inspect
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -39,6 +41,30 @@ class UserSession(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     csrf_token: Mapped[str] = mapped_column(String)
     expires_at: Mapped[float] = mapped_column(Float, index=True)
+    # "Keep me signed in": expires_at slides forward while the session is used; renewed_at is the last renewal.
+    remember: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    renewed_at: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+
+
+# Fixed identifiers and SQL only; nothing user-supplied reaches this DDL.
+_USER_SESSION_COLUMNS = {"remember": "BOOLEAN DEFAULT 0 NOT NULL", "renewed_at": "FLOAT DEFAULT 0 NOT NULL"}
+
+
+@sa_event.listens_for(Base.metadata, "after_create")
+def _add_user_session_columns(target, connection, **kwargs):
+    """create_all never alters an existing table: add the session columns newer releases introduced, in place.
+    Sessions from before the upgrade read as not remembered and keep their original expiry."""
+    inspector = sa_inspect(connection)
+    if not inspector.has_table(UserSession.__tablename__):
+        return
+    columns = {column["name"] for column in inspector.get_columns(UserSession.__tablename__)}
+    for name, ddl in _USER_SESSION_COLUMNS.items():
+        if name not in columns:
+            try:
+                connection.exec_driver_sql(f"ALTER TABLE user_sessions ADD COLUMN {name} {ddl}")
+            except OperationalError as error:  # another worker added it first
+                if "duplicate column" not in str(error).lower():
+                    raise
 
 
 class AuthThrottle(Base):

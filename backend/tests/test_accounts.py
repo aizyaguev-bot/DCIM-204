@@ -68,6 +68,7 @@ async def test_bootstrap_login_cookie_logout_and_expiry(setup):
         assert (await c.get("/api/rack-items",auth=("admin",PASSWORD))).status_code == 401
         r = await sign_in(c)
         assert "HttpOnly" in r.headers["set-cookie"] and "SameSite=lax" in r.headers["set-cookie"]
+        assert "Max-Age=43200" in r.headers["set-cookie"]   # no "Keep me signed in": ACCOUNTS_SESSION_HOURS
         assert "password" not in r.text.replace("must_change_password", "")
         assert (await c.get("/api/rack-items")).status_code == 200
         assert (await c.post("/api/auth/logout")).status_code == 200

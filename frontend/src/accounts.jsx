@@ -206,7 +206,7 @@ const ENDED_TEXT = {
 function SignIn({ ended = null }) {
   const {accept,registration_enabled,setup_required} = useAccounts();
   const [signup,setSignup] = useState(false);
-  const [form,setForm] = useState(() => ({name:"",username:ended?.user?.username || "",password:"",confirm:""}));
+  const [form,setForm] = useState(() => ({name:"",username:ended?.user?.username || "",password:"",confirm:"",remember:true}));
   const [error,setError] = useState("");
   const [busy,setBusy] = useState(false);
   const overlay = useRef(null);
@@ -224,7 +224,7 @@ function SignIn({ ended = null }) {
     observer.observe(document.body, {childList:true});
     return () => { observer.disconnect(); marked.forEach(node => node.removeAttribute("inert")); };
   }, []);
-  const change = e => setForm({...form,[e.target.name]:e.target.value});
+  const change = e => setForm({...form,[e.target.name]:e.target.type === "checkbox" ? e.target.checked : e.target.value});
   async function submit(e) {
     e.preventDefault();setError("");
     if (signup && form.password !== form.confirm) return setError("Passwords do not match.");
@@ -243,8 +243,10 @@ function SignIn({ ended = null }) {
       <label>Username<input name="username" value={form.username} onChange={change} autoComplete="username" required maxLength={32} autoFocus={!ended?.user}/></label>
       <label>Password<input name="password" type="password" value={form.password} onChange={change} autoComplete={signup?"new-password":"current-password"} required minLength={signup?8:1} maxLength={256} autoFocus={!!ended?.user}/></label>
       {signup && <label>Confirm password<input name="confirm" type="password" value={form.confirm} onChange={change} autoComplete="new-password" required minLength={8} maxLength={256}/></label>}
+      <label className="account-check"><input name="remember" type="checkbox" checked={form.remember} onChange={change}/>Keep me signed in</label>
       {error && <p role="alert" className="account-error">{error}</p>}
       <button className="account-primary" disabled={busy}>{busy ? "Please wait…" : signup ? "Create account" : "Sign in"}</button>
+      <p className="text-xs text-zinc-600">{form.remember ? "This browser stays signed in until you sign out. Clear the box on a shared computer." : "You will be signed out after a few hours."}</p>
       <p className="text-xs text-zinc-600">{signup ? "New accounts start as Viewer. An admin can change your role." : "Forgot your password? Ask a lab admin to reset it in Admin → Users."}</p>
     </form></>}
   </div>;
