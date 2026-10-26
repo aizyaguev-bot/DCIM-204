@@ -7,18 +7,18 @@ import { useSshStatus } from "../components/SshButton";
 import {
   sshApi, terminalUrl, currentCsrf, authMessage, inputMessages, resizeMessage, parseServerMessage, safeLinkUrl, createOutputFlow,
   connectionReducer, INITIAL_CONNECTION, PHASE_LABEL, BUSY_PHASES, ADMIN_SSH_URL, httpErrorText, sshAvailability, hostKeyState,
-  sshStatusStore, shouldAutoConnect, installRowFor, copyText, NO_KEY_TEXT, classifyReason, KEY_SOURCE_TEXT, normalizeKeySource,
+  sshStatusStore, shouldAutoConnect, installRowFor, copyText, NO_KEY_TEXT, classifyReason, KEY_SOURCE_TEXT, keySourceOf,
 } from "../api/ssh";
 
 const THEME = { background: "#0c0c0c", foreground: "#d4d4d4", cursor: "#76b900", cursorAccent: "#0c0c0c", selectionBackground: "#3f6a14" };
 const DOT = { idle: "bg-zinc-600", connected: "bg-nv-400", closed: "bg-zinc-600" };
 const BUSY_DOT = "bg-amber-400 animate-pulse";
 const RECONNECT_MARK = "\x1b[?1049l\x1b[!p\r\n\x1b[90m[New session]\x1b[0m\r\n";   // fixed text only; never server data
-const ADMIN_LINK_KINDS = ["host-key-changed", "not-allowed", "no-key", "code-4409", "denied"];
+const ADMIN_LINK_KINDS = ["host-key-changed", "not-allowed", "no-key", "code-4409", "denied", "system-unavailable"];
 
 // Full-height browser terminal for one known server (/?tab=ssh&server=<key>). No private key or password ever
-// reaches the browser: the backend signs in with the VM account's SSH keys and/or the Lab Manager key (Admin → SSH)
-// and streams only terminal text. When SSH is available for the server the page connects at once; after a close
+// reaches the browser: the backend signs in with the VM's own ssh command (the default), the VM account's SSH key
+// files and/or the Lab Manager key (Admin → SSH) and streams only terminal text. When SSH is available for the server the page connects at once; after a close
 // the person reconnects with Reconnect. Lab Manager never runs anything on the server by itself.
 export default function SshTerminal({ serverKey, onExit }) {
   const { canOperate, canAdmin, mode } = useAccounts();
@@ -44,7 +44,8 @@ function TerminalSession({ serverKey, onExit, canAdmin, accountMode }) {
     ? sshAvailability({ status: status.data, name: server?.name || serverKey, accountMode, protocol: window.location.protocol })
     : null;
   const blockedReason = availability && !availability.enabled ? availability.reason : "";
-  const keySource = normalizeKeySource(status.data?.key_source);
+  // A loaded status without key_source means the default ("system"); "" while nothing is loaded.
+  const keySource = keySourceOf(status.data);
   const [conn, dispatch] = useReducer(connectionReducer, INITIAL_CONNECTION);
   const hostRef = useRef(null);
   const termRef = useRef(null);
@@ -192,9 +193,10 @@ function TerminalSession({ serverKey, onExit, canAdmin, accountMode }) {
     return () => { document.title = previous; };
   }, [name]);
 
-  // When the server refused the keys, show this server's Lab Manager key-install command next to the terminal.
+  // When the server refused the keys, show this server's Lab Manager key-install command next to the terminal; not
+  // with the VM's ssh command ("system"), which never offers the Lab Manager key.
   const closedKind = conn.phase === "closed" ? conn.closed?.kind : "";
-  const showInstall = closedKind === "auth-failed" && !!status.data?.key_exists;
+  const showInstall = closedKind === "auth-failed" && keySource !== "system" && !!status.data?.key_exists;
 
   // Keyboard users land on Reconnect after a session ends (unless they are already somewhere else).
   useEffect(() => {
@@ -239,7 +241,7 @@ function TerminalSession({ serverKey, onExit, canAdmin, accountMode }) {
           {target || (statusLoading ? "Loading server details…" : statusError || (server ? "SSH user and host are not shown" : "Server details unavailable"))}
           {target && <span className="text-zinc-600"> · port 22</span>}
           {target && keySource && <span className="text-zinc-600"> · {KEY_SOURCE_TEXT[keySource]}</span>}
-          {keyState.state === "unconfirmed" && <span className="text-amber-300"> · host key not yet confirmed by an Admin</span>}
+          {keyState.state === "unconfirmed" && keySource !== "system" && <span className="text-amber-300"> · host key not yet confirmed by an Admin</span>}
         </p>
       </div>
       <div role="status" aria-live="polite" className="flex items-center gap-2 text-xs text-zinc-300">

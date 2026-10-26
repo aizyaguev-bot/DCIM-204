@@ -7,6 +7,7 @@ from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 import asyncio
 import base64
+import glob
 import errno
 import hashlib
 import importlib
@@ -46,9 +47,14 @@ END_REASONS = frozenset({"remote_closed", "browser_disconnected", "idle_timeout"
                          "service_interrupted", "admin_action", "denied",
                          # Fixed connection-failure reasons shared by the terminal and the audit log.
                          "unreachable", "refused", "auth_failed"})
-# Which keys a terminal offers: "vm" = the VM account's own default keys, then the site key; "site" = only the site key.
-KEY_SOURCES = ("vm", "site")
-DEFAULT_KEY_SOURCE = "vm"
+# How a terminal signs in: "system" = the VM's own OpenSSH `ssh` command in a PTY, exactly as the account running
+# Lab Manager would type it (its ~/.ssh/config, agent, Kerberos tickets and known_hosts); "vm" = the VM account's own
+# key files, then the site key; "site" = only the site key.
+KEY_SOURCES = ("system", "vm", "site")
+DEFAULT_KEY_SOURCE = "system"
+# Stored with every configuration written since "system" exists. A configuration without it predates "system" and
+# is read as "system" with every server allowed; an Admin can still choose "vm" or "site" again, which then stays.
+KEY_SOURCE_VERSION = 2
 # The VM account's default identity files, in the order OpenSSH offers them. Only file names ever leave this module.
 VM_KEY_NAMES = ("id_ed25519", "id_ecdsa", "id_rsa")
 SITE_KEY_NAME = "lab-manager"
@@ -57,6 +63,13 @@ _KEY_TYPE = re.compile(r"[a-z0-9@._+-]{1,64}")
 _KEY_NAMES = frozenset({*VM_KEY_NAMES, SITE_KEY_NAME})
 # ~/.ssh/config is read for its IdentityFile lines only: "config:<file name>" names such a key, never its path.
 VM_CONFIG_NAME = "config"
+# The system-wide client config, read after ~/.ssh/config the way ssh reads it (IdentityFile and Include only).
+SYSTEM_SSH_CONFIG = Path("/etc/ssh/ssh_config")
+MAX_INCLUDE_DEPTH = 8
+MAX_CONFIG_FILES = 32
+# Where an ssh-agent of this account usually listens when the service environment has no SSH_AUTH_SOCK.
+AGENT_RUNTIME_NAMES = ("ssh-agent.socket", "openssh_agent", "ssh-agent", "keyring/ssh", "gcr/ssh",
+                       "gnupg/S.gpg-agent.ssh")
 MAX_VM_CONFIG_BYTES = 256 * 1024
 MAX_CONFIG_KEYS = 16
 _CONFIG_KEY_NAME = re.compile(r"config:[A-Za-z0-9@._+-]{1,57}")
@@ -557,6 +570,42 @@ def _config_mode(info) -> str:
     return ""
 
 
+def _own_socket(path) -> bool:
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISSOCK(info.st_mode) and (os.name == "nt" or info.st_uid == os.getuid())
+
+
+def agent_socket(environ=None) -> str:
+    """The ssh-agent socket of the account running Lab Manager: SSH_AUTH_SOCK when it names a live socket, else
+    the first socket of this account in the usual places (systemd/desktop runtime folder, /tmp/ssh-*/agent.*,
+    newest first). "" when there is none. Only sockets owned by this account are ever used."""
+    environ = os.environ if environ is None else environ
+    configured = environ.get("SSH_AUTH_SOCK", "")
+    if configured and _own_socket(configured):
+        return configured
+    if os.name != "posix":
+        return ""
+    runtime = environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    candidates = [str(Path(runtime) / name) for name in AGENT_RUNTIME_NAMES]
+    with suppress(OSError):
+        found = glob.glob("/tmp/ssh-*/agent.*")[:64]
+        candidates += sorted(found, key=lambda item: os.stat(item).st_mtime if os.path.exists(item) else 0,
+                             reverse=True)
+    return next((path for path in candidates if _own_socket(path)), "")
+
+
+def passphrase_reason(name: str) -> str:
+    base = name.split(":", 1)[-1]
+    if agent_socket():
+        return (f"protected by a passphrase; the ssh-agent may hold {base} - choose \"This VM's ssh command\" in "
+                "Admin \u2192 SSH to use it")
+    return (f"The VM's key {base} needs its passphrase (ssh-agent); install the Lab Manager key once "
+            "(Admin \u2192 SSH) or start Lab Manager with access to the agent")
+
+
 def _load_vm_key(asyncssh, path: Path, name: str):
     """(report row or None, key or None) for one identity file; reasons are fixed texts, never library output."""
     data, reason = _read_vm_file(path, MAX_VM_KEY_BYTES, _key_mode, "too large to be a private key")
@@ -570,7 +619,7 @@ def _load_vm_key(asyncssh, path: Path, name: str):
             encrypted = "passphrase" in str(error).lower()
     del data
     if encrypted:
-        return _skip(name, "protected by a passphrase"), None
+        return _skip(name, passphrase_reason(name)), None
     if key is None:
         return _skip(name, "not a private key Lab Manager can read"), None
     return {"name": name, "type": key_type_of(key), "usable": True, "reason": ""}, key
@@ -708,21 +757,17 @@ def _same_file(path) -> str:
     return os.path.normcase(os.path.normpath(str(path)))
 
 
-def _config_identities(folder: Path, target: dict | None) -> list:
-    """The IdentityFile entries of <folder>/config that apply to `target` ({"host", "name", "user"}), in file order,
-    each file once, at most MAX_CONFIG_KEYS: a path to load or a report row for an entry that cannot be used.
-
-    Lines before the first Host count for every server; a Host block counts when its patterns match the target's
-    saved host or name; Match blocks never count. Every other directive (Include, ProxyCommand, ProxyJump,
-    LocalCommand, IdentityAgent, CertificateFile, Port, User, HostName...) is ignored: never run, followed or used.
-    Without a target (Admin → SSH) every Host block counts and entries naming the server (%h, %r) are left out."""
-    data, reason = _read_vm_file(folder / VM_CONFIG_NAME, MAX_VM_CONFIG_BYTES, _config_mode,
-                                 "too large to be an SSH config")
+def _config_values(path: Path, label: str, base: Path, home: Path, names, active: bool, depth: int, budget: list):
+    """IdentityFile values (and report rows for unusable files) of one ssh config file, in file order. Include is
+    followed for IdentityFile lines only (relative to `base`, ~/ expanded, globs sorted), at most MAX_INCLUDE_DEPTH
+    deep and MAX_CONFIG_FILES files in all; an Include inside an inactive Host block is not followed."""
+    if budget[0] <= 0:
+        return []
+    budget[0] -= 1
+    data, reason = _read_vm_file(path, MAX_VM_CONFIG_BYTES, _config_mode, "too large to be an SSH config")
     if data is None:
-        return [] if reason is None else [_skip(VM_CONFIG_NAME, reason, "VM SSH")]
-    names = None if target is None else [  # A saved host is at most 253 characters; longer names are not matched.
-        value for value in (str(target.get(field) or "").strip() for field in ("host", "name")) if 0 < len(value) <= 255]
-    active, values = True, []
+        return [] if reason is None else [_skip(label, reason, "VM SSH")]
+    values = []
     for line in data.decode("utf-8", "replace").splitlines():
         words = _config_words(line)
         keyword = words[0].lower() if words else ""
@@ -732,9 +777,39 @@ def _config_identities(folder: Path, target: dict | None) -> list:
             active = False
         elif keyword == "identityfile" and active and len(words) == 2:
             values.append(words[1])
+        elif keyword == "include" and active and depth < MAX_INCLUDE_DEPTH:
+            for pattern in words[1:]:
+                if "%" in pattern or "${" in pattern or (pattern.startswith("~") and not pattern.startswith("~/")):
+                    continue
+                pattern = str(home) + pattern[1:] if pattern.startswith("~/") else pattern
+                pattern = pattern if Path(pattern).is_absolute() else str(base / pattern)
+                for included in sorted(glob.glob(pattern))[:MAX_CONFIG_FILES]:
+                    values += _config_values(Path(included), Path(included).name[:64] or "include", base, home,
+                                             names, active, depth + 1, budget)
     del data
+    return values
+
+
+def _config_identities(folder: Path, target: dict | None) -> list:
+    """The IdentityFile entries that apply to `target` ({"host", "name", "user"}), in the order ssh reads them:
+    <folder>/config, then the system-wide /etc/ssh/ssh_config (each with the files their Include lines name); each
+    key file once, at most MAX_CONFIG_KEYS: a path to load or a report row for an entry that cannot be used.
+
+    Lines before the first Host count for every server; a Host block counts when its patterns match the target's
+    saved host or name; Match blocks never count. Every other directive (ProxyCommand, ProxyJump, LocalCommand,
+    IdentityAgent, CertificateFile, Port, User, HostName...) is ignored: never run or used.
+    Without a target (Admin → SSH) every Host block counts and entries naming the server (%h, %r) are left out."""
+    names = None if target is None else [  # A saved host is at most 253 characters; longer names are not matched.
+        value for value in (str(target.get(field) or "").strip() for field in ("host", "name")) if 0 < len(value) <= 255]
+    budget = [MAX_CONFIG_FILES]
+    values = _config_values(folder / VM_CONFIG_NAME, VM_CONFIG_NAME, folder, folder.parent, names, True, 0, budget)
+    values += _config_values(SYSTEM_SSH_CONFIG, SYSTEM_SSH_CONFIG.name, SYSTEM_SSH_CONFIG.parent, folder.parent,
+                             names, True, 0, budget)
     entries, seen = [], set()
     for value in values:
+        if isinstance(value, dict):
+            entries.append(value)
+            continue
         path, reason = _expand_identity(value, folder.parent, target)
         if path is None and not reason:
             continue
@@ -831,6 +906,10 @@ def _config(directory: Path) -> dict:
     # Owner decision: a configuration that never set these allows every server and signs in like the VM's ssh.
     auto_allow = config.get("auto_allow", True)
     key_source = config.get("key_source", DEFAULT_KEY_SOURCE)
+    if config.get("key_source_version") != KEY_SOURCE_VERSION:
+        # Migration (owner decision): every configuration saved before "system" existed moves to the VM's own ssh
+        # command with every lab server allowed; turned-off servers stay turned off.
+        key_source, auto_allow = "system", True
     if type(auto_allow) is not bool or key_source not in KEY_SOURCES:
         raise ValueError("Invalid SSH configuration")
     return {"default_user": default, "per_server_user": overrides, "targets": approved, "auto_allow": auto_allow,
@@ -939,7 +1018,7 @@ def write_config(default_user: str, per_server_user: dict, targets: dict,
         config["denied_hosts"] = {key: host for key, host in config["denied_hosts"].items() if key in config["denied"]}
         if not config["auto_allow"]:
             config["auto_skipped"], config["auto_hosts"] = {}, {}
-        _write(directory / "config.json", _json_bytes(config))
+        _write(directory / "config.json", _json_bytes({**config, "key_source_version": KEY_SOURCE_VERSION}))
     return config
 
 

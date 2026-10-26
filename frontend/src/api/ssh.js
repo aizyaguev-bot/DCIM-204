@@ -214,6 +214,10 @@ export function classifyReason(reason) {
   if (!text) return "";
   const token = text.trim().toLowerCase();
   if (Object.hasOwn(FAILURE_REASONS, token)) return FAILURE_REASONS[token];
+  // Key source "system" chosen but the VM's own ssh command cannot run (close code 4503); before "not installed".
+  if (/ssh command is not available/i.test(text)) return "system-unavailable";
+  // The VM's ssh command's lab-network guard (close code 4403).
+  if (/outside the lab networks/i.test(text)) return "outside-networks";
   // "No SSH key is available: ..." (key source "vm": no usable VM account key and no Lab Manager key).
   if (/^no ssh key is available/i.test(text.trim())) return "no-key";
   if (/host key changed|host key mismatch/i.test(text)) return "host-key-changed";
@@ -248,6 +252,7 @@ export const DISABLED_TEXT = "The SSH terminal is turned off in the Lab Manager 
 export const NO_ACCOUNTS_TEXT = "SSH terminals need user accounts (sign-in) to be enabled on Lab Manager.";
 export const INSECURE_TEXT = "SSH terminals stay off until the owner sets SSH_ALLOW_INSECURE_TRANSPORT=true on the VM: Lab Manager uses plain HTTP, so keystrokes would cross the network unencrypted.";
 export const NO_KEY_TEXT = "Lab Manager has no SSH key yet. An Admin must generate one in Admin → SSH.";
+export const SYSTEM_SSH_UNAVAILABLE_TEXT = "Lab Manager cannot run this VM's ssh command (it needs Linux and the OpenSSH client). An Admin can choose another key source in Admin → SSH.";
 
 const CLOSE_CODES = {
   4400: "The terminal sent a message the server did not accept. Reconnect to start again.",
@@ -259,18 +264,46 @@ const CLOSE_CODES = {
   4503: NOT_INSTALLED_TEXT,
 };
 
-// Which keys Lab Manager offers when it signs in (Admin → SSH): "vm" = the SSH keys of the VM account that runs
-// Lab Manager (~/.ssh/id_ed25519, id_ecdsa, id_rsa), then the Lab Manager key; "site" = only the Lab Manager key.
-export const KEY_SOURCES = ["vm", "site"];
+// How Lab Manager signs in (Admin → SSH): "system" (the default) = the VM's own OpenSSH ssh command, run as the VM
+// account that runs Lab Manager exactly as typing ssh in its shell (its ~/.ssh/config, ssh-agent, Kerberos tickets and
+// known_hosts; the Lab Manager key and host key pins are not used); "vm" = Lab Manager reads that account's key files
+// (~/.ssh/id_ed25519, id_ecdsa, id_rsa and IdentityFile lines), then the Lab Manager key; "site" = only the Lab Manager key.
+export const KEY_SOURCES = ["system", "vm", "site"];
+export const DEFAULT_KEY_SOURCE = "system";
 export const normalizeKeySource = value => KEY_SOURCES.includes(value) ? value : "";
+// A missing or unknown key source is the default ("system").
+const effectiveKeySource = value => normalizeKeySource(value) || DEFAULT_KEY_SOURCE;
+// The option names in Admin → SSH.
+export const KEY_SOURCE_LABELS = {
+  system: "This VM's ssh command (same as typing ssh on the VM)",
+  vm: "VM account key files",
+  site: "Only the Lab Manager key",
+};
+export const KEY_SOURCE_HELP = {
+  system: "Lab Manager runs the VM's own ssh command as the account it runs as, exactly like typing ssh on the VM: it uses that account's ~/.ssh/config, ssh-agent, Kerberos tickets and ~/.ssh/known_hosts. It never asks for a password: a server that wants one refuses the session. The Lab Manager key is not used.",
+  vm: "Lab Manager reads the key files in this VM account's ~/.ssh (id_ed25519, id_ecdsa, id_rsa and IdentityFile lines in ~/.ssh/config), then offers the Lab Manager key. It does not use ssh-agent or passwords.",
+  site: "Lab Manager offers only its own key. Install it on each server with the commands below.",
+};
+// The terminal subtitle and the Admin page's current setting.
 export const KEY_SOURCE_TEXT = {
+  system: "Signs in with this VM's ssh command (same as typing ssh on the VM)",
   vm: "Keys used: this VM account's SSH keys, then the Lab Manager key",
   site: "Keys used: only the Lab Manager key",
 };
-// The Admin's exact settings win over the status copy; "" when this Lab Manager version has no key source setting.
-export const keySourceOf = (status, config) => normalizeKeySource(config?.key_source) || normalizeKeySource(status?.key_source);
+// The Admin's exact settings win over the status copy; a status (or config) without a known key source means the
+// default ("system"). "" only when neither was loaded.
+export function keySourceOf(status, config) {
+  const exact = normalizeKeySource(config?.key_source) || normalizeKeySource(status?.key_source);
+  if (exact) return exact;
+  return (status && typeof status === "object") || (config && typeof config === "object") ? DEFAULT_KEY_SOURCE : "";
+}
+// The VM's ssh command cannot be used (status.system_ssh, Operator+); absent on older backends = not known to fail.
+export const systemSshUnavailable = status => status?.system_ssh?.available === false;
+// The backend's fixed sentence for that, as plain text.
+export const systemSshReason = status =>
+  typeof status?.system_ssh?.reason === "string" ? stripControls(status.system_ssh.reason).trim().slice(0, 400) : "";
 export const VM_NO_KEY_TEXT = "Lab Manager has no SSH key to sign in with: the VM account that runs it has no usable key in ~/.ssh and the Lab Manager key has not been generated. An Admin can generate the Lab Manager key in Admin → SSH.";
-// The keys a refused sign-in tried. A status without key_source is treated as the default ("vm").
+// The keys a refused sign-in tried ("vm" / "site").
 const triedKeys = keySource => normalizeKeySource(keySource) === "site" ? "the Lab Manager key" : "the VM's keys or the Lab Manager key";
 
 // What to show after a terminal closes. `reason` is the server's final status reason (or the close
@@ -279,12 +312,19 @@ export function describeClose({ code, reason, opened, server, user, keySource } 
   const kind = classifyReason(reason) || (code === 4409 ? "host-key-changed" : code === 4503 ? "not-installed" : "");
   const who = server || "this server";
   const account = user && isPosixUser(user) ? user : "the SSH user";
+  const system = effectiveKeySource(keySource) === "system";
   const fixed = {
     "no-answer": ["error", `${who} did not answer. Check that it is powered on and connected to the network.`],
     "port-closed": ["error", `Port 22 on ${who} is closed. Check that the SSH service (sshd) is running on it.`],
-    "auth-failed": ["error", `${who} did not accept ${triedKeys(keySource)} for ${account}. Install the Lab Manager key on ${who} with the command on this page, or check the SSH user in Admin → SSH.`],
+    "auth-failed": ["error", system
+      ? `${who} did not accept the sign-in of this VM's ssh command for ${account}. On the VM, check that ssh to ${who} as ${account} signs in without any prompt when run by the account that runs Lab Manager, or choose another key source in Admin → SSH.`
+      : `${who} did not accept ${triedKeys(keySource)} for ${account}. Install the Lab Manager key on ${who} with the command on this page, or check the SSH user in Admin → SSH.`],
     "denied": ["error", `Lab Manager did not allow this SSH session to ${who}: its address is not allowed (for example it points to the Lab Manager VM or a local address) or SSH is turned off for it. An Admin can check the server in Admin → SSH.`],
-    "host-key-changed": ["error", `The host key of ${who} changed. If the server was reinstalled, an Admin can compare and accept the new key in Admin → SSH, then you can reconnect. If it was not reinstalled, do not connect: someone may be intercepting the connection.`],
+    "host-key-changed": ["error", system
+      ? `The host key of ${who} changed. It no longer matches the key saved for it in ~/.ssh/known_hosts of the VM account that runs Lab Manager. If the server was reinstalled, that account must remove the old line on the VM (ssh-keygen -R with the server's address), then you can reconnect. If it was not reinstalled, do not connect: someone may be intercepting the connection.`
+      : `The host key of ${who} changed. If the server was reinstalled, an Admin can compare and accept the new key in Admin → SSH, then you can reconnect. If it was not reinstalled, do not connect: someone may be intercepting the connection.`],
+    "system-unavailable": ["error", SYSTEM_SSH_UNAVAILABLE_TEXT],
+    "outside-networks": ["error", outsideNetworksText(who)],
     "not-installed": ["error", NOT_INSTALLED_TEXT],
     "no-accounts": ["error", NO_ACCOUNTS_TEXT],
     "insecure": ["error", INSECURE_TEXT],
@@ -303,7 +343,9 @@ export function describeClose({ code, reason, opened, server, user, keySource } 
     "no-key": ["error", normalizeKeySource(keySource) === "site" ? NO_KEY_TEXT : VM_NO_KEY_TEXT],
     "not-found": ["error", CLOSE_CODES[4404]],
     "ended": ["info", "The SSH session ended."],
-    "failed": ["error", `Could not open an SSH session to ${who}. Check that the server is up, that it accepts ${triedKeys(keySource)} for ${account}, and that the SSH user in Admin → SSH is right.`],
+    "failed": ["error", system
+      ? `Could not open an SSH session to ${who}. Check that the server is up, that ssh to ${who} as ${account} works on the VM for the account that runs Lab Manager, and that the SSH user in Admin → SSH is right.`
+      : `Could not open an SSH session to ${who}. Check that the server is up, that it accepts ${triedKeys(keySource)} for ${account}, and that the SSH user in Admin → SSH is right.`],
     "other": ["error", "The terminal connection was refused or closed by Lab Manager."],
   }[kind];
   if (fixed) return { tone: fixed[0], kind, text: fixed[1] };
@@ -450,13 +492,17 @@ export function sshAvailability({ status, error, loading, name, accountMode, pro
   if (status.enabled === false) return { enabled: false, reason: DISABLED_TEXT };
   if (status.installed === false) return { enabled: false, reason: NOT_INSTALLED_TEXT };
   if (transportBlocked(status, protocol)) return { enabled: false, reason: INSECURE_TEXT };
-  // With the VM account's keys ("vm") a terminal can sign in before the Lab Manager key exists.
-  if (!status.key_exists && status.key_source !== "vm") return { enabled: false, reason: NO_KEY_TEXT };
+  // Only "site" needs the Lab Manager key: "system" (the default, also for a status without key_source) runs the VM's
+  // ssh command and "vm" can sign in with the VM account's key files before the Lab Manager key exists.
+  const keySource = keySourceOf(status);
+  if (keySource === "system" && systemSshUnavailable(status)) return { enabled: false, reason: SYSTEM_SSH_UNAVAILABLE_TEXT };
+  if (!status.key_exists && keySource === "site") return { enabled: false, reason: NO_KEY_TEXT };
   const server = findServer(status.servers, name);
   if (!server) return { enabled: false, reason: `Lab Manager does not know a host for ${name} yet.` };
   const label = server.name || name;
   if (server.allowed === false) return { enabled: false, server, reason: notAllowedText(server, label) };
-  if (hostKeyState(server).state === "changed") return { enabled: false, server, reason: `The host key of ${label} changed. An Admin must check and accept the new key in Admin → SSH.` };
+  // With "system" the VM account's known_hosts checks host keys; Lab Manager's pins are not used.
+  if (keySource !== "system" && hostKeyState(server).state === "changed") return { enabled: false, server, reason: `The host key of ${label} changed. An Admin must check and accept the new key in Admin → SSH.` };
   const target = server.user && (server.approved_host || server.host) ? ` as ${server.user}@${server.approved_host || server.host}` : "";
   return { enabled: true, server, reason: `Open an SSH terminal to ${label}${target} (new tab)` };
 }
@@ -489,14 +535,23 @@ export function overridesFromStatus(status) {
 // ─── "Allow every server with an address" (auto_allow) ───────────────────────────────────────────
 // status.servers[].approval: "explicit" (an Admin allowed it), "auto" (allowed by "allow every server"),
 // "denied" (an Admin turned it off; wins over everything), "skipped" (its saved address could not be used),
-// "address_changed" (allowed for an older address) or "none".
+// "address_changed" (allowed for an older address) or "none". With the VM's ssh command ("system") every server is
+// allowed automatically ("auto") unless an Admin turned it off, its address is outside the lab networks ("outside")
+// or the VM cannot find its address ("unresolved").
 export const APPROVAL_LABELS = {
   explicit: "Allowed", auto: "Allowed (every server)", denied: "Turned off", skipped: "No usable address",
   address_changed: "Needs address check", none: "Not allowed",
+  outside: "Outside the lab networks", unresolved: "Address not found",
 };
+// Not allowed automatically because of the server's address (listed in Admin → SSH; the checkbox cannot allow them).
+export const ADDRESS_SKIP_STATES = ["skipped", "outside", "unresolved"];
+export const outsideNetworksText = label => `${label} is outside the lab networks, so Lab Manager does not open SSH to it. The owner can add its network to SSH_ALLOWED_NETWORKS on the VM.`;
 
 // Why the terminal cannot open for a server the status reports as not allowed (fixed sentences only).
 export function notAllowedText(server, label = server?.name || "this server") {
+  // The lab-network guard of the VM's ssh command: fixed sentences.
+  if (server?.approval === "outside") return outsideNetworksText(label);
+  if (server?.approval === "unresolved") return `Lab Manager cannot find an IP address for ${label}. Give ${label} its IP address in Ping Monitor (or fix its DNS name).`;
   // The backend's own sentence (Operator+) is exact, e.g. an alias of a turned-off host or a server the Admin's
   // "Check addresses again" pass has not seen yet; shown as plain text, never as markup.
   const own = typeof server?.not_allowed_reason === "string" ? stripControls(server.not_allowed_reason).trim().slice(0, 400) : "";
@@ -513,10 +568,11 @@ export function notAllowedText(server, label = server?.name || "this server") {
 export const supportsAutoAllow = (status, config) =>
   typeof config?.auto_allow === "boolean" || typeof status?.auto_allow === "boolean";
 
-// Servers the "allow every server" pass left out, with the backend's owner-facing reason (shown as plain text).
-export function skippedServers(status) {
-  if (!status?.auto_allow) return [];
-  return (status.servers || []).filter(s => s?.key && s.approval === "skipped")
+// Servers the "allow every server" pass (or the VM's ssh command's automatic allow: `system`) left out because of their
+// address, with the backend's owner-facing reason (shown as plain text).
+export function skippedServers(status, { system = false } = {}) {
+  if (!status?.auto_allow && !system) return [];
+  return (status?.servers || []).filter(s => s?.key && ADDRESS_SKIP_STATES.includes(s.approval))
     .map(s => ({ key: s.key, name: String(s.name || s.key), reason: typeof s.not_allowed_reason === "string" ? s.not_allowed_reason.slice(0, 400) : "" }));
 }
 
@@ -614,7 +670,8 @@ export const END_REASON_LABELS = {
 export const eventLabel = event => EVENT_LABELS[event] || (event ? String(event) : "Terminal");
 export const endReasonLabel = reason => reason ? END_REASON_LABELS[reason] || String(reason) : "—";
 
-// Which key signed a terminal in (audit: key type and key file name only, never key material or a path).
+// Which key signed a terminal in (audit: key type and key file name only, never key material or a path). Rows of the
+// "system" key source have no key name or type: Lab Manager does not know which key the VM's ssh command used.
 // Key file names, incl. "config:<name>" for IdentityFile keys from the VM account's SSH config (never paths).
 const KEY_TEXT = /^[A-Za-z0-9@._+:-]{1,72}$/;
 export function sessionKeyLabel(row) {
@@ -622,7 +679,7 @@ export function sessionKeyLabel(row) {
   const type = typeof row?.key_type === "string" && KEY_TEXT.test(row.key_type) ? row.key_type : "";
   if (name || type) return [name, type].filter(Boolean).join(" · ");
   const source = normalizeKeySource(row?.key_source);
-  return source === "vm" ? "VM account keys" : source === "site" ? "Lab Manager key" : "—";
+  return source === "system" ? "VM ssh command" : source === "vm" ? "VM account keys" : source === "site" ? "Lab Manager key" : "—";
 }
 
 // The VM account's default keys as Admin → SSH lists them (GET /api/ssh/config `vm_keys`): the key files that exist,

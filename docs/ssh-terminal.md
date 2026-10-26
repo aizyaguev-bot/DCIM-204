@@ -53,16 +53,65 @@ The private key is not encrypted on disk. Three safeguards protect it:
 
 ## 3a. Which keys a terminal uses (Admin → SSH → Keys)
 
-The owner's servers already accept the VM account's own keys: on the VM, `ssh root@server` works without a password. The
-site therefore signs in the same way. Admin → SSH shows the key source in use and a switch:
+The owner's servers already accept the VM account's own sign-in: on the VM, `ssh root@server` works without a password.
+The site therefore signs in the same way. Admin → SSH → **Sign in with** offers three choices:
 
-| Key source | Keys offered, in this order |
+| Key source | How a terminal signs in |
 |---|---|
-| **VM account keys** (`"vm"`, the default) | The key files that `IdentityFile` lines in `~/.ssh/config` name for this server (below), then `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa` of the account running Lab Manager (each one that exists and can be used, and only once), then the Lab Manager key from section 3 |
-| **Lab Manager key only** (`"site"`) | Only the Lab Manager key |
+| **This VM's ssh command (same as typing ssh on the VM)** (`"system"`, the default) | Lab Manager runs the VM's own OpenSSH client (`ssh`, found on `PATH`, or `SSH_CLIENT_PATH`) as the account that runs Lab Manager, inside a terminal (PTY), exactly as that account would in its shell: its `~/.ssh/config` and `/etc/ssh/ssh_config` (with their `Include` files), its key files, its ssh-agent, its Kerberos tickets, host-based sign-in and its `~/.ssh/known_hosts` all work as they do there (section 3b) |
+| **VM account key files** (`"vm"`) | Lab Manager itself reads the key files that `IdentityFile` lines name for this server (section 3c), then `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa` of the account running Lab Manager (each one that exists and can be used, and only once), then the Lab Manager key from section 3 |
+| **Only the Lab Manager key** (`"site"`) | Only the Lab Manager key |
 
-A configuration saved before this setting existed uses **VM account keys**.
+Every configuration saved before **This VM's ssh command** existed now uses it, with every lab server allowed (section
+3b); servers an Admin turned off stay off. An Admin can still choose **VM account key files** or **Only the Lab Manager
+key**, and that choice is kept.
 
+### 3b. This VM's ssh command (`"system"`)
+
+- **Zero clicks.** Every known server is allowed automatically: there is no "Allow every server" or "Check addresses
+  again" step and no host-key confirmation. **SSH works for every lab server automatically; turn a server off in Admin →
+  SSH if needed** (the per-server "turned off" setting, and the same-address rule, work as before).
+- **Only lab networks.** So that an Operator cannot point the site at an arbitrary machine, a server is reached only when
+  every address its saved host resolves to is inside the lab networks: the /24 (IPv4) or /64 (IPv6) around every saved
+  PDU/KVM address and every Ping Monitor server target that is a literal IP, plus any networks listed in the optional
+  setting `SSH_ALLOWED_NETWORKS` (comma-separated CIDRs, for example `SSH_ALLOWED_NETWORKS=10.20.0.0/16,fd00:1::/48`).
+  The networks are recomputed at most every 60 seconds. A server outside them shows **Outside the lab networks (add it
+  to SSH_ALLOWED_NETWORKS)**; a server whose name the VM cannot resolve is not allowed either. Loopback, link-local,
+  multicast and the VM's own addresses stay refused (section 4).
+- **The exact command.** No shell is involved; the arguments are fixed:
+  `ssh -tt -p 22 -o BatchMode=yes -o ConnectTimeout=<SSH_CONNECT_TIMEOUT_SECONDS> -o ServerAliveInterval=30
+  -o StrictHostKeyChecking=accept-new -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes
+  -o PermitLocalCommand=no -o RequestTTY=force -l <user> -- <saved host>`. `BatchMode=yes` means it never asks for a
+  password or passphrase. Agent, X11 and port forwarding are always off. The saved host string is passed after `--`,
+  so the account's `~/.ssh/config` (`HostName`, `ProxyJump`, `IdentityFile`...) applies to it as in the shell.
+- **The environment** of the ssh process is the service's own minus everything else: only `HOME`, `USER`, `LOGNAME`,
+  `PATH`, `LANG`/`LC_*`, `TZ`, `SHELL`, `SSH_AUTH_SOCK`, `KRB5CCNAME`, `KRB5_CONFIG` and `XDG_RUNTIME_DIR` are kept,
+  and `TERM=xterm-256color`. Lab Manager secrets, tokens and passwords never reach it. A service has no login session,
+  so when `SSH_AUTH_SOCK` is not set Lab Manager looks for this account's own running ssh-agent (`$XDG_RUNTIME_DIR` or
+  `/run/user/<uid>`, then `/tmp/ssh-*/agent.*`; sockets owned by this account only). A key that needs its passphrase
+  works only through such an agent.
+- **Host keys** are checked by the VM account's `~/.ssh/known_hosts` (`accept-new`: a new server is added on first
+  connection; a changed key is refused). Admin → SSH shows "Host keys are checked by the VM account's known_hosts"; the
+  site's own pins (sections 5 and 6) do not apply. If a server was reinstalled, remove its old line on the VM as the
+  account that runs Lab Manager: `ssh-keygen -R <server>`.
+- **Errors.** Nothing ssh prints on its own error output is shown or stored. A failure before the session starts (exit
+  status 255) becomes one fixed reason: `auth_failed` (Permission denied), `refused` (Connection refused), `unreachable`
+  (No route to host, Could not resolve hostname, Connection timed out), `host_key_changed` (REMOTE HOST IDENTIFICATION
+  HAS CHANGED, Host key verification failed), `connect_timeout`, or `connection_failed`.
+- **Limits.** The idle timeout, maximum length, session quotas, input rate limit, connection-attempt limit, audit log
+  and Admin "end sessions" apply as for the other key sources. Closing the terminal sends SIGHUP and then SIGKILL to the
+  whole ssh process group and always waits for it.
+- **Linux only.** On a machine without a PTY (Windows development) or without an `ssh` command, the status reports
+  `system_ssh: {"available": false, "reason": ...}` and a terminal closes with "The VM's ssh command is not available -
+  an Admin can choose another key source in Admin -> SSH".
+- **Which account.** It is the account that runs the Lab Manager service. If `ssh root@server` works for you on the VM
+  as a different user, run the same command as the service account to check.
+
+### 3c. VM account key files (`"vm"`)
+
+- A key file protected by a passphrase is listed with the reason "The VM's key <name> needs its passphrase (ssh-agent);
+  install the Lab Manager key once (Admin → SSH) or start Lab Manager with access to the agent" (or, when this account
+  has a running ssh-agent, a pointer to **This VM's ssh command**, which uses it).
 - A VM key protected by a passphrase, unreadable by the service account, readable by other users (the same rule OpenSSH
   applies), or not a private key is skipped. Admin → SSH lists each key file by name with its type and, for a skipped
   file, the reason. The service log records the same reason once per file, with the file name only. The site never asks
@@ -82,8 +131,12 @@ A configuration saved before this setting existed uses **VM account keys**.
     config did not already name; a file that does not exist is left out;
   - each file goes through the same checks as a default key (a regular file, not readable by other users, not
     passphrase-protected, a private key), so an unusable file is skipped with its reason;
-  - every other line has no effect: `Include` is not followed, and `ProxyCommand`, `ProxyJump`, `LocalCommand`,
-    `IdentityAgent`, `CertificateFile`, `HostName`, `Port`, `User` and the rest are never used or run;
+  - `/etc/ssh/ssh_config` is read after `~/.ssh/config`, the way ssh reads it, by the same rules;
+  - `Include` is followed for `IdentityFile` lines only (relative paths from `~/.ssh` for the user config and from
+    `/etc/ssh` for the system config, `~/` expanded, globs such as `ssh_config.d/*.conf` sorted; at most 8 levels and
+    32 files; an `Include` inside a `Host` block that does not match is not followed);
+  - every other line has no effect: `ProxyCommand`, `ProxyJump`, `LocalCommand`, `IdentityAgent`, `CertificateFile`,
+    `HostName`, `Port`, `User` and the rest are never used or run;
   - a config that is writable by other users or owned by another account (OpenSSH refuses it too) is not read; Admin
     → SSH lists it as `config` with the reason, and the default files still work.
 - The ssh-agent, agent forwarding, X11 forwarding, port forwarding, password and keyboard-interactive logins are never
@@ -322,8 +375,9 @@ If pip refuses because a pinned package would have to change, stop there: that c
 ## 10. API summary (for the site's pages)
 
 - `GET /api/ssh/status` (Viewer): `enabled`, `available`, `installed`, `key_exists`, `auto_allow`, and per server
-  `key`, `name`, host-key state, `allowed`, `approval` (`explicit`, `auto`, `denied`, `skipped`, `address_changed` or
-  `none`). Operators also get `default_user`, `key_source`, and per server `host`, `approved_host`, `user` and
+  `key`, `name`, host-key state, `allowed`, `approval` (`explicit`, `auto`, `denied`, `skipped`, `address_changed`,
+  `none`, or with key source `system` also `outside` and `unresolved`). Operators also get `default_user`, `key_source`
+  (`system`, `vm` or `site`), `system_ssh` (`{"available", "reason"}`), and per server `host`, `approved_host`, `user` and
   `not_allowed_reason`. Admins also get `config_revision` (the value for `If-Match`).
 - `GET /api/ssh/config` (Admin): `default_user`, `per_server_user`, `targets`, `denied`, `auto_allow`, `key_source`,
   `auto_skipped`, `auto_hosts` (the saved hosts the last check allowed), `denied_hosts` (the host of each

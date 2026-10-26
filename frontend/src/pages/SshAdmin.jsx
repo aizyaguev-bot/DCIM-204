@@ -6,11 +6,18 @@ import {
   sshApi, sshStatusStore, httpErrorText, formFromStatus, buildConfigPayload, hasOptIn, hostKeyState, transportBlocked, sameHost,
   normalizeSessions, toMillis, formatDuration, formatBytes, eventLabel, endReasonLabel, NOT_INSTALLED_TEXT, DISABLED_TEXT, INSECURE_TEXT,
   supportsAutoAllow, skippedServers, allowChange, APPROVAL_LABELS, KEY_SOURCE_TEXT, keySourceOf, vmKeyRows, sessionKeyLabel, copyText,
+  KEY_SOURCES, KEY_SOURCE_LABELS, KEY_SOURCE_HELP, SYSTEM_SSH_UNAVAILABLE_TEXT, systemSshUnavailable, systemSshReason, ADDRESS_SKIP_STATES,
 } from "../api/ssh";
 
 const inputCls = "h-8 w-full min-w-[120px] bg-zinc-950 border border-zinc-800 rounded px-2 text-xs font-mono text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-nv-400/60 disabled:opacity-60";
 const fmtTime = ms => ms == null ? "—" : new Date(ms).toLocaleString();
 const HOST_KEY_CHECK = "for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf \"$f\"; done";
+const SIGN_IN_KPI = { system: "VM ssh command", vm: "VM account + Lab Manager", site: "Lab Manager only" };
+const KEY_SOURCE_SAVED = {
+  system: "Lab Manager now signs in with this VM's ssh command, like typing ssh on the VM.",
+  vm: "Lab Manager now signs in with this VM account's SSH keys, then the Lab Manager key.",
+  site: "Lab Manager now signs in with the Lab Manager key only.",
+};
 
 // Admin → SSH: which keys Lab Manager signs in with, the Lab Manager key, install/revoke commands, which servers
 // allow SSH ("allow every server with an address" or one by one) and as which user, host key pins, and the session
@@ -79,6 +86,8 @@ export default function SshAdmin() {
   const optIn = hasOptIn(status);
   const keyStates = servers.map(hostKeyState);
   const keySource = keySourceOf(status, config);
+  // With the VM's ssh command the VM account's known_hosts checks host keys; Lab Manager's pins are not used.
+  const systemKeys = keySource === "system";
 
   // Saves one setting on its own (PUT /config with only that field, If-Match = the shown revision). The table
   // form never sends these, so neither can undo the other. A newer revision elsewhere (409/412) reloads the page data.
@@ -174,9 +183,9 @@ export default function SshAdmin() {
       {[["Terminal", !status ? "—" : status.enabled === false ? "Off" : "On"],
         ["SSH support", !status ? "—" : status.installed === false ? "Missing" : "Installed"],
         ["Key", !status ? "—" : status.key_exists ? "Ready" : "None"],
-        ["Sign-in keys", !status ? "—" : keySource === "vm" ? "VM account + Lab Manager" : "Lab Manager only"],
+        ["Sign-in keys", !status ? "—" : SIGN_IN_KPI[keySource] || "—"],
         ["Servers allowed", !status ? "—" : optIn ? `${servers.filter(s => s.allowed).length} / ${servers.length}` : servers.length],
-        ["Host keys to check", status ? keyStates.filter(k => k.state === "unconfirmed" || k.state === "changed").length : "—"]].map(([label, value]) =>
+        ...(systemKeys ? [] : [["Host keys to check", status ? keyStates.filter(k => k.state === "unconfirmed" || k.state === "changed").length : "—"]])].map(([label, value]) =>
         <div key={label}><span>{label}</span><strong>{value}</strong></div>)}
     </div>
     {status?.enabled === false && <p role="alert" className="text-sm text-amber-300 mb-4">{DISABLED_TEXT}</p>}
@@ -184,17 +193,16 @@ export default function SshAdmin() {
     {transportBlocked(status, window.location.protocol) && <p role="alert" className="text-sm text-amber-300 mb-4">{INSECURE_TEXT}</p>}
 
     <KeySourceCard status={status} config={config} source={keySource} canAdmin={canAdmin} setting={setting}
-      onChange={vm => saveSetting("key_source", { key_source: vm ? "vm" : "site" },
-        vm ? "Lab Manager now signs in with this VM account's SSH keys, then the Lab Manager key." : "Lab Manager now signs in with the Lab Manager key only.")} />
+      onSave={value => saveSetting("key_source", { key_source: value }, KEY_SOURCE_SAVED[value])} />
 
     <div className="account-grid mb-4">
-      <KeyCard status={status} keyInfo={keyInfo} canAdmin={canAdmin} onRetry={loadKey}
+      <KeyCard status={status} keyInfo={keyInfo} canAdmin={canAdmin} onRetry={loadKey} unused={systemKeys}
         onGenerate={() => setDialog({ kind: status?.key_exists ? "rotate" : "generate", fingerprint: status?.public_key_fingerprint || keyInfo.data?.fingerprint || "" })} />
       <InstallCard status={status} keyInfo={keyInfo} />
     </div>
 
     <ServersCard status={status} config={config} servers={servers} optIn={optIn} canAdmin={canAdmin} accountMode={mode}
-      setting={setting} onDirtyChange={setFormDirty}
+      setting={setting} onDirtyChange={setFormDirty} systemKeys={systemKeys}
       onAutoAllow={(on, again) => saveSetting("auto_allow", { auto_allow: on },
         !on ? "Only the servers ticked below are allowed now." : again ? "Every server's address was checked again." : "Every server with an address is now allowed.")}
       autoAllowLocked={formDirty}
@@ -249,29 +257,69 @@ function SettingResult({ setting, kind }) {
   return null;
 }
 
-// Which private keys Lab Manager offers when it signs in: the VM account's own keys first (as `ssh root@server` on
-// the VM does), then the Lab Manager key; or only the Lab Manager key.
-function KeySourceCard({ status, config, source, canAdmin, setting, onChange }) {
+// How Lab Manager signs in: the VM's own ssh command (the default, exactly like typing ssh on the VM), the VM account's
+// key files then the Lab Manager key, or only the Lab Manager key. A native radio group: arrow keys only pick an option
+// and nothing is saved until the Admin presses Save (one PUT with key_source alone, If-Match = the shown revision).
+function KeySourceCard({ status, config, source, canAdmin, setting, onSave }) {
+  const [choice, setChoice] = useState(source);
+  const groupRef = useRef(null);
+  const refocus = useRef(false);
+  // The saved value changed (this save, another window or a reload): start again from it.
+  useEffect(() => { setChoice(source); }, [source]);
+  // The Save button is disabled while saving, which drops keyboard focus: put it back on the chosen option.
+  useEffect(() => {
+    if (setting.busy || !refocus.current) return;
+    refocus.current = false;
+    const active = document.activeElement;
+    if (!active || active === document.body) groupRef.current?.querySelector("input:checked")?.focus();
+  }, [setting.busy]);
+  const selected = KEY_SOURCES.includes(choice) ? choice : source;
   const vmKeys = vmKeyRows(config);
   const blocked = !status ? "" : status.installed === false ? NOT_INSTALLED_TEXT : status.enabled === false ? DISABLED_TEXT : "";
+  const systemDown = systemSshUnavailable(status);
+  const systemReason = systemSshReason(status);
+  const saving = setting.busy === "key_source";
+  const locked = !!setting.busy || !status?.config_revision;
+  const dirty = !!source && selected !== source;
   return <section className="account-card mb-4">
-    <header><h2>Sign-in keys</h2><p>The private keys Lab Manager offers when it signs in to a server. They never leave the VM.</p></header>
+    <header><h2>Sign-in keys</h2><p>How Lab Manager signs in to a server. Private keys never leave the VM and no password is ever asked for.</p></header>
     <div className="p-4 space-y-3 text-sm">
-      {!status ? <p className="text-zinc-500">Loading…</p>
-        : !source ? <p className="text-zinc-400">This Lab Manager version signs in with the Lab Manager key only.</p>
+      {!status || !source ? <p className="text-zinc-500">Loading…</p>
         : <>
           <p role="status" className="font-semibold text-white">{KEY_SOURCE_TEXT[source]}</p>
-          <p id="ssh-key-source-help" className="text-xs text-zinc-400">{source === "vm"
-            ? "Lab Manager first offers the SSH keys of the VM account it runs as (~/.ssh/id_ed25519, id_ecdsa, id_rsa: the keys a plain ssh root@server uses on the VM), then its own key. No password is needed where those keys are already accepted."
-            : "Lab Manager offers only its own key. Install it on each server with the commands below."}
-            {" "}It never uses ssh-agent, ~/.ssh/config or passwords, and connects only to allowed servers on port 22.</p>
+          {source === "system" && systemDown && <p role="alert" className="text-xs text-amber-300">
+            {SYSTEM_SSH_UNAVAILABLE_TEXT}{systemReason ? ` Lab Manager reports: ${systemReason}` : ""}</p>}
           {canAdmin
-            ? <Switch checked={source === "vm"} label="Use this VM account's SSH keys" busy={setting.busy === "key_source"}
-                disabled={!!setting.busy || !status.config_revision} describedBy="ssh-key-source-help" onChange={onChange} />
-            : <p className="text-xs text-zinc-500">Only an Admin can change which keys are used.</p>}
+            ? <>
+              <fieldset ref={groupRef} disabled={locked} className="space-y-2 disabled:opacity-80">
+                <legend className="mb-2 text-xs text-zinc-400">Sign in with</legend>
+                {KEY_SOURCES.map(value => <div key={value}
+                  className={`flex items-start gap-3 rounded border p-3 ${selected === value ? "border-nv-400/60 bg-zinc-900" : "border-zinc-800"}`}>
+                  <input id={`ssh-key-source-${value}`} type="radio" name="ssh-key-source" value={value} checked={selected === value}
+                    aria-describedby={`ssh-key-source-${value}-help`} className="mt-0.5 w-4 h-4 shrink-0 accent-[#76b900] cursor-pointer"
+                    onChange={() => setChoice(value)} />
+                  <div className="min-w-0">
+                    <label htmlFor={`ssh-key-source-${value}`} className="font-semibold text-white cursor-pointer">{KEY_SOURCE_LABELS[value]}</label>
+                    {value === source && <span className="ml-2 text-[11px] text-nv-300">In use</span>}
+                    <p id={`ssh-key-source-${value}-help`} className="mt-1 text-xs text-zinc-400">{KEY_SOURCE_HELP[value]}
+                      {value === "system" && systemDown ? ` ${systemReason || SYSTEM_SSH_UNAVAILABLE_TEXT}` : ""}</p>
+                  </div>
+                </div>)}
+              </fieldset>
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" className="account-primary" disabled={!dirty || locked} onClick={() => { refocus.current = true; onSave(choice); }}>
+                  {saving ? "Saving…" : "Save sign-in keys"}</button>
+                {dirty && !saving && <span className="text-xs text-amber-300">Not saved yet: {KEY_SOURCE_LABELS[selected]}</span>}
+              </div>
+            </>
+            : <>
+              <p className="text-xs text-zinc-400"><span className="font-semibold text-zinc-200">{KEY_SOURCE_LABELS[source]}.</span> {KEY_SOURCE_HELP[source]}</p>
+              <p className="text-xs text-zinc-500">Only an Admin can change which keys are used.</p>
+            </>}
+          <p className="text-xs text-zinc-500">Lab Manager connects only to the servers allowed below.</p>
           {blocked && <p className="text-xs text-amber-300">{blocked}</p>}
           <SettingResult setting={setting} kind="key_source" />
-          {vmKeys.length > 0 && <div>
+          {selected === "vm" && vmKeys.length > 0 && <div>
             <div className="text-xs text-zinc-500 mb-1">Keys of this VM account</div>
             <ul className="space-y-1 text-xs">
               {vmKeys.map(k => <li key={k.name} className="flex flex-wrap gap-x-2">
@@ -283,19 +331,20 @@ function KeySourceCard({ status, config, source, canAdmin, setting, onChange }) 
               </li>)}
             </ul>
           </div>}
-          {source === "vm" && config && Array.isArray(config.vm_keys) && vmKeys.every(k => k.usable === false) &&
+          {selected === "vm" && config && Array.isArray(config.vm_keys) && vmKeys.every(k => k.usable === false) &&
             <p className="text-xs text-amber-300">This VM account has no usable default SSH key (~/.ssh/id_ed25519, id_ecdsa or id_rsa without a passphrase), so only the Lab Manager key is offered.</p>}
         </>}
     </div>
   </section>;
 }
 
-function KeyCard({ status, keyInfo, canAdmin, onGenerate, onRetry }) {
+function KeyCard({ status, keyInfo, canAdmin, onGenerate, onRetry, unused }) {
   const exists = !!status?.key_exists;
   const blockedReason = !status ? "" : status.installed === false ? NOT_INSTALLED_TEXT : status.enabled === false ? DISABLED_TEXT : "";
   return <Card title="Lab Manager SSH key" hint="One ed25519 key for all servers. Only the public key is shown here."
     actions={canAdmin && status && <button type="button" className={exists ? "account-secondary text-rose-300" : "account-primary"} disabled={!!blockedReason} onClick={onGenerate}
       title={blockedReason || undefined}>{exists ? "Replace key…" : "Generate key…"}</button>}>
+    {unused && <p className="text-xs text-zinc-400">Not used while Lab Manager signs in with this VM's ssh command (Sign-in keys above).</p>}
     {!status ? <p className="text-zinc-500">Loading…</p>
       : !exists ? <p className="text-zinc-400">{canAdmin ? "No key yet. Generate one, then install its public key on the allowed servers." : "No key yet. An Admin must generate one."}</p>
       : <>
@@ -361,7 +410,9 @@ function InstallCard({ status, keyInfo }) {
   </Card>;
 }
 
-function HostKeyCell({ server, state, canAdmin, onAccept }) {
+function HostKeyCell({ server, state, canAdmin, onAccept, systemKeys }) {
+  // The VM's ssh command checks host keys itself; Lab Manager's pins neither block nor can be accepted.
+  if (systemKeys) return <span className="text-zinc-400">Host keys are checked by the VM account's known_hosts</span>;
   const { state: kind, pinned, offered } = state;
   if (kind === "none") return <span className="text-zinc-500">Not pinned yet (pinned on first connection)</span>;
   if (kind === "changed") return <div className="space-y-1">
@@ -377,24 +428,28 @@ function HostKeyCell({ server, state, canAdmin, onAccept }) {
   </div>;
 }
 
-function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, setting, onAutoAllow, autoAllowLocked, onDirtyChange, onAccept, onSaved }) {
+function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, setting, onAutoAllow, autoAllowLocked, onDirtyChange, onAccept, onSaved, systemKeys }) {
   // Unsaved edits survive status refreshes; rows that appear later start from their saved values.
   const [form, setForm] = useState(null);
   const [errors, setErrors] = useState({});
   const [result, setResult] = useState({});
   const [busy, setBusy] = useState(false);
-  const base = formFromStatus(status, config);
+  // With the VM's ssh command every server is allowed automatically (no "allow every server" click): the table edits
+  // in that mode, where unticking a server turns it off (denied).
+  const systemAuto = !!systemKeys && optIn;
+  const base = formFromStatus(systemAuto && status ? { ...status, auto_allow: true } : status,
+    systemAuto && config ? { ...config, auto_allow: true } : config);
   const view = form || base;
   const entryFor = key => view.servers[key] || base.servers[key] || { allowed: false, approved_host: "", user: "" };
   const dirty = !!form;
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
-  const autoSupported = optIn && supportsAutoAllow(status, config);
+  const autoSupported = optIn && (systemAuto || supportsAutoAllow(status, config));
   const autoMode = autoSupported && !!view.auto_allow;   // the saved mode this form edits in
   const savedAuto = autoSupported && !!base.auto_allow;
-  const skipped = autoSupported ? skippedServers(status) : [];
+  const skipped = autoSupported ? skippedServers(status, { system: systemAuto }) : [];
   const settingBusy = !!setting?.busy;
 
-  function edit(change) { setResult({}); setForm(f => change(f || JSON.parse(JSON.stringify(base)))); }
+  function edit(change) { setResult({}); setForm(f => change(f || { ...JSON.parse(JSON.stringify(base)), system: systemAuto })); }
   function editServer(key, patch) { edit(f => ({ ...f, servers: { ...f.servers, [key]: { ...(f.servers[key] || base.servers[key] || {}), ...patch } } })); }
 
   async function save(e) {
@@ -402,9 +457,11 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, se
     if (!form || busy || settingBusy) return;
     // The table means different things with "allow every server" on or off; if it was switched elsewhere since these
     // edits began, saving them could turn servers off or on by mistake.
-    if (autoSupported && !!form.auto_allow !== !!base.auto_allow) {
+    if (autoSupported && (!!form.auto_allow !== !!base.auto_allow || !!form.system !== systemAuto)) {
       setForm(null); setErrors({});
-      setResult({ error: "“Allow every server with an address” was switched in the meantime, so your table changes were discarded. Review the table and make them again." });
+      setResult({ error: form.system !== systemAuto
+        ? "The sign-in keys were changed in the meantime, so your table changes were discarded. Review the table and make them again."
+        : "“Allow every server with an address” was switched in the meantime, so your table changes were discarded. Review the table and make them again." });
       return;
     }
     const { ok, errors: found, payload } = buildConfigPayload(form, servers, { optIn, autoAllow: autoSupported ? !!form.auto_allow : undefined });
@@ -430,10 +487,17 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, se
   return <section className="account-card mb-4">
     <header>
       <h2>Servers</h2>
-      <p>{optIn ? "SSH works only for servers an Admin allows, to the server's saved address, on port 22." : "Lab Manager connects only to known servers, on port 22."} A blank user uses the default.</p>
+      <p>{systemAuto ? "Lab Manager connects to each server's saved address, on port 22." : optIn ? "SSH works only for servers an Admin allows, to the server's saved address, on port 22." : "Lab Manager connects only to known servers, on port 22."} A blank user uses the default.</p>
     </header>
     <form onSubmit={save} className="p-4 space-y-4" noValidate>
-      {autoSupported && <div className="rounded border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
+      {systemAuto && <div className="rounded border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
+        <p className="text-sm font-semibold text-white">SSH works for every lab server automatically; turn a server off here if needed.</p>
+        {skipped.length > 0 && <div role="status" className="rounded border border-amber-800 bg-amber-950/30 p-2 text-xs text-amber-200">
+          <p className="font-semibold">Not allowed automatically ({skipped.length})</p>
+          <ul className="mt-1 list-disc pl-5 space-y-0.5">{skipped.map(item => <li key={item.key}><span className="font-mono">{item.name}</span>{item.reason ? `: ${item.reason}` : ""}</li>)}</ul>
+        </div>}
+      </div>}
+      {autoSupported && !systemAuto && <div className="rounded border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           {canAdmin
             ? <Switch checked={savedAuto} label="Allow every server with an address" busy={setting?.busy === "auto_allow"}
@@ -466,7 +530,7 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, se
               const entry = entryFor(s.key);
               const approved = entry.allowed ? entry.approved_host || s.host : "";
               const moved = optIn && !autoMode && entry.allowed && entry.approved_host && s.host && !sameHost(entry.approved_host, s.host);
-              const noAddress = autoMode && s.approval === "skipped" && !entry.explicit;
+              const noAddress = autoMode && ADDRESS_SKIP_STATES.includes(s.approval) && !entry.explicit;
               const approvalLabel = typeof s.approval === "string" ? APPROVAL_LABELS[s.approval] || "" : "";
               return <tr key={s.key}>
                 {optIn && <td>
@@ -487,7 +551,7 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, se
                     onChange={e => editServer(s.key, { user: e.target.value })} />
                   {errors[s.key] && <div className="account-error mt-1">{errors[s.key]}</div>}
                 </td>
-                <td><HostKeyCell server={s} state={hostKeyState(s)} canAdmin={canAdmin} onAccept={onAccept} /></td>
+                <td><HostKeyCell server={s} state={hostKeyState(s)} canAdmin={canAdmin} onAccept={onAccept} systemKeys={systemKeys} /></td>
                 <td><SshButton name={s.name} size="md" /></td>
               </tr>;
             })}

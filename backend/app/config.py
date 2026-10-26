@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # Folder holding the VM account's own SSH keys (id_ed25519/id_ecdsa/id_rsa); empty = ~/.ssh of the account
     # running Lab Manager. Tests point it at a temporary fake home.
     ssh_vm_key_dir: str = ""
+    # The OpenSSH client the "system" key source runs (argv only, never a shell); empty = `ssh` found on PATH.
+    ssh_client_path: str = ""
+    # Extra networks (comma-separated CIDRs) the "system" key source may reach besides the lab networks it derives
+    # from the saved PDU/KVM addresses and Ping Monitor server IPs (their /24, or /64 for IPv6).
+    ssh_allowed_networks: str = ""
     ping_monitor_enabled: bool = True
     ping_monitor_timezone: str = "Asia/Jerusalem"
     email_alerts_enabled: bool = False

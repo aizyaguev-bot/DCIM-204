@@ -12,16 +12,26 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import shutil
+import signal
 import socket
+import struct
 import time
+try:
+    import fcntl
+    import termios
+except ImportError:  # Windows development machines: the "system" PTY path is Linux-only (tests mock it).
+    fcntl = termios = None
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import accounts, confirm, ssh_store
 from ..config import get_settings
 from ..database import AsyncSessionLocal, get_db
+from ..models import Device, PingTarget
 from ..ping_monitor import validate_host
 
 router = APIRouter(prefix="/api/ssh", tags=["ssh"])
@@ -257,6 +267,9 @@ def approval(server, config, blocked=None):
         return "none", "", "Invalid SSH host"
     if host_token(saved) in (blocked_hosts(config) if blocked is None else blocked):
         return "denied", "", SAME_ADDRESS_REASON
+    if config.get("key_source") == "system":
+        # Zero clicks: every known server, at its saved host. The lab-network guard (lab_state) still applies.
+        return "auto", saved, ""
     host = config.get("targets", {}).get(key)
     if host and checked_host(host) == saved:
         return "explicit", saved, ""
@@ -281,6 +294,89 @@ def approved_host(server, config, blocked=None):
     return host
 
 
+# --- Lab networks: where key_source "system" may connect without an Admin click ---------------------------------
+OUTSIDE_REASON = "Outside the lab networks (add it to SSH_ALLOWED_NETWORKS)"
+LAB_CACHE_SECONDS = 60
+LAB_CACHE_MAX = 4096
+STATUS_LAB_DEADLINE = 4      # Seconds GET /api/ssh/status waits for lab-network lookups.
+_LAB_CACHE: dict = {}         # "networks" -> (expires, frozenset); ("host", token) -> (expires, addresses or None)
+
+
+def lab_network_of(value):
+    """The /24 (IPv4) or /64 (IPv6) around one literal IP address; ValueError for anything else."""
+    address = ipaddress.ip_address(str(value or "").strip())
+    address = getattr(address, "ipv4_mapped", None) or address
+    return ipaddress.ip_network(f"{address}/{24 if address.version == 4 else 64}", strict=False)
+
+
+def configured_networks():
+    """SSH_ALLOWED_NETWORKS: comma-separated CIDRs; entries that are not networks are ignored."""
+    found = []
+    for item in str(getattr(get_settings(), "ssh_allowed_networks", "") or "").split(","):
+        with suppress(ValueError):
+            if item.strip():
+                found.append(ipaddress.ip_network(item.strip(), strict=False))
+    return found
+
+
+async def lab_networks(db):
+    """The lab networks: around every saved PDU/KVM address and Ping Monitor server IP, plus SSH_ALLOWED_NETWORKS.
+    Cached for LAB_CACHE_SECONDS."""
+    now = time.monotonic()
+    cached = _LAB_CACHE.get("networks")
+    if cached and cached[0] > now:
+        return cached[1]
+    found = set(configured_networks())
+    for (address,) in (await db.execute(select(Device.ip).where(Device.kind.in_(("pdu", "kvm"))))).all():
+        with suppress(ValueError, TypeError):
+            found.add(lab_network_of(address))
+    for source_key, address in (await db.execute(select(PingTarget.source_key, PingTarget.host))).all():
+        if str(source_key or "").startswith("server:"):
+            with suppress(ValueError, TypeError):
+                found.add(lab_network_of(address))
+    value = frozenset(found)
+    _LAB_CACHE["networks"] = (now + LAB_CACHE_SECONDS, value)
+    return value
+
+
+async def host_addresses(host, *, cached=True):
+    """Every address `host` resolves to (canonical), or None when the VM cannot resolve it. Cached briefly."""
+    token = ("host", host_token(host))
+    now = time.monotonic()
+    hit = _LAB_CACHE.get(token) if cached else None
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        addresses = [canonical_ip(host)]
+    except ValueError:
+        try:
+            answers = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, 22, type=socket.SOCK_STREAM),
+                                            min(5, getattr(get_settings(), "ssh_connect_timeout_seconds", 10)))
+            addresses = sorted({canonical_ip(answer[4][0]) for answer in answers}) or None
+        except (OSError, asyncio.TimeoutError, UnicodeError, ValueError):
+            addresses = None
+    if len(_LAB_CACHE) >= LAB_CACHE_MAX:
+        _LAB_CACHE.clear()
+    _LAB_CACHE[token] = (now + LAB_CACHE_SECONDS, addresses)
+    return addresses
+
+
+async def lab_state(host, networks, *, cached=True):
+    """None when every address of `host` is inside the lab networks, else "outside" or "unresolved"."""
+    addresses = await host_addresses(host, cached=cached)
+    if not addresses:
+        return "unresolved"
+    for value in addresses:
+        address = ipaddress.ip_address(value)
+        if not any(address.version == network.version and address in network for network in networks):
+            return "outside"
+    return None
+
+
+def lab_reason(code, host):
+    return OUTSIDE_REASON if code == "outside" else skip_text("unresolved", host)
+
+
 async def limited(items, worker):
     """Run worker over items with bounded concurrency, keeping their order."""
     semaphore = asyncio.Semaphore(CHECK_CONCURRENCY)
@@ -301,9 +397,24 @@ async def status(request: Request, response: Response, db: AsyncSession = Depend
     servers = []
     known = await ssh_store.known_servers(db)
     blocked = blocked_hosts(config, known)
+    states = {server["key"]: approval(server, config, blocked) for server in known}
+    if config["key_source"] == "system":
+        networks = await lab_networks(db)
+        await db.rollback()  # DNS lookups below must not hold the inventory read transaction.
+        checks = [(key, host) for key, (state, host, _) in states.items() if state in ALLOWED_STATES]
+        lookups = asyncio.ensure_future(limited(checks, lambda item: lab_state(item[1], networks)))
+        try:
+            # Slow DNS never holds the page: unfinished lookups keep filling the cache for the next status, and a
+            # terminal always checks the lab networks again with a fresh lookup before it connects.
+            codes = await asyncio.wait_for(asyncio.shield(lookups), STATUS_LAB_DEADLINE)
+        except asyncio.TimeoutError:
+            codes = [None] * len(checks)
+        for (key, host), code in zip(checks, codes):
+            if code:
+                states[key] = (code, "", lab_reason(code, host))
     for server in known:
         pin = await ssh_store.run_file_op(ssh_store.host_info, server["key"])
-        state, host, reason = approval(server, config, blocked)
+        state, host, reason = states[server["key"]]
         allowed = state in ALLOWED_STATES
         entry = {"key": server["key"], "name": server["name"], **pin,
                  "host_key": pin, "approved": allowed, "allowed": allowed, "approval": state,
@@ -324,6 +435,8 @@ async def status(request: Request, response: Response, db: AsyncSession = Depend
     if operator:
         result["default_user"] = config["default_user"]
         result["key_source"] = config["key_source"]
+        # Whether "system" (the VM's own ssh command) can run here; the reason is a fixed sentence.
+        result["system_ssh"] = system_ssh_state()
     if current["user"]["role"] == "Admin":
         result["config_revision"] = ssh_store.config_etag(config)
     return result
@@ -539,7 +652,7 @@ async def configure(request: Request, response: Response, db: AsyncSession = Dep
         raise HTTPException(400, "auto_allow must be true or false")
     key_source = body.get("key_source", current["key_source"])
     if not isinstance(key_source, str) or key_source not in ssh_store.KEY_SOURCES:
-        raise HTTPException(400, 'key_source must be "vm" or "site"')
+        raise HTTPException(400, 'key_source must be "system", "vm" or "site"')
     denied = body.get("denied", current["denied"])
     if (not isinstance(denied, list) or len(denied) > 10000 or
             not all(isinstance(key, str) and SLUG.fullmatch(key) for key in denied)):
@@ -882,11 +995,252 @@ async def connect_target(host):
         raise
 
 
+# ─── key_source "system": the VM's own OpenSSH client in a PTY ────────────────────────────────────────────────────
+SYSTEM_UNAVAILABLE_REASON = ("The VM's ssh command is not available - an Admin can choose another key source in "
+                             "Admin -> SSH")
+SYSTEM_NOT_LINUX = "The VM's ssh command can be used only when Lab Manager runs on Linux"
+SYSTEM_NO_CLIENT = "This VM has no ssh command - install the OpenSSH client on the VM"
+SYSTEM_BAD_CLIENT = "SSH_CLIENT_PATH does not name an executable ssh command"
+# The service environment the ssh child keeps: what the account's own `ssh` needs to find its config, keys, agent
+# and Kerberos tickets. Everything else (Lab Manager secrets, tokens, passwords, proxies) is left out.
+SYSTEM_ENV_KEEP = ("HOME", "USER", "LOGNAME", "PATH", "LANG", "LANGUAGE", "TZ", "SHELL", "SSH_AUTH_SOCK",
+                   "KRB5CCNAME", "KRB5_CONFIG", "XDG_RUNTIME_DIR")
+SYSTEM_ENV_SENSITIVE = re.compile(r"PASS|SECRET|TOKEN|CREDENTIAL|PRIVATE|_KEY|COOKIE|SESSION|MASTER", re.I)
+SYSTEM_STDERR_LIMIT = 65536
+# Signal numbers by name; the POSIX values stand in on Windows, where this path never runs (tests mock it).
+SIGHUP, SIGKILL, SIGWINCH = (getattr(signal, name, number)
+                              for name, number in (("SIGHUP", 1), ("SIGKILL", 9), ("SIGWINCH", 28)))
+SYSTEM_READY_GRACE = 30       # Seconds past ConnectTimeout to wait for the first output before showing the terminal.
+# OpenSSH client messages (stderr, exit status 255) -> fixed reason tokens. The text itself never leaves this module.
+SYSTEM_FAILURES = (
+    ("host_key_changed", ("REMOTE HOST IDENTIFICATION HAS CHANGED", "Host key verification failed")),
+    ("auth_failed", ("Permission denied",)),
+    ("refused", ("Connection refused",)),
+    ("connect_timeout", ("timed out during banner exchange",)),
+    ("unreachable", ("No route to host", "Could not resolve hostname", "Connection timed out",
+                     "Network is unreachable", "Name or service not known")),
+)
+
+
+def system_ssh_path():
+    """(path, "") for the OpenSSH client the "system" source runs, or ("", fixed reason) when it cannot run here."""
+    if os.name != "posix" or fcntl is None or not hasattr(os, "openpty"):
+        return "", SYSTEM_NOT_LINUX
+    configured = getattr(get_settings(), "ssh_client_path", "") or ""
+    if configured:
+        path = Path(configured)
+        if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+            return "", SYSTEM_BAD_CLIENT
+        return str(path), ""
+    found = shutil.which("ssh")
+    return (found, "") if found else ("", SYSTEM_NO_CLIENT)
+
+
+def system_ssh_state():
+    path, reason = system_ssh_path()
+    return {"available": bool(path), "reason": reason}
+
+
+def system_argv(ssh_path, user, host, timeout):
+    """The exact argv of the account's own `ssh`: no shell, never prompts (BatchMode), no forwarding of any kind,
+    port 22, the validated user and the approved saved host after "--"."""
+    user, host = username(user), checked_host(host)
+    if not host or host.startswith("-"):
+        raise HTTPException(400, "Invalid SSH host")
+    return [ssh_path, "-tt", "-p", "22", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(timeout)}",
+            "-o", "ServerAliveInterval=30", "-o", "StrictHostKeyChecking=accept-new", "-o", "ForwardAgent=no",
+            "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no",
+            "-o", "RequestTTY=force", "-l", user, "--", host]
+
+
+def system_env(source=None):
+    """The ssh child's environment: the kept service variables (and LC_*), never anything that looks secret."""
+    source = os.environ if source is None else source
+    env = {name: value for name, value in source.items()
+           if (name in SYSTEM_ENV_KEEP or name.startswith("LC_")) and not SYSTEM_ENV_SENSITIVE.search(name)}
+    if "SSH_AUTH_SOCK" not in env:
+        # A service has no login session: use this account's own running ssh-agent when there is one, as the shell would.
+        found = ssh_store.agent_socket(source)
+        if found:
+            env["SSH_AUTH_SOCK"] = found
+    env.setdefault("PATH", os.defpath)
+    with suppress(RuntimeError, KeyError):
+        env.setdefault("HOME", str(Path.home()))
+    env["TERM"] = "xterm-256color"
+    return env
+
+
+def system_failure(stderr):
+    """Fixed reason token for an ssh that exited with status 255 before the session started."""
+    text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr or "")
+    for token, patterns in SYSTEM_FAILURES:
+        if any(pattern.lower() in text.lower() for pattern in patterns):
+            return token
+    return "connection_failed"
+
+
+class EmptyReader:
+    """Local ssh diagnostics never reach the terminal: the bridge's stderr stream is always empty."""
+
+    async def read(self, size):
+        return b""
+
+
+class PtyReader:
+    """Non-blocking reads from the PTY master; EOF when the slave side is gone (EIO) or the ssh process exited."""
+
+    def __init__(self, fd, exited):
+        self.fd, self.exited, self.pending = fd, exited, b""
+
+    async def read(self, size):
+        if self.pending:
+            data, self.pending = self.pending[:size], self.pending[size:]
+            return data
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                return os.read(self.fd, size)
+            except (BlockingIOError, InterruptedError):
+                if self.exited.is_set():
+                    return b""
+            except OSError as error:
+                if error.errno in (errno.EIO, errno.EBADF):
+                    return b""
+                raise
+            ready = loop.create_future()
+            loop.add_reader(self.fd, lambda: ready.done() or ready.set_result(None))
+            waiter = asyncio.ensure_future(self.exited.wait())
+            try:
+                await asyncio.wait({ready, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                loop.remove_reader(self.fd)
+                waiter.cancel()
+                ready.cancel()
+
+
+class PtyWriter:
+    """Terminal input into the PTY master; a full PTY buffer waits (input is already rate limited)."""
+
+    def __init__(self, fd):
+        self.fd, self.buffer = fd, bytearray()
+
+    def write(self, data):
+        self.buffer += data
+
+    async def drain(self):
+        loop = asyncio.get_running_loop()
+        while self.buffer:
+            try:
+                del self.buffer[:os.write(self.fd, self.buffer)]
+                continue
+            except (BlockingIOError, InterruptedError):
+                pass
+            except OSError as error:
+                if error.errno in (errno.EIO, errno.EBADF):
+                    self.buffer.clear()  # ssh is gone; the output side reports the end.
+                    return
+                raise
+            ready = loop.create_future()
+            loop.add_writer(self.fd, lambda: ready.done() or ready.set_result(None))
+            try:
+                await ready
+            finally:
+                loop.remove_writer(self.fd)
+
+
+class SystemSsh:
+    """The VM's OpenSSH client in its own session and process group, behind the interface bridge() uses."""
+
+    def __init__(self, process, master):
+        self.process, self.master = process, master
+        self.exited = asyncio.Event()
+        self.stdin, self.stdout, self.stderr = PtyWriter(master), PtyReader(master, self.exited), EmptyReader()
+        self.diagnostics = bytearray()
+        self._waiter = asyncio.ensure_future(self._wait())
+        self._collector = asyncio.ensure_future(self._collect())
+        self._closed = False
+
+    async def _wait(self):
+        try:
+            return await self.process.wait()
+        finally:
+            self.exited.set()
+
+    async def _collect(self):
+        # Kept in memory only for system_failure(); bounded, never logged, never sent.
+        while self.process.stderr is not None:
+            chunk = await self.process.stderr.read(16384)
+            if not chunk:
+                return
+            room = SYSTEM_STDERR_LIMIT - len(self.diagnostics)
+            if room > 0:
+                self.diagnostics += chunk[:room]
+
+    def change_terminal_size(self, cols, rows):
+        with suppress(OSError, AttributeError):
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        with suppress(OSError):
+            os.killpg(self.process.pid, SIGWINCH)
+
+    async def ready(self, timeout):
+        """Wait for the first terminal output (the session started) or the end of ssh. Raises ConnectFailure with a
+        fixed token when ssh gave up before any output with status 255; otherwise the terminal opens."""
+        try:
+            first = await asyncio.wait_for(self.stdout.read(16384), timeout)
+        except asyncio.TimeoutError:
+            return  # Still running and silent: open the terminal; idle/lifetime limits still apply.
+        if first:
+            self.stdout.pending = first + self.stdout.pending
+            return
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(self._waiter), 5)
+        with suppress(asyncio.TimeoutError, Exception):
+            await asyncio.wait_for(asyncio.shield(self._collector), 1)
+        if self.process.returncode == 255:
+            raise ConnectFailure(system_failure(bytes(self.diagnostics)))
+
+    async def close(self):
+        """SIGHUP to the whole process group, then SIGKILL; always reaped (no zombie); the PTY master closed."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, SIGHUP)
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(self._waiter), 2)
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, SIGKILL)  # Stragglers too (ProxyCommand, ControlPersist).
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(self._waiter), 5)
+        finally:
+            self._collector.cancel()
+            with suppress(OSError):
+                os.close(self.master)
+
+
+async def spawn_system_ssh(argv, env, cols=80, rows=24):
+    """Start argv (never a shell) on a new PTY in its own session; stderr is a private pipe for system_failure()."""
+    master, slave = os.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        os.set_blocking(master, False)
+        process = await asyncio.create_subprocess_exec(
+            *argv, stdin=slave, stdout=slave, stderr=asyncio.subprocess.PIPE, env=env, start_new_session=True,
+            close_fds=True)
+    except BaseException:
+        os.close(master)
+        raise
+    finally:
+        os.close(slave)
+    return SystemSsh(process, master)
+
+
 @router.websocket("/{key}/terminal")
 async def terminal(key: str, websocket: WebSocket):
     session_started = time.monotonic()
     accepted = False
-    audit = connection = None
+    audit = connection = system = None
     reason, detail, code = "remote_closed", "", 1000
     connected_ip = fingerprint = ""
     counts = {"in": 0, "out": 0}
@@ -917,19 +1271,34 @@ async def terminal(key: str, websocket: WebSocket):
             attempts = await ssh_store.recent_attempts(rate_db, current["user"]["username"])
         if attempts >= getattr(get_settings(), "ssh_max_connect_attempts_per_minute", 12):
             raise HTTPException(429, RATE_REASON)
-        library = await ssh_store.run_file_op(ssh_store.load_asyncssh)
         async with AsyncSessionLocal() as target_db:
             known = await ssh_store.known_servers(target_db)
+            networks = await lab_networks(target_db)
         server = server_in(known, key)
         config = await ssh_store.run_file_op(ssh_store.read_config)
         # Only explicit approvals and hosts captured by the Admin's pass get here (and so the VM account's keys).
         host, user = approved_host(server, config, blocked_hosts(config, known)), user_for(server, config)
         key_source = config["key_source"]
+        # "system" runs the VM's own ssh command; the other sources sign in with AsyncSSH and our key list.
+        library = None if key_source == "system" else await ssh_store.run_file_op(ssh_store.load_asyncssh)
         connected_ip = await connect_target(host)
         if canonical_ip(connected_ip) in await denied_addresses(denied_host_list(config, known)):
             raise HTTPException(403, "denied")  # Another name for an address an Admin turned SSH off for.
-        offers = await ssh_store.run_file_op(client_keys_for, key_source, vm_key_dir(),
-                                             {"host": host, "name": server["name"], "user": user})
+        if key_source == "system":
+            # No Admin click in this mode: every resolved address must be inside the lab networks (fresh lookup).
+            outside = await lab_state(host, networks, cached=False)
+            if outside == "outside":
+                raise HTTPException(403, OUTSIDE_REASON)
+            if outside:
+                raise ConnectFailure("unreachable")
+            ssh_path, _ = system_ssh_path()
+            if not ssh_path:
+                raise HTTPException(503, SYSTEM_UNAVAILABLE_REASON)
+            # The saved host string goes to ssh (after "--"); its resolution was checked above.
+            argv = system_argv(ssh_path, user, host, getattr(get_settings(), "ssh_connect_timeout_seconds", 10))
+        else:
+            offers = await ssh_store.run_file_op(client_keys_for, key_source, vm_key_dir(),
+                                                 {"host": host, "name": server["name"], "user": user})
         settings = get_settings()
         if not await session_valid(websocket, current):
             raise HTTPException(401, "signed_out")
@@ -940,63 +1309,74 @@ async def terminal(key: str, websocket: WebSocket):
                     user_id=current["user"]["id"], user_name=current["user"]["name"], connected_ip=connected_ip,
                     remote_user=user, client_ip=websocket.client.host if websocket.client else "", key_source=key_source)
         await websocket.send_json({"type": "status", "state": "connecting", "reason": ""})
-        pinned, changed, storage_errors, reached, tried = [], [], [], [], []
+        if key_source == "system":
+            timeout = getattr(settings, "ssh_connect_timeout_seconds", 10)
+            try:
+                system = await spawn_system_ssh(argv, system_env())
+            except OSError:
+                raise ConnectFailure("connection_failed") from None
+            # Known hosts, keys, agent and Kerberos are the VM account's own; nothing from ssh's stderr is sent.
+            await system.ready(timeout + SYSTEM_READY_GRACE)
+            process = system
+            await websocket.send_json({"type": "status", "state": "connected", "reason": ""})
+        else:
+            pinned, changed, storage_errors, reached, tried = [], [], [], [], []
 
-        class Client(library.SSHClient):
-            def connection_made(self, conn):
-                reached.append(True)  # TCP is up: a later timeout is not "unreachable".
+            class Client(library.SSHClient):
+                def connection_made(self, conn):
+                    reached.append(True)  # TCP is up: a later timeout is not "unreachable".
 
-            def public_key_auth_requested(self):
-                # The only source of client keys (client_keys=None): our explicit list, one per call, in order.
-                if len(tried) >= len(offers):
-                    return None
-                tried.append(offers[len(tried)])
-                return tried[-1][2]
+                def public_key_auth_requested(self):
+                    # The only source of client keys (client_keys=None): our explicit list, one per call, in order.
+                    if len(tried) >= len(offers):
+                        return None
+                    tried.append(offers[len(tried)])
+                    return tried[-1][2]
 
-            def auth_completed(self):
-                if tried:
-                    signed_in.append(tried[-1][:2])
+                def auth_completed(self):
+                    if tried:
+                        signed_in.append(tried[-1][:2])
 
-            def validate_host_public_key(self, ignored_host, addr, port, host_key):
-                nonlocal fingerprint
-                fingerprint = host_key.get_fingerprint()
-                try:
-                    # AsyncSSH's host-key callback is synchronous: never wait for a held storage lock here.
-                    if ssh_store.pin_host(key, host, host_key, blocking=False):
-                        pinned.append(fingerprint)
-                    return True
-                except ssh_store.HostKeyChanged:
-                    changed.append(True)
-                    return False
-                except HTTPException as error:
-                    storage_errors.append(error)
-                    return False
+                def validate_host_public_key(self, ignored_host, addr, port, host_key):
+                    nonlocal fingerprint
+                    fingerprint = host_key.get_fingerprint()
+                    try:
+                        # AsyncSSH's host-key callback is synchronous: never wait for a held storage lock here.
+                        if ssh_store.pin_host(key, host, host_key, blocking=False):
+                            pinned.append(fingerprint)
+                        return True
+                    except ssh_store.HostKeyChanged:
+                        changed.append(True)
+                        return False
+                    except HTTPException as error:
+                        storage_errors.append(error)
+                        return False
 
-        timeout = getattr(settings, "ssh_connect_timeout_seconds", 10)
+            timeout = getattr(settings, "ssh_connect_timeout_seconds", 10)
 
-        async def connect():
-            nonlocal connection
-            # Explicit args keep AsyncSSH's own ~/.ssh/config handling (ProxyCommand, Port, HostName...), the ssh-agent,
-            # default key loading, passwords, GSSAPI and tunnels out of the target/auth policy. client_keys=None stops
-            # AsyncSSH loading ~/.ssh itself; Client.public_key_auth_requested offers exactly `offers` (ssh_store.vm_keys
-            # reads only the config's IdentityFile lines), in order.
-            connection = await library.connect(connected_ip, port=22, username=user, client_keys=None, client_factory=Client,
-                known_hosts=library.import_known_hosts(""), server_host_key_algs="default", config=None, agent_path=None,
-                agent_identities=None, pkcs11_provider=None, x509_trusted_certs=None, x509_trusted_cert_paths=None,
-                public_key_auth=True, gss_auth=False, gss_kex=False, password_auth=False, kbdint_auth=False,
-                host_based_auth=False, preferred_auth="publickey", agent_forwarding=False, x11_forwarding=False,
-                connect_timeout=timeout, login_timeout=timeout, encoding=None, keepalive_interval=30, keepalive_count_max=3)
-            # No command: the account's login shell only. Lab Manager never runs or writes anything on the server.
-            return await connection.create_process(term_type="xterm-256color", term_size=(80, 24), encoding=None)
+            async def connect():
+                nonlocal connection
+                # Explicit args keep AsyncSSH's own ~/.ssh/config handling (ProxyCommand, Port, HostName...), the ssh-agent,
+                # default key loading, passwords, GSSAPI and tunnels out of the target/auth policy. client_keys=None stops
+                # AsyncSSH loading ~/.ssh itself; Client.public_key_auth_requested offers exactly `offers` (ssh_store.vm_keys
+                # reads only the config's IdentityFile lines), in order.
+                connection = await library.connect(connected_ip, port=22, username=user, client_keys=None, client_factory=Client,
+                    known_hosts=library.import_known_hosts(""), server_host_key_algs="default", config=None, agent_path=None,
+                    agent_identities=None, pkcs11_provider=None, x509_trusted_certs=None, x509_trusted_cert_paths=None,
+                    public_key_auth=True, gss_auth=False, gss_kex=False, password_auth=False, kbdint_auth=False,
+                    host_based_auth=False, preferred_auth="publickey", agent_forwarding=False, x11_forwarding=False,
+                    connect_timeout=timeout, login_timeout=timeout, encoding=None, keepalive_interval=30, keepalive_count_max=3)
+                # No command: the account's login shell only. Lab Manager never runs or writes anything on the server.
+                return await connection.create_process(term_type="xterm-256color", term_size=(80, 24), encoding=None)
 
-        try:
-            process = await asyncio.wait_for(connect(), timeout)
-        except Exception as error:
-            if storage_errors:
-                raise storage_errors[0] from None
-            raise ConnectFailure("host_key_changed" if changed else connect_failure(library, error, bool(reached))) from None
-        await websocket.send_json({"type": "status", "state": "connected",
-            "reason": f"new host key pinned {pinned[0]} (unconfirmed; compare using the KVM console)" if pinned else ""})
+            try:
+                process = await asyncio.wait_for(connect(), timeout)
+            except Exception as error:
+                if storage_errors:
+                    raise storage_errors[0] from None
+                raise ConnectFailure("host_key_changed" if changed else connect_failure(library, error, bool(reached))) from None
+            await websocket.send_json({"type": "status", "state": "connected",
+                "reason": f"new host key pinned {pinned[0]} (unconfirmed; compare using the KVM console)" if pinned else ""})
         maximum = min(getattr(settings, "ssh_max_session_seconds", 3600), getattr(settings, "accounts_session_hours", 12) * 3600)
         remaining = maximum - (time.monotonic() - session_started)
         reason = "lifetime_limit" if remaining <= 0 else await bridge(
@@ -1028,6 +1408,9 @@ async def terminal(key: str, websocket: WebSocket):
                 if connection is not None:
                     connection.close()
                     await asyncio.wait_for(connection.wait_closed(), 5)
+            with suppress(Exception, asyncio.CancelledError):
+                if system is not None:
+                    await asyncio.wait_for(system.close(), 10)
             with suppress(Exception, asyncio.CancelledError):
                 if audit is not None:
                     async with AsyncSessionLocal() as audit_db:
