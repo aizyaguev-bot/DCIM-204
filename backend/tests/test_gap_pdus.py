@@ -280,10 +280,15 @@ async def test_out_of_range_outlet_never_switches_any_outlet(client, pdu, monkey
     fake, built = FakePdu(outlets=3), []
     monkeypatch.setattr(pdus_module, "RaritanPduDriver", driver_factory(fake, built))
     r = await client.post(f"/api/pdus/{pdu['id']}/outlets/{outlet}/power", json={"action": "off"})
-    assert r.status_code == 502
-    assert r.json()["detail"] == f"Outlet {outlet} out of range (max 3)"
+    if outlet < 1:
+        # v2.40 (cfa9f8c, routers/pdus.py outlet_power) refuses an outlet below 1 before any device contact.
+        assert r.status_code == 400 and r.json()["detail"] == "Outlet numbers start at 1"
+        assert built == []
+    else:
+        assert r.status_code == 502
+        assert r.json()["detail"] == f"Outlet {outlet} out of range (max 3)"
+        assert built[0]["driver"]._client.is_closed
     assert fake.switch_calls() == [] and fake.power == {1: 1, 2: 1, 3: 1}
-    assert built[0]["driver"]._client.is_closed
 
 
 @pytest.mark.parametrize("action", ["ON", "Cycle", " on", "on ", "power-on"])

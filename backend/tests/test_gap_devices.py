@@ -302,7 +302,11 @@ async def test_rename_opt_carries_monitor_owner_labels_and_every_layout_file(lab
 
     r = await rename(lab, "WEB-1", "web-2")   # matched without regard to case
     assert r.status_code == 200, r.text
-    assert r.json() == {"ok": True, "updated_devices": ["PDU-A"]}
+    # v2.40 device name sync (ea3bd90, devices.py rename_opt -> name_sync.queue) adds "device_names" (and maybe
+    # "device_names_reason") to the answer; the rename result itself is unchanged.
+    body = r.json()
+    assert {k: body[k] for k in ("ok", "updated_devices")} == {"ok": True, "updated_devices": ["PDU-A"]}
+    assert "device_names" in body
     assert await saved_labels(lab.db) == {**LABELS, "pdu-a": {**LABELS["pdu-a"], "3": "web-2"}}
     targets, owners = await monitors_and_owners(lab.db)
     # Same monitor id and host; a new revision so a probe still in flight for the old name is ignored.
@@ -365,11 +369,15 @@ async def test_swap_of_a_dual_feed_opt_with_a_plain_name_server_drops_the_feed_s
         "pdu-b": {"1": "web-1", "2": "OPTN45 (PSU2)", "5": "Outlet 5"},
         "kvm-a": {"1": "web-1", "2": "OPTN45"},
     }
+    # Sweep B01 contract C6 (a75b67b, devices.py move_server -> _with_auto_pins): the automatic U numbers in the racks
+    # involved are pinned first and the preview carries the U, so web-1 shows its automatic U1 and OPTN44 takes it;
+    # OPTN45's PSU2 outlet keeps its automatic U1 in Rack-02.
     assert body["positions"] == [
-        {"server": "OPTN44", "before": {"rack": "Rack-01", "slot": 3}, "after": {"rack": "Rack-01", "slot": None}},
-        {"server": "web-1", "before": {"rack": "Rack-01", "slot": None}, "after": {"rack": "Rack-01", "slot": 3}}]
+        {"server": "OPTN44", "before": {"rack": "Rack-01", "slot": 3}, "after": {"rack": "Rack-01", "slot": 1}},
+        {"server": "web-1", "before": {"rack": "Rack-01", "slot": 1}, "after": {"rack": "Rack-01", "slot": 3}}]
     assert read_layout(lab.folder) == {
-        "rack_slots.json": {"Rack-01": {"web-1": 3, "optn45 (psu1)": 7}, "Rack-02": {"web-1": 3}},
+        "rack_slots.json": {"Rack-01": {"web-1": 3, "optn45 (psu1)": 7, "optn44": 1},
+                            "Rack-02": {"web-1": 3, "optn45 (psu2)": 1}},
         "rack_positions.json": {"Rack-01": ["optn45 (psu1)", "web-1", "optn44"]},
         "rack_overrides.json": LAYOUT["rack_overrides.json"],
         "switch_assignments.json": {"web-1": {"switch": "SW1", "port": "12"}, "optn45 (psu1)": {"switch": "SW2", "port": "3"}},
@@ -397,7 +405,10 @@ async def test_a_server_known_only_by_its_monitor_needs_a_rack_for_a_slot_and_ca
         {"server": "OPTN45", "before": {"rack": "Rack-01", "slot": 7}, "after": {"rack": None, "slot": None}},
         {"server": "OPTN77", "before": {"rack": None, "slot": None}, "after": {"rack": "Rack-01", "slot": 7}}]
     layout = read_layout(lab.folder)
-    assert layout["rack_slots.json"]["Rack-01"] == {"optn44": 3, "optn77 (psu1)": 7}
+    # Sweep B01 contract C6 (a75b67b, devices.py move_server -> _with_auto_pins): web-1's automatic U1 in Rack-01 and
+    # the automatic U1 of the PSU2 outlet in Rack-02 are pinned before the swap renames that outlet's id.
+    assert layout["rack_slots.json"] == {"Rack-01": {"optn44": 3, "optn77 (psu1)": 7, "web-1": 1},
+                                         "Rack-02": {"optn44 (psu2)": 3, "optn77 (psu2)": 1}}
     assert layout["switch_assignments.json"]["optn77 (psu1)"] == {"switch": "SW2", "port": "3"}
     assert await monitors_and_owners(lab.db) == people     # monitors and owners follow the server, not the location
     rows = {s["key"]: s for s in (await lab.client.get("/api/devices/locations")).json()["servers"]}
@@ -415,8 +426,10 @@ async def test_moving_to_ports_with_only_a_rack_drops_the_old_slot_and_keeps_the
         "pdu-b": {"1": "Outlet 1", "2": "OPTN45 (PSU2)", "5": "Outlet 5"},
         "kvm-a": {"1": "Port 1", "2": "OPTN45"},
     }
+    # Sweep B01 contract C6 (a75b67b, devices.py move_server -> _with_auto_pins): the automatic U numbers of the
+    # neighbours in the racks OPTN44 leaves (web-1 in Rack-01, OPTN45's PSU2 outlet in Rack-02) are pinned.
     assert read_layout(lab.folder) == {
-        "rack_slots.json": {"Rack-01": {"optn45 (psu1)": 7}, "Rack-02": {}},
+        "rack_slots.json": {"Rack-01": {"optn45 (psu1)": 7, "web-1": 1}, "Rack-02": {"optn45 (psu2)": 1}},
         "rack_positions.json": {"Rack-01": ["optn45 (psu1)", "web-1"]},
         "rack_overrides.json": {**LAYOUT["rack_overrides.json"], "optn44": "Rack-05"},
         "switch_assignments.json": LAYOUT["switch_assignments.json"],

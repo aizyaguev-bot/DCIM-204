@@ -242,7 +242,7 @@ async def test_reachable_pdu_without_outlets_is_502_and_records_nothing(env):
         assert data["pdus"] == {} and data["log"] == []
 
 
-async def test_shutdown_without_verification_read_falls_back_to_switch_results(env):
+async def test_shutdown_without_verification_read_counts_no_outlet_as_off_and_reports_the_pdu_unreachable(env):
     pdu = env.pdu("a")
     pdu.states = {1: "on", 2: "cycling", 3: "on", 4: "on"}
     pdu.fail, pdu.lost = {3}, {4}
@@ -251,13 +251,16 @@ async def test_shutdown_without_verification_read_falls_back_to_switch_results(e
         r = await shutdown(c, "pdu-a")
         assert r.status_code == 200, r.text
         state = r.json()["state"]
-        # Rejected (3), lost (4) and cycling (2) outlets all count as failed; every powered outlet stays restorable.
-        assert state["outlets_off"] == [1, 3, 4] and state["failed"] == [2, 3, 4]
-        assert r.json()["results"] == [{"outlet": 1, "ok": True}, {"outlet": 2, "ok": False},
+        # v2.40 (023b683 ACT-3 and 749756f ACT-CX-FINAL B2, pdu_maintenance._shutdown_locked): only a live verification
+        # counts as success, so every attempted (1, 3, 4) and cycling (2) outlet is failed, every powered outlet stays
+        # restorable, and the failed read marks the PDU unreachable so a batch stops before the next PDU.
+        assert state["outlets_off"] == [1, 3, 4] and state["failed"] == [1, 2, 3, 4]
+        assert r.json()["results"] == [{"outlet": 1, "ok": False}, {"outlet": 2, "ok": False},
                                        {"outlet": 3, "ok": False}, {"outlet": 4, "ok": False}]
+        assert r.json()["reachable"] is False
         assert SECRET not in r.text
         entry = (await listing(c))["log"][0]
-        assert (entry["action"], entry["ok"], entry["failed"]) == ("shutdown", 1, 3)
+        assert (entry["action"], entry["ok"], entry["failed"]) == ("shutdown", 0, 4)
 
         pdu.fail, pdu.lost, pdu.side_effects, pdu.unreachable, pdu.calls = set(), set(), {}, False, []
         r = await restore(c, "pdu-a")

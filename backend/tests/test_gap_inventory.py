@@ -261,7 +261,7 @@ async def test_a_new_item_from_an_editor_cannot_bring_its_own_history_or_last_se
     assert saved == {"id": "ci-new", "name": "New", "u": 9}
 
 
-async def test_editor_barcode_checks_only_changed_codes_and_allow_a_swap(env):
+async def test_editor_barcode_checks_only_changed_codes_and_keeps_linked_barcodes(env):
     c = env.client
     data = store.read_items()
     data["Rack-02"].append({"id": "ci-c", "name": "Legacy twin", "serial_number": "MT00123", "barcode": "000333", "u": 3})
@@ -278,13 +278,14 @@ async def test_editor_barcode_checks_only_changed_codes_and_allow_a_swap(env):
         r = await c.put("/api/rack-items", json=data, headers={"If-Match": await tag(c)})
         assert r.status_code == 409 and r.json()["detail"] == DUPLICATE_CODE
         assert store.ITEMS_FILE.read_bytes() == before
-    # Two items exchanging their barcodes in one save is not a conflict.
+    # Sweep B09 decision D4 (43bbc1f, inventory_store.replace_items): a whole-list save never replaces a linked
+    # barcode, so two items exchanging their barcodes is not a conflict and both keep the stored ones.
     data = (await c.get("/api/rack-items")).json()
     item(data, "ci-b")["barcode"], item(data, "ci-c")["barcode"] = "000333", "000222"
     r = await c.put("/api/rack-items", json=data, headers={"If-Match": await tag(c)})
     assert r.status_code == 200, r.text
     saved = store.read_items()
-    assert (item(saved, "ci-b")["barcode"], item(saved, "ci-c")["barcode"]) == ("000333", "000222")
+    assert (item(saved, "ci-b")["barcode"], item(saved, "ci-c")["barcode"]) == ("000222", "000333")
 
 
 async def test_an_editor_shelf_position_change_is_a_move_and_an_untouched_item_gets_no_history(env):
