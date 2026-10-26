@@ -186,7 +186,8 @@ def can(job: PxeJob, now: float) -> dict:
         "choose_boot": state == "waiting_for_choice",
         "choose_grub": state == "waiting_for_grub_choice",
         "install": state == "ready_to_install" and job.install_sent_at is None,
-        "cancel": (state == "draft" or state in PRE_INSTALL) and job.install_sent_at is None,
+        # Once GRUB is up its default entry may boot the installer by itself, so only takeover is left.
+        "cancel": (state == "draft" or state in PRE_INSTALL) and state not in MAY_START and job.install_sent_at is None,
         # After a failure only a real console is left to open; a simulated job has none.
         "takeover": state in PRE_INSTALL or state in POST_INSTALL or (state == "failed" and job.driver != "simulated"),
         "complete": state == "install_started",
@@ -980,6 +981,8 @@ class PxeRunner:
             job = await self._load(db, job_id)
             if job.install_sent_at is not None or job.state in POST_INSTALL:
                 raise HTTPException(409, "The install was already sent; use manual takeover instead")
+            if job.state in MAY_START:
+                raise HTTPException(409, "An install entry may already be booting; use manual takeover")
             if job.state != "draft" and job.state not in PRE_INSTALL:
                 raise HTTPException(409, "The job is already closed")
             await self._guard(db, job)
@@ -998,6 +1001,8 @@ class PxeRunner:
         async with self._action(job_id) as db:
             job = await self._load(db, job_id)
             if job.state in PRE_INSTALL or job.state in POST_INSTALL:
+                if job.state in MAY_START:          # an install entry may boot: keep the computer until an Admin acknowledges
+                    job.install_may_have_started = True
                 await self._transition(db, job, "manual_takeover", actor, "takeover", "Automation stopped for manual control")
             elif job.state == "failed":
                 if job.driver == "simulated":           # refused before anything is logged

@@ -19,6 +19,20 @@ router = APIRouter(prefix="/api/pdus", tags=["pdus"])
 _cache: dict[str, tuple[float, PduStatus]] = {}
 _CACHE_TTL = 20
 _refreshing: set[str] = set()
+# { device_id: generation }: bumped when the device's address, kind or credentials change, so a read that started
+# before the change never lands in the cache afterwards.
+_generation: dict[str, int] = {}
+
+
+def invalidate(device_id: str) -> None:
+    """Drop the cached status and discard any read of this PDU still in flight."""
+    _generation[device_id] = _generation.get(device_id, 0) + 1
+    _cache.pop(device_id, None)
+
+
+def _store(device_id: str, generation: int, result: PduStatus) -> None:
+    if _generation.get(device_id, 0) == generation:
+        _cache[device_id] = (time.monotonic(), result)
 
 
 async def _get_pdu_or_404(device_id: str, db: AsyncSession) -> Device:
@@ -83,8 +97,9 @@ async def _refresh_background(device_id: str, dev: Device):
         return
     _refreshing.add(device_id)
     try:
+        generation = _generation.get(device_id, 0)  # an address change during the read discards it
         result = await _fetch_status(device_id, dev)
-        _cache[device_id] = (time.monotonic(), result)
+        _store(device_id, generation, result)
     finally:
         _refreshing.discard(device_id)
 
@@ -95,6 +110,7 @@ async def pdu_status(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
+    generation = _generation.get(device_id, 0)  # before the read: a later address change discards this result
     dev = await _get_pdu_or_404(device_id, db)
 
     cached = _cache.get(device_id)
@@ -117,7 +133,7 @@ async def pdu_status(
 
     # First load — fetch now
     result = await _fetch_status(device_id, dev)
-    _cache[device_id] = (time.monotonic(), result)
+    _store(device_id, generation, result)
     return result
 
 
