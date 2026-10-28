@@ -17,7 +17,7 @@ MAIN_STORAGE = "Storage-Main"
 
 class Placement(BaseModel):
     rack: str = Field(min_length=1, max_length=120)
-    u: int = Field(ge=0, le=42, strict=True)
+    u: int = Field(ge=0, le=store.MAX_U, strict=True)
     position: str = Field(default="", max_length=80)
 
     @field_validator("rack", "position")

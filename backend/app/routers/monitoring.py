@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..database import get_db
-from ..models import PingIncident, PingMonitorState, PingSample, PingTarget
+from ..models import PingIncident, PingMonitorState, PingSample, PingTarget, PingTargetName
 from ..monitor_links import connection_index
-from ..ping_monitor import close_incident, interval_minutes, iso, next_slot, server_identity, validate_host
+from ..ping_monitor import close_incident, interval_minutes, iso, next_slot, server_identity, validate_host, inventory_sources
 
 router = APIRouter(prefix="/api/monitoring", tags=["ping monitoring"])
 
@@ -24,6 +24,15 @@ class TargetEdit(BaseModel):
     host: str = Field(max_length=253)
     enabled: bool
     revision: int = Field(ge=0)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    sync_name: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def valid_name(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("A server name is required")
+        return value.strip() if value is not None else None
 
     @field_validator("host")
     @classmethod
@@ -52,7 +61,7 @@ def zone():
         raise HTTPException(503, "Invalid monitoring timezone or missing tzdata. Check server configuration.") from exc
 
 
-def target_view(target, tz):
+def target_view(target, tz, *, name_override="", inventory_name=None):
     status = target.status
     if not target.enabled:
         status = "paused"
@@ -61,7 +70,8 @@ def target_view(target, tz):
     elif target.checked_at and time.time() > next_slot(target.checked_at, tz) + 120:
         status = "stale"
     return {
-        "id": target.id, "name": target.name, "host": target.host, "rack": target.rack,
+        "id": target.id, "name": name_override or inventory_name or target.name, "host": target.host, "rack": target.rack,
+        "inventory_name": inventory_name or target.name, "name_synced": not bool(name_override),
         "source": target.source, "enabled": target.enabled, "revision": target.revision,
         "status": status, "last_result": target.status, "checked_at": iso(target.checked_at),
         "last_up_at": iso(target.last_up_at), "rtt_ms": target.rtt_ms, "detail": target.detail,
@@ -74,6 +84,8 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
     settings = get_settings()
     state = await db.get(PingMonitorState, 1)
     targets = (await db.execute(select(PingTarget).order_by(PingTarget.name))).scalars().all()
+    sources = await inventory_sources(db)
+    overrides = {n.target_id:n.override for n in (await db.execute(select(PingTargetName))).scalars()}
     service = "not_started"
     if not settings.ping_monitor_enabled:
         service = "disabled"
@@ -83,14 +95,18 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
             service = "error"
     response.headers["Cache-Control"] = "no-store"
     connections = await connection_index(db, tz, now)
+    from ..alerts import overview as alert_overview
     return {
+        "email_alerts": await alert_overview(db, settings),
         "timezone": settings.ping_monitor_timezone, "service": service,
         "interval_minutes": interval_minutes(now, tz), "server_time": iso(now),
         "next_run_at": iso(state.next_run_at) if state and settings.ping_monitor_enabled else None,
         "last_started_at": iso(state.last_started_at) if state else None,
         "last_completed_at": iso(state.last_completed_at) if state else None,
         "error": state.error if state else "",
-        "targets": [{**target_view(t, tz), **connections.get(t.source_key, {"pdu": [], "kvm": []})} for t in targets],
+        "targets": [{**target_view(t, tz, name_override=overrides.get(t.id,""),
+                     inventory_name=sources.get(t.source_key.removeprefix("server:"), (None,))[0] if t.source=="inventory" else None),
+                     **connections.get(t.source_key, {"pdu": [], "kvm": []})} for t in targets],
     }
 
 
@@ -148,13 +164,22 @@ async def edit_target(target_id: str, body: TargetEdit, db: AsyncSession = Depen
         if changed:
             target.last_up_at = None
     target.host, target.enabled = body.host, body.enabled
+    name_record = await db.get(PingTargetName, target.id)
+    if body.name is not None or body.sync_name is not None:
+        if target.source == "manual":
+            if body.name is not None: target.name = body.name
+        else:
+            if name_record is None:
+                name_record = PingTargetName(target_id=target.id)
+                db.add(name_record)
+            name_record.override = "" if body.sync_name else (body.name or target.name)
     await db.commit()
-    return target_view(target, zone())
+    return target_view(target, zone(), name_override=name_record.override if name_record else "")
 
 
-def incident_view(incident, target):
+def incident_view(incident, target, name=None):
     return {
-        "id": incident.id, "target_id": target.id, "name": target.name, "rack": target.rack,
+        "id": incident.id, "target_id": target.id, "name": name or target.name, "rack": target.rack,
         "host": incident.host, "previous_up_at": iso(incident.previous_up_at),
         "first_failed_at": iso(incident.first_failed_at), "last_failed_at": iso(incident.last_failed_at),
         "ended_at": iso(incident.ended_at), "end_reason": incident.end_reason,
@@ -170,14 +195,27 @@ async def incident_rows(db, target_id, limit):
     return (await db.execute(query.order_by(PingIncident.first_failed_at.desc()).limit(limit))).all()
 
 
+async def display_names(db):
+    sources = await inventory_sources(db)
+    overrides = {n.target_id:n.override for n in (await db.execute(select(PingTargetName))).scalars()}
+    return sources, overrides
+
+
+async def named_incidents(db, target_id, limit):
+    sources, overrides = await display_names(db)
+    return [incident_view(i, t, overrides.get(t.id) or
+            (sources.get(t.source_key.removeprefix("server:"), (t.name,))[0] if t.source == "inventory" else t.name))
+            for i, t in await incident_rows(db, target_id, limit)]
+
+
 @router.get("/incidents")
 async def incidents(target_id: str | None = None, limit: int = Query(default=200, ge=1, le=2000), db: AsyncSession = Depends(get_db)):
-    return [incident_view(i, t) for i, t in await incident_rows(db, target_id, limit)]
+    return await named_incidents(db, target_id, limit)
 
 
 @router.get("/incidents.csv")
 async def export_incidents(db: AsyncSession = Depends(get_db)):
-    rows = [incident_view(i, t) for i, t in await incident_rows(db, None, 10000)]
+    rows = await named_incidents(db, None, 10000)
     out = io.StringIO(newline="")
     fields = ["name", "host", "rack", "previous_up_at", "first_failed_at", "last_failed_at", "ended_at", "end_reason", "failed_checks", "observed_seconds"]
     writer = csv.writer(out)

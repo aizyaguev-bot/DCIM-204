@@ -9,7 +9,11 @@ export function rackCode(rack) {
 async function parse(response) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = typeof body.detail === "string" ? body.detail : `Request failed (${response.status}). Check the fields and try again.`;
+    // FastAPI sends a 422 detail as a list of { msg } entries; join them like client.js does.
+    const detail = typeof body.detail === "string" ? body.detail
+      : Array.isArray(body.detail) ? body.detail.map(e => e?.msg).filter(Boolean).join("; ")
+      : "";
+    const message = detail || `Request failed (${response.status}). Check the fields and try again.`;
     const error = new Error(message);
     error.status = response.status;
     throw error;
@@ -35,6 +39,11 @@ export async function saveRackItems(updated, previous) {
     versions.set(saved.data, saved.revision);
     return saved.data;
   } catch (error) {
+    // A stale revision would fail every later save too; callers apply error.reloaded instead.
+    if (error.status === 409 || error.status === 428) {
+      error.reloaded = await loadRackItems().catch(() => null);
+      if (error.reloaded) error.message = "Equipment changed in another session. The equipment list was reloaded; review it and try again.";
+    }
     // Older equipment dialogs do not render server errors themselves.
     window.alert(error.message);
     throw error;
@@ -57,6 +66,12 @@ export async function updateInventory(path, body, revision) {
 
 export function locationCode(rack, u, position = "") {
   return `LOC:${encodeURIComponent(rack)}:${u}:${encodeURIComponent(position)}`;
+}
+
+// The one value a printed location label carries. Its barcode and its QR code both encode exactly this text,
+// so a scan of either goes through parseLocationCode below.
+export function labelCode(label) {
+  return label.rack === MAIN_STORAGE ? mainStorageCode : label.u === 0 ? rackCode(label.rack) : locationCode(label.rack, label.u, label.position);
 }
 
 export function parseLocationCode(code) {

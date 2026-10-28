@@ -29,7 +29,15 @@ The twin only calls endpoints that already exist:
 | live power / env | `GET /api/pdus/{id}/status` (15 s poll) |
 | **power control** | `POST /api/pdus/{id}/outlets/{n}/power` `{action: on|off|cycle}` |
 | KVM ports | `GET /api/kvms/{id}/status` |
-| **KVM console** | `POST …/ports/{p}/mark-in-use` → opens `/api/kvms/{id}/autologin?port={p}` |
+| **KVM console** | opens `/api/kvms/{id}/autologin?port={p}`, then `POST …/ports/{p}/mark-in-use` → `{ok, lease, sessions}`; on close `POST …/ports/{p}/mark-free` with body `{"lease": "<that lease>"}` |
+
+KVM console lease rules (shared with the Lab Manager UI):
+
+- Before opening a port whose status shows `in_use`, the twin asks first (Hebrew advisory dialog, Cancel focused). Cancel opens nothing and marks nothing.
+- Every `mark-in-use` call returns its own `lease`. When that console closes (tab closed, inline console closed, or `pagehide` with `keepalive`), the twin frees only that lease, so another person's console on the same port keeps the port IN USE. The `sessions` field in the response is the number of consoles still open on the port.
+- `mark-free` is sent once, and only after `mark-in-use` has succeeded. If `mark-in-use` failed, nothing is freed. An older server that returns no lease gets `mark-free` without a body.
+- The lease travels in the JSON body only, never in the query string, so the URL still ends in `mark-free`.
+- `POST /api/kvms/{id}/mark-free` (the device-wide "Mark KVM free") clears every lease of that KVM. The twin does not call it.
 
 No device IPs or credentials are ever stored in the twin; everything goes through the backend exactly like the React UI.
 

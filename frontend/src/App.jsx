@@ -1,34 +1,134 @@
-import { useState, useEffect, useMemo, Fragment } from "react";
-import { api } from "./api/client";
-import Header from "./components/Header";
+import { useState, useEffect, useMemo, useRef, Fragment, lazy, Suspense } from "react";
+import { api, deviceState, errorMessage } from "./api/client";
+import Header, { useTabStripCue } from "./components/Header";
 import StatsBar from "./components/StatsBar";
 import PduCard from "./components/PduCard";
 import KvmCard from "./components/KvmCard";
+import InventoryRackCard from "./components/InventoryRackCard";
+import { loadRackItems, MAIN_STORAGE } from "./api/inventory";
 import PduDetail from "./pages/PduDetail";
 import KvmDetail from "./pages/KvmDetail";
 import DcimView from "./pages/DcimView";
 import SyncView from "./pages/SyncView";
+import LocationsView from "./pages/LocationsView";
+import ConnectionsView from "./pages/ConnectionsView";
+import AssistantKeyView from "./pages/AssistantKeyView";
 import ScanView from "./pages/ScanView";
 import MonitoringView from "./pages/MonitoringView";
 import AddDeviceModal from "./components/AddDeviceModal";
+import { useAccounts, AccountSettings, UsersView } from "./accounts";
+import { EngineersView } from "./engineers";
+import InlineKvmConsole from "./components/InlineKvmConsole";
+import MaintenanceColumn, { maintenanceStateFor } from "./components/MaintenanceColumn";
+import MaintenanceDialog from "./components/MaintenanceDialog";
+import WhatsNew from "./components/WhatsNew";
+import RemoteInstallView from "./pages/RemoteInstallView";
+import { pxeApi, errorText as pxeErrorText } from "./api/pxe";
+import AssistantPanel from "./components/assistant/AssistantPanel";
+import useAssistantUseful from "./components/assistant/useAssistantUseful";
+import SshAdmin from "./pages/SshAdmin";
+// The terminal page (and xterm) loads only when an SSH tab is opened.
+const SshTerminal = lazy(() => import("./pages/SshTerminal"));
+const ADMIN_SECTIONS = ["devices", "users", "engineers", "mapping", "locations", "connections", "assistant", "ssh", "help"];
+// ?tab=admin&section=<id> opens that Admin sub-page directly (the SSH terminal page links to Admin -> SSH this way).
+function linkedAdminSection(search) {
+  const section = new URLSearchParams(search).get("section");
+  return ADMIN_SECTIONS.includes(section) ? section : "devices";
+}
+import { dashboardStats } from "./dashboardStats";
 
 export default function App() {
+  const { mode: accountMode, canOperate, canAdmin, preferences } = useAccounts();
+  // The lab assistant appears only when a language model is connected or assistant actions are on.
+  const assistantShown = useAssistantUseful();
   const [devices, setDevices] = useState([]);
   const [pduStatuses, setPduStatuses] = useState({});   // { id: PduStatus }
   const [kvmStatuses, setKvmStatuses] = useState({});   // { id: KvmStatus }
   const [view, setView] = useState({ kind: "dashboard" });
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return ["scan", "monitoring"].includes(tab) ? tab : "dashboard";
+    return tab === "dcim" ? "racks" : ["sync", "locations", "connections", "assistant"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
   });
+  const [pxeConfig, setPxeConfig] = useState(undefined);   // undefined: loading, null: unavailable
+  const [pxeConfigError, setPxeConfigError] = useState("");
 
+  const [editMode, setEditMode] = useState(false);
+  // onPop reads the tab shown before Back, so Back between a rack and all racks keeps Edit mode.
+  const mainTabRef = useRef(null);
+  mainTabRef.current = mainTab;
+  const [summary, setSummary] = useState("");
+  const [version, setVersion] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [deviceError, setDeviceError] = useState("");
+  const [kvmOpenError, setKvmOpenError] = useState("");
+  const [inlineConsole, setInlineConsole] = useState(null);   // { deviceId, port, url, name, leaseP }
+  const inlineConsoleRef = useRef(null);   // the same console, for the history and pagehide listeners
+  const kvmTimers = useRef(new Set());
+  const devicesSeq = useRef(0);    // a newer load or a removal makes an older device list response stale
+  const devicesJson = useRef("");  // unchanged lists keep their array, so status polling is not restarted
+  // Rack detail shown on Racks (?rack=); DcimView reads it and reports changes through selectRack.
+  const [rackParam, setRackParam] = useState(() => new URLSearchParams(window.location.search).get("rack"));
+  const [rackItems, setRackItems] = useState(null);
+  const [rackItemsError, setRackItemsError] = useState("");
+  const [maintenance, setMaintenance] = useState(null);
+  const [maintenanceError, setMaintenanceError] = useState("");
+  const [maintenanceDialog, setMaintenanceDialog] = useState(null);   // { mode: "shutdown" | "restore", pduId }
+  const maintenanceSeq = useRef(0);
+  // Admin sub-pages with their own shareable ?tab= link; the others open from ?tab=admin&section=<id>.
+  const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[new URLSearchParams(location.search).get("tab")] || linkedAdminSection(location.search));
+  function navigate(tab, rack) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", tab);
+    if (rack) url.searchParams.set("rack", rack);
+    else url.searchParams.delete("rack");
+    if (tab !== "ssh") url.searchParams.delete("server");
+    url.searchParams.delete("section");
+    const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
+    history.pushState({ tab, view: {kind:"dashboard"}, adminSection: section || adminSection }, "", url);
+    setView({kind:"dashboard"}); setMainTab(section ? "admin" : tab); setEditMode(false);
+    if (section) setAdminSection(section);
+  }
+  function navigateAdmin(section) {
+    navigate(["locations", "connections", "assistant"].includes(section) ? section : "admin");
+    setAdminSection(section);
+    history.replaceState({ ...history.state, adminSection: section }, "");
+  }
   function openDetail(newView) {
-    history.pushState({ view: newView }, "");
+    history.pushState({ view: newView, tab: mainTab }, "");
     setView(newView);
+  }
+  // navigate() plus the rack it wrote to the URL (Header tabs, storage cards, What's new, the assistant).
+  // Admin sub-pages keep navigateAdmin(): rackParam is only read on Racks, and every way back there sets it.
+  function goTo(tab, rack) {
+    navigate(tab, rack);
+    setRackParam(rack || null);
+  }
+  // Opening or leaving a rack detail on Racks: its own history entry, Edit mode stays as it is.
+  function selectRack(rack) {
+    const next = rack || null;
+    if (next === rackParam) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "racks");
+    if (next) url.searchParams.set("rack", next);
+    else url.searchParams.delete("rack");
+    history.pushState({ tab: "racks", view: { kind: "dashboard" }, adminSection }, "", url);
+    setRackParam(next);
   }
 
   useEffect(() => {
-    const onPop = () => setView({ kind: "dashboard" });
+    const onPop = event => {
+      const tab = event.state?.tab || new URLSearchParams(location.search).get("tab") || "dashboard";
+      const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
+      const nextTab = tab === "dcim" ? "racks" : section ? "admin" : tab;
+      const view = event.state?.view || { kind: "dashboard" };
+      // Back / Forward between a rack and all racks stays in Edit mode; anything else leaves it.
+      // The open rack itself is re-read from ?rack= by onHistory below.
+      const sameRacks = nextTab === "racks" && mainTabRef.current === "racks" && view.kind === "dashboard";
+      setView(view);
+      setMainTab(nextTab);
+      setAdminSection(event.state?.adminSection || section || linkedAdminSection(location.search));
+      if (!sameRacks) setEditMode(false);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
@@ -38,47 +138,191 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  // The Admin sub-tabs scroll on a phone: same fade cue and active-tab-in-view as the main tab strip.
+  // `loading` is a dependency because the nav first renders after the device list has loaded.
+  const subnavRef = useRef(null);
+  useTabStripCue(subnavRef, [loading, mainTab, view.kind, adminSection, accountMode, canAdmin]);
 
+  // Returns "popup" | "inline" | "denied" | "cancelled" (the assistant's console button shows it); other callers ignore it.
   function openKvmConsole(deviceId, portNumber) {
-    fetch(`/api/kvms/${deviceId}/ports/${portNumber}/mark-in-use`, { method: "POST" });
-    const popup = window.open(`/api/kvms/${deviceId}/autologin?port=${portNumber}`, "_blank");
+    setKvmOpenError("");
+    if (!canOperate) {
+      setKvmOpenError("פתיחת KVM דורשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.");
+      return "denied";
+    }
+    const name = devices.find(device => device.id === deviceId)?.name || "KVM";
+    // Advisory only: someone else may be working on this port. Cancel opens nothing and marks nothing.
+    const port = kvmStatuses[deviceId]?.ports?.find(p => String(p.number) === String(portNumber));
+    if (port?.in_use && !window.confirm(`הפורט ${port.label?.trim() || `Port ${portNumber}`} ב-${name} מסומן כבשימוש. ייתכן שמישהו אחר עובד עליו כרגע.\nלפתוח את הקונסול בכל זאת?`)) return "cancelled";
+    const base = `/api/kvms/${encodeURIComponent(deviceId)}`;
+    const url = `${base}/autologin?port=${encodeURIComponent(portNumber)}`;
+    // Keep window.open in the click handler, before any asynchronous request.
+    // A blocked popup must still open a console without discarding app state.
+    let popup = null;
+    try { popup = window.open(url, "_blank"); } catch {}
+    // The console page must not be able to navigate this tab (SEC-ACT-18).
+    if (popup) { try { popup.opener = null; } catch {} }
+    // Resolves to this session's lease ("" from a server without leases), or null when marking failed.
+    const leaseP = fetch(`${base}/ports/${encodeURIComponent(portNumber)}/mark-in-use`, { method: "POST" })
+      .then(async response => {
+        if (!response.ok) throw new Error();
+        const data = await response.json().catch(() => null);
+        loadKvmStatus(deviceId);   // show IN USE now, not at the next poll
+        return typeof data?.lease === "string" ? data.lease : "";
+      })
+      .catch(() => {
+        setKvmOpenError("הקונסול נפתח, אבל סימון הפורט כבשימוש נכשל. בדוק שההתחברות לאתר עדיין בתוקף.");
+        return null;
+      });
     if (popup) {
       const t = setInterval(() => {
         if (popup.closed) {
           clearInterval(t);
-          fetch(`/api/kvms/${deviceId}/ports/${portNumber}/mark-free`, { method: "POST" })
-            .then(() => loadKvmStatus(deviceId));
+          kvmTimers.current.delete(t);
+          releasePort(deviceId, portNumber, leaseP);
         }
       }, 2000);
+      kvmTimers.current.add(t);
+      return "popup";
     }
+    const prev = inlineConsoleRef.current;
+    if (prev) {
+      // The new console replaces the open one: free the port it held. Without a lease, the same port
+      // is left alone, because a lease-less mark-free would also clear the mark that was just made.
+      const samePort = prev.deviceId === deviceId && String(prev.port) === String(portNumber);
+      releasePort(prev.deviceId, prev.port, prev.leaseP, { leaseOnly: samePort });
+    }
+    showInlineConsole({ deviceId, port: portNumber, url, name, leaseP });
+    // Back (or a phone's back gesture) closes the console instead of leaving the page.
+    if (!prev) {
+      // A first page load (start page from preferences, no ?tab=) has no history state, which onPop
+      // reads as Dashboard: record the current page first, so closing the console returns to it.
+      if (!history.state?.tab) history.replaceState({ ...history.state, tab: mainTab, view, adminSection }, "");
+      history.pushState({ ...history.state, kvmConsole: true }, "");
+    }
+    return "inline";
   }
+
+  function showInlineConsole(value) {
+    inlineConsoleRef.current = value;
+    setInlineConsole(value);
+  }
+
+  // Frees one console's port once its mark-in-use has answered: with its lease, so another session's
+  // mark on the same port stays; without a body when the server gave no lease; not at all if marking failed.
+  async function releasePort(deviceId, port, leaseP, { keepalive = false, leaseOnly = false } = {}) {
+    const lease = await leaseP;
+    if (lease == null || (leaseOnly && !lease)) return;
+    const init = lease
+      ? { method: "POST", keepalive, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lease }) }
+      : { method: "POST", keepalive };
+    try {
+      await fetch(`/api/kvms/${encodeURIComponent(deviceId)}/ports/${encodeURIComponent(port)}/mark-free`, init);
+    } catch {}
+    if (!keepalive) loadKvmStatus(deviceId);
+  }
+
+  useEffect(() => () => { for (const timer of kvmTimers.current) clearInterval(timer); }, []);
+
+  useEffect(() => {
+    if (!canOperate) { setPxeConfig(null); return; }
+    let active = true;
+    setPxeConfig(undefined);
+    pxeApi.config()
+      .then(config => { if (active) { setPxeConfig(config || null); setPxeConfigError(""); } })
+      .catch(error => { if (active) { setPxeConfig(null); setPxeConfigError(pxeErrorText(error)); } });
+    return () => { active = false; };
+  }, [canOperate]);
+
+  // fromHistory: Back already left the console's history entry. keepalive: the page is going away.
+  function closeInlineConsole({ fromHistory = false, keepalive = false } = {}) {
+    const current = inlineConsoleRef.current;
+    if (!current) return;
+    showInlineConsole(null);
+    releasePort(current.deviceId, current.port, current.leaseP, { keepalive });
+    if (!fromHistory && !keepalive && history.state?.kvmConsole) history.back();
+  }
+  const closeConsoleRef = useRef(closeInlineConsole);
+  closeConsoleRef.current = closeInlineConsole;
+
+  // History listeners kept apart from onPop: Back closes the inline console and re-reads ?rack=;
+  // leaving the page frees the inline console's port (fetch keepalive carries the CSRF header, sendBeacon cannot).
+  useEffect(() => {
+    const onHistory = () => {
+      if (!history.state?.kvmConsole) closeConsoleRef.current({ fromHistory: true });
+      setRackParam(new URLSearchParams(window.location.search).get("rack"));
+    };
+    const onPageHide = () => closeConsoleRef.current({ fromHistory: true, keepalive: true });
+    window.addEventListener("popstate", onHistory);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("popstate", onHistory);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }, []);
 
   const pdus = devices.filter(d => d.kind === "pdu");
   const kvms = devices.filter(d => d.kind === "kvm");
   const racks = useMemo(() => [...new Set(devices.map(d => d.rack).filter(Boolean))].sort(), [devices]);
+  const inventoryRacks = useMemo(() => [...new Map(devices.filter(d => d.kind === "rack" && d.rack && (d.model === "Storage" || d.rack === MAIN_STORAGE)).map(d => [d.rack, d])).values()], [devices]);
+
+  useEffect(() => {
+    if (mainTab !== "dashboard" || inventoryRacks.length === 0) return;
+    let active = true;
+    const refresh = async () => {
+      try {
+        const items = await loadRackItems();
+        if (active) { setRackItems(items); setRackItemsError(""); }
+      } catch (error) {
+        if (active) { setRackItems(null); setRackItemsError(error.message); }
+      }
+    };
+    refresh();
+    const timer = setInterval(refresh, preferences.refresh_seconds * 1000);
+    return () => { active = false; clearInterval(timer); };
+  }, [mainTab, inventoryRacks, preferences.refresh_seconds]);
 
   // Load devices on mount, then poll statuses every 15s
   useEffect(() => {
     loadDevices();
+    fetch("/api/version").then(r => r.json()).then(d => setVersion(d.version)).catch(() => {});
   }, []);
+
+  // Devices added or removed, and port labels saved, in another session, by the assistant or in Locations reach every
+  // page (Racks included) without a reload, on the same interval as the device statuses. Kept out of the [devices]
+  // effect below: that one restarts whenever the list changes, so polling the list there would loop.
+  useEffect(() => {
+    const timer = setInterval(() => { if (!document.hidden) loadDevices(); }, preferences.refresh_seconds * 1000);
+    return () => clearInterval(timer);
+  }, [preferences.refresh_seconds]);
 
   useEffect(() => {
     if (devices.length === 0) return;
     const refresh = () => {
       pdus.forEach(p => loadPduStatus(p.id));
       kvms.forEach(k => loadKvmStatus(k.id));
+      if (pdus.length) loadMaintenance();
     };
     refresh();
-    const t = setInterval(refresh, 15000);
+    const t = setInterval(refresh, preferences.refresh_seconds * 1000);
     return () => clearInterval(t);
-  }, [devices]);
+  }, [devices, preferences.refresh_seconds]);
 
+  // Returns the fetched list, or undefined when the request failed.
   async function loadDevices() {
+    const seq = ++devicesSeq.current;
     try {
       const data = await api.getDevices();
-      setDevices(data);
+      // Polling: keep the same list object when nothing changed, so pages and status polling do not restart.
+      if (seq === devicesSeq.current) {
+        const json = JSON.stringify(data);
+        if (json !== devicesJson.current) { devicesJson.current = json; setDevices(data); }
+        setDeviceError("");
+      }
+      return data;
     } catch (e) {
-      console.error("Failed to load devices:", e);
+      if (seq === devicesSeq.current) setDeviceError(errorMessage(e));
+      return undefined;
     } finally {
       setLoading(false);
     }
@@ -88,14 +332,31 @@ export default function App() {
     try {
       const status = await api.getPduStatus(id);
       setPduStatuses(s => ({ ...s, [id]: status }));
-    } catch {}
+      setLastUpdated(new Date());
+    } catch (e) { setPduStatuses(s => ({...s, [id]: {device_id:id, requestFailed:true, outlets:[], error:errorMessage(e)}})); }
+  }
+
+  async function loadMaintenance() {
+    const seq = ++maintenanceSeq.current;
+    try {
+      const data = await api.maintenanceList();
+      if (seq !== maintenanceSeq.current) return;
+      // protection / protected (outlet numbers per PDU): Racks blocks Off of a protected outlet before anything is sent.
+      setMaintenance({ password_mode: data?.password_mode || "unavailable", pdus: data?.pdus || {}, log: data?.log || [],
+        protection: typeof data?.protection === "string" ? data.protection : null,
+        protected: data?.protected && typeof data.protected === "object" ? data.protected : {} });
+      setMaintenanceError("");
+    } catch (e) {
+      if (seq === maintenanceSeq.current) setMaintenanceError(e.detail || (e.status ? `HTTP ${e.status}` : e.message));
+    }
   }
 
   async function loadKvmStatus(id) {
     try {
       const status = await api.getKvmStatus(id);
       setKvmStatuses(s => ({ ...s, [id]: status }));
-    } catch {}
+      setLastUpdated(new Date());
+    } catch (e) { setKvmStatuses(s => ({...s, [id]: {device_id:id, requestFailed:true, ports:[], error:errorMessage(e)}})); }
   }
 
   async function handleRenameOpt(oldName, newName) {
@@ -111,19 +372,74 @@ export default function App() {
     ]);
   }
 
+  // Errors are rethrown for the caller to show; a 409 (labels changed elsewhere) reloads first and
+  // attaches the fresh device as e.latest (undefined if the reload failed) so the editor can keep its draft.
+  // The response is returned so pages can show whether the names were sent to the device (device_names).
+  async function saveLabels(id, labels, revision) {
+    let saved;
+    try {
+      saved = await api.updateLabels(id, labels, revision);
+    } catch (e) {
+      if (e.status === 409) {
+        const list = await loadDevices();
+        e.latest = list?.find(d => d.id === id);
+        await refreshAllStatuses();
+      }
+      throw e;
+    }
+    await loadDevices();
+    await refreshAllStatuses();
+    return saved;
+  }
+
+  // The X clears every port's IN USE mark on this KVM, including other people's: ask first and name them.
   async function handleMarkKvmFree(id) {
+    const name = devices.find(d => d.id === id)?.name || "KVM";
+    const ports = (kvmStatuses[id]?.ports || []).filter(p => p.in_use)
+      .map(p => p.label?.trim() ? `${p.label.trim()} (P${p.number})` : `P${p.number}`);
+    if (!window.confirm(`לסמן את ${name} כפנוי?\nסימון "בשימוש" יוסר מכל הפורטים: ${ports.join(", ") || "—"}.\nמי שמחובר לקונסול לא ינותק, אבל הפורט יוצג כפנוי.`)) return;
     try {
       await api.markKvmFree(id);
       await loadKvmStatus(id);
     } catch {}
   }
 
-  async function handleOutletAction(device, outletNumber, action) {
+  async function handleOutletAction(device, outletNumber, action, confirmed = false) {
+    if (!canOperate) return;
+    const label = pduStatuses[device.id]?.outlets?.find(o => String(o.number) === String(outletNumber))?.label;
+    const target = label && !/^Outlet \d+$/.test(label) ? `${label} (${device.name} · outlet ${outletNumber})` : `${device.name}, outlet ${outletNumber}`;
+    if (!confirmed && preferences.confirm_power && ["off", "cycle"].includes(action) && !confirm(`Power ${action} ${target}?`)) return;
     try {
       await api.outletPower(device.id, outletNumber, action);
       await loadPduStatus(device.id);
     } catch (e) {
-      alert(`Action failed: ${e.message}`);
+      alert(`Action failed: ${e.detail || e.message}`);
+    }
+  }
+
+  // Racks power: the page asked first (its own dialog), so this only switches the outlets in order and reports each
+  // one; after an Off failure the rest are not attempted. Every affected PDU is read again once.
+  async function switchFeeds(targets, action, { stopOnFailure = false } = {}) {
+    if (!canOperate) throw new Error("Viewer account: read only");
+    const results = [];
+    let stop = false;
+    for (const t of targets) {
+      if (stop) { results.push({ ...t, ok: false, notAttempted: true }); continue; }
+      try { await api.outletPower(t.pduId, t.outlet, action); results.push({ ...t, ok: true }); }
+      catch (e) { results.push({ ...t, ok: false, status: e.status, error: errorMessage(e) }); if (stopOnFailure) stop = true; }
+    }
+    await Promise.all([...new Set(targets.map(t => t.pduId))].map(loadPduStatus));
+    return results;
+  }
+
+  async function handleTurnOnAll(device, numbers) {
+    if (!canOperate || !device || !numbers.length) return;
+    const results = await Promise.allSettled(numbers.map(n => api.outletPower(device.id, n, "on")));
+    const failed = numbers.filter((n, i) => results[i].status === "rejected");
+    await loadPduStatus(device.id);
+    if (failed.length) {
+      const reasons = [...new Set(results.filter(r => r.status === "rejected").map(r => errorMessage(r.reason)))].join("; ");
+      alert(`Turn on all outlets: ${failed.length} of ${numbers.length} ${numbers.length === 1 ? "outlet" : "outlets"} failed (${failed.join(", ")}). ${reasons}`);
     }
   }
 
@@ -133,18 +449,27 @@ export default function App() {
       await loadDevices();
       setAddOpen(false);
     } catch (e) {
-      alert(`Failed to add device: ${e.message}`);
+      alert(`Failed to add device: ${errorMessage(e)}`);
     }
   }
 
+  // Returns true only when the device was removed.
   async function handleDeleteDevice(id) {
-    if (!confirm("Remove this device?")) return;
+    const name = devices.find(d => d.id === id)?.name || "this device";
+    if (!confirm(`Remove ${name}? This cannot be undone.`)) return false;
     try {
       await api.deleteDevice(id);
-      setDevices(d => d.filter(x => x.id !== id));
     } catch (e) {
-      alert(`Failed: ${e.message}`);
+      // 404: someone else already removed it, which is the result that was asked for.
+      if (e.status !== 404) {
+        alert(`Could not remove ${name}: ${errorMessage(e)}`);
+        return false;
+      }
     }
+    devicesSeq.current++;      // a list fetched before the removal must not bring the device back
+    devicesJson.current = "";
+    setDevices(d => d.filter(x => x.id !== id));
+    return true;
   }
 
   const match = (d) => {
@@ -154,39 +479,11 @@ export default function App() {
     const status = pduStatuses[d.id] || kvmStatuses[d.id];
     const outletMatch = (status?.outlets || []).some(o => o.label.toLowerCase().includes(s));
     const portMatch = (status?.ports || []).some(p => p.label.toLowerCase().includes(s));
-    return d.name.toLowerCase().includes(s) || d.ip.includes(s) || (d.rack || "").toLowerCase().includes(s) || outletMatch || portMatch;
+    const itemMatch = d.kind === "rack" && (rackItems?.[d.rack] || []).some(item => [item.name, item.serial_number, item.barcode].some(value => value?.toLowerCase().includes(s)));
+    return d.name.toLowerCase().includes(s) || (d.ip || "").includes(s) || (d.rack || "").toLowerCase().includes(s) || outletMatch || portMatch || itemMatch;
   };
 
-  const stats = useMemo(() => {
-    let outletsOn = 0, outletsTotal = 0, watts = 0, portsActive = 0, portsTotal = 0, alerts = 0;
-    const temps = [], humids = [];
-    let leakDetected = false;
-    pdus.forEach(p => {
-      const s = pduStatuses[p.id];
-      if (s?.outlets) {
-        outletsOn    += s.outlets.filter(o => o.state === "on").length;
-        outletsTotal += s.outlets.length;
-        watts        += s.total_watts || 0;
-      }
-      if (!s?.reachable && s) alerts++;
-      if (s?.temperature != null) temps.push(s.temperature);
-      if (s?.humidity    != null) humids.push(s.humidity);
-      if (s?.leak_detected)       leakDetected = true;
-    });
-    kvms.forEach(k => {
-      const s = kvmStatuses[k.id];
-      if (s?.ports) {
-        portsActive += s.ports.filter(p => /^opt/i.test(p.label || "")).length;
-        portsTotal  += s.ports.length;
-      }
-    });
-    const tempMin = temps.length ? Math.min(...temps) : null;
-    const tempMax = temps.length ? Math.max(...temps) : null;
-    const humMin  = humids.length ? Math.min(...humids) : null;
-    const humMax  = humids.length ? Math.max(...humids) : null;
-    return { deviceCount: devices.length, outletsOn, outletsTotal, watts, portsActive, portsTotal, alerts,
-             tempMin, tempMax, humMin, humMax, leakDetected, hasSensors: temps.length > 0 || humids.length > 0 };
-  }, [devices, pduStatuses, kvmStatuses]);
+  const stats = useMemo(() => dashboardStats(pdus, kvms, pduStatuses, kvmStatuses), [devices, pduStatuses, kvmStatuses]);
 
   if (loading) {
     return (
@@ -200,41 +497,35 @@ export default function App() {
     );
   }
 
+  const pageInfo = {
+    racks: ["Racks", "Shelf layout, equipment and power across Lab 204."],
+    inventory: ["Inventory", "Servers with their rack, power outlet, switch port and owner."],
+    twin: ["3D Twin", "Explore the lab and its saved rack layout."],
+    changelog: ["Changelog", "Changes and releases in Lab Manager."],
+  }[mainTab];
+  const updatedText = lastUpdated ? `Last updated ${lastUpdated.toLocaleTimeString()}.` : "Waiting for device readings.";
   const visiblePdus = pdus.filter(match);
   const visibleKvms = kvms.filter(match).sort((a, b) => a.name.localeCompare(b.name));
+  const visibleInventoryRacks = inventoryRacks.filter(match).sort((a, b) => a.rack.localeCompare(b.rack));
+  const shownCount = mainTab === "power" ? visiblePdus.length : mainTab === "consoles" ? visibleKvms.length
+    : (filter === "all" || filter === "pdus" ? visiblePdus.length : 0) + (filter === "all" || filter === "kvms" ? visibleKvms.length : 0) + (filter === "all" || filter === "racks" ? visibleInventoryRacks.length : 0);
+  const filtersActive = !!search.trim() || rackFilter !== "all" || (mainTab === "dashboard" && filter !== "all");
+  const detailFrom = { power: "Power", consoles: "Consoles", admin: "Admin" }[mainTab] || "Dashboard";
+  // Full-height terminal: no footer or assistant panel over it, and terminal text never reaches the assistant.
+  const sshPage = view.kind === "dashboard" && mainTab === "ssh";
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <Header search={search} setSearch={setSearch} onAdd={() => setAddOpen(true)} onHome={() => { if (view.kind !== "dashboard") history.back(); }} />
-      <StatsBar stats={stats} />
-
-      {/* top-level tab bar — only visible on the root dashboard level */}
-      {view.kind === "dashboard" && (
-        <div className="border-b border-zinc-800/60 bg-zinc-950/40">
-          <div className="max-w-[1600px] mx-auto px-6 flex gap-1 pt-2 overflow-x-auto">
-            {[
-              { id: "dashboard", label: "Dashboard" },
-              { id: "dcim",      label: "DCIM" },
-              { id: "sync",      label: "Sync Map" },
-              { id: "scan",      label: "Scan & Track" },
-              { id: "monitoring", label: "Ping Monitor" },
-              { id: "twin",      label: "3D Twin" },
-            ].map(t => (
-              <button key={t.id} onClick={() => setMainTab(t.id)}
-                className={`px-4 py-2 text-sm font-medium whitespace-nowrap shrink-0 rounded-t-lg border-b-2 transition ${
-                  mainTab === t.id
-                    ? "text-nv-400 border-nv-400 bg-nv-400/5"
-                    : "text-zinc-500 border-transparent hover:text-zinc-300 hover:bg-zinc-800/40"
-                }`}>
-                {t.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {view.kind === "dashboard" && mainTab === "dcim" && (
-        <DcimView
+    <div className={sshPage ? "h-[100dvh] flex flex-col overflow-hidden" : "min-h-screen flex flex-col"}>
+      <Header activeTab={mainTab} onNavigate={goTo} summary={summary} editMode={editMode} onEditChange={value => setEditMode(canOperate && value)} onHome={() => goTo("dashboard")}
+        onAccount={() => goTo("account")} onUsers={() => navigateAdmin("users")} remoteInstall={pxeConfig?.enabled === true} />
+      {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
+      {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
+      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canOperate?[["ssh","SSH"]]:[]),...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
+      {view.kind === "dashboard" && pageInfo && <div className="page-intro"><h1>{pageInfo[0]}</h1><p>{pageInfo[1]} {updatedText}</p></div>}
+      {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
+      {view.kind === "dashboard" && ["racks", "inventory", "power", "changelog"].includes(mainTab) && (
+        <DcimView section={mainTab} editMode={editMode} onSummary={setSummary}
+          rack={rackParam} onRackChange={selectRack}
           devices={devices}
           pduStatuses={pduStatuses}
           kvmStatuses={kvmStatuses}
@@ -242,121 +533,206 @@ export default function App() {
             const device = pdus.find(p => p.id === pduId);
             if (device) await handleOutletAction(device, outletNumber, action);
           }}
-          onLabelChange={async (pduId, newLabels) => {
-            await api.updateLabels(pduId, newLabels);
-            await loadDevices();
-            await refreshAllStatuses();
-          }}
+          onLabelChange={(pduId, newLabels, revision) => saveLabels(pduId, newLabels, revision ?? devices.find(d => d.id === pduId)?.labels_revision)}
           onRenameOpt={handleRenameOpt}
           onRefresh={loadDevices}
+          onOpenConsole={openKvmConsole}
+          maintenance={maintenance}
+          onSwitchFeeds={switchFeeds}
+          onRequestEdit={canOperate ? () => setEditMode(true) : null}
         />
       )}
 
+      {view.kind === "dashboard" && mainTab === "pxe" && (canOperate && pxeConfig?.enabled === true
+        ? <RemoteInstallView config={pxeConfig} onOpenConsole={openKvmConsole} kvmNames={Object.fromEntries(kvms.map(k => [k.id, k.name]))} />
+        : <main className="device-page"><h1 className="text-2xl font-bold text-white">Remote install</h1>
+            <p role={pxeConfig === undefined ? "status" : "alert"} className="text-sm text-zinc-400 mt-2">
+              {!canOperate ? "Remote install requires the Operator or Admin role."
+                : pxeConfig === undefined ? "Loading remote install settings…"
+                : pxeConfigError ? `Remote install settings could not load: ${pxeConfigError}`
+                : "Remote install is not enabled on this server."}
+            </p></main>)}
       {view.kind === "dashboard" && mainTab === "scan" && <ScanView />}
+      {view.kind === "dashboard" && mainTab === "account" && <AccountSettings />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "users" && canAdmin && <UsersView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "engineers" && canAdmin && <EngineersView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "connections" && <ConnectionsView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "assistant" && <AssistantKeyView />}
       {view.kind === "dashboard" && mainTab === "monitoring" && <MonitoringView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "ssh" && <SshAdmin />}
+      {sshPage && (
+        <Suspense fallback={<main className="device-page"><p role="status" className="text-sm text-zinc-400">Loading the terminal…</p></main>}>
+          <SshTerminal serverKey={new URLSearchParams(location.search).get("server") || ""} onExit={() => goTo("inventory")} />
+        </Suspense>
+      )}
 
       {view.kind === "dashboard" && mainTab === "twin" && (
         <iframe title="3D Digital Twin" src="/twin/index.html?embed=1" className="w-full flex-1 border-0"
           style={{ minHeight: "calc(100vh - 150px)" }} allow="fullscreen" />
       )}
 
-      {view.kind === "dashboard" && mainTab === "sync" && (
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "mapping" && (
         <SyncView
           devices={devices}
           pduStatuses={pduStatuses}
           kvmStatuses={kvmStatuses}
+          onChanged={async () => { await loadDevices(); await refreshAllStatuses(); }}
         />
       )}
 
-      {view.kind === "dashboard" && mainTab === "dashboard" && (
-        <main className="flex-1 px-6 py-5 max-w-[1600px] w-full mx-auto">
-          <Toolbar filter={filter} setFilter={setFilter} rackFilter={rackFilter} setRackFilter={setRackFilter} racks={racks} />
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-5">
-            {(filter === "all" || filter === "pdus") && visiblePdus.map(p =>
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "locations" && (
+        <LocationsView devices={devices} onChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />
+      )}
+
+      {view.kind === "dashboard" && ["dashboard", "power", "consoles"].includes(mainTab) && (
+        <main className="device-page">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h1 className="text-2xl font-bold text-white">{mainTab === "consoles" ? "Remote consoles" : mainTab === "power" ? "Power distribution units" : "Dashboard"}</h1><p className="text-sm text-zinc-400 mt-1">{pdus.length} {pdus.length === 1 ? "PDU" : "PDUs"} · {kvms.length} {kvms.length === 1 ? "KVM" : "KVMs"} · {updatedText}</p></div><input aria-label="Search devices" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search devices, ports, IPs…" className="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm w-full sm:w-72"/></div>
+          {mainTab === "dashboard" && <Toolbar filter={filter} setFilter={setFilter} rackFilter={rackFilter} setRackFilter={setRackFilter} racks={racks}
+            count={(filter === "all" || filter === "pdus" ? visiblePdus.length : 0) + (filter === "all" || filter === "kvms" ? visibleKvms.length : 0)}
+            rackCount={filter === "all" || filter === "racks" ? visibleInventoryRacks.length : 0} onAdd={canAdmin ? () => setAddOpen(true) : null} />}
+          <div className={mainTab === "power" ? "flex flex-col xl:flex-row xl:items-start gap-x-4" : undefined}>
+          <div className={mainTab === "power" ? "device-grid flex-1 min-w-0" : "device-grid"}>
+            {(mainTab === "power" || (mainTab === "dashboard" && (filter === "all" || filter === "pdus"))) && visiblePdus.map(p =>
               <PduCard key={p.id} device={p} status={pduStatuses[p.id]}
+                inMaintenance={!!maintenanceStateFor(maintenance, p.id)}
                 onOpen={() => openDetail({ kind: "pdu", id: p.id })}
                 onOutletAction={(n, a) => handleOutletAction(p, n, a)}
               />
             )}
-            {(filter === "all" || filter === "kvms") && visibleKvms.map(k =>
+            {(mainTab === "consoles" || (mainTab === "dashboard" && (filter === "all" || filter === "kvms"))) && visibleKvms.map(k =>
               <KvmCard key={k.id} device={k} status={kvmStatuses[k.id]}
                 onOpen={() => openDetail({ kind: "kvm", id: k.id })}
                 onPortClick={(port) => openKvmConsole(k.id, port.number)}
                 onMarkFree={() => handleMarkKvmFree(k.id)}
               />
             )}
-            {devices.length === 0 && (
+            {mainTab === "dashboard" && (filter === "all" || filter === "racks") && visibleInventoryRacks.map(rack =>
+              <InventoryRackCard key={rack.rack} rack={rack} items={rackItems ? rackItems[rack.rack] || [] : null} error={rackItemsError}
+                onOpen={() => goTo("racks", rack.rack)} />
+            )}
+            {shownCount === 0 && filtersActive && pdus.length + kvms.length + inventoryRacks.length > 0 && (
+              <div role="status" className="col-span-full text-center text-zinc-500 py-12">
+                <div className="mb-3">No devices match {search.trim() ? `"${search.trim()}"` : "the selected filters"}.</div>
+                <button className="underline text-nv-300" onClick={() => { setSearch(""); setFilter("all"); setRackFilter("all"); }}>Clear search and filters</button>
+              </div>
+            )}
+            {pdus.length + kvms.length + inventoryRacks.length === 0 && !deviceError && (
               <div className="col-span-full text-center text-zinc-500 py-16">
                 <div className="text-2xl mb-3">No devices yet</div>
-                <button onClick={() => setAddOpen(true)} className="bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium px-4 py-2 rounded-lg">
+                <button disabled={!canAdmin} onClick={() => setAddOpen(true)} className="bg-nv-400 hover:bg-nv-300 text-zinc-950 font-medium px-4 py-2 rounded-lg">
                   + Add your first device
                 </button>
               </div>
             )}
           </div>
+          {mainTab === "power" && pdus.length > 0 && (
+            <MaintenanceColumn pdus={pdus} pduStatuses={pduStatuses} maintenance={maintenance} error={maintenanceError}
+              onShutdown={p => setMaintenanceDialog({ mode: "shutdown", pduId: p.id })}
+              onRestore={p => setMaintenanceDialog({ mode: "restore", pduId: p.id })} />
+          )}
+          </div>
         </main>
       )}
 
-      {view.kind === "pdu" && (
-        <PduDetail
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "devices" && <main className="p-4 w-full mx-auto">
+        <div className="flex items-center justify-between mb-5"><div><h1 className="text-xl font-semibold text-white">Devices</h1><p className="text-xs text-zinc-500 mt-1">Manage the connected PDUs and KVMs.</p></div><button disabled={!canAdmin} className="edit-toggle active" onClick={()=>setAddOpen(true)}>+ Add Device</button></div>
+        <div className="border border-zinc-800 rounded-xl overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-zinc-900 text-zinc-500"><tr>{["Name","Type","Address","Rack","Status","Actions"].map(h=><th key={h} className="p-3 font-medium">{h}</th>)}</tr></thead><tbody>{devices.filter(d=>["pdu","kvm"].includes(d.kind)).map(d=><tr key={d.id} className="border-t border-zinc-800"><td className="p-3 font-medium text-white">{d.name}</td><td className="p-3 uppercase">{d.kind}</td><td className="p-3 font-mono">{d.ip}</td><td className="p-3">{d.rack}</td><td className="p-3" title={(pduStatuses[d.id] || kvmStatuses[d.id])?.error || undefined}>{{ online: "Online", offline: "Offline", error: "Error", unavailable: "Status unavailable", unknown: "Pending" }[deviceState(pduStatuses[d.id] || kvmStatuses[d.id])]}</td><td className="p-3 whitespace-nowrap"><button className="text-nv-300 mr-4" onClick={()=>openDetail({kind:d.kind,id:d.id})}>Details</button><button disabled={!canAdmin} className="text-rose-400" onClick={()=>handleDeleteDevice(d.id)}>Remove</button></td></tr>)}</tbody></table></div>
+      </main>}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "help" && <main className="p-6 max-w-3xl text-sm space-y-5">
+        <h1 className="text-xl font-semibold text-white">Help & About</h1><p>Lab Manager connects to your Raritan PDUs and KVMs. Device data refreshes every 15 seconds while the page is open.</p>
+        <p>Racks opens in view mode. Use Edit to rename assets, assign owners or rearrange shelves. Scan & Track supports equipment, shelf and whole-rack barcodes, including main storage.</p>
+        <p>Ping Monitor runs on the backend: every 5 minutes from 07:00–20:00 and every 30 minutes overnight, using Israel time. It includes each server's PDU and KVM connections and email delivery status.</p>
+        <p>Power load percentages are estimates using the existing 16 A rating assumption. Email thresholds use measured inlet values and separate configuration.</p>
+        <p>Access continues to use the VM's existing authentication. Version: <span className="font-mono">{version || "Unknown"}</span>.</p>
+      </main>}
+
+      {(view.kind === "pdu" || view.kind === "kvm") && !deviceError && !devices.some(d => d.id === view.id && d.kind === view.kind) && (
+        <RemovedDevice from={detailFrom} onBack={() => history.back()} />
+      )}
+
+      {view.kind === "pdu" && pdus.some(p => p.id === view.id) && (
+        <PduDetail key={`pdu:${view.id}`}
           device={pdus.find(p => p.id === view.id)}
           status={pduStatuses[view.id]}
+          maintenance={maintenanceStateFor(maintenance, view.id)}
+          maintenanceMode={maintenance?.password_mode}
+          onMaintenance={mode => setMaintenanceDialog({ mode, pduId: view.id })}
           onBack={() => history.back()}
-          onOutletAction={(n, a) => handleOutletAction(pdus.find(p => p.id === view.id), n, a)}
-          onDelete={() => { handleDeleteDevice(view.id); history.back(); }}
-          onLabelsSave={async (labels) => {
-            await api.updateLabels(view.id, labels);
-            await loadDevices();
-            await refreshAllStatuses();
-          }}
+          from={detailFrom}
+          onOutletAction={(n, a, confirmed) => handleOutletAction(pdus.find(p => p.id === view.id), n, a, confirmed)}
+          onTurnOnAll={numbers => handleTurnOnAll(pdus.find(p => p.id === view.id), numbers)}
+          onDelete={async () => { if (await handleDeleteDevice(view.id)) history.back(); }}
+          onLabelsSave={(labels, revision) => saveLabels(view.id, labels, revision)}
+          devices={devices}
         />
       )}
 
-      {view.kind === "kvm" && (
-        <KvmDetail
+      {view.kind === "kvm" && kvms.some(k => k.id === view.id) && (
+        <KvmDetail key={`kvm:${view.id}`}
           device={kvms.find(k => k.id === view.id)}
           status={kvmStatuses[view.id]}
           onBack={() => history.back()}
+          from={detailFrom}
           onPortClick={(port) => openKvmConsole(view.id, port.number)}
-          onDelete={() => { handleDeleteDevice(view.id); history.back(); }}
+          onDelete={async () => { if (await handleDeleteDevice(view.id)) history.back(); }}
           onMarkFree={() => handleMarkKvmFree(view.id)}
-          onLabelsSave={async (labels) => {
-            await api.updateLabels(view.id, labels);
-            await loadDevices();
-            await refreshAllStatuses();
-          }}
+          onLabelsSave={(labels, revision) => saveLabels(view.id, labels, revision)}
+          devices={devices}
         />
       )}
 
       {addOpen && <AddDeviceModal racks={racks} onClose={() => setAddOpen(false)} onAdd={handleAddDevice} />}
+      {inlineConsole && <InlineKvmConsole key={`${inlineConsole.deviceId}:${inlineConsole.port}`} console={inlineConsole} onClose={() => closeInlineConsole()} />}
+      {maintenanceDialog && (
+        <MaintenanceDialog key={`${maintenanceDialog.mode}-${maintenanceDialog.pduId}`}
+          mode={maintenanceDialog.mode}
+          device={pdus.find(p => p.id === maintenanceDialog.pduId)}
+          status={pduStatuses[maintenanceDialog.pduId]}
+          state={maintenanceStateFor(maintenance, maintenanceDialog.pduId)}
+          passwordMode={maintenance?.password_mode}
+          onClose={() => setMaintenanceDialog(null)}
+          onChanged={() => { loadMaintenance(); loadPduStatus(maintenanceDialog.pduId); }} />
+      )}
 
-      <footer className="border-t border-zinc-800/80 bg-zinc-950/70 mt-auto">
-        <div className="max-w-[1600px] mx-auto px-6 py-3 text-[11px] text-zinc-500 flex justify-between">
-          <span>Lab Manager · Raritan PX4 + KX III / LX II</span>
-          <span>Auto-refreshes every 15s</span>
-        </div>
-      </footer>
+      <WhatsNew version={version} onOpenChangelog={() => goTo("changelog")} />
+      {!sshPage && assistantShown && <AssistantPanel context={{tab: mainTab, rack: mainTab === "racks" ? rackParam : null, detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={goTo} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />}
+      {!sshPage && <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>}
     </div>
   );
 }
 
-function Toolbar({ filter, setFilter, rackFilter, setRackFilter, racks }) {
+// A PDU or KVM detail page whose device was removed, here or in another session.
+function RemovedDevice({ from, onBack }) {
+  return (
+    <main className="device-page">
+      <div className="flex items-center gap-3 text-sm">
+        <button onClick={onBack} className="text-zinc-400 hover:text-nv-400"><span aria-hidden="true">← </span>Back</button>
+        <span className="text-zinc-600">/</span>
+        <span className="text-zinc-500">{from}</span>
+      </div>
+      <p role="status" className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 text-sm text-zinc-300">This device was removed.</p>
+    </main>
+  );
+}
+
+function Toolbar({ filter, setFilter, rackFilter, setRackFilter, racks, count, rackCount, onAdd }) {
   const Btn = ({ v, label }) => (
-    <button onClick={() => setFilter(v)}
-      className={`px-3 py-1.5 rounded-md text-sm transition ${filter === v ? "bg-zinc-100 text-zinc-900 font-medium" : "bg-zinc-900 text-zinc-300 hover:bg-zinc-800 border border-zinc-800"}`}>
+    <button onClick={() => setFilter(v)} aria-pressed={filter === v}
+      className={`device-filter ${filter === v ? "active" : ""}`}>
       {label}
     </button>
   );
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Btn v="all" label="All" /><Btn v="pdus" label="PDUs" /><Btn v="kvms" label="KVMs" />
-      <div className="w-px h-6 bg-zinc-800 mx-1" />
-      <span className="text-xs text-zinc-500">Rack:</span>
-      <select value={rackFilter} onChange={e => setRackFilter(e.target.value)}
-        className="bg-zinc-900 border border-zinc-800 rounded-md text-sm px-2 py-1.5 focus:outline-none focus:border-nv-400/60">
+    <div className="device-toolbar">
+      <div className="flex gap-1.5" role="group" aria-label="Device type"><Btn v="all" label="All" /><Btn v="pdus" label="PDUs" /><Btn v="kvms" label="KVMs" /><Btn v="racks" label="Storage" /></div>
+      <label className="flex items-center gap-2 text-xs text-zinc-500">Rack
+      <select aria-label="Rack" value={rackFilter} onChange={e => setRackFilter(e.target.value)} className="device-rack-filter">
         <option value="all">All racks</option>
         {racks.map(r => <option key={r}>{r}</option>)}
       </select>
+      </label>
+      <span className="device-count" aria-live="polite">{count} {count === 1 ? "device" : "devices"}{rackCount > 0 && ` · ${rackCount} storage ${rackCount === 1 ? "rack" : "racks"}`}</span>
+      {onAdd && <button className="device-add" onClick={onAdd}><span aria-hidden="true">+</span> Add Device</button>}
     </div>
   );
 }

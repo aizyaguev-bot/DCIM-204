@@ -2,6 +2,773 @@
 
 ---
 
+## v2.44.1 — 2026-10-28 — SSH goes exactly where it was checked
+
+### Security
+- The SSH button connects to the exact address that passed the lab-network check, so a
+  DNS change or a `HostName` / proxy line in the VM's SSH config cannot send it
+  elsewhere. The VM's SSH settings for that server (keys, agent) still apply.
+- An SSH terminal never leaves a shared background connection (ControlMaster) running
+  after it closes.
+
+---
+
+## v2.44.0 — 2026-10-26 — SSH like typing ssh on the VM, four floors per rack
+
+### Added
+- **SSH works the same way as typing `ssh root@<server>` on the VM.** The SSH button
+  now runs the VM's own `ssh` command, so it signs in with the same keys, agent and
+  SSH config as the VM account (for example `~/.ssh/developer_key`). Every lab server
+  is open with zero clicks: no Admin approval, no key install, no password and no
+  host-key confirmation. Existing setups switch to this automatically. An Admin can
+  still turn SSH off for one server, or pick another key source in Admin → SSH.
+- **Four floors per rack.** Each rack card shows floors 1–4, top to bottom. An empty
+  floor is one compact "Free" slot, and the long list of empty shelves is gone.
+  Cooling units and equipment on a floor sit beside the server, not under it, at the
+  same height as the server line; on a
+  phone they wrap under the server inside the same floor.
+
+### Security
+- SSH goes only to servers inside the lab networks: around the saved PDU and KVM
+  addresses, plus `SSH_ALLOWED_NETWORKS`. Ping Monitor targets no longer widen these
+  networks. The `ssh` command runs without a shell, never asks for a password and
+  forwards nothing (no agent, X11 or ports). It gets none of Lab Manager's secrets.
+
+### Changed
+- The "Empty shelves" toggle is gone, because every floor is always shown. Anything
+  saved on a shelf above 4 appears under "Other · not on floors 1–4".
+
+---
+
+## v2.43.1 — 2026-10-26 — Rename a server everywhere at once, 20 more fixes
+
+### Added
+- **Rename a server everywhere at once.** Changing a server's name on the PDU, KVM or
+  PDU–KVM mapping page now asks "Rename OPT45 to OPT46?" and shows exactly what
+  follows the name: every PDU outlet (both feeds), the KVM port, the rack position,
+  the ping monitor and the owner. "Rename everywhere" keeps every port and position
+  and changes only the name (also on the PDU itself); "Only this outlet/port" changes
+  one port. Typing the name of another existing server still assigns that server to
+  the port without asking.
+
+### Fixed
+- Renaming one feed of a server renames all its feeds, its monitor, owner and rack
+  position together; a default port name can no longer be "renamed" on every PDU.
+- A PDU's status no longer shows the previous PDU for a while after its address
+  changes; one malformed inlet reading no longer marks the whole PDU unreachable.
+- A KVM whose REST address answers with a web page, or reports one port without a
+  name, is no longer shown as unreachable.
+- KVM console pages: redirects with a body, "303 See Other", stylesheet links and
+  Latin-1 pages now work through the site.
+- Equipment and layout saves refuse NaN/Infinity instead of breaking the page; a
+  forced password change cannot reuse the temporary password; the alert state no
+  longer stores a hash of the device password; a PXE install that may already have
+  started cannot be cancelled into a second install; and smaller fixes in the CSV
+  export, monitoring and the rack view.
+
+---
+
+## v2.43.0 — 2026-10-26 — New 3D Digital Twin, one row per server, SSH keys from the VM's SSH config
+
+### Added
+- **The redesigned 3D Digital Twin.** A top bar with search ("/"), Overview / Rack
+  front / Aisle / Top views, Layers and "Color by: Health", a live badge with the data
+  age and an issues badge; a rack bar grouped by row with a health dot per rack; a
+  left panel with Issues (click to fly to the problem), Racks and Data quality; a
+  health legend; a Rack front view with shelves, servers as tiles and Free slots,
+  previous/next rack; a server drawer with Power, Ping, Owner and Console, Open
+  console and Power…, location and connections; a power dialog that names the
+  server, PDU, outlet, current state, feeds and console; and a phone layout with a
+  bottom sheet. Power and console still work only for live DCIM mappings and always
+  ask first.
+- **SSH uses the keys named in the VM account's SSH config** (`IdentityFile` lines
+  only — nothing else from that file is used), before the default key files.
+
+### Changed
+- **Racks: one organised row per server on every shelf.** Each server has its own
+  row with aligned columns: state and power, PDU feeds (amber when they disagree),
+  KVM port, owner, address, and KVM / SSH / power on the right. Several servers on a
+  shelf stack under one shelf number; on phones a row wraps into two lines.
+- **The lab assistant stays hidden** until a language model is connected (Admin →
+  AI assistant) or assistant actions are turned on.
+
+---
+
+## v2.42.2 — 2026-10-25 — SSH works like `ssh root@server` on the VM
+
+### Changed
+- **SSH signs in like the VM's own shell.** The terminal now uses the SSH keys of the
+  VM account that runs Lab Manager (the same keys `ssh root@optn118` uses on the VM),
+  then the Lab Manager key — no password and nothing to install on servers that the
+  VM already reaches. Admin → SSH shows which keys are used and can switch back to
+  "Only the Lab Manager key". Graphical forwarding (`-X`) is not available in a
+  browser terminal.
+- **The terminal opens connected.** Clicking SSH opens the terminal and connects at
+  once; "Reconnect" after a close.
+- **One click for every server.** Admin → SSH → "Allow every server with an
+  address" allows all servers whose address the VM can find; servers without one are
+  listed with the reason. A server added later, or whose address changed, waits for
+  one more click on "Check addresses again". A server an Admin turned off stays off,
+  also under any other name for the same address.
+- **Clear failure messages:** "did not answer", "port 22 is closed", "did not accept
+  the keys", and more, instead of one generic message.
+
+---
+
+## v2.42.1 — 2026-10-25 — Polished unit tiles on every rack shelf
+
+### Changed
+- **Racks: every unit on a shelf is a clean tile.** A coloured stripe shows its state
+  at a glance (green on, grey off, amber when only some feeds are on, purple in
+  maintenance, dashed grey when unknown or unreachable); the name is clear, with the
+  state, power draw and owner below it; power, KVM and SSH sit in one tidy row on the
+  right. Equipment shows a type chip, and empty shelves are dashed "Free" slots.
+- **A nicer power switch:** a pill toggle with ON/OFF inside, a smooth knob, an amber
+  "Mixed" state for split feeds, a dashed look when the state is unknown, a spinner
+  while a request runs, and a clear focus ring. Same confirmation as before.
+
+---
+
+## v2.42.0 — 2026-10-25 — New Racks page: power without Edit mode, cooling units you can always bring back
+
+### Added
+- **Power from the Racks page without Edit mode.** Every server row has an ON/OFF
+  switch for Operators and Admins. Off and Cycle always ask first in a dialog that
+  names the server, PDU, outlet and the change; a server with two power supplies
+  switches both by default ("Only this feed" for one). A switch that cannot be used
+  says why: PDU unreachable, unknown state, maintenance, protected outlet, or a
+  request already running. A double click switches once. Viewers see no switches.
+- **Cooling units panel.** Every chiller is listed, including units not on a shelf
+  ("Not on a shelf" on their rack's card) and units without a rack ("Needs a rack").
+  Place, move and take a unit off a shelf from a dialog (keyboard and touch friendly)
+  or by dragging in Edit mode; every change has Undo, and "Change history" brings back
+  any earlier version or a single unit. No action deletes a unit. Two units on one
+  shelf are both drawn.
+- **KVM and SSH on every server row,** in the rack cards, the rack table, the phone
+  list and the server dialog.
+
+### Changed
+- **The Racks page is reorganised.** Summary tiles (draw, servers on, racks, what
+  needs attention) with shortcuts; a toolbar that stays on top with search (servers,
+  owners, switches, equipment, cooling units), filters (Off, No reading,
+  Maintenance), jump to rack, show empty shelves, collapse/expand all. Rack cards
+  show status, maintenance and a load bar and fold runs of empty shelves. On phones
+  cards start collapsed and the rack detail opens as a list. The detail table is in
+  U order, a failed load shows a banner with Retry, and opening a rack updates the
+  address so Back works.
+
+### Fixed
+- Saving equipment after a "changed in another session" warning no longer
+  overwrites the other session's barcode or location; U slots are checked; equipment
+  reloads on its own; non-server labels are not counted; servers on storage shelves
+  are drawn; automatically placed U numbers are marked as such.
+
+---
+
+## v2.41.4 — 2026-10-22 — Old installer backups are cleaned up automatically
+
+### Changed
+- The VM's auto-updater now removes old installer backups on its own, so a full disk
+  can no longer stop updates (as happened today). It always keeps the newest 8
+  backups and every backup from the last 7 days (up to 12), never touches the backup
+  of the running version, and logs each removal. `vm-auto-update.py prune --dry-run`
+  shows what it would remove.
+
+---
+
+## v2.41.3 — 2026-10-22 — Approving SSH servers no longer fails on one unknown address
+
+### Fixed
+- **Admin → SSH:** saving the server approvals no longer fails as a whole when one
+  server has no address the VM can find ("SSH target could not be resolved safely").
+  The other servers are approved, and the page lists the skipped ones and why —
+  usually a server known only by its name: give it its IP address in Ping Monitor,
+  then approve it again.
+
+---
+
+## v2.41.2 — 2026-10-22 — 41 more fixes from the full site check
+
+### Fixed
+- **Devices:** two PDUs or KVMs can no longer share one address, and a device needs
+  a name. The device list reloads on its own, and the Alerts count includes offline
+  KVMs.
+- **Locations:** moves and swaps no longer renumber other servers in the rack, the
+  preview shows the U, and "Clear location" names the rack and U that are kept.
+- **PDU–KVM mapping:** asks before taking a KVM port another server uses, refuses a
+  save based on stale data, keeps links visible when a KVM is unavailable, shows
+  partial saves honestly, and fits a phone screen.
+- **Scan:** scans in quick succession are queued instead of lost or cut, a failed
+  scan is cleared, and a Viewer is never asked to act.
+- **KVM consoles:** each console holds its own lease end to end (pages, 3D Twin and
+  assistant), "Mark KVM free" lists the in-use ports and asks first, and the phone's
+  Back button behaves.
+- **Accounts:** role and status changes ask for confirmation, open tabs stay in step
+  after a sign-in change, an ended session is explained without losing your input,
+  and successful sign-ins no longer count against the sign-in limit.
+- **Ping Monitor:** the side panel stays on screen, keyboard focus is visible, a
+  concurrent edit no longer discards your draft, and renaming an engineer no longer
+  reactivates a deactivated one.
+- **Equipment:** U slots must be whole numbers 0–42, and a whole-list save keeps
+  linked barcodes.
+- **Maintenance:** the shutdown dialog warns about outlets in an unknown or cycling
+  state.
+- **Remote install:** the run limit is enforced before a draft is created, and a
+  failed simulated job offers no console takeover.
+- **Connections export:** shows KVM ports right after a restart.
+
+---
+
+## v2.41.1 — 2026-10-22 — 26 fixes from the full site check
+
+### Fixed
+- **KVM:** two people on the same KVM port no longer free it for each other — each
+  console holds its own lease and the port stays IN USE until the last one closes.
+  The inline console behaves like a dialog, and a console replaced by another one
+  frees its port. The LX II banner text is accurate.
+- **PDU and KVM pages:** your unsaved label edits survive a "changed in another
+  session" conflict (merged with the latest labels), the port IN USE mark shows at
+  once, a Viewer sees why buttons are disabled, and "Turn on all" no longer does
+  nothing silently.
+- **Add device:** a double click creates one device, not two; only lab racks are
+  offered; blank or space-padded names are refused or trimmed.
+- **Locations:** "Clear location" says exactly what is kept, the swap boxes of the
+  move and the place dialogs are separate, a same-rack move without a slot keeps
+  the U, and a move that changes nothing is not counted as an update.
+- **Lab assistant panel:** fits short phone screens in landscape, closes when a link
+  opens a page on a tablet, a Viewer's draft is read-only, and the phone sheet is a
+  proper dialog (the action confirm dialog keeps keyboard focus).
+- **Remote install:** search no longer hides an armed selection, an abandoned draft
+  is released, the run limit is shown, and failure texts say what really happened.
+- **Connections:** refreshes on its own, searches only the columns you can see, and
+  shows Hebrew names in the right direction.
+
+---
+
+## v2.41.0 — 2026-10-22 — SSH to every server from the browser
+
+### Added
+- **SSH terminal in the browser.** An **SSH** button next to every server (Racks,
+  Inventory, Locations, Connections and the PDU–KVM mapping) opens a terminal to that
+  server in a new tab, using one SSH key that lives on the VM. Operators and Admins
+  only. **Admin → SSH**: create the VM key, see the exact `authorized_keys` line for
+  each approved server (it only accepts the VM's address), approve servers, confirm
+  each server's host key once, replace the key, and end open sessions. Every session
+  is recorded (who, which server, when; never what was typed). See
+  docs/ssh-terminal.md. Off until `SSH_ALLOW_INSECURE_TRANSPORT=true` is set in
+  `.env`, because the site runs over plain HTTP.
+- **Racks:** each server now has KVM and SSH buttons together.
+
+---
+
+## v2.40.1 — 2026-10-22 — Racks follow the dashboard, KVM button on every server
+
+### Fixed
+- **Racks now follow the dashboard.** The Racks page used the outlet names it had
+  loaded when the page opened, and could keep showing a server where it used to be.
+  It now uses the same live names as the dashboard, and reloads names and the rack
+  layout on the dashboard's refresh interval (and when you come back to the tab),
+  so moves and renames made in Locations, the 3D Twin, the assistant or another
+  session appear without reloading the page. Nothing reloads while you are editing.
+
+### Added
+- **KVM button on every server in Racks.** Each server row in the rack diagram and
+  in the rack's table has a **KVM** button that opens that server's console
+  directly (Operator and Admin).
+
+---
+
+## v2.40.0 — 2026-10-22 — Active lab assistant, port names written to the PDUs, API key page
+
+### Added
+- **The lab assistant can act — after you confirm.** Ask it in Hebrew or English to
+  turn a server, rack, PDU or the whole lab off or on, to reset a server (power
+  cycle, then open its KVM console), or to swap, move or clear server locations.
+  The assistant only proposes: every action shows the exact outlets or ports it
+  will change, and runs only when you confirm (power actions also ask for your
+  password and a confirmation phrase). Outlets listed in POWER_PROTECTED_OUTLETS
+  are never switched off. Off by default: set `ASSISTANT_ACTIONS_ENABLED=true` in
+  `.env` and restart (see docs/assistant-actions.md). Needs user accounts.
+- **Port names are written to the PDUs themselves.** When you save outlet names on
+  the site, the same names are written to the PDU's own web interface (names only,
+  never power or any other setting; the PDU is read back to confirm). Each outlet
+  shows a small status mark (synced, pending, failed), and the PDU page has a
+  **Device names** panel that compares the site with the PDU and writes the
+  differences you select. Clearing a name on the site resets the PDU's name to its
+  default. KVM port names are not written yet (the lab's KVM models have no
+  documented way to rename ports). `DEVICE_NAME_SYNC=manual` turns off the
+  automatic write (the panel still works), `off` turns all writes off.
+- **Admin → AI assistant:** paste the Anthropic API key in the browser instead of
+  editing `.env` on the VM. The key is tested before it is saved, stored encrypted,
+  shown only as its last 4 characters, and used within a few seconds without a
+  restart. Admins only; saving or removing it asks for your password.
+
+### Fixed
+- A power cycle re-checks every outlet under the PDU locks and refuses, switching
+  nothing, if an outlet changed since the proposal.
+- A lab or rack shutdown stops before the next PDU whenever a PDU stops answering,
+  even if its outlets were already off.
+- The assistant's focus moves into its panel at once, so Escape is never lost on
+  the 3D Twin page.
+- 3D Digital Twin: a click right after a live refresh no longer misses the
+  equipment under the pointer.
+
+### Changed
+- The VM installer's package check never installs anything, and pip ignores every
+  pip configuration file on the VM, so only the fixed package index is used.
+
+---
+
+## v2.39.6 — 2026-10-21 — 3D Digital Twin: clearer moves and keyboard search
+
+### Fixed
+- The move banner no longer covers the toolbar buttons or the Attention list; it
+  sits just under the toolbar and its destination list fits the screen.
+- An unreachable PDU shows its real number of outlets (from Lab Manager or what it
+  last reported) with an unknown state, instead of always 24. Its outlet menu
+  refuses power actions, like the PDU page.
+- Search results: the arrow keys move through them, Enter selects, Escape closes.
+  The Zone and Setup lists show a focus ring.
+- On the 3D Twin page the lab assistant button sits in the page title row, so it
+  never covers the twin's panels; other pages keep it in the corner.
+
+---
+
+## v2.39.5 — 2026-10-21 — Safer 3D Digital Twin and automatic package install
+
+### Fixed
+- **3D Digital Twin — power and console are safe.** Power and console buttons work
+  only for servers that are in the live DCIM mappings; a server that is not shows
+  "Not in live DCIM — power disabled" and a stale PDU is marked "(stale)". Every
+  power confirmation names the server, PDU, outlet and the new state.
+- **3D Digital Twin — moves ask first.** Moving a server always shows where it is
+  going (rack, shelf and U). Moving onto an occupied shelf offers **Swap places**
+  or **Cancel** instead of pushing the other servers down; Cancel writes nothing.
+- The rack bar now flies to the chosen rack without hiding it behind the opposite
+  row, and one tap can no longer save a move to the wrong rack.
+- Moving works while a search is active, and the Attention panel no longer covers
+  the target rack's top shelf during a move.
+- Search: an exact name (for example "OPT11") is selected first; owner names are
+  found again.
+- A blocked KVM pop-up no longer reports success; the console opens inside the
+  twin and closing it frees the port.
+- Zone names sit on their floor areas again; labels and notes are shown as plain
+  text.
+- Rack moves from the twin and from Locations can no longer overwrite each other:
+  a save based on an older layout is refused and asks you to reload.
+- The DCIM rack rows skip the same non-server labels as the 3D twin (PDU, KVM
+  power, spare, free and similar).
+
+### Changed
+- The VM installer now adds any missing Python package the site needs (such as
+  the AI assistant's), without changing packages that are already installed. A
+  failed download never stops the update.
+
+---
+
+## v2.39.4 — 2026-10-21 — Locations (move and swap servers) and Export CSV
+
+### Added
+- **Admin → Locations.** One row per server: rack, U slot, PDU outlets and KVM
+  port. **Move…** sends a server to another server's location (the two swap by
+  default; untick "Swap" to leave the other server unplaced) or to empty
+  outlets and ports, with an optional rack and U. Every move shows the exact
+  list of changes first (each port before → after, positions, servers left
+  unplaced) and applies only what was previewed; if anything changed in the
+  meantime, it asks you to preview again. Monitors and owners stay with the
+  server. **Clear location** removes a server from all its PDU outlets and KVM
+  ports and keeps its rack position.
+- **Admin → Connections** and an **Export CSV** button (also on Locations): every
+  server with rack, U slot, server address, owner, ping state, PDU outlets and
+  KVM ports, ready to send. Operator role and up, because it lists addresses.
+
+### Fixed
+- Editing labels on a PDU or KVM page can no longer wipe the device's other
+  saved labels when the page had not finished loading.
+- A cleared port keeps its default name even when the name came only from the
+  device itself.
+- Moving a server to new ports keeps its rack and U unless you choose new ones.
+- A move that fails half way puts everything back, and says so honestly if it
+  could not.
+
+---
+
+## v2.39.3 — 2026-10-20 — Clear a mapping on the PDU–KVM page
+
+### Added
+- **Clear button in Admin → PDU–KVM mapping.** Every outlet assigned to a
+  server has a Clear button next to Edit. After a confirmation that names the
+  exact ports, it removes the server from that PDU outlet and from its linked
+  KVM port, and changes nothing else.
+
+### Fixed
+- A cleared port keeps its default name ("Outlet 7" / "Port 7"), so a name
+  stored on the PDU or KVM itself cannot reappear after clearing.
+- The Assigned / Empty counts and filters on that page treat default names as
+  empty.
+
+---
+
+## v2.39.2 — 2026-10-20 — QR codes on location labels
+
+### Added
+- **QR codes on printed location labels.** Every shelf, whole-rack and
+  main-storage label from Scan & Track → Print location labels now carries a
+  square QR code next to the existing barcode. Both hold exactly the same value,
+  so a 2D scanner reading the QR and a 1D scanner reading the barcode type the
+  same text into the scan field and go through the same checks.
+
+### Notes
+- An A4 page now holds 8 labels instead of 12, because the barcode keeps its
+  full width below the QR.
+- Reading the QR needs a 2D imager scanner; 1D laser scanners keep using the
+  barcode.
+
+---
+
+## v2.39.1 — 2026-10-20 — Port label edits change only that port
+
+### Fixed
+- **Editing a port label no longer renames the server everywhere.** Writing a
+  new name on a PDU outlet or KVM port (Power and Consoles pages) used to be
+  treated as a rename: the old name was replaced on every other PDU and KVM,
+  in the rack positions, and in the monitor and owner records. Moving a server
+  to another port therefore renamed the server that used to be there. Now only
+  the edited port changes. Renaming a server on purpose still works by editing
+  its name in the Racks view (edit mode).
+
+### Notes
+- To repair labels changed by the old behaviour, use Admin → PDU–KVM mapping:
+  each edit there changes only that outlet and its KVM port.
+
+---
+
+## v2.39.0 — 2026-10-20 — AI lab assistant and remote PXE install (off by default)
+
+### Added
+- **Remote install** for Operator and Admin accounts. Choose a computer from its
+  live KVM port label, reboot it, pick the network boot entry and the install
+  profile, and review the `inst.repo` / `inst.ks` host change before the
+  installer starts. Reboot and install each ask for the operator password.
+  If an install may already have started, that computer stays blocked until an
+  Admin acknowledges it. Leaving the page cancels a job that was never started,
+  so it does not keep the computer blocked.
+- With `PXE_DRIVER=raritan`, an allowlisted computer is driven through its
+  Raritan JavaScript console. That path stays unavailable until the console
+  browser and a screen reader are installed, and it does not send the install
+  key unless the edited line on screen matches the review.
+
+### Changed
+- With user accounts enabled, the 3D twin's lab data needs a signed-in session.
+  Without one, the twin shows "Sign in required" with a link to Lab Manager, so
+  a wall screen showing the twin must stay signed in (a Viewer account is enough).
+- With user accounts enabled, replacing all owners at once (`PUT /api/opt-owners`)
+  is Admin-only. Setting the owner of a single asset, which the app and the twin
+  use, is unchanged.
+- Without user accounts (shared site password), wrong passwords are limited
+  per client address: after 10 in 5 minutes the site answers "Too many attempts.
+  Try again in five minutes." until the window ends. Correct passwords do not
+  count.
+- A device address must be a single IP address or DNS host name, without
+  `http://`, a port, a path, quotes or spaces. A saved address that is not
+  changed never blocks other edits of the device.
+- Saving PDU or KVM port labels no longer overwrites labels that someone else
+  saved in the meantime. The save is refused with "Port labels on this device
+  were changed in another session. Reload and try again." Label values must be
+  text, and new label keys must be port numbers.
+- The main tab bar keeps the current tab in view, fades the edge that hides
+  more tabs, and scrolls sideways with the mouse wheel. Tabs are more compact on
+  screens up to 1600 px wide.
+
+### Fixed
+- Outlet power errors showed raw server output such as `409: {"detail": …}`.
+  They now show the server's message.
+- 3D twin: moving equipment could overwrite layout changes saved meanwhile in
+  another session, and a failed save could still say "saved in Lab Manager".
+  A move now starts from the latest saved layout and shows the server's message
+  when it fails.
+- 3D twin: text from the saved twin data and rack item IDs could run script in
+  the page. It is now always shown as plain text.
+- 3D twin: after a session expired, the twin kept showing "Live" with frozen
+  data. It now shows "Signed out", stops polling, and reconnects after sign-in.
+- 3D twin: a KVM that answers but fails to sign in was shown as active. It now
+  shows the sign-in error and appears under Attention.
+- 3D twin: owners of live Lab Manager equipment could not be changed in the
+  twin, and rack items showed no owner. The twin now shows and saves owners in
+  Lab Manager.
+- 3D twin: Power On and Cycle stayed available for outlets of a PDU in
+  maintenance, and power errors showed raw server output. They are now disabled
+  with the reason, and errors show the server's message.
+- 3D twin: Viewer accounts saw outlet power buttons, could change the rack
+  mapping locally, and saw a "Save to server" button that the server refuses.
+  These controls are now hidden for Viewers.
+- 3D twin: unsaved input in the editor was lost when live data refreshed, and
+  the kiosk Attention list jumped back to the top on every refresh.
+- KVM console: requests forwarded to the KVM no longer include Lab Manager's own
+  sign-in, CSRF or forwarding headers, and device values written into the
+  console page are encoded so they cannot run script.
+- A CSRF header with non-ASCII characters caused a server error. It is now
+  refused with 403.
+- Invalid requests (HTTP 422) repeated the submitted values, such as a
+  password, in the error response. They no longer do.
+- The sign-in screen showed a broken NVIDIA logo. The logo is now part of the
+  app.
+- A PDU whose reading was waiting for a background refresh showed its outlet
+  labels from before the last label change. Current labels now show at once.
+- Ping Monitor: with monitoring turned off in the server configuration, the
+  page now says so and asks for a lab administrator instead of showing a
+  generic error. Hebrew settings labels read right to left.
+- Users: an error in the Add user dialog showed twice. It now shows only in the
+  dialog.
+- The inline KVM console now moves keyboard focus to its Close button when it
+  opens.
+- PDU maintenance log: a reason in Hebrew no longer reorders the rest of the
+  line.
+- Stopping or restarting Lab Manager now also stops remote-install jobs and
+  closes their consoles.
+
+### Notes
+- The lab assistant runs in demo mode until an Anthropic API key
+  (`ASSISTANT_ANTHROPIC_API_KEY`) is set in the server's `.env` and the service
+  is restarted.
+- Remote install stays off until `PXE_ENABLED` is set. The default driver is
+  simulated and does not open a KVM, switch a PDU outlet, or reboot a computer.
+- The live KVM regression tests in `backend/tests/test_kvm_regression.py` run
+  only when `DCIM_LIVE_KVM_TESTS=1` and `DCIM_TEST_BASE_URL` are set. They no
+  longer read `.env` or assume `localhost:8000`.
+
+### AI lab assistant
+- **Lab assistant**: a Hebrew (right-to-left) chat panel for every role,
+  Viewer included. Ask about equipment status, power, consoles, owners,
+  maintenance and the rack layout, or what switching something off would affect.
+- The assistant only reads lab data. Its tools are read-only: it never switches
+  power, opens a console or changes a setting. Each answer lists the sources it
+  used.
+- Without an Anthropic API key, or with the language model turned off, it
+  answers in a clearly labelled demo mode ("מצב הדגמה — ללא מודל שפה") built
+  from the real lab data by fixed rules. The key stays on the server
+  (`ASSISTANT_ANTHROPIC_API_KEY`, see `.env.assistant.example`) and is never
+  sent to the browser or written to logs. A site with no user accounts and no
+  shared password stays in demo mode unless `ASSISTANT_ALLOW_OPEN_LLM` is set.
+- Work items: the assistant drafts a task from an answer; Operator and Admin
+  accounts edit it and save it to the team's list.
+- Voice: dictate a question and have answers read aloud, in browsers that
+  support speech.
+- Questions are limited per user (per minute and per hour), language-model
+  questions have a daily cap for the whole site, and only a few questions are
+  answered at the same time.
+- Remote install (PXE) stays off by default: `PXE_ENABLED` is false and the
+  driver is the simulated one unless the server's `.env` changes them.
+
+---
+
+## v2.38.0 — 2026-10-19 — Automatic VM updates and public version check
+
+### Added
+- The VM can install every new commit of `feat/lab-manager-v3-accounts` by
+  itself. After this release is installed, a one-time command on the VM,
+  `backend/.venv/bin/python scripts/vm-auto-update.py install`, adds a
+  crontab line that checks GitHub every 2 minutes. A new commit is installed
+  with the same installer as the manual runbook, keeping user accounts on when
+  they are on now, usually within about 5 minutes of a push. Every install
+  restarts the site once.
+- A failed update is retried after 30 minutes, at most 3 times, then skipped
+  until a newer commit appears. If a failed attempt leaves down a site that was
+  up before, it is started again. Nothing is installed in the first 5 minutes
+  after a boot or with less than 1 GiB free.
+- `vm-auto-update.py status` shows the installed and the newest commit, the
+  last result and the size of the installer backups; `remove` deletes only its
+  own crontab line. Logs and state are kept in `.monitor-backups/auto-update/`.
+  See section 9 of `docs/vm-runbook.md`.
+
+### Changed
+- `GET /api/version` no longer needs a sign-in when user accounts are on, so a
+  release can be confirmed without signing in. It shows only the installed
+  version (on the VM, the first 7 characters of the installed commit). Every
+  other page and API, and any other method on this address, still needs a
+  session.
+
+### Notes
+- Once automatic updates are on, anyone who can push to
+  `feat/lab-manager-v3-accounts` can run code on the VM within minutes. Turn
+  on GitHub branch protection for this branch (owner action).
+- Run `install` as the normal user, never as root, from a shell that exports
+  no application settings; they belong in `.env`.
+
+---
+
+## v2.37.2 — 2026-10-14 — KVM console in browsers that opened it before
+
+### Fixed
+- The KVM console could stay white after updating, because the browser kept
+  the broken copy of the KVM's scripts from the earlier version. The KVM sends
+  them without cache headers, so browsers reuse them for months. Console pages
+  and scripts now load from a new address, are never cached, and the browser's
+  "has it changed?" and partial-download requests are no longer passed on to
+  the KVM, so the browser always receives a complete, matching script.
+- While the KVM reports no picture, the console says that the server's screen
+  is probably asleep or off, and that moving the mouse or pressing a key wakes
+  it.
+
+---
+
+## v2.37.1 — 2026-10-14 — KVM console fix
+
+### Fixed
+- The KVM console opened as a white page. The proxy changed single quotes to
+  double quotes inside the KVM's own scripts, which broke jQuery. Rewritten
+  links now keep their original quotes.
+- With user accounts enabled, the console's live connection (WebSocket) was
+  always refused because `ws://` was compared with the browser's `http://`
+  origin. Same-site connections are accepted again; other sites are still
+  refused.
+- With user accounts enabled, the KVM web client's own requests were refused
+  for a missing CSRF header that it cannot send. Requests through the KVM
+  proxy now need an Operator session and a same-site `Origin` header instead.
+
+---
+
+## v2.37.0 — 2026-10-13 — PDU maintenance mode, KVM fixes and twin daily-tracking view
+
+### Added
+- **What's new** window: after an update, each browser shows once the changelog
+  sections added since the version it last saw, with a link to the full
+  Changelog tab.
+- Power tab **Maintenance** column. "Turn off all outlets" puts a PDU in
+  maintenance mode. It asks for a reason and the user's password, or the shared
+  Lab Manager password in legacy mode, and records which outlets were on.
+  "Restore power" switches exactly those outlets back on. Every shutdown,
+  restore and wrong-password attempt is kept in a maintenance log, and the last
+  15 entries are shown in the column. API: `GET /api/pdus/maintenance`,
+  `POST /api/pdus/{id}/maintenance/shutdown`, `POST /api/pdus/{id}/maintenance/restore`.
+- While a PDU is in maintenance, outlet on/cycle requests return 409 and are
+  disabled in the PDU card and the detail page. Changing its IP or kind, or
+  deleting it, also returns 409.
+- Wrong maintenance passwords are throttled separately from login
+  (10 failures per 5 minutes; 429 with `Retry-After`).
+- 3D twin: an **Attention** tab and a kiosk dock list leaks, unreachable PDUs
+  and KVMs, high temperature, high rack load, OPTs that are off, in an unknown
+  state or missing from the DCIM labels, auto-placed or unplaced items,
+  unmapped racks and equipment not scanned for over 30 days, sorted by
+  severity. Clicking an entry focuses its rack or item. Identity shows when the
+  device was last seen and how many trackers it has. Heat is off by default and
+  remembered per browser. Refreshes keep the panel scroll position and any
+  open edit.
+
+### Fixed
+- Restoring a PDU from maintenance only counts outlets that the PDU reports as
+  on. Outlets missing from the status reading stay on the restore list instead
+  of ending maintenance mode while still off.
+- KVM ports marked in use on LX II and other units without live port status
+  no longer lose the mark after two minutes. The mark stays until Mark free
+  or expiry.
+- A KVM that rejects the saved credentials now reports "Device API
+  authentication failed" instead of appearing online with generic ports, and
+  stops after the first refused sign-in.
+- 3D twin labels, search results and inventory rows escape device names.
+
+### Notes
+- Maintenance mode is not a physical lockout. Disconnect power physically
+  before hands-on work. Without accounts and without `LAB_MANAGER_PASSWORD`,
+  maintenance actions are disabled.
+
+---
+
+## Unreleased — Unknown power readings and VM operations tools
+
+### Added
+- `scripts/diagnose-device-api.py`: a read-only VM check per PDU/KVM (DNS,
+  route, TCP 443, TLS, HTTPS, proxy environment of the running backend) that
+  separates connection failures from slow responses. It sends no credentials
+  and makes no device changes. See `docs/device-api-diagnostics.md`.
+- `scripts/lab-service.py`: `status` (backend PIDs, version, monitoring and
+  alert state, inventory counts), idempotent `start`, safe `restart`, and an
+  optional `@reboot` start (`install-boot` / `remove-boot`) that refuses to add
+  a second boot mechanism and cannot start a second backend.
+- `scripts/alerts-setup.py`: check, configure SMTP from approved values, send
+  one test mail and show the relay's reply, enable alerts only after a matching
+  successful test, verify the running worker, and an isolated alert simulation.
+- `docs/vm-runbook.md`: ordered VM steps for install, diagnosis, SMTP, alerts,
+  boot start and before/after inventory comparison.
+
+### Fixed
+- Missing or invalid PDU readings are shown as unknown instead of 0 W/V/A.
+  Totals that include unknown outlets are marked partial; measured inlet
+  current is kept when only outlet watts are incomplete.
+- PDU and KVM API failures report fixed failure classes (authentication, HTTP
+  status, connection/read/pool timeout, DNS, refused, unreachable, TLS, proxy).
+  Device response bodies, RPC messages and raw connection errors are no longer
+  returned by the API or included in monitor details and alert emails. The PDU
+  sensor debug view returns status codes and numeric samples only.
+
+---
+
+## Unreleased — KVM console launch recovery
+
+### Fixed
+- When a browser refuses a new KVM tab, a port click opens the console inside
+  the application instead of silently doing nothing. Closing it releases that
+  port's in-use marker and keeps the existing application view intact.
+- KVM cards and detail pages explain why Viewer accounts cannot open consoles.
+  Operator/Admin permissions and saved device connections are unchanged.
+
+---
+
+## v3.1.1 — 2026-10-01
+
+### Added
+- Optional email alerts for persistent PDU/KVM API-check failures, with one
+  notification per episode and a recovery message. Existing device-check schedules
+  remain in use; SMTP configuration is still required to enable delivery.
+
+### Fixed
+- Monitor diagnostics distinguish connection, read and connection-pool timeouts.
+  Connection failures no longer imply that the device replied too slowly.
+
+---
+
+## v3.1.0 — 2026-10-01
+
+### Added
+- An engineer directory seeded with the requested ten names, and Owner selection
+  in Inventory, rack editors and the Twin. Admins can add, rename or disable
+  engineers; Operators can assign owners. Existing ownership remains preserved.
+- Reset View, Fit Lab and Focus Selection controls, with Hebrew navigation hints.
+
+### Fixed
+- Twin mouse input now uses the bundled official OrbitControls. Rotation, screen
+  pan and bounded zoom share one controller; releasing or cancelling a drag stops
+  navigation. Equipment only moves through explicit Edit → Move → destination.
+- Monitor names follow inventory changes and can use a saved display alias.
+  Server renames preserve monitoring history, port associations and ownership.
+- PDU checks have sufficient time for multiple outlet requests and expose safe
+  failure details instead of hiding the reason behind Check failed.
+- KVM sign-in redirects to the same-origin viewer proxy; its HTTP/WebSocket
+  traffic no longer requires opening the device's certificate warning page.
+
+---
+
+## v3.0.0 — 2026-09-30
+
+### Added
+- Real accounts with Admin, Operator and Viewer permissions, account settings,
+  temporary passwords and user management. Activation reuses the existing site
+  password for the first administrator and preserves the existing inventory.
+- Optional email alerts for observed network outages and configured PDU inlet
+  limits. Delivery remains disabled until SMTP and thresholds are configured.
+- The Linux installer can activate accounts, test sign-in before changing the
+  running site, and restore the previous login configuration on failure.
+
+### Changed
+- Integrated the v3 design into the existing application. Dashboard remains the
+  default page; Racks, Inventory, monitoring, console controls and 3D Twin remain
+  connected to the real APIs.
+- Storage racks appear on Dashboard with their saved equipment. Compute rack
+  placeholders do not create additional Dashboard cards for Rack 6 or Rack 7.
+- Rack editing is explicit; opening a rack no longer adds cooling assignments.
+
+---
+
 ## v2.36.0 — 2026-07-30
 
 ### Fixed
@@ -21,7 +788,7 @@
 - **Sensor name matching** — flexible keyword matching (handles `temperature1`, `relativeHumidity`, `leakDetector` etc. across Raritan firmware versions)
 
 ### Added
-- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:FTSW2026 http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
+- **Sensor debug endpoint** — `GET /api/pdus/{id}/sensors-debug` (with auth) tries multiple Raritan API methods to discover where environmental sensors are exposed; use `curl -u x:YOUR_SITE_PASSWORD http://localhost:8000/api/pdus/pdu-rack01/sensors-debug` to diagnose
 
 ---
 

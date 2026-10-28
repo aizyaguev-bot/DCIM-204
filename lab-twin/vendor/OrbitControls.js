@@ -250,7 +250,20 @@
 
 			}();
 
+			// Lab Manager lifecycle adapter: stop input without applying residual
+			// damping. Camera movement calculations remain upstream r128.
+			this.cancel = function () {
+				scope.domElement.ownerDocument.removeEventListener( 'pointermove', onPointerMove );
+				scope.domElement.ownerDocument.removeEventListener( 'pointerup', onPointerUp );
+				state = STATE.NONE;
+				sphericalDelta.set( 0, 0, 0 );
+				panOffset.set( 0, 0, 0 );
+				scale = 1;
+				zoomChanged = false;
+			};
+
 			this.dispose = function () {
+				this.cancel();
 
 				scope.domElement.removeEventListener( 'contextmenu', onContextMenu );
 				scope.domElement.removeEventListener( 'pointerdown', onPointerDown );
@@ -851,13 +864,8 @@
 			}
 
 			function onMouseUp( event ) {
-
-				scope.domElement.ownerDocument.removeEventListener( 'pointermove', onPointerMove );
-				scope.domElement.ownerDocument.removeEventListener( 'pointerup', onPointerUp );
-				if ( scope.enabled === false ) return;
-				handleMouseUp( event );
+				scope.cancel();
 				scope.dispatchEvent( _endEvent );
-				state = STATE.NONE;
 
 			}
 
@@ -981,11 +989,8 @@
 			}
 
 			function onTouchEnd( event ) {
-
-				if ( scope.enabled === false ) return;
-				handleTouchEnd( event );
+				scope.cancel();
 				scope.dispatchEvent( _endEvent );
-				state = STATE.NONE;
 
 			}
 
