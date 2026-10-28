@@ -61,7 +61,7 @@ export default function Header({ activeTab, onNavigate, summary, editMode, onEdi
     </nav>
     <div className="app-header-actions">
       {/* The read-only wall TV page (every role): a new tab, so this page and its unsaved input stay as they are. */}
-      <a className="display-link" href="/?tab=display" target="_blank" rel="noopener" title="Open the read-only lab display for the entrance TV in a new tab">
+      <a className="display-link" href="/?tab=display" target="_blank" rel="noopener" title="Open the read-only lab display for the entrance TV in a new tab. On the TV, sign in as Viewer (the lab's Viewer account), not with an Operator or Admin account.">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M3 5h18v12H3zM8 21h8M12 17v4"/></svg>
         <span className="display-link-text">Lab display (TV)</span>
       </a>

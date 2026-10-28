@@ -5,7 +5,8 @@ import { rackSummary, serverVisualState } from "./components/racks/rackView.js";
 import { MAIN_STORAGE } from "./api/inventory.js";
 
 export const REFRESH_MS = 15_000;        // one data cycle, like the rest of the site
-export const STALE_MS = 60_000;          // older data than this shows the stale badge
+export const STALE_MS = 60_000;          // older data than this: the page is "NOT LIVE" (banner, greyed panels)
+export const STALE_ALARM_MS = 5 * 60_000; // not live for this long: the banner turns from warning to alarm
 export const ROTATE_MS = 10_000;         // long lists and the rack grid turn a page this often
 export const REQUEST_TIMEOUT_MS = 12_000; // a request that hangs longer counts as failed; the next cycle retries
 export const OVERRIDES_EVERY = 4;        // rack overrides (servers moved between racks) change rarely: every 4th cycle
@@ -20,8 +21,12 @@ export const RATED_AMPS = 16;
 export const LOAD_WARN_PCT = 60;
 export const LOAD_ALARM_PCT = 80;
 // Row heights in em of the display's base size; the page sets them inline and fits lists with the same numbers.
-export const ROW_EM = { attention: 3.7, load: 2.75, inUse: 2.4, ticker: 2.6 };
-export const RACK_CARD_EM = { minW: 14, minH: 7.6, maxH: 11, gap: 0.8 };
+export const ROW_EM = { attention: 4, load: 2.6, inUse: 2.4, ticker: 2.6 };
+export const RACK_CARD_EM = { minW: 14, minH: 10, maxH: 11, gap: 0.8 };
+// More racks than fit at that size: compact cards (name, on / total, state) so every rack is seen in two pages or fewer.
+export const RACK_CARD_COMPACT_EM = { minW: 11, minH: 5.2, maxH: 6, gap: 0.6 };
+// The lab's own time zone: a TV stick or mini-PC set to UTC still shows lab time.
+export const LAB_TZ = "Asia/Jerusalem";
 export const LIST_GAP_EM = 0.45;
 export const LOAD_COL_EM = 26;   // Power by PDU: a second column once the panel is this wide (per column)
 export const TICKER_ITEM_EM = 31;   // recent changes: one entry per this much strip width
@@ -37,6 +42,14 @@ export const naturalCompare = (a, b) => String(a ?? "").localeCompare(String(b ?
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const asArray = value => (Array.isArray(value) ? value : []);
 const asObject = value => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+
+// Sentences as parts: {text} is the page's own English, {text, user: true} is text people typed (rack, device and
+// server names, who, why). The page shows each user part in its own <bdi dir="auto">, so a Hebrew name or reason
+// keeps its place in the English sentence instead of swapping with its neighbours.
+const own = text => ({ text: String(text) });
+const typed = text => ({ text: String(text), user: true });
+export const partsText = parts => asArray(parts).map(p => p?.text ?? "").join("");
+const rackPrefix = rack => (rack ? [typed(rack), own(" · ")] : []);
 
 // Servers as the Racks page lists them (DcimView `servers`): every PDU outlet whose label names a server. A reachable
 // PDU's live outlets win over saved labels; a moved server (rack overrides) belongs to its new rack.
@@ -80,26 +93,58 @@ export function pduLoad(pdu, status) {
   return { id: pdu.id, name: pdu.name, rack: pdu.rack || "", state, reachable, watts, amps, pct, estimated: !measured, level };
 }
 
-// Rack cards: one per rack named by a PDU or a rack device, in natural order (Rack-2 before Rack-10).
-export function buildRacks(devices, pduStatuses = {}, servers = [], maintenance = null) {
+// Rack cards: one per rack named by a PDU or a rack device, in natural order (Rack-2 before Rack-10). A rack's level
+// is the worst of its power state and what its sensors and Ping Monitor report; `reason` names the top one ("Water
+// leak", "37 °C", "2 not answering ping", "Unreachable", "Maintenance", "Online"). `noReading` counts every server
+// without an on/off reading (PDU unreachable, outlet unknown or first reading pending), so on + off + noReading = total.
+const RANK = { alarm: 4, maint: 3, warn: 2, ok: 1, idle: 0 };
+export function buildRacks(devices, pduStatuses = {}, servers = [], maintenance = null, { sensors = [], attention = [] } = {}) {
   const rackDevices = (devices || []).filter(d => (d.kind === "pdu" || d.kind === "rack") && d.rack);
   const names = [...new Set(rackDevices.map(d => d.rack))].sort(naturalCompare);
   return names.map(rack => {
-    const own = rackDevices.filter(d => d.rack === rack);
+    const ownDevices = rackDevices.filter(d => d.rack === rack);
     const shared = rackDevices.filter(d => d.kind === "pdu" && d.rack !== rack && String(d.notes || "").split(",").map(s => s.trim()).includes(`shared:${rack}`));
-    const pduData = [...own, ...shared].filter(d => d.kind === "pdu").map(d => ({ id: d.id, name: d.name }));
-    const rackType = rack === MAIN_STORAGE || own[0]?.model === "Storage" ? "storage" : "compute";   // DcimView rackStats rule
+    const pduData = [...ownDevices, ...shared].filter(d => d.kind === "pdu").map(d => ({ id: d.id, name: d.name }));
+    const rackType = rack === MAIN_STORAGE || ownDevices[0]?.model === "Storage" ? "storage" : "compute";   // DcimView rackStats rule
     const loads = pduData.map(p => pduLoad(p, pduStatuses[p.id]));
     const watts = loads.some(l => l.watts != null) ? loads.reduce((sum, l) => sum + (l.watts ?? 0), 0) : null;
     const wattsComplete = pduData.length > 0 && pduData.every(p => pduStatuses[p.id]?.reachable === true && pduStatuses[p.id]?.watts_complete === true);
     const rackServers = servers.filter(s => s.rack === rack);
     const summary = rackSummary({ rackType, pduData, servers: rackServers, wattsComplete }, { pduStatuses, maintenance });
-    const level = summary.status === "offline" ? "alarm"
-      : summary.maintenancePdus.length ? "maint"
-      : summary.status === "unavailable" || summary.noReading > 0 ? "warn"
-      : summary.status === "online" ? "ok" : "idle";
-    return { rack, storage: rackType === "storage", status: summary.status, statusText: summary.statusText, level,
-      total: summary.total, on: summary.on, off: summary.off, noReading: summary.noReading,
+    const noReading = summary.total - summary.on - summary.off;
+    const inMaintenance = summary.maintenancePdus.length > 0;
+    const base = summary.status === "online" ? { level: "ok", reason: "Online" }
+      : summary.status === "loading" ? { level: "idle", reason: "Reading…" }
+      : summary.status === "no-pdu" ? { level: "idle", reason: "No PDU" }
+      : summary.status === "storage" ? { level: "idle", reason: "" }
+      : { level: "idle", reason: summary.statusText };
+    // Each issue: its level, its place among issues of the same level (lower first) and the words on the card.
+    const issues = [];
+    if (summary.status === "offline") issues.push({ level: "alarm", order: 3, reason: "Unreachable" });
+    else if (summary.status === "unavailable") issues.push({ level: "warn", order: 3, reason: "No reading" });
+    else if (summary.status === "online" && noReading > 0) issues.push({ level: "warn", order: 3, reason: "Partial reading" });
+    if (inMaintenance) issues.push({ level: "maint", order: -1, reason: "Maintenance" });
+    for (const s of asArray(sensors)) {
+      if (s?.rack !== rack) continue;
+      if (s.leak === true) issues.push({ level: "alarm", order: 0, reason: "Water leak" });
+      if (finite(s.temperature) && s.temperature > TEMP_ALARM_C) issues.push({ level: "alarm", order: 1, reason: `${formatNumber(s.temperature, 0)} °C` });
+      else if (finite(s.temperature) && s.temperature > TEMP_WARN_C) issues.push({ level: "warn", order: 1, reason: `${formatNumber(s.temperature, 0)} °C` });
+      if (finite(s.humidity) && s.humidity > HUMIDITY_WARN) issues.push({ level: "warn", order: 6, reason: `Humidity ${formatNumber(s.humidity, 0)} %` });
+    }
+    const mine = asArray(attention).filter(i => i?.rack === rack);
+    const pingDown = mine.filter(i => i.kind === "ping" && i.severity === "alarm").length;
+    const pingLate = mine.filter(i => i.kind === "ping" && i.severity !== "alarm").length;
+    // Servers a maintenance switched off stop answering ping: expected while the rack is in maintenance.
+    if (pingDown) issues.push({ level: inMaintenance ? "maint" : "alarm", order: 4, reason: `${pingDown} not answering ping` });
+    if (pingLate) issues.push({ level: inMaintenance ? "maint" : "warn", order: 5, reason: `${pingLate} ping ${pingLate === 1 ? "check" : "checks"} failed` });
+    if (mine.some(i => i.kind === "kvm")) issues.push({ level: "warn", order: 7, reason: "KVM unreachable" });
+    // A PDU that answers with an error (the unreachable / no reading states are counted above).
+    if (summary.status === "online" && mine.some(i => i.kind === "pdu")) issues.push({ level: "warn", order: 3, reason: "PDU error" });
+    issues.sort((a, b) => RANK[b.level] - RANK[a.level] || a.order - b.order);
+    const top = issues[0] && RANK[issues[0].level] >= RANK[base.level] ? issues[0] : base;
+    return { rack, storage: rackType === "storage", status: summary.status, statusText: summary.statusText,
+      level: top.level, reason: top.reason, issues: issues.map(i => i.reason),
+      total: summary.total, on: summary.on, off: summary.off, noReading,
       watts, wattsComplete, maintenancePdus: summary.maintenancePdus };
   });
 }
@@ -131,6 +176,8 @@ export function environment(pdus, pduStatuses = {}) {
     humMin: hums.length ? Math.min(...hums) : null, humMax, leak, leakSensors: leaks.length, tempLevel, humLevel, leakLevel, level };
 }
 
+const LOAD_ORDER = { alarm: 0, warn: 1 };
+
 // The headline numbers. Servers without an on/off reading (PDU unreachable, outlet unknown, first read pending) count
 // as "no reading", so ON + OFF + no reading is every server.
 export function kpis({ devices = [], pduStatuses = {}, kvmStatuses = {}, servers = [], maintenance = null }) {
@@ -154,7 +201,8 @@ export function kpis({ devices = [], pduStatuses = {}, kvmStatuses = {}, servers
     kvms: { reachable: kvms.filter(k => kvmStatuses[k.id]?.reachable === true).length, total: kvms.length,
       read: kvms.filter(k => kvmStatuses[k.id] != null).length },
     power: { watts, complete, known: known.length },
-    loads: loads.sort((a, b) => naturalCompare(a.name, b.name)),
+    // Problems first (an unreachable PDU is never on a later page), then by name.
+    loads: loads.sort((a, b) => (LOAD_ORDER[a.level] ?? 2) - (LOAD_ORDER[b.level] ?? 2) || naturalCompare(a.name, b.name)),
   };
 }
 
@@ -176,66 +224,96 @@ export function openAlerts(recent) {
 }
 
 const SEVERITY = { alarm: 0, warn: 1, info: 2 };
-const KIND_ORDER = ["leak", "temperature", "alert", "pdu", "ping", "kvm", "humidity", "monitor", "maintenance"];
+const KIND_ORDER = ["leak", "temperature", "alert", "pdu", "ping", "kvm", "humidity", "monitor"];
 
 // Everything that needs a look, most severe first: unreachable devices, servers that stopped answering ping, open
-// alerts, sensors past a threshold, maintenance in progress. Each entry: {key, severity, kind, title, detail}.
-export function attentionItems({ devices = [], pduStatuses = {}, kvmStatuses = {}, maintenance = null, monitoring = null, env = null, now = Date.now() }) {
+// alerts, sensors past a threshold. Maintenance has its own band (maintenanceEntries). Each entry: {key, severity,
+// kind, rack, titleParts, parts} plus title / detail as plain text. monitoringUnknownSince (ms): Ping Monitor data
+// could not be read since then, so its ping and alert items are left out and one warning says so.
+export function attentionItems({ devices = [], pduStatuses = {}, kvmStatuses = {}, monitoring = null, env = null, now = Date.now(), monitoringUnknownSince = null }) {
   const items = [];
-  const add = (key, severity, kind, title, detail = "") => items.push({ key, severity, kind, title, detail });
+  const add = (key, severity, kind, rack, titleParts, parts = []) =>
+    items.push({ key, severity, kind, rack: rack || "", titleParts, parts, title: partsText(titleParts), detail: partsText(parts) });
   const servers = buildServers(devices.filter(d => d.kind === "pdu"), pduStatuses);
   for (const d of devices) {
     if (d.kind !== "pdu" && d.kind !== "kvm") continue;
     const status = d.kind === "pdu" ? pduStatuses[d.id] : kvmStatuses[d.id];
     const state = status == null ? "loading" : deviceState(status);
-    const where = d.rack ? `${d.rack} · ` : "";
+    const where = rackPrefix(d.rack);
+    const name = typed(d.name);
     if (d.kind === "pdu") {
       const count = servers.filter(s => s.pduId === d.id).length;
-      const impact = count ? `${count} ${count === 1 ? "server has" : "servers have"} no power reading` : "No power reading";
-      if (state === "offline") add(`pdu:${d.id}`, "alarm", "pdu", `${d.name} unreachable`, `${where}${impact}`);
-      else if (state === "unavailable") add(`pdu:${d.id}`, "warn", "pdu", `${d.name}: status not available`, `${where}${impact}`);
-      else if (state === "error") add(`pdu:${d.id}`, "warn", "pdu", `${d.name} reports an error`, `${where}Readings may be incomplete`);
+      const impact = own(count ? `${count} ${count === 1 ? "server has" : "servers have"} no power reading` : "No power reading");
+      if (state === "offline") add(`pdu:${d.id}`, "alarm", "pdu", d.rack, [name, own(" unreachable")], [...where, impact]);
+      else if (state === "unavailable") add(`pdu:${d.id}`, "warn", "pdu", d.rack, [name, own(": status not available")], [...where, impact]);
+      else if (state === "error") add(`pdu:${d.id}`, "warn", "pdu", d.rack, [name, own(" reports an error")], [...where, own("Readings may be incomplete")]);
     } else {
-      if (state === "offline") add(`kvm:${d.id}`, "warn", "kvm", `${d.name} unreachable`, `${where}Remote consoles are unavailable`);
-      else if (state === "unavailable") add(`kvm:${d.id}`, "warn", "kvm", `${d.name}: status not available`, `${where}Console state unknown`);
-      else if (state === "error") add(`kvm:${d.id}`, "warn", "kvm", `${d.name} reports an error`, `${where}Remote consoles may not open`);
+      if (state === "offline") add(`kvm:${d.id}`, "warn", "kvm", d.rack, [name, own(" unreachable")], [...where, own("Remote consoles are unavailable")]);
+      else if (state === "unavailable") add(`kvm:${d.id}`, "warn", "kvm", d.rack, [name, own(": status not available")], [...where, own("Console state unknown")]);
+      else if (state === "error") add(`kvm:${d.id}`, "warn", "kvm", d.rack, [name, own(" reports an error")], [...where, own("Remote consoles may not open")]);
     }
   }
-  const pduNames = new Map(devices.filter(d => d.kind === "pdu").map(d => [String(d.id), d]));
-  for (const [id, state] of Object.entries(asObject(maintenance?.pdus))) {
-    const pdu = pduNames.get(String(id));
-    const since = finite(state?.started_at) ? ` since ${clockTime(state.started_at * 1000)}` : "";
-    const who = state?.started_by ? ` by ${state.started_by}` : "";
-    const why = state?.reason ? ` · ${String(state.reason).slice(0, 80)}` : "";
-    add(`maint:${id}`, "info", "maintenance", `${pdu?.name || id} in maintenance`, `${pdu?.rack ? `${pdu.rack} · ` : ""}Outlets switched off${since}${who}${why}`);
-  }
-  if (monitoring) {
+  if (monitoringUnknownSince != null) {
+    add("monitor:data", "warn", "monitor", "", [own(`Ping Monitor data not available since ${clockTime(monitoringUnknownSince)}`)],
+      [own("Ping and alert items are left out until it answers again")]);
+  } else if (monitoring) {
     for (const t of asArray(monitoring.targets)) {
       if (!t || t.enabled === false) continue;
-      const where = t.rack ? `${t.rack} · ` : "";
-      const lastUp = t.last_up_at ? `last answered ${relativeAge(now - Date.parse(t.last_up_at))}` : "no reply yet";
-      if (t.status === "down") add(`ping:${t.id}`, "alarm", "ping", `${t.name} not answering ping`, `${where}${lastUp}`);
-      else if (t.status === "stale" && t.last_result === "down") add(`ping:${t.id}`, "warn", "ping", `${t.name}: last ping failed`, `${where}Check overdue · ${lastUp}`);
-      else if (t.status === "error") add(`ping:${t.id}`, "warn", "ping", `${t.name}: ping probe error`, `${where}The check itself failed`);
+      const where = rackPrefix(t.rack);
+      const lastUp = own(t.last_up_at ? `last answered ${relativeAge(now - Date.parse(t.last_up_at))}` : "no reply yet");
+      if (t.status === "down") add(`ping:${t.id}`, "alarm", "ping", t.rack, [typed(t.name), own(" not answering ping")], [...where, lastUp]);
+      else if (t.status === "stale" && t.last_result === "down") add(`ping:${t.id}`, "warn", "ping", t.rack, [typed(t.name), own(": last ping failed")], [...where, own("Check overdue · "), lastUp]);
+      else if (t.status === "error") add(`ping:${t.id}`, "warn", "ping", t.rack, [typed(t.name), own(": ping probe error")], [...where, own("The check itself failed")]);
     }
     if (monitoring.service === "error" || monitoring.service === "overdue") {
-      add("monitor:service", "warn", "monitor", "Ping Monitor checks are overdue", monitoring.service === "error" ? "The last monitoring run failed" : "No check ran on schedule");
+      add("monitor:service", "warn", "monitor", "", [own("Ping Monitor checks are overdue")], [own(monitoring.service === "error" ? "The last monitoring run failed" : "No check ran on schedule")]);
     }
     for (const alert of openAlerts(monitoring.email_alerts?.recent)) {
-      add(`alert:${alert.id}`, "alarm", "alert", alert.title, alert.at ? `Alert sent ${relativeAge(now - alert.at)}` : "Alert sent");
+      add(`alert:${alert.id}`, "alarm", "alert", "", [typed(alert.title)], [own(alert.at ? `Alert sent ${relativeAge(now - alert.at)}` : "Alert sent")]);
     }
   }
   if (env?.hasSensors) {
     for (const s of env.sensors) {
-      const where = s.rack ? `${s.rack} · ${s.name}` : s.name;
-      if (s.leak === true) add(`leak:${s.id}`, "alarm", "leak", "Water leak detected", where);
-      if (s.temperature != null && s.temperature > TEMP_ALARM_C) add(`temp:${s.id}`, "alarm", "temperature", `Temperature ${formatNumber(s.temperature, 1)} °C`, `${where} · above ${TEMP_ALARM_C} °C`);
-      else if (s.temperature != null && s.temperature > TEMP_WARN_C) add(`temp:${s.id}`, "warn", "temperature", `Temperature ${formatNumber(s.temperature, 1)} °C`, `${where} · above ${TEMP_WARN_C} °C`);
-      if (s.humidity != null && s.humidity > HUMIDITY_WARN) add(`hum:${s.id}`, "warn", "humidity", `Humidity ${formatNumber(s.humidity, 0)} %`, `${where} · above ${HUMIDITY_WARN} %`);
+      const where = s.rack ? [typed(s.rack), own(" · "), typed(s.name)] : [typed(s.name)];
+      if (s.leak === true) add(`leak:${s.id}`, "alarm", "leak", s.rack, [own("Water leak detected")], where);
+      if (s.temperature != null && s.temperature > TEMP_ALARM_C) add(`temp:${s.id}`, "alarm", "temperature", s.rack, [own(`Temperature ${formatNumber(s.temperature, 1)} °C`)], [...where, own(` · above ${TEMP_ALARM_C} °C`)]);
+      else if (s.temperature != null && s.temperature > TEMP_WARN_C) add(`temp:${s.id}`, "warn", "temperature", s.rack, [own(`Temperature ${formatNumber(s.temperature, 1)} °C`)], [...where, own(` · above ${TEMP_WARN_C} °C`)]);
+      if (s.humidity != null && s.humidity > HUMIDITY_WARN) add(`hum:${s.id}`, "warn", "humidity", s.rack, [own(`Humidity ${formatNumber(s.humidity, 0)} %`)], [...where, own(` · above ${HUMIDITY_WARN} %`)]);
     }
   }
   return items.sort((a, b) => SEVERITY[a.severity] - SEVERITY[b.severity]
     || KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || naturalCompare(a.title, b.title));
+}
+
+// Outlet numbers as short runs: [1, 2, 3, 5] -> "1–3, 5".
+export function outletRuns(numbers) {
+  const sorted = [...new Set(asArray(numbers).map(Number).filter(Number.isInteger))].sort((a, b) => a - b);
+  const runs = [];
+  for (const n of sorted) {
+    const last = runs[runs.length - 1];
+    if (last && n === last[1] + 1) last[1] = n; else runs.push([n, n]);
+  }
+  return runs.map(([a, b]) => (a === b ? `${a}` : b === a + 1 ? `${a}, ${b}` : `${a}–${b}`)).join(", ");
+}
+
+// Maintenance in progress, one entry per PDU: "Rack-03 · PDU 03 · outlets 1, 2 off since 11:34 · admin · reason".
+export function maintenanceEntries({ devices = [], maintenance = null }) {
+  const pdus = new Map(devices.filter(d => d.kind === "pdu").map(d => [String(d.id), d]));
+  const rows = [];
+  for (const [id, state] of Object.entries(asObject(maintenance?.pdus))) {
+    const pdu = pdus.get(String(id));
+    const outlets = outletRuns(state?.outlets_off);
+    const count = asArray(state?.outlets_off).length;
+    const since = finite(state?.started_at) ? ` since ${clockTime(state.started_at * 1000)}` : "";
+    const parts = [...rackPrefix(pdu?.rack), typed(pdu?.name || id), own(" · "),
+      own(`${outlets ? `${count === 1 ? "outlet" : "outlets"} ${outlets}` : "outlets"} off${since}`)];
+    const failed = asArray(state?.failed).length;
+    if (failed) parts.push(own(` · ${failed} did not switch off`));
+    if (state?.started_by) parts.push(own(" · "), typed(state.started_by));
+    if (state?.reason) parts.push(own(" · "), typed(String(state.reason).slice(0, 120)));
+    rows.push({ key: `maint:${id}`, rack: pdu?.rack || "", name: pdu?.name || String(id), parts, text: partsText(parts) });
+  }
+  return rows.sort((a, b) => naturalCompare(a.rack, b.rack) || naturalCompare(a.name, b.name));
 }
 
 // KVM ports with an open console from this site ("IN USE"): who is working now, by server.
@@ -262,19 +340,22 @@ export function recentChanges({ devices = [], maintenance = null, incidents = nu
   for (const entry of asArray(maintenance?.log)) {
     const text = MAINT_TEXT[entry?.action];
     if (!text || !finite(entry.at)) continue;
-    const who = entry.by ? ` · ${entry.by}` : "";
+    const parts = [typed(names.get(String(entry.device_id)) || entry.device_id), own(` ${text}`), ...(entry.by ? [own(" · "), typed(entry.by)] : [])];
     rows.push({ key: `m:${entry.at}:${entry.device_id}:${entry.action}`, at: entry.at * 1000, kind: entry.action === "shutdown" ? "warn" : "ok",
-      text: `${names.get(String(entry.device_id)) || entry.device_id} ${text}${who}` });
+      parts, text: partsText(parts) });
   }
   for (const incident of asArray(incidents)) {
     if (!incident?.id) continue;
     const started = Date.parse(incident.first_failed_at);
     const ended = Date.parse(incident.ended_at);
     if (Number.isFinite(ended)) {
-      rows.push({ key: `i:${incident.id}:end`, at: ended, kind: incident.end_reason === "recovered" ? "ok" : "info",
-        text: `${incident.name} ${INCIDENT_END[incident.end_reason] || "ping incident closed"}` });
+      const parts = [typed(incident.name), own(` ${INCIDENT_END[incident.end_reason] || "ping incident closed"}`)];
+      rows.push({ key: `i:${incident.id}:end`, at: ended, kind: incident.end_reason === "recovered" ? "ok" : "info", parts, text: partsText(parts) });
     }
-    if (Number.isFinite(started)) rows.push({ key: `i:${incident.id}:start`, at: started, kind: "alarm", text: `${incident.name} stopped answering ping` });
+    if (Number.isFinite(started)) {
+      const parts = [typed(incident.name), own(" stopped answering ping")];
+      rows.push({ key: `i:${incident.id}:start`, at: started, kind: "alarm", parts, text: partsText(parts) });
+    }
   }
   return rows.sort((a, b) => b.at - a.at || naturalCompare(a.key, b.key)).slice(0, TICKER_MAX);
 }
@@ -303,6 +384,14 @@ export function gridLayout(count, width, height, { minW, minH, maxH = Infinity, 
   return { cols, rows, perPage: count > capacity ? capacity : Math.max(n, 1), cellH };
 }
 
+// The rack grid at the normal card size, or compact cards when the racks would need more than one page of normal ones.
+export function rackGrid(count, width, height, em) {
+  const scaled = size => ({ minW: size.minW * em, minH: size.minH * em, maxH: size.maxH * em, gap: size.gap * em });
+  const normal = gridLayout(count, width, height, scaled(RACK_CARD_EM));
+  if (count <= normal.perPage) return { ...normal, compact: false, gapEm: RACK_CARD_EM.gap };
+  return { ...gridLayout(count, width, height, scaled(RACK_CARD_COMPACT_EM)), compact: true, gapEm: RACK_CARD_COMPACT_EM.gap };
+}
+
 // How many fixed-height rows fit in `height` px.
 export function rowsThatFit(height, rowH, gap = 0) {
   if (!(height > 0) || !(rowH > 0)) return 1;
@@ -316,6 +405,45 @@ export function pageOf(items, perPage, tick = 0) {
   const pages = Math.max(1, Math.ceil(list.length / size));
   const page = ((Math.floor(tick) % pages) + pages) % pages;
   return { items: list.slice(page * size, page * size + size), page, pages };
+}
+
+// Attention paging: alarms are pinned to the first rows of every page and only the other items rotate below them.
+// When there are more alarms than rows, the alarms turn pages among themselves and the last row counts the alarms
+// not shown (moreAlarms). `more`: items not on this page.
+export function pinnedPage(items, rows, tick = 0) {
+  const list = asArray(items);
+  const size = Math.max(1, Math.floor(rows) || 1);
+  if (list.length <= size) return { items: list, moreAlarms: 0, more: 0, page: 0, pages: 1 };
+  const alarms = list.filter(i => i?.severity === "alarm");
+  const rest = list.filter(i => i?.severity !== "alarm");
+  if (alarms.length > size) {
+    const { items: shown, page, pages } = pageOf(alarms, Math.max(1, size - 1), tick);
+    return { items: shown, moreAlarms: alarms.length - shown.length, more: list.length - shown.length, page, pages };
+  }
+  if (alarms.length === size) return { items: alarms, moreAlarms: 0, more: rest.length, page: 0, pages: 1 };
+  const { items: shown, page, pages } = pageOf(rest, size - alarms.length, tick);
+  return { items: [...alarms, ...shown], moreAlarms: 0, more: rest.length - shown.length, page, pages };
+}
+
+// The lab in one word for the top bar: ALL NORMAL, N WARNINGS or N ALARMS.
+export function labStatus(items) {
+  const alarms = asArray(items).filter(i => i?.severity === "alarm").length;
+  const warnings = asArray(items).filter(i => i?.severity === "warn").length;
+  if (alarms) return { level: "alarm", text: `${alarms} ${alarms === 1 ? "ALARM" : "ALARMS"}`, alarms, warnings };
+  if (warnings) return { level: "warn", text: `${warnings} ${warnings === 1 ? "WARNING" : "WARNINGS"}`, alarms, warnings };
+  return { level: "ok", text: "ALL NORMAL", alarms, warnings };
+}
+
+// A data source (maintenance, monitoring, incidents, rack overrides) after one read. A success keeps its value; a
+// source the server does not offer (404) or allow (403) is "absent"; a failure keeps the last good copy until
+// `limit` ms after the last success, then the source is "unknown" (value null) since that success (or the first try).
+export function sourceAfter(previous, result, now, limit = STALE_MS) {
+  const first = previous?.firstTry ?? now;
+  if (result.ok) return { state: "ok", value: result.value, lastOk: now, since: null, firstTry: first };
+  if (result.status === 404 || result.status === 403) return { state: "absent", value: null, lastOk: previous?.lastOk ?? 0, since: null, firstTry: first };
+  const lastOk = previous?.lastOk ?? 0;
+  if (lastOk && now - lastOk <= limit) return { ...previous, firstTry: first };
+  return { state: "unknown", value: null, lastOk, since: lastOk || first, firstTry: first };
 }
 
 // ── text ──
@@ -346,33 +474,46 @@ export function formatRange(min, max, digits = 0) {
   return min.toFixed(digits) === max.toFixed(digits) ? max.toFixed(digits) : `${min.toFixed(digits)}–${max.toFixed(digits)}`;
 }
 
-const pad = n => String(n).padStart(2, "0");
-export function clockTime(ms, seconds = false) {
+// Date and time parts in lab time (LAB_TZ), whatever the device's own time zone is.
+const LAB_FORMAT = new Intl.DateTimeFormat("en-GB", { timeZone: LAB_TZ, hourCycle: "h23", year: "numeric", month: "short",
+  day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const LAB_LONG_DATE = new Intl.DateTimeFormat("en-GB", { timeZone: LAB_TZ, weekday: "long", day: "numeric", month: "long", year: "numeric" });
+export function labTime(ms) {
   const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "—";
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}${seconds ? `:${pad(d.getSeconds())}` : ""}`;
+  if (Number.isNaN(d.getTime())) return null;
+  const parts = Object.fromEntries(LAB_FORMAT.formatToParts(d).map(p => [p.type, p.value]));
+  return { year: parts.year, month: parts.month, day: parts.day, hour: parts.hour, minute: parts.minute, second: parts.second };
 }
 
-// A change's time: "14:32" today, "24 Oct 14:32" before.
+export function clockTime(ms, seconds = false) {
+  const t = labTime(ms);
+  if (!t) return "—";
+  return `${t.hour}:${t.minute}${seconds ? `:${t.second}` : ""}`;
+}
+
+// A change's time: "14:32" today, "24 Oct 14:32" before (lab days).
 export function changeTime(ms, now = Date.now()) {
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "—";
-  return new Date(now).toDateString() === d.toDateString() ? clockTime(ms)
-    : `${d.getDate()} ${d.toLocaleDateString("en-GB", { month: "short" })} ${clockTime(ms)}`;
+  const t = labTime(ms), today = labTime(now);
+  if (!t) return "—";
+  return today && t.year === today.year && t.month === today.month && t.day === today.day ? clockTime(ms)
+    : `${t.day} ${t.month} ${clockTime(ms)}`;
 }
 
 export function longDate(ms) {
   const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  return LAB_LONG_DATE.format(d);
 }
 
-// The connection line under the clock. lastSuccess: ms of the last complete data cycle (0 = none yet).
-export function connectionState({ state, lastSuccess, now }) {
+// The connection line under the clock. lastSuccess: ms of the last complete data cycle (0 = none yet); partial: a
+// source (maintenance, Ping Monitor, …) has not answered for longer than STALE_MS.
+export function connectionState({ state, lastSuccess, now, partial = false }) {
   const age = lastSuccess ? now - lastSuccess : Infinity;
   const stale = lastSuccess > 0 && age > STALE_MS;
   if (state === "signed-out") return { level: "alarm", text: "Signed out", stale };
-  if (state === "connecting" && !lastSuccess) return { level: "idle", text: "Connecting…", stale: false };
+  // Never "Reconnecting…" before there was a connection: until the first good cycle it is "Connecting…".
+  if (!lastSuccess) return { level: "idle", text: "Connecting…", stale: false };
+  if (state === "online" && !stale && partial) return { level: "warn", text: "Live · partial", stale };
   if (state === "online") return { level: stale ? "warn" : "ok", text: "Live", stale };
   return { level: stale ? "alarm" : "warn", text: stale ? "Connection lost" : "Reconnecting…", stale };
 }

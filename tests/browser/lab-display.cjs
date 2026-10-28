@@ -1,8 +1,10 @@
-// Lab display (?tab=display): the read-only wall TV page. Viewer and Operator, 1920 x 1080, 1280 x 720 and 3840 x 2160.
-// Checks: only GET requests, no page errors, no header / footer / assistant / What's new / dialogs / controls, no
-// scrolling or clipped panels, the numbers the fixture implies, two refresh cycles without re-mounting or memory
-// growth, page rotation, a network loss (last data kept, Reconnecting, stale badge) and the recovery, and the header
-// link for both roles. Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
+// Lab display (?tab=display): the read-only wall TV page. Viewer and Operator, 1920 x 1080, 1280 x 720, 960 x 540 and
+// 3840 x 2160. Checks: only GET requests, no page errors, no header / footer / assistant / What's new / dialogs /
+// controls, no scrolling or clipped panels, the numbers the fixture implies (an unreadable rack shows "—", never 0),
+// text sizes (smallest >= 20 px, status words >= 24 px at 1920), two refresh cycles without re-mounting or memory
+// growth, page rotation with alarms pinned, a network loss (last data kept, Reconnecting, NOT LIVE banner, greyed
+// panels) and the recovery, one failing source ("Live · partial"), the role warning, the TV sign-in, the narrow-screen
+// notice and the header link for both roles. Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
 // to GET responses in the browser only; the fixture is never written.
 // Run: DCIM_TEST_ACCOUNTS=1 python tests/browser/preview-server.py 9311, then
 // DCIM_PREVIEW_URL=http://127.0.0.1:9311 node tests/browser/lab-display.cjs (screenshots: DCIM_QA_SHOTS, default C:/t/lb-shots).
@@ -30,12 +32,13 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       const context = await browser.newContext({ viewport });
       const login = await context.request.post(origin + '/api/auth/login', { data: { username: role, password: PASSWORD } });
       assert.equal(login.status(), 200, `${role} signs in`);
-      const state = { offline: false, devicesGets: 0 };
+      const state = { offline: false, devicesGets: 0, failMaintenance: false };
       await context.route('**/*', async route => {
         const request = route.request();
         if (!request.url().startsWith(origin + '/')) return route.abort();
         const url = new URL(request.url());
         if (state.offline && url.pathname.startsWith('/api/')) return route.abort('internetdisconnected');
+        if (state.failMaintenance && url.pathname === '/api/pdus/maintenance') return route.fulfill({ status: 500, json: { detail: 'QA failure' } });
         if (request.method() !== 'GET') return route.continue();
         const patch = async edit => { const response = await route.fetch(); const json = await response.json(); return route.fulfill({ response, json: edit(json) ?? json }); };
         if (url.pathname === '/api/devices/') { state.devicesGets++; if (extraRacks) return patch(list => [...list, ...EXTRA_RACKS]); }
@@ -92,9 +95,31 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         };
       });
     }
-    const pager = (page, panel) => page.locator(`${panel} .ld-pager-text`).evaluate(e => e.textContent.replace(/\s+/g, ' ').trim()).catch(() => '');
+    // The pager reads "+N more · next in n s"; its data-page is "page/pages".
+    const pager = (page, panel) => page.locator(`${panel} .ld-pager`).first().getAttribute('data-page', { timeout: 2000 }).catch(() => '');
     // Waits for the panel to turn to another page (every 10 s).
-    const turned = (page, panel, from) => page.waitForFunction(([p, f]) => (document.querySelector(`${p} .ld-pager-text`)?.textContent.replace(/\s+/g, ' ').trim() || f) !== f, [panel, from], { timeout: 12000 });
+    const turned = (page, panel, from) => page.waitForFunction(([p, f]) => (document.querySelector(`${p} .ld-pager`)?.dataset.page || f) !== f, [panel, from], { timeout: 12000 });
+    // Numbers are never cut off: every KPI value fits its box and has no ellipsis.
+    async function numbersWhole(page, label) {
+      const cut = await page.evaluate(() => [...document.querySelectorAll('.ld-tile-value, .ld-env dd, .ld-rack-servers strong, .ld-clock-time')]
+        .filter(e => e.scrollWidth > e.clientWidth + 1 || /…/.test(e.innerText)).map(e => `${e.className}: ${e.innerText}`));
+      assert.deepEqual(cut, [], `${label}: no number is cut off`);
+    }
+    async function sizesAt1920(page, label) {
+      const sizes = await page.evaluate(() => {
+        const px = e => parseFloat(getComputedStyle(e).fontSize);
+        const texts = [...document.querySelectorAll('.lab-display *')].filter(e => e.getClientRects().length && [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()));
+        const words = [...document.querySelectorAll('.ld-attn-tag, .ld-rack-state, .ld-badge, .ld-conn-state, .ld-status, .ld-chip, .ld-maint-label, .ld-stale-banner')].filter(e => e.getClientRects().length && e.innerText.trim());
+        const smallest = texts.reduce((m, e) => (px(e) < m.px ? { px: px(e), what: `${e.className || e.tagName}: ${e.innerText.slice(0, 30)}` } : m), { px: Infinity });
+        const word = words.reduce((m, e) => (px(e) < m.px ? { px: px(e), what: `${e.className}: ${e.innerText.slice(0, 30)}` } : m), { px: Infinity });
+        return { base: px(document.querySelector('.lab-display')), kpi: px(document.querySelector('.ld-tile-value')), clock: px(document.querySelector('.ld-clock-time')),
+          attention: px(document.querySelector('.ld-attn strong')), smallest, word, words: words.length };
+      });
+      assert.ok(sizes.base >= 15.9 && sizes.kpi >= 56 && sizes.clock >= 64 && sizes.attention >= 22, `${label}: ${JSON.stringify(sizes)}`);
+      assert.ok(sizes.smallest.px >= 19.9, `${label}: smallest text ${JSON.stringify(sizes.smallest)}`);
+      assert.ok(sizes.words >= 5 && sizes.word.px >= 23.9, `${label}: smallest status word ${JSON.stringify(sizes.word)}`);
+      return sizes;
+    }
 
     // ── Viewer 1920 x 1080: content, two refresh cycles, network loss and recovery ──
     {
@@ -109,21 +134,29 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       assert.match(f.inUse, /OPT12 KVM 01 · port 2/);
       assert.match(f.changes, /PDU 03 maintenance started · admin/);
       assert.doesNotMatch(f.changes, /denied|viewer/);
-      const attention = await page.locator('.ld-attn').evaluateAll(rows => rows.map(r => [r.dataset.level, r.querySelector('strong').innerText]));
+      const attention = await page.locator('.ld-attn:not(.ld-attn-more)').evaluateAll(rows => rows.map(r => [r.dataset.level, r.querySelector('strong').innerText]));
       const order = { alarm: 0, warn: 1, info: 2 };
       assert.ok(attention.every((row, i) => i === 0 || order[attention[i - 1][0]] <= order[row[0]]), 'attention sorted by severity');
       assert.ok(attention.some(([, t]) => t === 'PDU 07 unreachable') && attention.some(([, t]) => /^OPT7\d( not answering ping|: last ping failed)$/.test(t)), JSON.stringify(attention));
       assert.equal(await page.locator('[data-rack="Rack-03"] .ld-badge').innerText(), 'MAINT', 'maintenance badge');
       assert.equal(await page.locator('[data-rack="Rack-07"]').getAttribute('data-level'), 'alarm');
-      checks.push('viewer 1920: KPIs, environment, racks, attention order, consoles in use, recent changes');
+      // An unreachable PDU: the rack shows "—" for servers on, never a 0 that reads as "all off".
+      assert.equal(await text(page, '[data-rack="Rack-07"] .ld-rack-servers strong'), '—', 'no reading is never 0');
+      assert.equal(await text(page, '[data-rack="Rack-07"] .ld-rack-state'), 'Unreachable');
+      // Status in words and shapes too: the top chip, PARTIAL power, the maintenance band with who and why.
+      assert.match(await text(page, '[data-testid="lab-status"]'), /^\d+ ALARMS?$/);
+      assert.equal(await page.locator('[data-testid="kpi-power"]').getAttribute('data-level'), 'warn');
+      assert.equal(await text(page, '[data-testid="kpi-power-chip"]'), 'PARTIAL');
+      assert.match((await text(page, '[data-testid="maint-band"]')).replace(/\s+/g, ' '), /^MAINTENANCE IN PROGRESS Rack-03 · PDU 03 · outlets 1, 2 off since \d\d:\d\d · admin · Rewiring PSU feeds$/);
+      assert.equal(await page.locator('[data-testid="maint-band"] bdi[dir="auto"]').count(), 4, 'user text isolated in <bdi dir="auto">');
+      assert.equal(await page.locator('[data-testid="role-warning"]').count(), 0, 'no role warning for a Viewer');
+      assert.equal(await text(page, '[data-testid="display-role"]'), 'Viewer');
+      assert.equal(await page.locator('.ld-attn[data-level="alarm"]').first().evaluate(e => getComputedStyle(e).backgroundColor), 'rgb(255, 79, 79)', 'alarm rows are a solid fill');
+      checks.push('viewer 1920: KPIs, environment, racks (Rack-07 "—"), attention order, status chip, PARTIAL power, maintenance band, consoles in use, recent changes');
       // Readable from 3 m: big numbers, large text.
-      const sizes = await page.evaluate(() => ({ base: parseFloat(getComputedStyle(document.querySelector('.lab-display')).fontSize),
-        kpi: parseFloat(getComputedStyle(document.querySelector('.ld-tile-value')).fontSize),
-        clock: parseFloat(getComputedStyle(document.querySelector('.ld-clock-time')).fontSize),
-        attention: parseFloat(getComputedStyle(document.querySelector('.ld-attn strong')).fontSize),
-        smallest: Math.min(...[...document.querySelectorAll('.lab-display *')].filter(e => e.childNodes.length && [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim())).map(e => parseFloat(getComputedStyle(e).fontSize))) }));
-      assert.ok(sizes.base >= 15.9 && sizes.kpi >= 56 && sizes.clock >= 64 && sizes.attention >= 22 && sizes.smallest >= 15, JSON.stringify(sizes));
-      checks.push(`viewer 1920: text sizes ${JSON.stringify(sizes)}`);
+      const sizes = await sizesAt1920(page, 'viewer 1920');
+      await numbersWhole(page, 'viewer 1920');
+      checks.push(`viewer 1920: smallest text ${sizes.smallest.px}px, smallest status word ${sizes.word.px}px`);
       await page.screenshot({ path: path.join(shots, 'viewer-1920x1080.png') });
 
       // Two refresh cycles: the same DOM stays (no blanking or re-mount), no memory growth.
@@ -148,34 +181,59 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       const kept = await page.evaluate(() => ({ same: window.__qaNode.isConnected, blank: window.__qaBlank }));
       assert.deepEqual(kept, { same: true, blank: 0 }, 'refresh keeps the page in place');
       assert.ok(heap1 - heap0 < 2_000_000, `heap growth ${heap1 - heap0} bytes over two cycles`);
-      assert.match(await text(page, '.ld-conn-updated'), /^Updated (just now|\d+ s ago)$/);
+      assert.match(await text(page, '.ld-conn-updated'), /^Updated (just now|\d+ s ago)\s+Viewer$/);
       assert.equal(await text(page, '.ld-conn-state'), 'Live');
       checks.push(`viewer 1920: two refresh cycles without re-mount (heap ${heap0} -> ${heap1})`);
 
       // Attention rotates (8+ items, two pages at this size).
       const before = await pager(page, '.ld-attention');
-      assert.match(before, /^Page \d \/ [2-9]$/);
+      assert.match(before, /^\d\/[2-9]$/);
+      assert.match(await text(page, '.ld-attention .ld-pager'), /^\+\d+ more · next in \d+ s$/);
+      const pinned = await page.locator('.ld-attn').evaluateAll(rows => rows.map(r => r.dataset.level));
       const titles = await page.locator('.ld-attn strong').allInnerTexts();
       await turned(page, '.ld-attention', before);
       const after = await pager(page, '.ld-attention');
+      const pinnedAfter = await page.locator('.ld-attn').evaluateAll(rows => rows.map(r => r.dataset.level));
+      assert.equal(pinnedAfter.filter(l => l === 'alarm').length, pinned.filter(l => l === 'alarm').length, 'alarms stay pinned on every page');
       assert.notDeepEqual(await page.locator('.ld-attn strong').allInnerTexts(), titles, 'another page of the list');
       checks.push(`viewer 1920: attention rotates (${before} -> ${after})`);
 
-      // Network loss: the last data stays, the state says Reconnecting, then Connection lost with a stale badge.
+      // Network loss: the last data stays, the state says Reconnecting, then Connection lost with the NOT LIVE banner.
       state.offline = true;
       await page.waitForFunction(() => document.querySelector('.ld-conn-state')?.innerText === 'Reconnecting…', null, { timeout: 20000 });
       assert.equal((await figures(page)).on, '24', 'data kept while offline');
       await page.clock.fastForward('01:05');
-      await page.waitForFunction(() => document.querySelector('[data-testid="stale-badge"]') && document.querySelector('.ld-conn-state')?.innerText === 'Connection lost', null, { timeout: 20000 });
+      await page.waitForFunction(() => document.querySelector('[data-testid="stale-banner"]') && document.querySelector('.ld-conn-state')?.innerText === 'Connection lost', null, { timeout: 20000 });
       await page.waitForFunction(() => document.querySelector('.lab-display').dataset.stale === 'true', null, { timeout: 15000 });
       assert.equal((await figures(page)).pdus, '6 / 7', 'data kept while stale');
+      assert.match(await text(page, '[data-testid="stale-banner"]'), /^NOT LIVE · last update \d\d:\d\d \(\d+ (s|min) ago\) · Lab Manager is not answering$/);
+      const greyed = await page.evaluate(() => ['.ld-kpis', '.ld-main', '.ld-changes'].map(s => getComputedStyle(document.querySelector(s)).filter));
+      assert.deepEqual(greyed, ['grayscale(1)', 'grayscale(1)', 'grayscale(1)'], 'panels grey while not live');
+      assert.equal(await text(page, '[data-testid="inuse-unknown"]'), 'Unknown while the display is not live');
+      const bannerPx = await page.locator('[data-testid="stale-banner"]').evaluate(e => parseFloat(getComputedStyle(e).fontSize));
+      assert.ok(bannerPx >= 31.9, `banner ${bannerPx}px`);
       await chromeFree(page, 'viewer 1920 stale');
       await page.screenshot({ path: path.join(shots, 'viewer-1920x1080-stale.png') });
-      checks.push('viewer 1920: network loss keeps the data, shows Reconnecting, then Connection lost + stale badge');
+      checks.push('viewer 1920: network loss keeps the data, shows Reconnecting, then Connection lost, NOT LIVE banner, greyed panels');
       state.offline = false;
-      await page.waitForFunction(() => document.querySelector('.ld-conn-state')?.innerText === 'Live' && !document.querySelector('[data-testid="stale-badge"]'), null, { timeout: 25000 });
+      await page.waitForFunction(() => document.querySelector('.ld-conn-state')?.innerText === 'Live' && !document.querySelector('[data-testid="stale-banner"]'), null, { timeout: 25000 });
       assert.equal(await page.evaluate(() => window.__qaNode.isConnected), true);
       checks.push('viewer 1920: recovers by itself after the network returns');
+
+      // One source keeps failing for more than a minute: its last copy is not shown as current.
+      state.failMaintenance = true;
+      const gets1 = state.devicesGets;
+      for (let i = 0; i < 100 && state.devicesGets < gets1 + 1; i++) { await page.clock.fastForward(1000); await page.waitForTimeout(300); }
+      await page.clock.fastForward('01:05');
+      await page.waitForFunction(() => document.querySelector('.ld-conn-state')?.innerText === 'Live · partial', null, { timeout: 25000 });
+      assert.equal(await page.locator('[data-testid="maint-band"]').getAttribute('data-level'), 'warn');
+      assert.match(await text(page, '[data-testid="maint-band"]'), /Maintenance status unavailable since \d\d:\d\d/);
+      assert.equal(await page.locator('[data-rack="Rack-03"] .ld-badge').count(), 0, 'no MAINT badge from an old copy');
+      await page.screenshot({ path: path.join(shots, 'viewer-1920x1080-partial.png') });
+      state.failMaintenance = false;
+      for (let i = 0; i < 100 && await text(page, '.ld-conn-state') !== 'Live'; i++) { await page.clock.fastForward(1000); await page.waitForTimeout(300); }
+      assert.equal(await text(page, '.ld-conn-state'), 'Live');
+      checks.push('viewer 1920: a source failing for over 60 s shows "Live · partial" and "Maintenance status unavailable"');
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 
@@ -187,13 +245,15 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       snapshots.operator = f;
       const comparable = s => ({ ...s, changes: s.changes.replace(/\d\d:\d\d/g, 'hh:mm') });
       assert.deepEqual(comparable(f), comparable(snapshots.viewer), 'Viewer and Operator see the same');
+      assert.equal(await text(page, '[data-testid="role-warning"]'), 'Signed in as Operator — use a Viewer account for this screen');
+      assert.equal(await text(page, '[data-testid="display-role"]'), 'Operator');
       const gets0 = state.devicesGets;
       const deadline = Date.now() + 45000;
       while (state.devicesGets < gets0 + 2 && Date.now() < deadline) await page.waitForTimeout(500);
       assert.ok(state.devicesGets >= gets0 + 2, 'operator: two refresh cycles');
       await chromeFree(page, 'operator 1920 after refresh');
       await page.screenshot({ path: path.join(shots, 'operator-1920x1080.png') });
-      checks.push('operator 1920: same figures as the Viewer, two refresh cycles, read-only');
+      checks.push('operator 1920: same figures as the Viewer, role warning, two refresh cycles, read-only');
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 
@@ -204,7 +264,8 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       if (role === 'operator') {
         assert.equal(await text(page, '.ld-racks .ld-count'), '30');
         const first = await pager(page, '.ld-racks');
-        assert.match(first, /^Page \d \/ [2-9]$/);
+        assert.match(first, /^\d\/2$/, 'compact cards: 30 racks in two pages');
+        assert.equal(await page.locator('.ld-rack-grid').getAttribute('data-compact'), 'true');
         const names = () => page.locator('.ld-rack h3').allInnerTexts();
         const page1 = await names();
         await turned(page, '.ld-racks', first);
@@ -217,6 +278,69 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         checks.push('viewer 1280: fits without scrolling');
       }
       await page.screenshot({ path: path.join(shots, `${role}-1280x720.png`) });
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── 960 x 540 (many TV browsers and sticks): the 1920 layout at half size, nothing cut off ──
+    {
+      const { context, page } = await open('viewer', { width: 960, height: 540 });
+      await chromeFree(page, 'viewer 960');
+      const base = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.lab-display')).fontSize));
+      assert.ok(Math.abs(base - 8) < 0.1, `960 base size ${base}`);
+      await numbersWhole(page, 'viewer 960');
+      const f = await figures(page);
+      assert.deepEqual([f.on, f.off, f.none, f.pdus, f.kvms, f.power], ['24', '0', '4', '6 / 7', '1 / 1', '3.96 kW']);
+      await page.screenshot({ path: path.join(shots, 'viewer-960x540.png') });
+      checks.push('viewer 960x540: fits, no number cut off');
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── First load while Lab Manager does not answer: plain words, no raw browser error ──
+    {
+      const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+      assert.equal((await context.request.post(origin + '/api/auth/login', { data: { username: 'viewer', password: PASSWORD } })).status(), 200);
+      await context.route('**/*', route => {
+        const url = route.request().url();
+        if (!url.startsWith(origin + '/')) return route.abort();
+        return new URL(url).pathname.startsWith('/api/devices') ? route.abort('internetdisconnected') : route.continue();
+      });
+      const page = await context.newPage();
+      page.on('pageerror', e => errors.push(`first offline: ${e.message}`));
+      await page.goto(origin + '/?tab=display');
+      await page.waitForFunction(() => document.querySelector('.ld-first p')?.innerText === 'Lab Manager is not answering. Retrying every 15 s.', null, { timeout: 20000 });
+      assert.equal(await text(page, '.ld-conn-state'), 'Connecting…', 'never Reconnecting before a first connection');
+      checks.push('first load offline: "Lab Manager is not answering. Retrying every 15 s."');
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── A phone or portrait screen: a notice instead of the TV layout ──
+    {
+      const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+      assert.equal((await context.request.post(origin + '/api/auth/login', { data: { username: 'viewer', password: PASSWORD } })).status(), 200);
+      await context.route('**/*', route => route.request().url().startsWith(origin + '/') ? route.continue() : route.abort());
+      const page = await context.newPage();
+      page.on('pageerror', e => errors.push(`viewer 390: ${e.message}`));
+      await page.goto(origin + '/?tab=display');
+      assert.equal(await text(page, '[data-testid="display-narrow"]'), 'The lab display is made for a landscape TV. Open the Dashboard on this device.');
+      checks.push('viewer 390x844: landscape-TV notice');
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── Signed out: the sign-in is drawn at TV scale and names the Viewer account ──
+    {
+      const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+      await context.route('**/*', route => route.request().url().startsWith(origin + '/') ? route.continue() : route.abort());
+      const page = await context.newPage();
+      page.on('pageerror', e => errors.push(`signed out: ${e.message}`));
+      await page.goto(origin + '/?tab=display');
+      const title = page.locator('.auth-tv #sign-in-title');
+      await title.waitFor({ timeout: 15000 });
+      assert.equal(await title.innerText(), "Lab display signed out — sign in with the lab's Viewer account");
+      const px = await title.evaluate(e => parseFloat(getComputedStyle(e).fontSize));
+      assert.ok(px >= 35, `TV sign-in title ${px}px`);
+      assert.equal(await page.locator('.auth-tv input[name="remember"]').isChecked(), true);
+      await page.screenshot({ path: path.join(shots, 'signed-out-1920x1080.png') });
+      checks.push(`signed out 1920: TV-scale sign-in (title ${px}px), Keep me signed in ticked`);
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 

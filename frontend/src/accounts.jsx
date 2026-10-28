@@ -198,6 +198,9 @@ export function AccountsProvider({ children }) {
   </AccountContext.Provider>;
 }
 
+// The lab display (?tab=display) is a wall TV: its sign-in is drawn at TV scale and asks for the lab's Viewer account.
+const onLabDisplay = () => { try { return new URLSearchParams(window.location.search).get("tab") === "display"; } catch { return false; } };
+
 const ENDED_TEXT = {
   ended: "Your session ended: it expired or an administrator changed your account. Sign in again to continue.",
   "signed-out-elsewhere": "You signed out in another tab. Sign in again to continue.",
@@ -205,6 +208,7 @@ const ENDED_TEXT = {
 
 function SignIn({ ended = null }) {
   const {accept,registration_enabled,setup_required} = useAccounts();
+  const tv = onLabDisplay();
   const [signup,setSignup] = useState(false);
   const [form,setForm] = useState(() => ({name:"",username:ended?.user?.username || "",password:"",confirm:"",remember:true}));
   const [error,setError] = useState("");
@@ -234,8 +238,10 @@ function SignIn({ ended = null }) {
     finally{setBusy(false);}
   }
   const panel = <div className="auth-panel">
-    <div><img src={nvidiaLogo} alt="NVIDIA" width="120" height="24" className="mb-3"/><h1 id="sign-in-title" className="text-xl font-bold text-white">Lab Manager</h1><p className="text-xs text-zinc-500 mt-1">Lab 204 · Yokneam · internal use only</p></div>
-    {ended && <p role="alert" className="text-sm text-amber-300">{ENDED_TEXT[ended.reason] || ENDED_TEXT.ended} Unsaved input on this page is kept if you sign in as the same user.</p>}
+    <div><img src={nvidiaLogo} alt="NVIDIA" width="120" height="24" className="mb-3"/>{tv
+      ? <h1 id="sign-in-title" className="auth-tv-title">Lab display signed out — sign in with the lab's Viewer account</h1>
+      : <h1 id="sign-in-title" className="text-xl font-bold text-white">Lab Manager</h1>}<p className="text-xs text-zinc-500 mt-1">Lab 204 · Yokneam · internal use only</p></div>
+    {ended && <p role="alert" className="text-sm text-amber-300">{ENDED_TEXT[ended.reason] || ENDED_TEXT.ended}{tv ? "" : " Unsaved input on this page is kept if you sign in as the same user."}</p>}
     {setup_required ? <p role="alert">User accounts need initialization. A lab administrator must configure the initial admin on the VM.</p> : <>
     {registration_enabled && <div className="auth-tabs" role="tablist"><button role="tab" aria-selected={!signup} onClick={()=>{setSignup(false);setError("");}}>Sign in</button><button role="tab" aria-selected={signup} onClick={()=>{setSignup(true);setError("");}}>Create account</button></div>}
     <form onSubmit={submit} className="account-fields">
@@ -246,13 +252,15 @@ function SignIn({ ended = null }) {
       <label className="account-check"><input name="remember" type="checkbox" checked={form.remember} onChange={change}/>Keep me signed in</label>
       {error && <p role="alert" className="account-error">{error}</p>}
       <button className="account-primary" disabled={busy}>{busy ? "Please wait…" : signup ? "Create account" : "Sign in"}</button>
-      <p className="text-xs text-zinc-600">{form.remember ? "This browser stays signed in until you sign out. Clear the box on a shared computer." : "You will be signed out after a few hours."}</p>
+      <p className="text-xs text-zinc-600">{tv
+        ? form.remember ? "This TV stays signed in: the session lasts a year and renews itself while the display is on." : "This TV will be signed out after a few hours. Keep the box ticked for the wall display."
+        : form.remember ? "This browser stays signed in until you sign out. Clear the box on a shared computer." : "You will be signed out after a few hours."}</p>
       <p className="text-xs text-zinc-600">{signup ? "New accounts start as Viewer. An admin can change your role." : "Forgot your password? Ask a lab admin to reset it in Admin → Users."}</p>
     </form></>}
   </div>;
-  if (!ended) return <div className="auth-screen">{panel}</div>;
+  if (!ended) return <div className={tv ? "auth-screen auth-tv" : "auth-screen"}>{panel}</div>;
   // Opaque and above everything: the page underneath is inert until someone signs in.
-  return <div ref={overlay} className="auth-screen fixed inset-0 z-[1000] overflow-y-auto bg-zinc-950" role="dialog" aria-modal="true" aria-labelledby="sign-in-title">{panel}</div>;
+  return <div ref={overlay} className={`auth-screen fixed inset-0 z-[1000] overflow-y-auto bg-zinc-950${tv ? " auth-tv" : ""}`} role="dialog" aria-modal="true" aria-labelledby="sign-in-title">{panel}</div>;
 }
 
 export function UserMenu({onAccount,onUsers}) {
@@ -287,7 +295,7 @@ export function AccountSettings({forcePassword=false}) {
   if(!user) return <p className="p-6 text-zinc-400">User accounts are not enabled on this VM yet.</p>;
   async function save(section,fn) {
     setBusy(section);setResult({});
-    try {await fn();setResult({[section]:{message:"Saved."}});}
+    try {const message = await fn();setResult({[section]:{message:typeof message === "string" ? message : "Saved."}});}
     catch(e){setResult({[section]:{error:e.message}});}
     finally{setBusy("");}
   }
@@ -316,7 +324,9 @@ export function AccountSettings({forcePassword=false}) {
         <label className="account-check"><input type="checkbox" checked={prefs.compact_racks} onChange={e=>setPrefs({...prefs,compact_racks:e.target.checked})}/>Compact rack cards (hide empty shelves 05–08)</label>
         <Result {...result.prefs}/><button className="account-primary" disabled={!!busy}>Save preferences</button>
       </form></Card>}
-      <Card title="Session" hint={`${user.username} · ${user.role}`}><p className="text-sm text-zinc-500">Member since {new Date(user.created_at*1000).toLocaleDateString()}</p><button className="account-secondary" onClick={()=>save("session",logout)} disabled={!!busy}>Sign out</button><Result {...result.session}/></Card>
+      <Card title="Session" hint={`${user.username} · ${user.role}`}><p className="text-sm text-zinc-500">Member since {new Date(user.created_at*1000).toLocaleDateString()}</p><button className="account-secondary" onClick={()=>save("session",logout)} disabled={!!busy}>Sign out</button><Result {...result.session}/>
+        {!forcePassword && <><p className="text-sm text-zinc-500">Kept sessions stay signed in until they are ended. Lost a laptop, or replaced the lab TV? End every other session of your account; this browser stays signed in.</p>
+        <button className="account-secondary" disabled={!!busy} onClick={()=>save("others",async()=>{const {ended}=await accountRequest("/me/end-other-sessions","POST");return ended ? `Signed out of ${ended} other ${ended===1?"browser":"browsers"}.` : "No other browser was signed in.";})}>Sign out other browsers</button><Result {...result.others}/></>}</Card>
     </div>
   </main>;
 }
@@ -328,11 +338,17 @@ export function UsersView() {
   const [busy,setBusy] = useState(false);
   const [adding,setAdding] = useState(false);
   const [temporary,setTemporary] = useState(null);
+  const [notice,setNotice] = useState("");
   const [form,setForm] = useState({name:"",username:"",role:"Viewer",password:""});
   async function refresh(){setUsers(await accountRequest("/users"));}
   useEffect(()=>{if(canAdmin)refresh().catch(e=>setError(e.message));},[canAdmin]);
   if(!canAdmin) return <p role="alert" className="p-6">Only administrators can manage users.</p>;
-  async function action(fn){setBusy(true);setError("");try{await fn();await refresh();}catch(e){setError(e.message);}finally{setBusy(false);}}
+  async function action(fn){setBusy(true);setError("");setNotice("");try{await fn();await refresh();}catch(e){setError(e.message);}finally{setBusy(false);}}
+  // Signs the user out everywhere (a lost laptop, a replaced TV) without disabling the account or changing its password.
+  function endSessions(u){
+    if(!confirm(`End every session of ${u.username}? They are signed out on every browser and device and can sign in again with their password.`)) return;
+    action(async()=>{const {ended}=await accountRequest(`/users/${u.id}/end-sessions`,"POST");setNotice(`${u.username}: ${ended} ${ended===1?"session":"sessions"} ended.`);});
+  }
   // Each change ends the user's sessions, so a stray arrow key or click never applies it. On Cancel the controlled
   // select stays on the saved role.
   function changeRole(u,role){
@@ -349,11 +365,13 @@ export function UsersView() {
     <div className="flex flex-wrap justify-between items-end gap-4 mb-5"><div><h1 className="text-2xl font-bold text-white">Users</h1><p className="text-sm text-zinc-400 mt-2">Admin manages users and devices · Operator controls power and edits racks · Viewer can view.</p></div><button className="account-primary" onClick={()=>setAdding(true)}>Add user</button></div>
     <div className="user-kpis">{[["Users",users?.length],["Admins",users?.filter(u=>u.role==="Admin").length],["Operators",users?.filter(u=>u.role==="Operator").length],["Disabled",users?.filter(u=>!u.enabled).length]].map(([label,count])=><div key={label}><span>{label}</span><strong>{count??"—"}</strong></div>)}</div>
     {error && !adding && <p className="account-error my-3" role="alert">{error}</p>}
+    {notice && <p className="text-sm text-nv-300 my-3" role="status">{notice}</p>}
     <div className="user-table-wrap"><table className="user-table"><thead><tr>{["Name","Username","Role","Status","Created","Last sign-in","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>
       {users?.map(u=><tr key={u.id} className={!u.enabled?"opacity-60":""}><td className="font-semibold text-white">{u.name} {u.id===user.id&&<span className="text-zinc-500 font-normal">(you)</span>}</td><td className="font-mono">{u.username}</td>
         <td><select aria-label={`Role for ${u.username}`} value={u.role} disabled={busy||u.id===user.id} onChange={e=>changeRole(u,e.target.value)}>{["Admin","Operator","Viewer"].map(r=><option key={r}>{r}</option>)}</select></td>
         <td className={u.enabled?"text-nv-300":"text-zinc-500"}>{u.enabled?"Active":"Disabled"}</td><td>{formatTime(u.created_at)}</td><td>{formatTime(u.last_login_at)}</td>
         <td><div className="flex gap-2"><button className="account-secondary" disabled={busy||u.id===user.id} onClick={()=>{if(confirm(`Reset the password for ${u.username}? Their sessions will end.`))action(async()=>setTemporary({username:u.username,...await accountRequest(`/users/${u.id}/reset-password`,"POST")}));}}>Reset password</button>
+          <button className="account-secondary" disabled={busy||u.id===user.id} onClick={()=>endSessions(u)} title="Sign this user out on every browser and device">End sessions</button>
           <button className="account-secondary" disabled={busy||u.id===user.id} onClick={()=>toggleEnabled(u)}>{u.enabled?"Disable":"Enable"}</button>
           <button className="account-secondary text-rose-300" disabled={busy||u.id===user.id} onClick={()=>{if(confirm(`Remove ${u.username}?`))action(()=>accountRequest(`/users/${u.id}`,"DELETE"));}}>Remove</button></div></td>
       </tr>)}

@@ -142,6 +142,139 @@ async def test_renewal_is_written_at_most_once_an_hour(setup, clock):
         assert row.renewed_at == clock.now and row.expires_at == clock.now + YEAR
 
 
+async def test_a_failed_renewal_write_never_fails_the_request(setup, clock, monkeypatch):
+    """A database that cannot take the renewal write (locked past its timeout, disk full, read-only) must not turn
+    every kept session's requests into 500s: renewal is best effort and is not retried on every request."""
+    from sqlalchemy.exc import OperationalError
+    factory = accounts.AsyncSessionLocal
+    commits = []
+
+    def failing():
+        session = factory()
+
+        async def commit():
+            commits.append(clock.now)
+            raise OperationalError("UPDATE user_sessions", {}, Exception("database is locked"))
+        session.commit = commit
+        return session
+
+    async with client(setup) as c:
+        await login(c, remember=True)
+        [row] = await rows(setup)
+        issued = (row.renewed_at, row.expires_at)
+        clock.now += 13 * HOUR   # due for renewal
+        monkeypatch.setattr(accounts, "AsyncSessionLocal", failing)
+        r = await c.get("/api/rack-items")
+        assert r.status_code == 200 and not session_cookies(r)
+        assert len(commits) == 1
+        for _ in range(3):   # not retried on every request while the database is failing
+            r = await c.get("/api/rack-items")
+            assert r.status_code == 200 and not session_cookies(r)
+        assert len(commits) == 1
+        monkeypatch.setattr(accounts, "AsyncSessionLocal", factory)
+        [row] = await rows(setup)
+        assert (row.renewed_at, row.expires_at) == issued   # nothing half-written
+
+        clock.now += accounts.RENEW_RETRY_SECONDS   # the database recovered: the next request renews
+        r = await c.get("/api/rack-items")
+        assert r.status_code == 200 and max_age(session_cookies(r)[0]) == YEAR
+        [row] = await rows(setup)
+        assert row.renewed_at == clock.now and row.expires_at == clock.now + YEAR
+
+
+async def test_admin_ends_a_users_sessions_without_changing_the_account(setup, clock):
+    async with client(setup) as admin, client(setup) as tv, client(setup) as laptop, client(setup) as other:
+        await login(admin, remember=True)
+        await login(tv, "viewer", remember=True)
+        await login(laptop, "viewer")
+        await login(other, "operator", remember=True)
+        # Only an Admin may, with the CSRF header, and not on themselves.
+        assert (await tv.post("/api/users/operator/end-sessions")).status_code == 403
+        assert (await other.post("/api/users/viewer/end-sessions")).status_code == 403
+        csrf = admin.headers.pop("X-DCIM-CSRF")
+        assert (await admin.post("/api/users/viewer/end-sessions")).status_code == 403
+        admin.headers["X-DCIM-CSRF"] = csrf
+        assert (await admin.post("/api/users/initial-admin/end-sessions")).status_code == 400
+        assert (await admin.post("/api/users/nobody/end-sessions")).status_code == 404
+        assert len(await rows(setup, "viewer")) == 2
+
+        r = await admin.post("/api/users/viewer/end-sessions")
+        assert r.status_code == 200 and r.json() == {"ended": 2}
+        assert (await tv.get("/api/me")).status_code == 401
+        assert (await laptop.get("/api/me")).status_code == 401
+        assert await rows(setup, "viewer") == []
+        assert (await other.get("/api/me")).status_code == 200   # other users keep their sessions
+        assert (await admin.get("/api/me")).status_code == 200
+        async with setup.sessions() as db:   # the account itself is unchanged and can sign in again
+            viewer = await db.get(accounts.User, "viewer")
+            assert viewer.enabled and viewer.role == "Viewer" and not viewer.must_change_password
+        await login(tv, "viewer", remember=True)
+        assert (await tv.get("/api/me")).status_code == 200
+
+
+async def test_sign_out_other_browsers_keeps_this_one(setup, clock):
+    async with client(setup) as here, client(setup) as tv, client(setup) as laptop, client(setup) as admin:
+        await login(here, "viewer", remember=True)
+        await login(tv, "viewer", remember=True)
+        await login(laptop, "viewer")
+        await login(admin, remember=True)
+        csrf = here.headers.pop("X-DCIM-CSRF")
+        assert (await here.post("/api/me/end-other-sessions")).status_code == 403   # CSRF still required
+        here.headers["X-DCIM-CSRF"] = csrf
+        r = await here.post("/api/me/end-other-sessions")
+        assert r.status_code == 200 and r.json() == {"ended": 2}
+        assert (await here.get("/api/me")).status_code == 200
+        assert (await tv.get("/api/me")).status_code == 401
+        assert (await laptop.get("/api/me")).status_code == 401
+        assert (await admin.get("/api/me")).status_code == 200   # another account is untouched
+        [row] = await rows(setup, "viewer")
+        assert row.remember
+        r = await here.post("/api/me/end-other-sessions")
+        assert r.status_code == 200 and r.json() == {"ended": 0}
+
+
+async def test_renewal_never_puts_back_a_cookie_whose_session_ended_meanwhile(setup, clock, monkeypatch):
+    """A slow request that won the renewal must not answer with the old token after this browser signed out, changed
+    its password or signed in again while it was running: the browser would hold a dead cookie."""
+    from sqlalchemy import delete
+    original = accounts.renew
+
+    async def renew_then_session_ends(current):
+        seconds = await original(current)
+        async with setup.sessions() as db:   # e.g. sign-out in another tab while this request waits on a device
+            await db.execute(delete(UserSession).where(UserSession.token_hash == current["session_hash"]))
+            await db.commit()
+        return seconds
+
+    async with client(setup) as c:
+        await login(c, remember=True)
+        clock.now += 2 * HOUR
+        monkeypatch.setattr(accounts, "renew", renew_then_session_ends)
+        r = await c.get("/api/rack-items")
+        assert r.status_code == 200 and not session_cookies(r)
+        monkeypatch.setattr(accounts, "renew", original)
+        assert (await c.get("/api/me")).status_code == 401
+
+    async with client(setup) as c:   # control: with the row still there the renewal cookie is sent
+        await login(c, remember=True)
+        clock.now += 2 * HOUR
+        r = await c.get("/api/rack-items")
+        assert r.status_code == 200 and max_age(session_cookies(r)[0]) == YEAR
+
+
+async def test_remember_is_accepted_only_by_sign_in_and_sign_up(setup, clock):
+    async with client(setup) as c:
+        await login(c, remember=True)
+        new = {"name": "TV", "username": "lab-display", "password": "a-long-password", "role": "Viewer"}
+        r = await c.post("/api/users", json={**new, "remember": True})
+        assert r.status_code == 422 and "remember" in r.text
+        r = await c.post("/api/users", json=new)
+        assert r.status_code in (200, 201), r.text
+    async with client(setup) as tv:
+        await login(tv, "lab-display", "a-long-password", remember=True)
+        assert (await tv.get("/api/me")).status_code in (200, 403)
+
+
 async def test_password_change_ends_other_kept_sessions_and_keeps_this_browser_kept(setup, clock):
     async with client(setup) as here, client(setup) as elsewhere, client(setup) as short:
         await login(here, remember=True)
