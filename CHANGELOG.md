@@ -2,6 +2,33 @@
 
 ---
 
+## v2.44.0 — 2026-10-26 — SSH like typing ssh on the VM, four floors per rack
+
+### Added
+- **SSH works the same way as typing `ssh root@<server>` on the VM.** The SSH button
+  now runs the VM's own `ssh` command, so it signs in with the same keys, agent and
+  SSH config as the VM account (for example `~/.ssh/developer_key`). Every lab server
+  is open with zero clicks: no Admin approval, no key install, no password and no
+  host-key confirmation. Existing setups switch to this automatically. An Admin can
+  still turn SSH off for one server, or pick another key source in Admin → SSH.
+- **Four floors per rack.** Each rack card shows floors 1–4, top to bottom. An empty
+  floor is one compact "Free" slot, and the long list of empty shelves is gone.
+  Cooling units and equipment on a floor sit beside the server, not under it, at the
+  same height as the server line; on a
+  phone they wrap under the server inside the same floor.
+
+### Security
+- SSH goes only to servers inside the lab networks: around the saved PDU and KVM
+  addresses, plus `SSH_ALLOWED_NETWORKS`. Ping Monitor targets no longer widen these
+  networks. The `ssh` command runs without a shell, never asks for a password and
+  forwards nothing (no agent, X11 or ports). It gets none of Lab Manager's secrets.
+
+### Changed
+- The "Empty shelves" toggle is gone, because every floor is always shown. Anything
+  saved on a shelf above 4 appears under "Other · not on floors 1–4".
+
+---
+
 ## v2.43.1 — 2026-10-26 — Rename a server everywhere at once, 20 more fixes
 
 ### Added

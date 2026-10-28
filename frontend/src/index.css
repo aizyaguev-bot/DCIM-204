@@ -461,6 +461,15 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .equipment-name { display: block; min-width: 0; max-width: 100%; font-size: 12px; font-weight: 600; color: #fafafa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .equipment-serial { display: block; font-size: 11px; color: #a7a7a7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .floor-units .cooling-chip { max-width: 100%; }
+/* A unit is as tall as a server line; beside the servers, both columns fill the floor's height, so the server and the
+   unit next to it are the same height. */
+.floor-units > * { min-height: 44px; }
+@container shelves (min-width: 396px) {
+  .shelf-row[data-units] .shelf-content { align-items: stretch; }
+  .shelf-row[data-units] .floor-servers > *, .shelf-row[data-units] .floor-units > * { flex: 1 0 auto; }
+  .shelf-row[data-units] .unit-sortable { display: flex; flex-direction: column; }
+  .shelf-row[data-units] .unit-sortable > .unit-row { flex: 1 0 auto; }
+}
 
 /* power switch: a pill with its state written in it (ON / OFF) and a round knob with the power symbol. Blocked = dashed
    and muted (the reason is in its title), unknown = empty dashed pill with the knob in the middle, split feeds = amber
