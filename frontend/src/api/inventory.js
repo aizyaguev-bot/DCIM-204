@@ -27,7 +27,7 @@ export async function loadRackItems() {
   return data;
 }
 
-export async function saveRackItems(updated, previous) {
+export async function saveRackItems(updated, previous, { alert = true } = {}) {
   try {
     const revision = versions.get(previous);
     if (!revision) throw new Error("Reload DCIM before editing equipment.");
@@ -44,8 +44,8 @@ export async function saveRackItems(updated, previous) {
       error.reloaded = await loadRackItems().catch(() => null);
       if (error.reloaded) error.message = "Equipment changed in another session. The equipment list was reloaded; review it and try again.";
     }
-    // Older equipment dialogs do not render server errors themselves.
-    window.alert(error.message);
+    // Older equipment dialogs do not render server errors themselves; callers that show the error pass alert: false.
+    if (alert) window.alert(error.message);
     throw error;
   }
 }

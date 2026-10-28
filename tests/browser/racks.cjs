@@ -1,6 +1,7 @@
 // DCIM Racks view on the isolated fixture (tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1):
 // RACK-1 stale equipment panel after a 409, RACK-2 U validation, RACK-3 equipment reload, RACK-4 phone width,
-// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves. Every change it makes is undone.
+// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, SCAN-1..8 Scan barcode (add units to a
+// server's floor with a USB scanner or a stubbed camera). Every change it makes is undone.
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
@@ -200,6 +201,164 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
    await putLayout('/api/rack-positions',d=>{restore(d,'Rack-01',kept.order['Rack-01']);});
    await putLayout('/api/rack-slots',d=>{restore(d,'Storage-Main',kept.slots['Storage-Main']);restore(d,'Rack-01',kept.slots['Rack-01']);});
    await putItems(d=>{d['Storage-Main']=(d['Storage-Main']||[]).filter(i=>i.id!==SPARE);});
+  }
+
+  // ── SCAN-1..8: "Scan barcode" adds units to a server's floor in one step (USB scanner = typed code + Enter) ──
+  {
+   const run=Date.now().toString(36).toUpperCase();
+   const ours=i=>[i.barcode,i.serial_number].some(v=>String(v||'').toUpperCase().includes(run));
+   const dropScans=d=>{for(const rack of Object.keys(d))d[rack]=d[rack].filter(i=>!ours(i));};
+   const all=async()=>Object.entries((await items()).data).flatMap(([rack,list])=>list.map(i=>({...i,rack})));
+   const withCode=async code=>(await all()).filter(i=>[i.barcode,i.serial_number].some(v=>String(v||'').toLowerCase()===code.toLowerCase()));
+   const writes=[];
+   const SCAN_WRITE=/^\/api\/(inventory|inventory\/[^/]+\/location|rack-items)$/;
+   try{
+    const op=await operator.c.newPage();op.on('pageerror',e=>errors.push(e.message));
+    op.on('request',r=>{const u=new URL(r.url());if(!['GET','HEAD','OPTIONS'].includes(r.method())&&u.pathname!=='/api/auth/login')writes.push(`${r.method()} ${u.pathname}`);});
+    const wedge=async code=>{await op.keyboard.type(code);await op.keyboard.press('Enter');};
+    const toast=op.locator('.toast-region .toast');
+    await op.goto(origin+'/?tab=racks');
+    const opt=op.locator('[data-rack-id="Rack-02"] .server-cell[data-server="OPT22"]');
+    await opt.waitFor();
+    const floor=Number(await opt.evaluate(e=>e.closest('[data-u-slot]').dataset.uSlot));
+    assert.ok(floor>=1,'OPT22 has a floor');
+    await op.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').click();
+    const details=op.getByRole('dialog',{name:'OPT22'});
+    await details.getByRole('button',{name:'Scan barcode'}).click();
+    const dialog=op.getByRole('dialog',{name:'Scan unit barcode'});
+    await dialog.waitFor();
+    assert.match(await dialog.innerText(),new RegExp(`Units go to OPT22 · floor ${floor} in Rack-02`));
+    await op.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
+    const log=dialog.locator('.scan-unit-log > li');
+
+    // SCAN-1: a GS1 serial + part number: type, name and place are filled in and saved; the unit shows on the floor.
+    const A=`SNA${run}`;
+    await wedge(`(21)${A}(240)MQM8790-HS2F`);
+    await toast.filter({hasText:`Added MQM8790-HS2F ${A} to OPT22 · floor ${floor}.`}).waitFor();
+    let found=await withCode(A);
+    assert.equal(found.length,1);
+    assert.deepEqual([found[0].rack,found[0].u,found[0].type,found[0].name],['Rack-02',floor,'switch',`MQM8790-HS2F ${A}`]);
+    await op.locator(`[data-rack-id="Rack-02"] [data-u-slot="${floor}"] .equipment-cell[aria-label="View MQM8790-HS2F ${A}"]`).waitFor({state:'attached'});
+    assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode','Focus stays in the scan field');
+    passed.push(`SCAN-1 server dialog -> Scan barcode: GS1 serial added as a switch on OPT22 floor ${floor}, shown on the floor, focus kept`);
+
+    // SCAN-2: back-to-back scans while saving, including repeats: one row per code, never a second one.
+    const B=`SNB${run}`;
+    await op.keyboard.type(B);await op.keyboard.press('Enter');await op.keyboard.type(B);await op.keyboard.press('Tab');await wedge(A);
+    await op.waitForFunction(()=>document.querySelectorAll('.scan-unit-log > li').length===4);
+    await dialog.getByText('Ready for the next scan.').waitFor();
+    assert.deepEqual(await log.evaluateAll(els=>els.map(e=>e.dataset.action)),['confirmed','confirmed','created','created']);
+    assert.equal((await withCode(A)).length,1);assert.equal((await withCode(B)).length,1);
+    passed.push('SCAN-2 three wedge scans back to back (Enter / Tab), two repeats: no duplicate row, repeats change nothing');
+
+    // SCAN-3: Undo in the list removes the unit this scan added; the toast's Undo does the same. Focus returns to the field.
+    await log.filter({hasText:`Added ${B}`}).getByRole('button',{name:'Undo'}).click();
+    await log.filter({hasText:`Added ${B}`}).getByText('Undone').waitFor();
+    assert.equal((await withCode(B)).length,0);
+    assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode');
+    const C=`SNC${run}`;
+    await wedge(C);
+    await toast.filter({hasText:`Added ${C} to OPT22`}).getByRole('button',{name:'Undo'}).click();
+    await toast.filter({hasText:`Undone: ${C} was removed.`}).waitFor();
+    assert.equal((await withCode(C)).length,0);
+    await op.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
+    passed.push('SCAN-3 Undo (list and toast) removes the unit the scan added; focus goes back to the scan field');
+
+    // SCAN-4: a unit already in DCIM (elsewhere) is moved here, not added; Undo moves it back.
+    const M=`SNM${run}`;
+    await putItems(d=>{d['Rack-03']=[...(d['Rack-03']||[]),{id:`ci-move-${run}`,name:`Moved ${run}`,type:'cable',serial_number:M,u:1,shelf_position:'R'}];});
+    await wedge(M.toLowerCase());
+    await toast.filter({hasText:`Moved Moved ${run} to OPT22 · floor ${floor} (it was in Rack-03 · floor 1).`}).waitFor();
+    found=await withCode(M);
+    assert.deepEqual([found.length,found[0].rack,found[0].u,found[0].id],[1,'Rack-02',floor,`ci-move-${run}`]);
+    await log.filter({hasText:`Moved Moved ${run}`}).getByRole('button',{name:'Undo'}).click();
+    await toast.filter({hasText:`Undone: Moved ${run} is back in Rack-03 · floor 1.`}).waitFor();
+    found=await withCode(M);
+    assert.deepEqual([found[0].rack,found[0].u,found[0].shelf_position],['Rack-03',1,'R']);
+    passed.push('SCAN-4 a known serial (any case) moves that unit to the floor; Undo puts it back with its position');
+
+    // SCAN-5: refusals are sentences and write nothing: a location label, a code on two units, a part number only.
+    // The API refuses to create two units with one code, so the legacy duplicate is the lookup's answer, stubbed here.
+    const D=`DUP${run}`;
+    await op.route(`**/api/inventory?code=${D}`,async r=>{const real=await r.fetch();const body=await real.json();
+     body.matches=[{id:`ci-d1-${run}`,name:'Dup one',rack:'Rack-04',u:1,serial_number:D},{id:`ci-d2-${run}`,name:'Dup two',rack:'Rack-05',u:2,barcode:D.toLowerCase()}];
+     await r.fulfill({response:real,json:body});});
+    const before=writes.length;
+    await wedge('LOC:Rack-01:2:');
+    await dialog.getByRole('alert').filter({hasText:'This is a location label. Scan the barcode on the unit itself.'}).waitFor();
+    await wedge(D);
+    await dialog.getByRole('alert').filter({hasText:'This barcode matches 2 units, so nothing was changed.'}).waitFor();
+    assert.equal(await log.first().locator('.scan-unit-matches li').count(),2);
+    await wedge('MQM8790-HS2F');
+    await dialog.getByRole('alert').filter({hasText:'only names the product'}).waitFor();
+    assert.equal(writes.length,before,'Refused scans write nothing');
+    passed.push('SCAN-5 location label, ambiguous code (both listed) and part-number-only code are refused, nothing written');
+
+    // Escape closes only the scan dialog; focus goes back to its button in the server dialog.
+    await op.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
+    await details.waitFor();
+    assert.equal(await op.evaluate(()=>document.activeElement?.textContent),'Scan barcode');
+    await op.keyboard.press('Escape');await details.waitFor({state:'detached'});
+
+    // SCAN-6: Edit mode: the rack's "+ Equipment" dialog offers Scan barcode, with a floor choice.
+    await op.locator('button.edit-toggle').click();
+    await op.locator('[data-rack-id="Rack-02"] .rack-card-name').click();
+    await op.getByRole('button',{name:'All racks'}).waitFor();
+    assert.equal(await op.locator('.rack-detail-actions').getByRole('button',{name:'Scan barcode'}).count(),1);
+    await op.getByRole('button',{name:'Equipment',exact:true}).click();
+    await op.locator('div.fixed.inset-0.z-50').filter({hasText:'Add Equipment — Rack-02'}).getByRole('button',{name:'Scan barcode'}).click();
+    await dialog.waitFor();
+    await dialog.getByLabel('Floor in Rack-02').selectOption('3');
+    await op.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
+    const E=`SNE${run}`;
+    await wedge(`SN: ${E}`);
+    await toast.filter({hasText:`Added ${E} to Rack-02 · floor 3.`}).waitFor();
+    found=await withCode(E);assert.deepEqual([found.length,found[0].rack,found[0].u],[1,'Rack-02',3]);
+    await dialog.getByRole('button',{name:'Done'}).click();await dialog.waitFor({state:'detached'});
+    await op.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').first().click();
+    await op.getByRole('dialog',{name:'OPT22'}).getByRole('button',{name:'Scan barcode'}).waitFor();
+    await op.keyboard.press('Escape');
+    passed.push('SCAN-6 Edit mode: Scan barcode in + Equipment (floor 3 chosen), in the rack actions and in the server edit panel');
+
+    const unexpected=writes.filter(w=>!SCAN_WRITE.test(w.split(' ')[1]));
+    assert.deepEqual(unexpected,[],'Scanning writes only inventory registrations, locations and the equipment list (Undo)');
+    await op.close();
+
+    // SCAN-7: the camera path (BarcodeDetector + getUserMedia stubbed) goes through the same one-step save.
+    const cam=await operator.c.newPage();cam.on('pageerror',e=>errors.push(e.message));
+    await cam.addInitScript(()=>{
+     window.BarcodeDetector=class{static async getSupportedFormats(){return['code_128','qr_code'];}async detect(){const v=window.__cameraCode;return v?[{rawValue:v,format:'code_128'}]:[];}};
+     if(navigator.mediaDevices)navigator.mediaDevices.getUserMedia=async()=>{const c=document.createElement('canvas');c.width=64;c.height=48;c.getContext('2d').fillRect(0,0,64,48);return c.captureStream(5);};
+    });
+    await cam.goto(origin+'/?tab=racks');
+    await cam.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').click();
+    await cam.getByRole('dialog',{name:'OPT22'}).getByRole('button',{name:'Scan barcode'}).click();
+    const camDialog=cam.getByRole('dialog',{name:'Scan unit barcode'});
+    await camDialog.getByRole('button',{name:'Use camera'}).click();
+    await camDialog.locator('video').waitFor();
+    const K=`SNK${run}`;
+    await cam.evaluate(code=>{window.__cameraCode=code;},K);
+    await cam.locator('.toast-region .toast').filter({hasText:`Added ${K} to OPT22 · floor ${floor}.`}).waitFor();
+    await cam.waitForTimeout(700);
+    assert.equal((await withCode(K)).length,1,'The code held in view is saved once');
+    assert.equal(await camDialog.locator('.scan-unit-log > li').count(),1,'The code held in view is read once');
+    await cam.keyboard.press('Escape');await camDialog.locator('video').waitFor({state:'detached'});
+    assert.equal(await camDialog.count(),1,'The first Escape only stops the camera');
+    await cam.keyboard.press('Escape');await camDialog.waitFor({state:'detached'});
+    await cam.close();
+    passed.push('SCAN-7 camera (stubbed BarcodeDetector): one save per code in view, Escape stops the camera, then closes');
+
+    // SCAN-8: Viewers see no Scan barcode anywhere.
+    const viewer=await session('viewer');
+    const vp=await viewer.c.newPage();vp.on('pageerror',e=>errors.push(e.message));
+    await vp.goto(origin+'/?tab=racks&rack=Rack-02');
+    await vp.getByRole('button',{name:'All racks'}).waitFor();
+    await vp.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').first().click();
+    await vp.getByRole('dialog',{name:'OPT22'}).getByText('Viewer · read only').waitFor();
+    assert.equal(await vp.getByRole('button',{name:'Scan barcode'}).count(),0);
+    await viewer.c.close();
+    passed.push('SCAN-8 Viewer: no Scan barcode in the server dialog or the rack');
+   }finally{await putItems(dropScans);}
   }
 
   // ── RACK-4: the rack detail fits a 375 px phone, with Edit off and on ──

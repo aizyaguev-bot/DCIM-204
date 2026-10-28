@@ -21,6 +21,7 @@ import { CoolingChip, CoolingStrip, CoolingPanel } from "../components/racks/Coo
 import { RackKpis, RacksToolbar, filterEmptyText } from "../components/racks/RacksToolbar.jsx";
 import ServerDetailsDialog from "../components/racks/ServerDetailsDialog.jsx";
 import UndoToast from "../components/racks/UndoToast.jsx";
+import ScanUnitDialog from "../components/racks/ScanUnitDialog.jsx";
 import useDialogFocus from "../components/racks/useDialogFocus.js";
 import { useStoredState, useMediaQuery, useDebounced, flash, prefersReducedMotion } from "../components/racks/hooks.js";
 
@@ -29,7 +30,7 @@ const EditContext = createContext(false);
 // (sshFor, drawn through the SSH slot renderSsh), and the server's power (feeds, pending request, the request that
 // opens the in-app confirmation).
 const ServerActionsContext = createContext({ kvmFor: () => null, openConsole: null, sshFor: () => null, canOperate: false,
-  powerFor: null, powerPending: () => null, requestPower: null, waitingFor: () => false, renderSsh: null });
+  powerFor: null, powerPending: () => null, requestPower: null, waitingFor: () => false, renderSsh: null, scanUnit: null });
 
 // Small KVM button for a server row: opens that server's KVM console (Operator and up).
 function KvmButton({ server, compact = false }) {
@@ -674,7 +675,7 @@ function AddOptModal({ rack, onClose, onSave }) {
 }
 
 // ─── ADD EQUIPMENT MODAL ──────────────────────────────────────────────────────
-function AddEquipmentModal({ rackName, onClose, onSave }) {
+function AddEquipmentModal({ rackName, onClose, onSave, onScan = null }) {
   useEscClose(onClose);
   const [name,  setName]  = useState("");
   const [type,  setType]  = useState("switch");
@@ -702,6 +703,10 @@ function AddEquipmentModal({ rackName, onClose, onSave }) {
           <CloseBtn onClose={onClose}/>
         </div>
         <div className="px-5 py-4 space-y-3">
+          {onScan && <div className="scan-unit-entry">
+            <button type="button" onClick={() => onScan(slot)} className="racks-btn racks-btn-accent">Scan barcode</button>
+            <span className="text-[11px] text-zinc-400">Scan the unit instead: name, type and place are filled in and saved for you.</span>
+          </div>}
           <div><SL>Name</SL>
             <input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()}
               placeholder="e.g. SW-Lab-01"
@@ -966,7 +971,7 @@ function MoveOptSection({ server, pdu, pdus, rackDevices, onRackOverrideChange, 
 }
 
 // ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, optOwners, ownersLoaded, onOwnerChange, onRackOverrideChange, onClose, onLabelChange, onRenameOpt, onSlotSave, onSwitchSave, powerGroup, powerPending, onRequestPower }) {
+function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, optOwners, ownersLoaded, onOwnerChange, onRackOverrideChange, onScanUnit = null, onClose, onLabelChange, onRenameOpt, onSlotSave, onSwitchSave, powerGroup, powerPending, onRequestPower }) {
   const panelRef = useRef(null);
   useDialogFocus(panelRef, { onEscape: onClose });
   const pdu   = pdus.find(p => p.id === server.pduId);
@@ -1031,6 +1036,8 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
               </div>
             ))}
           </div>
+          {onScanUnit && <button type="button" onClick={onScanUnit} className="racks-btn racks-btn-sm racks-btn-accent mt-3"
+            title="Add a unit to this server's floor by scanning its barcode">Scan barcode</button>}
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
@@ -1149,6 +1156,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
   );
   const editMode = useContext(EditContext);
   const view = useContext(RackViewContext);
+  const { scanUnit } = useContext(ServerActionsContext);
   const {canAdmin} = useAccounts();
   const summary = view.summaryFor(r);
   const slots = rackSlots[r.rack] || {};
@@ -1184,6 +1192,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
       </ul>}
       {editMode && <div className="rack-detail-actions">
         <button type="button" onClick={() => onRequestAddEquip(r.rack)} className="racks-btn">{Icon.plus} Equipment</button>
+        {scanUnit && <button type="button" onClick={() => scanUnit({ rack: r.rack })} className="racks-btn racks-btn-accent">Scan barcode</button>}
         {r.pduData.length > 0 && <button type="button" onClick={() => onRequestAddOpt(r)} className="racks-btn racks-btn-accent">{Icon.plus} OPT</button>}
         {view.coolingEditable && <button type="button" onClick={e => view.onAddCooling(r.rack, e.currentTarget)} className="racks-btn">{Icon.plus} Cooling unit</button>}
       </div>}
@@ -1662,6 +1671,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
   const [coolingActive,  setCoolingActive]  = useState(null);
   const [pendingMove,    setPendingMove]    = useState(null);
   const editMode = useContext(EditContext);
+  const { scanUnit } = useContext(ServerActionsContext);
   const phone = useMediaQuery("(max-width: 640px)");
   const { visualFor, summaryFor } = base;
 
@@ -2012,7 +2022,8 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
       {addEquipFor && (
         <Portal>
           <AddEquipmentModal rackName={addEquipFor} onClose={() => setAddEquipFor(null)}
-            onSave={item => handleSaveEquip(addEquipFor, item)}/>
+            onSave={item => handleSaveEquip(addEquipFor, item)}
+            onScan={scanUnit ? u => { const rack = addEquipFor; setAddEquipFor(null); scanUnit({ rack, u }); } : null}/>
         </Portal>
       )}
       {addRackOpen && (
@@ -2679,6 +2690,29 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     setPowerDialog({ serverName: server.name, key: group.key, snapshot: group, action, scope, feedId: feed, allowScopeChoice: group.feeds.length > 1 && scope === "server" });
   }, [powerGroups, powerEnabled]);
 
+  // ── scan unit barcodes onto a floor: the dialog saves each unit itself; the equipment list is then reloaded (or
+  // replaced by the list an Undo saved), and itemsSeq drops any reload that was already on its way with the old list ──
+  const [scanTarget, setScanTarget] = useState(null);
+  const scanPlaceRef = useRef(null);
+  const openScanUnit = useCallback(({ server = null, rack = null, u = null } = {}) => {
+    if (server) {
+      const { rackStats: stats, rackOrder: order, rackSlots: slots, customItems: items } = scanPlaceRef.current || {};
+      const rs = stats?.find(x => x.rack === server.rack);
+      const shelf = rs ? serverShelf(buildRackRows(rs.servers, rs.rack, order, slots, items).uMap[server.id]) : null;
+      // Main storage is one place without shelves for equipment (the inventory API refuses a U there).
+      const storage = server.rack === MAIN_STORAGE;
+      setScanTarget({ rack: server.rack, u: storage ? 0 : shelf ?? 0, position: "", label: server.name, chooseFloor: !storage && shelf == null });
+    } else if (rack) {
+      setScanTarget({ rack, u: rack === MAIN_STORAGE ? 0 : Number.isInteger(u) ? u : 1, position: "", label: "", chooseFloor: rack !== MAIN_STORAGE });
+    }
+  }, []);
+  const scanItemsChanged = useCallback(async saved => {
+    if (saved) { itemsSeq.current++; setCustomItems(saved); return; }
+    const turn = ++itemsSeq.current;
+    try { const fresh = await loadRackItems(); if (turn === itemsSeq.current) setCustomItems(fresh); }
+    catch { /* the next periodic reload tries again */ }
+  }, []);
+
   const serverActions = useMemo(()=>({
     kvmFor: name => kvmByServer.get(serverIdentity(name)) || null,
     openConsole: onOpenConsole || null,
@@ -2689,7 +2723,9 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     powerFor: powerEnabled ? powerFor : null, powerPending, requestPower: powerEnabled ? requestPower : null, waitingFor,
     // The SSH slot of every server row, the detail table, the phone list and the details dialogs (v2.41 SSH button).
     renderSsh: (server, size) => <RackSshButton server={server} compact={size === "sm"}/>,
-  }),[kvmByServer,onOpenConsole,canOperate,powerEnabled,powerGroups,powerFor,powerPending,requestPower,waitingFor]);
+    // Scan unit barcodes onto a rack's floor ({ rack, u }) or a server's floor ({ server }); Operator and up.
+    scanUnit: canOperate ? openScanUnit : null,
+  }),[kvmByServer,onOpenConsole,canOperate,powerEnabled,powerGroups,powerFor,powerPending,requestPower,waitingFor,openScanUnit]);
 
   const handleReorder = useCallback((rackName,newIds)=>{
     if (!editMode) return;
@@ -2793,6 +2829,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   // Deleted in another session (seen in a reloaded list): its panel is gone, so equipment reloads resume.
   useEffect(() => { if (selectedCustomId != null && !selectedCustom) setSelectedCustomId(null); }, [selectedCustomId, selectedCustom]);
 
+  scanPlaceRef.current = { rackStats, rackOrder, rackSlots, customItems };
+  const scanFloorChoices = useMemo(() => {
+    if (!scanTarget?.chooseFloor) return null;
+    const list = Array.from({ length: RACK_FLOORS + 1 }, (_, n) => n);
+    return list.includes(scanTarget.u) ? list : [...list, scanTarget.u];
+  }, [scanTarget]);
   // The open server's shelf, as its rack draws it ("U03" or "U03 (auto)").
   const selectedShelf = useMemo(() => {
     if (!selectedServer) return "";
@@ -2852,6 +2894,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           group={powerGroups.get(serverIdentity(selectedServer.name)) || null} pending={powerPending(selectedServer)} waiting={waitingFor(selectedServer)}
           onRequestPower={powerEnabled ? (action, el, opts) => requestPower(selectedServer, action, el, opts) : null}
           onClose={()=>setSelectedServerId(null)}
+          onScanUnit={canOperate ? () => openScanUnit({ server: selectedServer }) : null}
           consoleButton={canOperate && onOpenConsole && kvmByServer.get(serverIdentity(selectedServer.name)) ? <KvmButton server={selectedServer}/> : null} sshSlot={<SshSlot server={selectedServer} size="md"/>}/>
       </Portal>}
       {selectedServer&&editMode&&(
@@ -2859,6 +2902,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
             switchAssignments={switchAssignments} optOwners={optOwners} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}
             onRackOverrideChange={handleRackOverrideSave}
+            onScanUnit={canOperate ? () => openScanUnit({ server: selectedServer }) : null}
             onClose={()=>setSelectedServerId(null)}
             onLabelChange={handleLabelChange} onRenameOpt={handleRenameOpt}
             onSlotSave={handleSlotSave} onSwitchSave={handleSwitchSave}
@@ -2893,6 +2937,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           feedId={powerDialog.feedId} allowScopeChoice={powerDialog.allowScopeChoice}
           onConfirm={({ action, scope, feedId, plan }) => runPower({ serverName: powerDialog.serverName, action, scope, feedId, plan })}
           onClose={(done, results, action, scope) => { const name = powerDialog.serverName; setPowerDialog(null); if (done) powerToast(name, action, results, { scope, group: powerGroupNow }); }}/>
+      </Portal>}
+      {scanTarget && canOperate && section === "racks" && <Portal>
+        <ScanUnitDialog key={`${scanTarget.rack}:${scanTarget.u}:${scanTarget.label}`} target={scanTarget} floorChoices={scanFloorChoices}
+          onClose={() => setScanTarget(null)} onItemsChanged={scanItemsChanged} onToast={showToast}/>
       </Portal>}
       {section === "racks" && <UndoToast toast={toast} onDismiss={dismissToast}/>}
     </main></ServerActionsContext.Provider></EditContext.Provider>

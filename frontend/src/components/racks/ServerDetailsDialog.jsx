@@ -6,8 +6,9 @@ import { PowerActionButtons, powerBlockReason } from "./ServerPowerControl.jsx";
 const FEED_STATE = s => (s === "on" ? "ON" : s === "off" ? "OFF" : "Unknown");
 
 // A server's details in view mode: place, owner, switch, power (whole server and per feed) and console.
-// Changing the shelf, outlet, switch or owner stays in Edit mode (ServerEditPanel).
-export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, watts, group, pending, waiting, onRequestPower, onClose, consoleButton, sshSlot }) {
+// Changing the shelf, outlet, switch or owner stays in Edit mode (ServerEditPanel). onScanUnit (Operator and up) opens
+// "Scan barcode": units scanned there are added to this server's floor.
+export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, watts, group, pending, waiting, onRequestPower, onClose, consoleButton, sshSlot, onScanUnit = null }) {
   const { canOperate } = useAccounts();
   const panelRef = useRef(null);
   const closeRef = useRef(null);
@@ -31,6 +32,10 @@ export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, 
         <div><dt>Power (W)</dt><dd>{watts}</dd></div>
         <div><dt>PDU</dt><dd dir="auto">{server.pduName} · outlet {server.outlet}</dd></div>
       </dl>
+      {canOperate && onScanUnit && <div className="scan-unit-entry">
+        <button type="button" className="racks-btn racks-btn-accent" onClick={onScanUnit}>Scan barcode</button>
+        <span className="racks-muted">Add a unit (switch, cable, NIC…) to this server's floor by scanning its barcode.</span>
+      </div>}
       <h3 className="racks-dialog-subtitle">Power</h3>
       {canOperate && group && onRequestPower && <div className="power-whole">
         <span className="power-whole-label">Whole server ({feeds.length} {feeds.length === 1 ? "feed" : "feeds"})</span>

@@ -667,6 +667,22 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .toast-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .toast-undo { min-height: 32px; padding: 0 12px; border: 1px solid #76b900; border-radius: 2px; color: #9fe040; font-size: 13px; font-weight: 700; }
 .toast-close { width: 32px; height: 32px; color: #ccc; font-size: 18px; }
+/* Scan barcode: add units to a server's floor (ScanUnitDialog) */
+.scan-unit-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 14px; }
+.scan-unit-entry .racks-muted, .scan-unit-entry span { flex: 1 1 200px; font-size: 12px; }
+.scan-unit-row { display: flex; gap: 8px; }
+.scan-unit-row input { flex: 1 1 auto; font-family: "JetBrains Mono", Consolas, monospace; }
+.scan-unit-row .racks-btn { min-height: 40px; }
+.scan-unit-camera { margin-top: 10px; }
+.scan-camera { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 10px; }
+.scan-camera-video { width: 100%; max-height: 240px; border: 1px solid #333; border-radius: 2px; background: #000; object-fit: cover; }
+.scan-unit-log { display: flex; flex-direction: column; gap: 6px; max-height: 220px; margin-top: 12px; overflow-y: auto; font-size: 13px; }
+.scan-unit-log > li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; border: 1px solid #333; border-left: 3px solid #76b900; border-radius: 2px; background: #1c1c1c; }
+.scan-unit-log > li[data-action="error"] { border-left-color: #fe3f3f; }
+.scan-unit-log > li[data-action="confirmed"] { border-left-color: #4b4b4b; }
+.scan-unit-text { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+.scan-unit-error { color: #ff8181; }
+.scan-unit-matches { flex-basis: 100%; padding-left: 16px; list-style: disc; color: #ccc; font-size: 12px; }
 .edit-mode-notice { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; color: #eee; }
 .edit-mode-notice p { flex: 1 1 320px; margin: 0; }
 
