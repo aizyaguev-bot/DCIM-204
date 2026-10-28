@@ -1038,16 +1038,23 @@ def system_ssh_state():
     return {"available": bool(path), "reason": reason}
 
 
-def system_argv(ssh_path, user, host, timeout):
+def system_argv(ssh_path, user, host, timeout, address=None):
     """The exact argv of the account's own `ssh`: no shell, never prompts (BatchMode), no forwarding of any kind,
-    port 22, the validated user and the approved saved host after "--"."""
+    port 22, the validated user and the approved saved host after "--". `address` is the IP the lab-network check
+    passed: HostName pins the connection to it (no second DNS lookup, no HostName from the account's SSH config),
+    while the account's Host blocks still match the saved name (keys, agent). No proxy, and no shared background
+    connection (ControlMaster) that would outlive the terminal."""
     user, host = username(user), checked_host(host)
     if not host or host.startswith("-"):
         raise HTTPException(400, "Invalid SSH host")
-    return [ssh_path, "-tt", "-p", "22", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(timeout)}",
+    pinned = []
+    if address is not None:
+        pinned = ["-o", f"HostName={ipaddress.ip_address(str(address))}"]
+    return [ssh_path, "-tt", "-p", "22", *pinned, "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(timeout)}",
             "-o", "ServerAliveInterval=30", "-o", "StrictHostKeyChecking=accept-new", "-o", "ForwardAgent=no",
             "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no",
-            "-o", "RequestTTY=force", "-l", user, "--", host]
+            "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+            "-o", "ControlPersist=no", "-o", "RequestTTY=force", "-l", user, "--", host]
 
 
 def system_env(source=None):
@@ -1284,15 +1291,17 @@ async def terminal(key: str, websocket: WebSocket):
         if key_source == "system":
             # No Admin click in this mode: every resolved address must be inside the lab networks (fresh lookup).
             outside = await lab_state(host, networks, cached=False)
-            if outside == "outside":
+            pinned = ipaddress.ip_address(canonical_ip(connected_ip))
+            if outside == "outside" or not any(pinned.version == network.version and pinned in network
+                                                for network in networks):
                 raise HTTPException(403, OUTSIDE_REASON)
             if outside:
                 raise ConnectFailure("unreachable")
             ssh_path, _ = system_ssh_path()
             if not ssh_path:
                 raise HTTPException(503, SYSTEM_UNAVAILABLE_REASON)
-            # The saved host string goes to ssh (after "--"); its resolution was checked above.
-            argv = system_argv(ssh_path, user, host, getattr(get_settings(), "ssh_connect_timeout_seconds", 10))
+            # The saved host string goes to ssh (after "--"), pinned to the address checked above.
+            argv = system_argv(ssh_path, user, host, getattr(get_settings(), "ssh_connect_timeout_seconds", 10), pinned)
         else:
             offers = await ssh_store.run_file_op(client_keys_for, key_source, vm_key_dir(),
                                                  {"host": host, "name": server["name"], "user": user})

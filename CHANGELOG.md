@@ -2,6 +2,17 @@
 
 ---
 
+## v2.44.1 — 2026-10-28 — SSH goes exactly where it was checked
+
+### Security
+- The SSH button connects to the exact address that passed the lab-network check, so a
+  DNS change or a `HostName` / proxy line in the VM's SSH config cannot send it
+  elsewhere. The VM's SSH settings for that server (keys, agent) still apply.
+- An SSH terminal never leaves a shared background connection (ControlMaster) running
+  after it closes.
+
+---
+
 ## v2.44.0 — 2026-10-26 — SSH like typing ssh on the VM, four floors per rack
 
 ### Added

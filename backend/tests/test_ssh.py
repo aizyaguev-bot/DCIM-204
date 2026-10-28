@@ -2369,7 +2369,14 @@ def test_system_argv_is_exact_argv_with_no_shell_prompts_or_forwarding():
     assert argv == [SSH_PATH, "-tt", "-p", "22", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                     "-o", "ServerAliveInterval=30", "-o", "StrictHostKeyChecking=accept-new", "-o", "ForwardAgent=no",
                     "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no",
+                    "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "ControlMaster=no",
+                    "-o", "ControlPath=none", "-o", "ControlPersist=no",
                     "-o", "RequestTTY=force", "-l", "root", "--", "opt106.lab"]
+    # Pinned to the checked address: HostName overrides DNS and the account's own HostName for that Host.
+    pinned = ssh.system_argv(SSH_PATH, "root", "Opt106.lab", 10, "10.20.30.40")
+    assert pinned[4:6] == ["-o", "HostName=10.20.30.40"] and pinned[-1] == "opt106.lab"
+    with pytest.raises(ValueError):
+        ssh.system_argv(SSH_PATH, "root", "opt106", 10, "10.0.0.1 -oProxyCommand=x")
     assert argv[-2] == "--" and argv.count("--") == 1
     for flag in ("-A", "-X", "-Y", "-L", "-R", "-D", "-W", "-J", "-F", "-i", "ForwardAgent=yes", "ForwardX11=yes",
                  "IdentitiesOnly=yes", "IdentityAgent=none"):
@@ -2499,7 +2506,10 @@ async def test_system_terminal_runs_the_vm_ssh_command_and_bridges_it(api, monke
             sock.send_json({"type": "input", "data": "exit"})
             assert until(sock, "closed")["reason"] == "SSH session ended"
     [system] = spawned
-    assert system.argv == ssh.system_argv(SSH_PATH, "root", "127.0.0.1", api.settings.ssh_connect_timeout_seconds)
+    # The saved name stays the Host (the account's SSH config matches it); the connection goes to the checked address.
+    assert system.argv == ssh.system_argv(SSH_PATH, "root", "127.0.0.1", api.settings.ssh_connect_timeout_seconds,
+                                          "10.9.8.7")
+    assert "HostName=10.9.8.7" in system.argv and system.argv[-1] == "127.0.0.1"
     assert system.env["TERM"] == "xterm-256color" and system.env["KRB5CCNAME"] == "FILE:/tmp/krb5cc_1000"
     assert system.env["SSH_AUTH_SOCK"] == "/run/user/1000/agent.sock"
     assert "LAB_MANAGER_MASTER_KEY" not in system.env
