@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import posixpath
 import re
 import secrets
@@ -13,7 +14,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import case, delete, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 
@@ -22,10 +23,14 @@ from .database import AsyncSessionLocal
 from .models import AuthThrottle, User, UserSession
 
 router = APIRouter(prefix="/api", tags=["accounts"])
+log = logging.getLogger(__name__)
 COOKIE = "dcim_session"
 DEFAULT_PREFS = {"start_page": "dashboard", "refresh_seconds": 15, "confirm_power": True, "compact_racks": False}
 PUBLIC = {"/api/auth/status", "/api/auth/login", "/api/auth/register"}
 ROLES = {"Viewer": 0, "Operator": 1, "Admin": 2}
+RENEW_SECONDS = 3600   # a kept ("Keep me signed in") session is renewed, in the database and the cookie, at most this often
+RENEW_RETRY_SECONDS = 60   # after a failed renewal write this session is not tried again for this long (this process)
+_renew_failed = {}   # session hash -> time of its last failed renewal write
 TWIN_ASSETS = {".html", ".htm", ".js", ".mjs", ".css", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".map"}
 
 
@@ -65,6 +70,18 @@ async def bootstrap_admin():
         except IntegrityError: await db.rollback()  # another worker initialized it
 
 
+def session_seconds(remember):
+    """How long a new or renewed session lasts. Only a kept session gets the long, sliding lifetime."""
+    settings = get_settings()
+    if remember: return getattr(settings, "accounts_remember_days", 365) * 86400
+    return settings.accounts_session_hours * 3600
+
+
+def set_session_cookie(response, raw, seconds, connection):
+    response.set_cookie(COOKIE, raw, max_age=seconds, httponly=True, samesite="lax",
+                        secure=get_settings().accounts_secure_cookie or connection.url.scheme == "https", path="/")
+
+
 async def identity(connection):
     token = connection.cookies.get(COOKIE, "")
     if not token or len(token) > 128: return None
@@ -75,7 +92,74 @@ async def identity(connection):
         ))).first()
         if not row: return None
         session, user = row
-        return {"user": public_user(user), "csrf_token": session.csrf_token, "session_hash": digest}
+        return {"user": public_user(user), "csrf_token": session.csrf_token, "session_hash": digest,
+                "remember": bool(session.remember), "renewed_at": session.renewed_at or 0}
+
+
+async def renew(current):
+    """Slides a kept session: when its last renewal is an hour old or more, it lasts ACCOUNTS_REMEMBER_DAYS from now.
+    Returns the new lifetime in seconds when this call renewed it, else None. A compare-and-set on renewed_at means
+    that of requests arriving together only one writes, so a session row is written at most once per hour."""
+    if not current or not current.get("remember"): return None
+    now = time.time()
+    if now - current.get("renewed_at", 0) < RENEW_SECONDS: return None
+    digest = current["session_hash"]
+    # Renewal is best effort: the session still has months left, so a database that cannot take the write (locked
+    # past its timeout, disk full, read-only) never fails the request, and is not retried on every request.
+    if now - _renew_failed.get(digest, 0) < RENEW_RETRY_SECONDS: return None
+    seconds = session_seconds(True)
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                result = await db.execute(update(UserSession).where(
+                    UserSession.token_hash == digest, UserSession.renewed_at == current["renewed_at"],
+                    UserSession.expires_at > now,
+                ).values(expires_at=now + seconds, renewed_at=now))
+                await db.commit()
+            except SQLAlchemyError:
+                try: await db.rollback()
+                except SQLAlchemyError: pass
+                raise
+    except SQLAlchemyError as error:
+        if len(_renew_failed) >= 10000: _renew_failed.clear()   # bounded: one entry per failing session at most
+        _renew_failed[digest] = now
+        log.warning("Kept session not renewed (the request continues): %s", error.__class__.__name__)
+        return None
+    _renew_failed.pop(digest, None)
+    if not result.rowcount: return None
+    current["renewed_at"] = now
+    return seconds
+
+
+async def session_exists(digest):
+    """True while the session row is still there. A slow response that renewed its session must not put the cookie
+    back after this browser signed out, changed its password or signed in again meanwhile (that row is gone)."""
+    try:
+        async with AsyncSessionLocal() as db:
+            return bool(await db.scalar(select(func.count()).select_from(UserSession).where(UserSession.token_hash == digest)))
+    except SQLAlchemyError:
+        return False   # unknown: the browser keeps the cookie it has, which is still valid for months
+
+
+def renewed_cookie_send(send, connection, seconds):
+    """Wraps an ASGI send so the response renews the session cookie's Max-Age, unless the endpoint set or cleared
+    that cookie itself (sign-in, password change, sign-out). The renewed cookie keeps every attribute it was issued with."""
+    template = Response()
+    set_session_cookie(template, connection.cookies.get(COOKIE, ""), seconds, connection)
+    header = template.headers["set-cookie"].encode("latin-1")
+    prefix = COOKIE.encode() + b"="
+    digest = hashlib.sha256(connection.cookies.get(COOKIE, "").encode()).hexdigest()
+
+    async def wrapped(message):
+        if message["type"] == "http.response.start":
+            headers = list(message.get("headers") or [])
+            if not any(key.lower() == b"set-cookie" and value.lstrip().startswith(prefix) for key, value in headers)                     and await session_exists(digest):
+                headers.append((b"set-cookie", header))
+                # A response carrying the session cookie must never be stored by a shared cache.
+                if not any(key.lower() == b"cache-control" for key, _ in headers): headers.append((b"cache-control", b"private"))
+                message = {**message, "headers": headers}
+        await send(message)
+    return wrapped
 
 
 def required_role(path, method):
@@ -108,7 +192,7 @@ def required_role(path, method):
     if path == "/api/chillers/history": return "Operator"
     if path == "/api/chillers/restore": return "Operator"
     if method in ("GET", "HEAD", "OPTIONS"): return "Viewer"
-    if path in ("/api/auth/logout", "/api/me", "/api/me/password", "/api/me/preferences"): return "Viewer"
+    if path in ("/api/auth/logout", "/api/me", "/api/me/password", "/api/me/preferences", "/api/me/end-other-sessions"): return "Viewer"
     if path == "/api/devices" or re.fullmatch(r"/api/devices/[^/]+", path):
         if path not in ("/api/devices/rename-opt", "/api/devices/direct-label", "/api/devices/move-server"): return "Admin"
     return "Operator"
@@ -168,6 +252,11 @@ class AccountAccess:
         if (unsafe or scope["type"] == "websocket") and not same_origin(connection):
             return await deny(403, "Cross-origin action rejected")
         current = await identity(connection)
+        # Only HTTP answers can carry the cookie, so only they renew: the database row and the cookie move together.
+        renewed = await renew(current) if scope["type"] == "http" else None
+        if renewed:
+            # deny() and the app below both answer through this send.
+            send = renewed_cookie_send(send, connection, renewed)
         scope.setdefault("state", {})["account"] = current
         if path in PUBLIC:
             return await self.app(scope, receive, send)
@@ -204,7 +293,16 @@ class Credentials(Input):
     password: str = Field(min_length=1, max_length=256, repr=False)
 
 
-class Registration(Credentials):
+class Remember(Input):
+    # "Keep me signed in": sign-in and sign-up only. Omitted = the short session clients got before the option existed.
+    remember: bool = False
+
+
+class Login(Credentials, Remember):
+    pass
+
+
+class AccountFields(Credentials):
     name: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=8, max_length=256, repr=False)
 
@@ -222,7 +320,12 @@ class Registration(Credentials):
         return value.strip()
 
 
-class NewUser(Registration):
+class Registration(AccountFields, Remember):
+    pass
+
+
+class NewUser(AccountFields):
+    # An admin creating a user issues no session, so "remember" is rejected here (extra=forbid).
     role: Literal["Admin", "Operator", "Viewer"] = "Viewer"
 
 
@@ -237,7 +340,7 @@ class Profile(Input):
 
     @field_validator("name")
     @classmethod
-    def name_valid(cls, value): return Registration.name_valid(value)
+    def name_valid(cls, value): return AccountFields.name_valid(value)
 
     @field_validator("email")
     @classmethod
@@ -291,13 +394,15 @@ async def refund(db, keys):
                          .values(attempts=AuthThrottle.attempts - 1))
 
 
-async def issue_session(db, user, request, response):
+async def issue_session(db, user, request, response, remember=False):
     raw = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
-    seconds = get_settings().accounts_session_hours * 3600
-    await db.execute(delete(UserSession).where(UserSession.expires_at <= time.time()))
-    db.add(UserSession(token_hash=hashlib.sha256(raw.encode()).hexdigest(), user_id=user.id, csrf_token=csrf, expires_at=time.time()+seconds))
-    response.set_cookie(COOKIE, raw, max_age=seconds, httponly=True, samesite="lax", secure=get_settings().accounts_secure_cookie or request.url.scheme == "https", path="/")
+    seconds = session_seconds(remember)
+    now = time.time()
+    await db.execute(delete(UserSession).where(UserSession.expires_at <= now))
+    db.add(UserSession(token_hash=hashlib.sha256(raw.encode()).hexdigest(), user_id=user.id, csrf_token=csrf, expires_at=now+seconds,
+                       remember=bool(remember), renewed_at=now))
+    set_session_cookie(response, raw, seconds, request)
     response.headers["Cache-Control"] = "no-store"
     return {"user":public_user(user), "csrf_token":csrf}
 
@@ -314,7 +419,7 @@ async def auth_status(request: Request, response: Response):
 
 
 @router.post("/auth/login")
-async def login(body: Credentials, request: Request, response: Response):
+async def login(body: Login, request: Request, response: Response):
     if not get_settings().accounts_enabled: raise HTTPException(404, "User accounts are not enabled")
     keys = await throttle(request, body.username)
     async with AsyncSessionLocal() as db:
@@ -326,7 +431,7 @@ async def login(body: Credentials, request: Request, response: Response):
         user.last_login_at = time.time()
         old = getattr(request.state, "account", None)
         if old: await db.execute(delete(UserSession).where(UserSession.token_hash == old["session_hash"]))
-        result = await issue_session(db, user, request, response)
+        result = await issue_session(db, user, request, response, remember=body.remember)
         await refund(db, keys)
         await db.commit()
         return result
@@ -344,7 +449,7 @@ async def register(body: Registration, request: Request, response: Response):
         db.add(user)
         try: await db.flush()
         except IntegrityError: raise HTTPException(409, "Username is already taken")
-        result = await issue_session(db, user, request, response)
+        result = await issue_session(db, user, request, response, remember=body.remember)
         await db.commit()
         return result
 
@@ -397,10 +502,22 @@ async def password_change(body: PasswordChange, request: Request, response: Resp
         user.password_hash = await asyncio.to_thread(hash_password, body.new_password)
         user.must_change_password = False
         await db.execute(delete(UserSession).where(UserSession.user_id == user.id))
-        result = await issue_session(db, user, request, response)
+        # Every session of the account ends; this browser gets a new one that is kept only if its old one was.
+        result = await issue_session(db, user, request, response, remember=current.get("remember", False))
         await refund(db, keys)
         await db.commit()
         return result
+
+
+@router.post("/me/end-other-sessions")
+async def end_other_sessions(request: Request):
+    """Signs this account out of every other browser (a lost laptop, an old TV); this browser stays signed in."""
+    current = account(request)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(delete(UserSession).where(UserSession.user_id == current["user"]["id"],
+                                                            UserSession.token_hash != current["session_hash"]))
+        await db.commit()
+    return {"ended": result.rowcount or 0}
 
 
 @router.get("/users")
@@ -453,6 +570,18 @@ async def delete_user(user_id: str, request: Request):
         if not result.rowcount: raise HTTPException(400, "User does not exist or is the last active administrator")
         await db.commit()
         return {"ok":True}
+
+
+@router.post("/users/{user_id}/end-sessions")
+async def end_sessions(user_id: str, request: Request):
+    """Admin: signs a user out everywhere without changing the account (a lost laptop, a replaced TV)."""
+    current = account(request)
+    if user_id == current["user"]["id"]: raise HTTPException(400, "Use Account settings to sign out your other browsers")
+    async with AsyncSessionLocal() as db:
+        if not await db.get(User, user_id): raise HTTPException(404, "User not found")
+        result = await db.execute(delete(UserSession).where(UserSession.user_id == user_id))
+        await db.commit()
+    return {"ended": result.rowcount or 0}
 
 
 @router.post("/users/{user_id}/reset-password")

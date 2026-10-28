@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     accounts_registration_enabled: bool = False
     accounts_admin_username: str = "admin"
     accounts_session_hours: int = Field(default=12, ge=1, le=168)
+    # "Keep me signed in": the session lasts this many days and is renewed (at most hourly) while it is used.
+    # Unchecked sign-ins and the SSH terminal keep accounts_session_hours.
+    accounts_remember_days: int = Field(default=365, ge=1, le=3650)
     accounts_secure_cookie: bool = False   # enable behind HTTPS; the existing VM uses HTTP
     ssh_terminal_enabled: bool = True
     ssh_allow_insecure_transport: bool = False

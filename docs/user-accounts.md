@@ -70,6 +70,33 @@ and reject foreign browser origins. Login/register are rate-limited by username
 and client address. Changing a password revokes other sessions and rotates the
 current cookie and CSRF token.
 
+"Keep me signed in" is checked by default: such a session lasts
+`ACCOUNTS_REMEMBER_DAYS` (365) and renews itself while it is used, so a browser
+that is used stays signed in. Renewal is best effort: if the database cannot take
+the write, the request still succeeds and renewal is tried again later. Kept
+sessions end only when someone ends them:
+
+- **Account settings → Sign out other browsers** ends every other session of your
+  account; this browser stays signed in.
+- **Admin → Users → End sessions** signs a user out on every browser and device
+  without disabling the account or changing its password (a lost laptop, a
+  replaced lab TV). Disable, a role change, a password reset and removal also end
+  the user's sessions.
+
+On plain HTTP the session cookie crosses the network unencrypted, and a copied
+kept session stays valid (and renews) until it is ended as above. Serve the site
+over HTTPS and set `ACCOUNTS_SECURE_COOKIE=true` to close that gap.
+
+### The lab display TV
+
+The entrance TV (`/?tab=display`, the header's "Lab display (TV)" link) only
+reads. Create a dedicated Viewer account for it (for example `lab-display`) and
+sign the TV in with "Keep me signed in" checked: it then stays signed in while the
+display runs. A Viewer cannot switch power, so the browser at the door cannot
+either; to retire or replace the TV, use End sessions or disable that one
+account. Signed in with an Operator or Admin account, the display shows
+"Signed in as Admin — use a Viewer account for this screen".
+
 Implementation references: [OWASP password storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html),
 [sessions](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html),
 and [CSRF prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html).

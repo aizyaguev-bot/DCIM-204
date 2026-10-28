@@ -731,3 +731,199 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   .rack-collapse svg, .power-knob, .power-track, .power-mixed, .server-cell, .equipment-cell, .rack-load > div, .cooling-history-chevron { transition: none; }
   .power-toggle[aria-busy="true"] .power-track { animation: none; }
 }
+/* ── Lab display (?tab=display, pages/LabDisplay.jsx): the read-only wall TV at the lab entrance ──────────────────
+   Every size is in em of one base size that follows the screen (16 px at 1920 x 1080, 8 px at 960 x 540, 32 px at
+   3840 x 2160), so every 16:9 screen shows the same layout; the page fits rows with the same em values (labDisplay.js
+   ROW_EM / RACK_CARD_EM). Status is never colour alone: blue = normal, orange outline + "!" = check, solid red fill +
+   "▲" = alarm, violet stripes = maintenance, and words (CHECK / ALARM, the state text) on every one. Text colours keep
+   at least 4.5:1 and ok / warn / alarm stay apart for deuteranopia and protanopia (lab-display.test.js checks both). */
+.display-link { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border: 1px solid #333333; border-radius: 2px; color: #ccc; font-size: 12px; white-space: nowrap; }
+.display-link:hover { color: #9fe040; border-color: #3f6a14; }
+@media (max-width: 1699px) { .display-link-text { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; } }
+/* The display is made for a landscape TV: no link to it on phones and small windows. */
+@media (max-width: 1023px) { .display-link { display: none; } }
+.lab-display {
+  --ld-bg: #000000; --ld-panel: #111111; --ld-card: #181818; --ld-line: #2e2e2e;
+  --ld-text: #ffffff; --ld-muted: #b3b3b3; --ld-ok: #5ab4ff; --ld-warn: #ffb52e; --ld-alarm: #ff4f4f; --ld-maint: #c9a7ff; --ld-idle: #a7a7a7;
+  position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; gap: .8em;
+  /* Burn-in care: the page moves the layout by --ld-shift-x / -y (0-4 px, every 5 min) inside a constant total padding. */
+  padding: calc(1em + var(--ld-shift-y, 0px)) calc(1.3em + 4px - var(--ld-shift-x, 0px)) calc(1em + 4px - var(--ld-shift-y, 0px)) calc(1.3em + var(--ld-shift-x, 0px));
+  overflow: hidden; background: var(--ld-bg); color: var(--ld-text); line-height: 1.2; font-variant-numeric: tabular-nums;
+  font-size: min(.8333vw, 1.4815vh, 64px);
+}
+.lab-display:not([data-pointer]) { cursor: none; }
+.lab-display h1, .lab-display h2, .lab-display h3, .lab-display p, .lab-display ul, .lab-display dl, .lab-display dd { margin: 0; }
+.lab-display [data-level="ok"] { --ld-c: var(--ld-ok); }
+.lab-display [data-level="warn"] { --ld-c: var(--ld-warn); }
+.lab-display [data-level="alarm"] { --ld-c: var(--ld-alarm); }
+.lab-display [data-level="maint"], .lab-display [data-level="info"] { --ld-c: var(--ld-maint); }
+.lab-display [data-level="idle"], .lab-display [data-level="neutral"] { --ld-c: var(--ld-idle); }
+.ld-muted { color: var(--ld-muted); }
+/* Shape and word as well as colour: "▲" for alarm, "!" for warning, "✓" for all normal. */
+.ld-chip[data-level="alarm"]::before, .ld-status[data-level="alarm"]::before, .ld-stale-banner[data-level="alarm"]::before,
+.ld-attn[data-level="alarm"] .ld-attn-tag::before, .ld-rack-state[data-level="alarm"]::before,
+.ld-loadrow[data-level="alarm"] .ld-load-value b::before, .ld-env dl [data-level="alarm"] dd::before { content: "\25B2\00A0"; }
+.ld-chip[data-level="warn"]::before, .ld-status[data-level="warn"]::before, .ld-stale-banner[data-level="warn"]::before,
+.ld-attn[data-level="warn"] .ld-attn-tag::before, .ld-rack-state[data-level="warn"]::before, .ld-role-warn::before,
+.ld-loadrow[data-level="warn"] .ld-load-value b::before, .ld-env dl [data-level="warn"] dd::before,
+.ld-maint-band[data-level="warn"] .ld-maint-label::before { content: "!\00A0"; }
+.ld-status[data-level="ok"]::before { content: "\2713\00A0"; }
+/* top bar */
+.ld-top { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 2.2em; padding-bottom: .7em; border-bottom: 2px solid var(--ld-line); }
+.ld-brand { display: flex; align-items: center; gap: 1.1em; min-width: 0; }
+.ld-brand img { width: auto; height: 1.9em; flex-shrink: 0; }
+.ld-brand-rule { width: 2px; height: 3.2em; background: #76b900; flex-shrink: 0; }
+.ld-brand h1 { min-width: 0; font-size: 2.7em; font-weight: 800; letter-spacing: -.01em; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-brand h1 span { color: var(--ld-muted); font-weight: 600; }
+.ld-status { flex-shrink: 0; padding: .1em .45em; border-radius: 2px; font-size: 1.9em; font-weight: 800; letter-spacing: .03em; line-height: 1.15; white-space: nowrap; color: var(--ld-c); box-shadow: inset 0 0 0 .1em var(--ld-c); }
+.ld-status[data-level="alarm"] { color: #000; background: var(--ld-alarm); }
+.ld-conn { display: flex; flex-direction: column; align-items: flex-end; gap: .3em; text-align: right; }
+.ld-conn-state { display: inline-flex; align-items: center; gap: .5em; font-size: 1.5em; font-weight: 800; color: var(--ld-c); white-space: nowrap; }
+.ld-conn-state i { width: .62em; height: .62em; border-radius: 50%; background: currentColor; }
+.ld-conn[data-level="ok"] .ld-conn-state i { animation: ld-pulse 2.4s ease-in-out infinite; }
+.lab-display[data-stale="true"] .ld-conn-state i { animation: none; }
+.ld-conn-updated { display: inline-flex; align-items: center; gap: .6em; font-size: 1.25em; color: var(--ld-muted); white-space: nowrap; }
+.ld-role { padding: 0 .4em; border: 1px solid #5a5a5a; border-radius: 2px; font-weight: 700; color: var(--ld-text); }
+.ld-clock { display: flex; flex-direction: column; align-items: flex-end; padding-left: 2em; border-left: 2px solid var(--ld-line); }
+.ld-clock-time { font-size: 4.2em; font-weight: 800; line-height: 1; letter-spacing: -.02em; color: var(--ld-text); }
+.ld-clock-time small { font-size: .42em; font-weight: 700; color: var(--ld-muted); margin-left: .1em; }
+.ld-clock-date { margin-top: .25em; font-size: 1.25em; color: var(--ld-muted); white-space: nowrap; }
+@keyframes ld-pulse { 50% { opacity: .35; } }
+/* not live: a banner nobody misses, and everything below it greyed out */
+.ld-stale-banner { padding: .25em .6em; border-radius: 2px; font-size: 2em; font-weight: 800; line-height: 1.2; color: #000; background: var(--ld-warn); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-stale-banner[data-level="alarm"] { background: var(--ld-alarm); }
+.lab-display[data-stale="true"] :is(.ld-kpis, .ld-maint-band, .ld-main, .ld-changes) { filter: grayscale(1); opacity: .45; }
+.ld-role-warn { padding: .25em .6em; border-radius: 2px; font-size: 1.4em; font-weight: 800; color: var(--ld-warn); box-shadow: inset 0 0 0 .12em var(--ld-warn); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* first load / no connection yet */
+.ld-first { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; }
+.ld-first p { max-width: 40em; font-size: 2.2em; font-weight: 700; color: var(--ld-muted); }
+/* KPI tiles: warn = orange outline + CHECK, alarm = solid red tile + ALARM */
+.ld-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)) minmax(0, 2fr); gap: .8em; }
+.ld-tile { container-type: inline-size; min-width: 0; padding: .7em 1em .75em; background: var(--ld-panel); border: 1px solid var(--ld-line); border-left: .4em solid var(--ld-c, var(--ld-idle)); border-radius: 2px; }
+.ld-tile[data-level="warn"] { box-shadow: inset 0 0 0 .2em var(--ld-warn); }
+.ld-tile[data-level="alarm"] { background: var(--ld-alarm); border-color: var(--ld-alarm); }
+.ld-tile[data-level="alarm"] :is(h2, .ld-tile-value, .ld-tile-value small, .ld-tile-sub, dt, dd, dd small) { color: #000; }
+.ld-tile h2 { font-size: 1.25em; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-tile-row { display: flex; align-items: center; gap: .4em; min-width: 0; margin-top: .12em; }
+/* A number is never cut: it scales with its tile (31 % of the tile width at most, 3.6em on a 16:9 screen) and the page
+   draws it smaller still when a long value would not fit beside its chip (LabDisplay.jsx useFitWidth). */
+.ld-tile-value { min-width: 0; font-size: min(3.6em, 31cqi); font-weight: 800; line-height: 1.12; color: var(--ld-c, var(--ld-text)); white-space: nowrap; overflow: hidden; text-overflow: clip; }
+.ld-tile[data-level="idle"] .ld-tile-value, .ld-tile[data-level="neutral"] .ld-tile-value { color: var(--ld-text); }
+.ld-tile-value small { font-size: .5em; font-weight: 700; color: var(--ld-muted); }
+.ld-tile-sub { margin-top: .2em; font-size: 1.25em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-tile-flag { margin-top: .15em; line-height: 1; }
+.ld-chip { display: inline-block; flex-shrink: 0; padding: .1em .35em; border-radius: 2px; font-size: 1.5em; font-weight: 800; letter-spacing: .02em; line-height: 1.15; white-space: nowrap; color: #000; background: var(--ld-c); }
+.ld-tile[data-level="alarm"] .ld-chip { color: var(--ld-alarm); background: #000; }
+.ld-env h2 { display: flex; align-items: center; gap: .6em; }
+.ld-env h2 .ld-chip { margin-left: 0; font-size: 1.2em; letter-spacing: .02em; }
+.ld-env dl { display: flex; justify-content: space-between; gap: 0 1em; margin-top: .3em; min-width: 0; overflow: hidden; }
+.ld-env dl > div { min-width: 0; }
+.ld-env dt { font-size: 1.25em; color: var(--ld-muted); }
+.ld-env dd { font-size: 1.9em; font-weight: 800; line-height: 1.1; color: var(--ld-c, var(--ld-text)); white-space: nowrap; overflow: hidden; text-overflow: clip; }
+.ld-env dd small { font-size: .66em; color: var(--ld-muted); }
+.ld-env [data-level="idle"] dd { color: var(--ld-text); }
+/* maintenance in progress: a violet striped band under the KPIs */
+.ld-maint-band { display: flex; align-items: center; gap: .7em; min-width: 0; padding: .3em .6em; border-radius: 2px; font-size: 1.6em; font-weight: 700; line-height: 1.2; color: #fff;
+  background: repeating-linear-gradient(135deg, #2c2140 0 .7em, #140f1f .7em 1.4em); box-shadow: inset 0 0 0 .12em var(--ld-maint); }
+.ld-maint-label { flex-shrink: 0; padding: .05em .4em; border-radius: 2px; font-weight: 800; letter-spacing: .03em; color: #000; background: var(--ld-maint); }
+.ld-maint-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-maint-count { flex-shrink: 0; margin-left: auto; font-size: .8em; color: var(--ld-muted); }
+.ld-maint-band[data-level="warn"] { background: #1d1404; box-shadow: inset 0 0 0 .12em var(--ld-warn); }
+.ld-maint-band[data-level="warn"] .ld-maint-label { background: var(--ld-warn); }
+/* panels */
+.ld-main { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: .8em; }
+.ld-column { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1.65fr) minmax(0, .8fr); gap: .8em; }
+.ld-side { grid-template-rows: minmax(0, 1fr) minmax(0, .34fr); }
+.ld-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: .8em 1em; background: var(--ld-panel); border: 1px solid var(--ld-line); border-radius: 2px; }
+.ld-panel-head { display: flex; align-items: baseline; gap: .8em; min-width: 0; }
+.ld-panel-head h2 { display: flex; align-items: baseline; gap: .45em; font-size: 1.6em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
+.ld-count { padding: 0 .4em; border-radius: 2px; font-size: .8em; font-weight: 800; color: var(--ld-text); background: #2a2a2a; }
+.ld-attention[data-level="alarm"] .ld-count { color: #000; background: var(--ld-alarm); }
+.ld-attention[data-level="warn"] .ld-count { color: #000; background: var(--ld-warn); }
+.ld-panel-note { font-size: 1.25em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-pager { margin-left: auto; flex-shrink: 0; font-size: 1.25em; font-weight: 700; color: var(--ld-muted); white-space: nowrap; }
+.ld-panel-body { flex: 1 1 0; min-height: 0; margin-top: .6em; overflow: hidden; }
+.ld-list { display: flex; flex-direction: column; list-style: none; padding: 0; }
+.ld-load-list { display: grid; }
+.ld-empty, .ld-allclear { font-size: 1.4em; color: var(--ld-muted); }
+.ld-allclear { display: flex; align-items: center; gap: .6em; color: var(--ld-ok); font-weight: 700; }
+.ld-allclear i { width: .7em; height: .7em; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+/* rack grid: alarm = solid red card, warn = orange outline, maintenance = violet striped top */
+.ld-rack-grid { display: grid; height: 100%; align-content: start; }
+.ld-rack { min-width: 0; display: flex; flex-direction: column; justify-content: space-between; padding: .55em .75em .6em; overflow: hidden; background: var(--ld-card); border: 1px solid var(--ld-line); border-top: .38em solid var(--ld-c); border-radius: 2px; }
+.ld-rack[data-level="warn"] { box-shadow: inset 0 0 0 .2em var(--ld-warn); }
+.ld-rack[data-level="alarm"] { background: var(--ld-alarm); border-color: var(--ld-alarm); }
+.ld-rack[data-level="alarm"] :is(h3, .ld-rack-servers, .ld-rack-servers strong, .ld-rack-extra, .ld-rack-state) { color: #000; }
+.ld-rack[data-level="maint"] { border-top-color: transparent;
+  background: repeating-linear-gradient(135deg, var(--ld-maint) 0 .45em, #3a2d52 .45em .9em) left top / 100% .38em no-repeat border-box, var(--ld-card); }
+.ld-rack h3 { min-width: 0; font-size: 1.6em; font-weight: 800; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-rack-servers { font-size: 1.35em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-rack-servers strong { font-size: 2.1em; font-weight: 800; line-height: 1; color: var(--ld-text); }
+.ld-rack[data-level="ok"] .ld-rack-servers strong { color: var(--ld-ok); }
+.ld-rack-servers[data-unknown] strong { color: var(--ld-muted); }
+.ld-rack-extra { display: flex; align-items: center; gap: .5em; min-width: 0; min-height: 1.45em; font-size: 1.25em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; }
+.ld-rack-extra > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ld-badge { flex-shrink: 0; padding: 0 .35em; border-radius: 2px; font-size: 1.2em; font-weight: 800; letter-spacing: .02em; line-height: 1.2; text-transform: uppercase; color: #000; background: var(--ld-maint); }
+.ld-rack[data-level="alarm"] .ld-badge { color: var(--ld-maint); background: #000; }
+.ld-rack-state { font-size: 1.5em; font-weight: 800; color: var(--ld-c); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-rack[data-level="idle"] .ld-rack-state { color: var(--ld-muted); }
+/* compact cards (more racks than one page of normal cards): name and on / total on the first line, the state below
+   across the whole card */
+.ld-rack-grid[data-compact="true"] .ld-rack { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; align-content: center; align-items: baseline; column-gap: .6em; padding: .4em .65em .45em; }
+.ld-rack-grid[data-compact="true"] .ld-rack h3 { grid-column: 1; grid-row: 1; }
+.ld-rack-grid[data-compact="true"] .ld-rack-servers { grid-column: 2; grid-row: 1; text-align: right; }
+.ld-rack-grid[data-compact="true"] .ld-rack-servers strong { font-size: 1.4em; }
+.ld-rack-grid[data-compact="true"] .ld-rack-state { grid-column: 1 / -1; grid-row: 2; }
+/* attention: alarm rows are solid red, warning rows outlined orange */
+.ld-attn { display: grid; grid-template-columns: 10.6em minmax(0, 1fr); align-items: center; gap: .8em; padding: 0 .8em 0 0; background: color-mix(in srgb, var(--ld-c) 7%, var(--ld-panel)); border-left: .38em solid var(--ld-c); border-radius: 2px; }
+.ld-attn[data-level="warn"] { box-shadow: inset 0 0 0 .15em var(--ld-warn); }
+.ld-attn[data-level="alarm"] { background: var(--ld-alarm); }
+.ld-attn[data-level="alarm"] :is(.ld-attn-text strong, .ld-attn-text > span, .ld-attn-more-text) { color: #000; }
+.ld-attn-tag { justify-self: start; margin-left: .4em; padding: .05em .35em; border-radius: 2px; font-size: 1.5em; font-weight: 800; letter-spacing: .02em; line-height: 1.2; text-transform: uppercase; white-space: nowrap; color: #000; background: var(--ld-c); }
+.ld-attn[data-level="alarm"] .ld-attn-tag { color: var(--ld-alarm); background: #000; }
+.ld-attn-text { display: flex; flex-direction: column; min-width: 0; }
+.ld-attn-text strong { font-size: 1.45em; font-weight: 800; line-height: 1.15; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-attn-text > span { font-size: 1.25em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-attn-more-text { font-size: 1.45em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
+/* power by PDU */
+.ld-loadrow { display: grid; grid-template-columns: minmax(0, 7em) minmax(0, 1fr) minmax(0, 11em); align-items: center; gap: 1em; }
+.ld-load-name { display: flex; flex-direction: column; min-width: 0; }
+.ld-load-name strong { font-size: 1.3em; font-weight: 800; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-bar { height: .95em; overflow: hidden; border-radius: 2px; background: #2a2a2a; }
+.ld-bar i { display: block; height: 100%; background: var(--ld-c); transition: width .6s ease; }
+.ld-load-value { display: flex; justify-content: flex-end; align-items: baseline; gap: .55em; font-size: 1.3em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
+.ld-load-value b { min-width: 2.9em; text-align: right; color: var(--ld-c); }
+.ld-loadrow[data-level="idle"] .ld-load-value b { color: var(--ld-muted); }
+/* working now */
+.ld-inuse-row { display: flex; align-items: center; gap: .7em; min-width: 0; padding-left: .7em; border-left: .3em solid var(--ld-ok); }
+.ld-inuse-row strong { font-size: 1.45em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
+.ld-inuse-row span { font-size: 1.25em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* recent changes */
+.ld-changes { display: flex; align-items: center; gap: 1.1em; padding-top: .55em; border-top: 2px solid var(--ld-line); }
+.ld-changes h2 { flex-shrink: 0; font-size: 1.25em; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--ld-muted); }
+.ld-changes-body { flex: 1 1 0; min-width: 0; display: flex; align-items: center; overflow: hidden; }
+.ld-changes-body > span { font-size: 1.25em; }
+.ld-changes ul { flex: 1; display: grid; gap: 1.2em; list-style: none; padding: 0; }
+.ld-changes li { display: flex; align-items: baseline; gap: .6em; min-width: 0; padding-left: .6em; border-left: .3em solid var(--ld-c, var(--ld-idle)); }
+.ld-changes time { flex-shrink: 0; font-size: 1.25em; font-weight: 700; color: var(--ld-muted); }
+.ld-changes li span { font-size: 1.25em; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* phones, small windows and portrait screens get a notice instead of the TV layout */
+.lab-display-narrow { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: #000; color: #fff; text-align: center; }
+.lab-display-narrow p { max-width: 26em; font-size: 20px; font-weight: 700; line-height: 1.45; }
+.lab-display-narrow a { color: #5ab4ff; text-decoration: underline; }
+/* the sign-in box over the lab display: TV scale, readable from the door */
+.auth-tv { font-size: max(10.7px, min(.8333vw, 1.4815vh)); background: #000; }
+.auth-tv .auth-panel { width: 34em; max-width: 100%; gap: 1.1em; padding: 2em 2.2em; font-size: 1.5em; }
+.auth-tv .auth-panel img { width: 6em; height: auto; }
+.auth-tv .auth-panel .auth-tv-title { font-size: 1.6em; font-weight: 800; line-height: 1.2; color: #fff; }
+.auth-tv .auth-panel :is(p, .text-xs, .text-sm) { font-size: .8em; line-height: 1.4; }
+.auth-tv .account-fields { gap: .8em; }
+.auth-tv .account-fields label { gap: .25em; font-size: .85em; }
+.auth-tv .account-fields input:not([type="checkbox"]) { height: 2.3em; padding: 0 .6em; font-size: 1.15em; }
+.auth-tv .account-fields input[type="checkbox"] { width: 1.1em; height: 1.1em; }
+.auth-tv .account-primary { min-height: 2.4em; padding: .3em .8em; font-size: 1em; }
+.auth-tv .auth-tabs button { font-size: .85em; }
+@media (prefers-reduced-motion: reduce) {
+  .ld-conn[data-level="ok"] .ld-conn-state i { animation: none; }
+  .ld-bar i { transition: none; }
+}
