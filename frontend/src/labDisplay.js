@@ -417,7 +417,11 @@ export function pinnedPage(items, rows, tick = 0) {
   const alarms = list.filter(i => i?.severity === "alarm");
   const rest = list.filter(i => i?.severity !== "alarm");
   if (alarms.length > size) {
-    const { items: shown, page, pages } = pageOf(alarms, Math.max(1, size - 1), tick);
+    // Every page is full: a window of size - 1 alarms that wraps around the list, so no page shows fewer alarms.
+    const per = Math.max(1, size - 1);
+    const pages = Math.ceil(alarms.length / per);
+    const page = ((Math.floor(tick) % pages) + pages) % pages;
+    const shown = Array.from({ length: per }, (_, i) => alarms[(page * per + i) % alarms.length]);
     return { items: shown, moreAlarms: alarms.length - shown.length, more: list.length - shown.length, page, pages };
   }
   if (alarms.length === size) return { items: alarms, moreAlarms: 0, more: rest.length, page: 0, pages: 1 };

@@ -374,6 +374,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .shelf-row + .shelf-row, .shelf-empty + .shelf-row, .shelf-gap + .shelf-row { padding-top: 0; border-top: 0; }
 .shelf-index { flex: 0 0 18px; justify-content: center; font-size: 12px; font-weight: 700; color: #a1a1aa; }
 .shelf-row > .shelf-index { min-height: 44px; }
+.shelf-index:has(.floor-add) { flex-direction: column; gap: 3px; }
+.shelf-empty .shelf-index:has(.floor-add) { flex-direction: row; flex-basis: 40px; gap: 4px; }
+.floor-add { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 1px dashed #52525b;
+  border-radius: 4px; background: transparent; color: #a1a1aa; font-size: 13px; font-weight: 700; line-height: 1; cursor: pointer; }
+.floor-add:hover, .floor-add:focus-visible { border-style: solid; border-color: #9fe040; color: #9fe040; }
 .shelf-content { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 6px; flex: 1; min-width: 0; }
 .floor-servers { container: servers / inline-size; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .floor-no-server { display: flex; align-items: center; min-height: 44px; padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; font-size: 11px; color: #a1a1aa; }

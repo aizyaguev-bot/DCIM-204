@@ -2,6 +2,32 @@
 
 ---
 
+## v2.45.0 — 2026-11-01 — Scan a barcode to add a unit, lab entrance TV screen, stay signed in
+
+### Added
+- **Add a unit to a floor in one scan.** A "+" under every floor number of a rack (and
+  "Scan barcode" in the server details, the server edit panel and "+ Equipment") opens
+  a scan box for that floor. Scan the unit's barcode with a USB scanner (or the camera
+  where the browser supports it) and it is saved there at once, beside the server:
+  the serial, part number (type and name), GS1 and QR labels are read for you. A code
+  that is already registered moves that unit instead of adding a second one. Every
+  scan has an Undo, and you can scan many units in a row.
+- **Lab entrance TV screen** (header → "Lab display (TV)"): a read-only screen made to
+  be read from the door — servers on, power, PDUs, ping, alarms, maintenance (who and
+  why), who is working now and the racks. A large "NOT LIVE" banner shows when the data
+  stops updating; colours are colour-blind safe with words and symbols; Hebrew names
+  and reasons display correctly; alarms stay on every page. Use a Viewer account on
+  the TV.
+- **Stay signed in.** "Keep me signed in" (ticked by default) keeps you signed in for
+  a year, renewed while you use the site. Admins can end a user's sessions (Admin →
+  Users → "End sessions"), and you can sign out your other browsers from Account.
+
+### Notes
+- The site still runs over plain HTTP, so a session cookie can be read on the lab
+  network; set up HTTPS and `ACCOUNTS_SECURE_COOKIE=true` when possible.
+
+---
+
 ## v2.44.1 — 2026-10-28 — SSH goes exactly where it was checked
 
 ### Security

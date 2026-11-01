@@ -443,17 +443,25 @@ function shelfIndex(u, floors, auto) {
 // cards, top-aligned. An empty floor is one compact dashed "Free" slot.
 function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, sortable = false, floors = true }) {
   const { coolingByRack, coolingDrop } = useContext(RackViewContext);
+  const { scanUnit } = useContext(ServerActionsContext);
   const cooling = u > 0 ? coolingByRack?.[rack]?.placed?.[u] || [] : [];
   const { setNodeRef, isOver } = useDroppable({ id: `shelf:${rack}:${u}`, disabled: !coolingDrop || !(u > 0) });
   const servers = items.filter(i => i.kind === "server");
   const equipment = items.filter(i => i.kind === "custom");
   const index = shelfIndex(u, floors, auto);
-  if (!items.length && !cooling.length) return <div ref={setNodeRef} data-u-slot={u} data-over={isOver ? "" : undefined} className="shelf-empty"><span className="shelf-index" title={index.title}>{index.text}</span><span className="shelf-empty-line">Free</span></div>;
+  // "+" under the floor number: add a unit on this floor, beside its server (scan, type or pick its barcode/serial).
+  const names = servers.map(({ data }) => data.name).join(", ");
+  const addHere = scanUnit && floors && u > 0 && u <= RACK_FLOORS
+    ? <button type="button" className="floor-add" data-floor-add={u} onClick={() => scanUnit({ rack, u, label: names, fixed: true })}
+        aria-label={`Add a unit on floor ${u}${names ? ` beside ${names}` : ""}`} title={`Add a unit on floor ${u}${names ? ` beside ${names}` : ""} (scan its barcode)`}>+</button>
+    : null;
+  const indexCell = <span className="shelf-index" title={index.title}><span>{index.text}</span>{addHere}</span>;
+  if (!items.length && !cooling.length) return <div ref={setNodeRef} data-u-slot={u} data-over={isOver ? "" : undefined} className="shelf-empty">{indexCell}<span className="shelf-empty-line">Free</span></div>;
   const Row = sortable ? SortableServerRow : ServerCell;
   const units = equipment.length > 0 || cooling.length > 0;
   return <div ref={setNodeRef} data-u-slot={u} data-auto={auto ? "" : undefined} data-cooling-only={!items.length ? "" : undefined} data-units={units ? "" : undefined}
     data-over={isOver ? "" : undefined} className="shelf-row">
-    <span className="shelf-index" title={index.title}>{index.text}</span>
+    {indexCell}
     <div className="shelf-content">
       <div className="floor-servers">
         {servers.length ? servers.map(({data}) => <Row key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]} onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)}/>)
@@ -2694,7 +2702,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   // replaced by the list an Undo saved), and itemsSeq drops any reload that was already on its way with the old list ──
   const [scanTarget, setScanTarget] = useState(null);
   const scanPlaceRef = useRef(null);
-  const openScanUnit = useCallback(({ server = null, rack = null, u = null } = {}) => {
+  const openScanUnit = useCallback(({ server = null, rack = null, u = null, label = "", fixed = false } = {}) => {
     if (server) {
       const { rackStats: stats, rackOrder: order, rackSlots: slots, customItems: items } = scanPlaceRef.current || {};
       const rs = stats?.find(x => x.rack === server.rack);
@@ -2703,7 +2711,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       const storage = server.rack === MAIN_STORAGE;
       setScanTarget({ rack: server.rack, u: storage ? 0 : shelf ?? 0, position: "", label: server.name, chooseFloor: !storage && shelf == null });
     } else if (rack) {
-      setScanTarget({ rack, u: rack === MAIN_STORAGE ? 0 : Number.isInteger(u) ? u : 1, position: "", label: "", chooseFloor: rack !== MAIN_STORAGE });
+      setScanTarget({ rack, u: rack === MAIN_STORAGE ? 0 : Number.isInteger(u) ? u : 1, position: "", label,
+        chooseFloor: rack !== MAIN_STORAGE && !(fixed && Number.isInteger(u)) });
     }
   }, []);
   const scanItemsChanged = useCallback(async saved => {
