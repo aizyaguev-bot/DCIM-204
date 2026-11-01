@@ -1,7 +1,9 @@
-// Lab display (?tab=display): the read-only wall TV page. Viewer and Operator, 1920 x 1080, 1280 x 720, 960 x 540 and
+// Lab display (?tab=display): the read-only screen at the lab entrance, made for a 24-inch monitor. Viewer and Operator,
+// 1920 x 1080, 1536 x 864 (1920 x 1080 at 125 % scaling), 1920 x 1200, 2560 x 1440, 1280 x 720, 960 x 540 and
 // 3840 x 2160. Checks: only GET requests, no page errors, no header / footer / assistant / What's new / dialogs /
-// controls, no scrolling or clipped panels, the numbers the fixture implies (an unreadable rack shows "—", never 0),
-// text sizes (smallest >= 20 px, status words >= 24 px at 1920), two refresh cycles without re-mounting or memory
+// controls, no scrolling or clipped panels, an orderly layout (no text wider than its box, no panel or line overlapping
+// another), the numbers the fixture implies (an unreadable rack shows "—", never 0), text sizes at 1920 x 1080
+// (smallest >= 22 px, status words and panel titles >= 26-28 px, KPI numbers >= 64 px), two refresh cycles without re-mounting or memory
 // growth, page rotation with alarms pinned, a network loss (last data kept, Reconnecting, NOT LIVE banner, greyed
 // panels) and the recovery, one failing source ("Live · partial"), the role warning, the TV sign-in, the narrow-screen
 // notice and the header link for both roles. Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
@@ -72,7 +74,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         controls: document.querySelectorAll('button, input, select, textarea, a[href], [contenteditable="true"], [tabindex]:not([tabindex="-1"])').length,
         seen: (() => { try { return localStorage.getItem('dcim.seenVersion'); } catch { return 'unavailable'; } })(),
         scroll: [document.documentElement.scrollWidth - innerWidth, document.documentElement.scrollHeight - innerHeight],
-        clipped: [...document.querySelectorAll('.ld-panel-body, .ld-changes-body, .ld-tile, .ld-rack, .ld-attn, .ld-loadrow, .ld-inuse-row, .ld-top, .ld-kpis, .ld-main')]
+        clipped: [...document.querySelectorAll('.ld-panel-body, .ld-changes-body, .ld-tile, .ld-rack, .ld-attn, .ld-inuse-row, .ld-top, .ld-kpis, .ld-main')]
           .filter(e => e.scrollHeight > e.clientHeight + 1 || e.scrollWidth > e.clientWidth + 1).map(e => e.className),
         outside: [...document.querySelectorAll('.lab-display *')].filter(e => { const r = e.getBoundingClientRect(); return r.width && (r.right > innerWidth + 0.5 || r.bottom > innerHeight + 0.5); }).length,
         title: document.title,
@@ -88,7 +90,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       return page.evaluate(() => {
         const t = s => document.querySelector(s)?.innerText.replace(/\s+/g, ' ').trim();
         return {
-          on: t('[data-testid="kpi-on"] .ld-tile-value'), off: t('[data-testid="kpi-off"] .ld-tile-value'), none: t('[data-testid="kpi-noreading"] .ld-tile-value'),
+          on: t('[data-testid="kpi-on"] .ld-tile-value'), onSub: t('[data-testid="kpi-on"] .ld-tile-sub'), none: t('[data-testid="kpi-noreading"] .ld-tile-value'),
           pdus: t('[data-testid="kpi-pdus"] .ld-tile-value'), kvms: t('[data-testid="kpi-kvms"] .ld-tile-value'), power: t('[data-testid="kpi-power"] .ld-tile-value'),
           env: t('[data-testid="kpi-env"] dl'), racks: t('.ld-racks .ld-count'), attention: t('.ld-attention .ld-count'), inUse: t('.ld-inuse .ld-list'),
           firstAttention: t('.ld-attn strong'), changes: t('.ld-changes ul'),
@@ -105,20 +107,71 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         .filter(e => e.scrollWidth > e.clientWidth + 1 || /…/.test(e.innerText)).map(e => `${e.className}: ${e.innerText}`));
       assert.deepEqual(cut, [], `${label}: no number is cut off`);
     }
-    async function sizesAt1920(page, label) {
+    // Every size follows the screen: `scale` is the screen's base size over 16 px (1 at 1920 x 1080, 0.8 at 1536 x 864),
+    // so the minimums below are the 1920 x 1080 ones (read from 2-3 m on a 24-inch monitor) times that scale.
+    async function textSizes(page, label, scale = 1) {
       const sizes = await page.evaluate(() => {
         const px = e => parseFloat(getComputedStyle(e).fontSize);
+        const shown = e => e.getClientRects().length && e.innerText.trim();
         const texts = [...document.querySelectorAll('.lab-display *')].filter(e => e.getClientRects().length && [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()));
-        const words = [...document.querySelectorAll('.ld-attn-tag, .ld-rack-state, .ld-badge, .ld-conn-state, .ld-status, .ld-chip, .ld-maint-label, .ld-stale-banner')].filter(e => e.getClientRects().length && e.innerText.trim());
-        const smallest = texts.reduce((m, e) => (px(e) < m.px ? { px: px(e), what: `${e.className || e.tagName}: ${e.innerText.slice(0, 30)}` } : m), { px: Infinity });
-        const word = words.reduce((m, e) => (px(e) < m.px ? { px: px(e), what: `${e.className}: ${e.innerText.slice(0, 30)}` } : m), { px: Infinity });
-        return { base: px(document.querySelector('.lab-display')), kpi: px(document.querySelector('.ld-tile-value')), clock: px(document.querySelector('.ld-clock-time')),
-          attention: px(document.querySelector('.ld-attn strong')), smallest, word, words: words.length };
+        const smallestOf = list => list.reduce((m, e) => (px(e) < m.px ? { px: px(e), what: `${e.className || e.tagName}: ${e.innerText.slice(0, 30)}` } : m), { px: Infinity });
+        const words = [...document.querySelectorAll('.ld-attn-tag, .ld-rack-state, .ld-badge, .ld-conn-state, .ld-status, .ld-chip, .ld-maint-label, .ld-stale-banner')].filter(shown);
+        const kpis = [...document.querySelectorAll('.ld-tile-value')].filter(shown);
+        const titles = [...document.querySelectorAll('.ld-panel-head h2')].filter(shown);
+        return { base: px(document.querySelector('.lab-display')), kpi: smallestOf(kpis), clock: px(document.querySelector('.ld-clock-time')),
+          title: smallestOf(titles), attention: px(document.querySelector('.ld-attn strong')), smallest: smallestOf(texts), word: smallestOf(words), words: words.length };
       });
-      assert.ok(sizes.base >= 15.9 && sizes.kpi >= 56 && sizes.clock >= 64 && sizes.attention >= 22, `${label}: ${JSON.stringify(sizes)}`);
-      assert.ok(sizes.smallest.px >= 19.9, `${label}: smallest text ${JSON.stringify(sizes.smallest)}`);
-      assert.ok(sizes.words >= 5 && sizes.word.px >= 23.9, `${label}: smallest status word ${JSON.stringify(sizes.word)}`);
+      // A hair under the round numbers: the base size is 0.8333vw, 15.9994 px at 1920.
+      const min = n => n * scale - 0.05;
+      assert.ok(sizes.base >= min(16) && sizes.kpi.px >= min(64) && sizes.clock >= min(76) && sizes.attention >= min(25) && sizes.title.px >= min(26),
+        `${label}: ${JSON.stringify(sizes)}`);
+      assert.ok(sizes.smallest.px >= min(22), `${label}: smallest text ${JSON.stringify(sizes.smallest)}`);
+      assert.ok(sizes.words >= 5 && sizes.word.px >= min(28), `${label}: smallest status word ${JSON.stringify(sizes.word)}`);
       return sizes;
+    }
+    // Orderly: no text is wider than its box (no clipped number, status word or line), nothing overlaps (the screen's
+    // blocks, and the lines inside a tile, rack card, Attention row or the top bar), nothing outside its block, no
+    // scrollbar anywhere.
+    async function orderly(page, label) {
+      const found = await page.evaluate(() => {
+        const name = e => `${e.className || e.tagName}: ${(e.innerText || '').replace(/\s+/g, ' ').slice(0, 40)}`;
+        const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden'; };
+        const texts = [...document.querySelectorAll('.lab-display *')].filter(e => visible(e) && getComputedStyle(e).display !== 'inline'
+          && [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()));
+        // Wider than its box, wrapped onto a second line (two text boxes whose middles are most of a line apart; a small
+        // unit beside a big number shares the line), or taller by more than the font's ascent / descent beyond a tight
+        // line-height.
+        const wrapped = e => {
+          const range = document.createRange();
+          range.selectNodeContents(e);
+          const rects = [...range.getClientRects()].filter(q => q.width > 0.5);
+          return rects.some(a => rects.some(b => Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2) > 0.75 * Math.max(a.height, b.height)));
+        };
+        const overflow = texts.filter(e => e.scrollWidth > e.clientWidth + 1 || wrapped(e) || e.scrollHeight > e.clientHeight + 0.5 * parseFloat(getComputedStyle(e).fontSize))
+          .map(e => `${name(e)} (${e.scrollWidth}x${e.scrollHeight} in ${e.clientWidth}x${e.clientHeight}${wrapped(e) ? ', wrapped' : ''})`);
+        const overlap = (a, b) => { const r = a.getBoundingClientRect(), q = b.getBoundingClientRect(); return Math.min(r.right, q.right) - Math.max(r.left, q.left) > 1 && Math.min(r.bottom, q.bottom) - Math.max(r.top, q.top) > 1; };
+        const inside = (child, box) => { const r = child.getBoundingClientRect(), q = box.getBoundingClientRect(); return r.left >= q.left - 1 && r.right <= q.right + 1 && r.top >= q.top - 1 && r.bottom <= q.bottom + 1; };
+        const pairs = list => { const out = []; list.forEach((a, i) => list.slice(i + 1).forEach(b => { if (overlap(a, b)) out.push(`${name(a)} / ${name(b)}`); })); return out; };
+        const blocks = [...document.querySelectorAll('.ld-top, .ld-stale-banner, .ld-role-warn, .ld-tile, .ld-maint-band, .ld-panel, .ld-changes')].filter(visible);
+        const overlaps = pairs(blocks), outside = [];
+        for (const box of document.querySelectorAll('.ld-top, .ld-brand, .ld-conn, .ld-clock, .ld-tile, .ld-tile-row, .ld-tile-foot, .ld-env dl, .ld-env dl > div, .ld-maint-band, .ld-panel-head, .ld-rack, .ld-rack-grid, .ld-attn, .ld-attn-text, .ld-inuse-row, .ld-changes, .ld-changes li')) {
+          const kids = [...box.children].filter(visible);
+          overlaps.push(...pairs(kids));
+          outside.push(...kids.filter(k => !inside(k, box)).map(k => `${name(k)} outside ${name(box)}`));
+        }
+        const scrollbars = [document.scrollingElement, ...document.querySelectorAll('.lab-display, .lab-display *')]
+          .filter(e => { const s = getComputedStyle(e); return (e.scrollHeight > e.clientHeight + 1 && /auto|scroll/.test(s.overflowY)) || (e.scrollWidth > e.clientWidth + 1 && /auto|scroll/.test(s.overflowX)); })
+          .map(name);
+        const page = [document.documentElement.scrollWidth - innerWidth, document.documentElement.scrollHeight - innerHeight, innerWidth - document.documentElement.clientWidth];
+        return { texts: texts.length, overflow, overlaps, outside, scrollbars, page };
+      });
+      assert.ok(found.texts > 40, `${label}: text found (${found.texts})`);
+      assert.deepEqual(found.overflow, [], `${label}: no text wider or taller than its box`);
+      assert.deepEqual(found.overlaps, [], `${label}: nothing overlaps`);
+      assert.deepEqual(found.outside, [], `${label}: every line stays inside its block`);
+      assert.deepEqual(found.scrollbars, [], `${label}: no scrollable box`);
+      assert.deepEqual(found.page, [0, 0, 0], `${label}: no page scrollbar`);
+      return found.texts;
     }
 
     // ── Viewer 1920 x 1080: content, two refresh cycles, network loss and recovery ──
@@ -127,7 +180,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       await chromeFree(page, 'viewer 1920');
       const f = await figures(page);
       snapshots.viewer = f;
-      assert.deepEqual([f.on, f.off, f.none, f.pdus, f.kvms, f.power], ['24', '0', '4', '6 / 7', '1 / 1', '3.96 kW']);
+      assert.deepEqual([f.on, f.onSub, f.none, f.pdus, f.kvms, f.power], ['24', 'of 28 · 0 off', '4', '6 / 7', '1 / 1', '3.96 kW']);
       assert.match(f.env, /Temp 22–28 °C Humidity 41–48 % Leak None/);
       assert.equal(f.racks, '8');
       assert.equal(f.firstAttention, 'QA inlet current above 15 A', 'alarms first');
@@ -153,10 +206,11 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       assert.equal(await text(page, '[data-testid="display-role"]'), 'Viewer');
       assert.equal(await page.locator('.ld-attn[data-level="alarm"]').first().evaluate(e => getComputedStyle(e).backgroundColor), 'rgb(255, 79, 79)', 'alarm rows are a solid fill');
       checks.push('viewer 1920: KPIs, environment, racks (Rack-07 "—"), attention order, status chip, PARTIAL power, maintenance band, consoles in use, recent changes');
-      // Readable from 3 m: big numbers, large text.
-      const sizes = await sizesAt1920(page, 'viewer 1920');
+      // Readable from 2-3 m on a 24-inch monitor: big numbers, large text, an orderly grid.
+      const sizes = await textSizes(page, 'viewer 1920');
       await numbersWhole(page, 'viewer 1920');
-      checks.push(`viewer 1920: smallest text ${sizes.smallest.px}px, smallest status word ${sizes.word.px}px`);
+      const lines = await orderly(page, 'viewer 1920');
+      checks.push(`viewer 1920: smallest text ${sizes.smallest.px}px, status words ${sizes.word.px}px, panel titles ${sizes.title.px}px, KPI ${sizes.kpi.px}px, clock ${sizes.clock}px; ${lines} text boxes, none cut off or overlapping`);
       await page.screenshot({ path: path.join(shots, 'viewer-1920x1080.png') });
 
       // Two refresh cycles: the same DOM stays (no blanking or re-mount), no memory growth.
@@ -213,6 +267,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       const bannerPx = await page.locator('[data-testid="stale-banner"]').evaluate(e => parseFloat(getComputedStyle(e).fontSize));
       assert.ok(bannerPx >= 31.9, `banner ${bannerPx}px`);
       await chromeFree(page, 'viewer 1920 stale');
+      await orderly(page, 'viewer 1920 stale');
       await page.screenshot({ path: path.join(shots, 'viewer-1920x1080-stale.png') });
       checks.push('viewer 1920: network loss keeps the data, shows Reconnecting, then Connection lost, NOT LIVE banner, greyed panels');
       state.offline = false;
@@ -252,8 +307,26 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       while (state.devicesGets < gets0 + 2 && Date.now() < deadline) await page.waitForTimeout(500);
       assert.ok(state.devicesGets >= gets0 + 2, 'operator: two refresh cycles');
       await chromeFree(page, 'operator 1920 after refresh');
+      await orderly(page, 'operator 1920 (role warning)');
       await page.screenshot({ path: path.join(shots, 'operator-1920x1080.png') });
       checks.push('operator 1920: same figures as the Viewer, role warning, two refresh cycles, read-only');
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── The 24-inch monitor at 125 % scaling (1536 x 864) and other common sizes: the same layout to scale, orderly ──
+    for (const [width, height] of [[1536, 864], [1920, 1200], [2560, 1440]]) {
+      const { context, page } = await open('viewer', { width, height });
+      const label = `viewer ${width}x${height}`;
+      await chromeFree(page, label);
+      const scale = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.lab-display')).fontSize) / 16);
+      assert.ok(Math.abs(scale - Math.min(width / 1920, height / 1080)) < 0.01, `${label}: base follows the screen (${scale})`);
+      const sizes = await textSizes(page, label, scale);
+      await numbersWhole(page, label);
+      const lines = await orderly(page, label);
+      const f = await figures(page);
+      assert.deepEqual([f.on, f.none, f.pdus, f.kvms, f.power], ['24', '4', '6 / 7', '1 / 1', '3.96 kW']);
+      await page.screenshot({ path: path.join(shots, `viewer-${width}x${height}.png`) });
+      checks.push(`${label}: scale ${scale.toFixed(3)}, smallest text ${sizes.smallest.px.toFixed(1)}px, ${lines} text boxes, none cut off or overlapping`);
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 
@@ -266,6 +339,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         const first = await pager(page, '.ld-racks');
         assert.match(first, /^\d\/2$/, 'compact cards: 30 racks in two pages');
         assert.equal(await page.locator('.ld-rack-grid').getAttribute('data-compact'), 'true');
+        await orderly(page, 'operator 1280 compact racks');
         const names = () => page.locator('.ld-rack h3').allInnerTexts();
         const page1 = await names();
         await turned(page, '.ld-racks', first);
@@ -289,7 +363,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       assert.ok(Math.abs(base - 8) < 0.1, `960 base size ${base}`);
       await numbersWhole(page, 'viewer 960');
       const f = await figures(page);
-      assert.deepEqual([f.on, f.off, f.none, f.pdus, f.kvms, f.power], ['24', '0', '4', '6 / 7', '1 / 1', '3.96 kW']);
+      assert.deepEqual([f.on, f.none, f.pdus, f.kvms, f.power], ['24', '4', '6 / 7', '1 / 1', '3.96 kW']);
       await page.screenshot({ path: path.join(shots, 'viewer-960x540.png') });
       checks.push('viewer 960x540: fits, no number cut off');
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();

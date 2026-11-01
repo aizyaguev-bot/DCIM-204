@@ -137,6 +137,29 @@ test("environment and kpis: thresholds, reachable counts, total power", () => {
   assert.deepEqual(k.loads.map(l => [l.name, l.level]), [["PDU 03", "alarm"], ["PDU 01", "ok"], ["PDU 02", "ok"]]);
 });
 
+test("PDU load near its rating: an Attention item and the rack card's state (the display has no per-PDU panel)", () => {
+  const now = Date.parse("2026-10-26T12:00:00Z");
+  const amps = current => ({ inlet_readings: [{ number: 1, current }] });
+  const devices = [pdu(1), pdu(2), pdu(3), pdu(4)];
+  // 16 A rating: 10.4 A = 65 % (warning), 13.6 A = 85 % (alarm), 2 A = 12.5 % (nothing), unreachable (its own item).
+  const pduStatuses = { pdu1: online(1, undefined, amps(10.4)), pdu2: online(2, undefined, amps(13.6)), pdu3: online(3), pdu4: offline(4) };
+  const items = attentionItems({ devices, pduStatuses, now });
+  assert.deepEqual(items.map(i => [i.key, i.severity, i.title, i.detail]), [
+    ["pdu:pdu4", "alarm", "PDU 04 unreachable", "Rack-04 · 2 servers have no power reading"],
+    ["load:pdu2", "alarm", "PDU 02 load 85 %", "Rack-02 · 13.6 A of 16 A"],
+    ["load:pdu1", "warn", "PDU 01 load 65 %", "Rack-01 · 10.4 A of 16 A"],
+  ]);
+  // Estimated from watts when no inlet current is reported.
+  const estimated = attentionItems({ devices: [pdu(1)], pduStatuses: { pdu1: online(1, undefined, { inlet_readings: [], total_watts: 2700, inlet_voltage: 230 }) }, now });
+  assert.deepEqual(estimated.map(i => [i.title, i.detail]), [["PDU 01 load 73 %", "Rack-01 · 11.7 A of 16 A (estimated)"]]);
+  const servers = buildServers(devices, pduStatuses);
+  const racks = Object.fromEntries(buildRacks(devices, pduStatuses, servers, null, { attention: items }).map(r => [r.rack, r]));
+  assert.deepEqual([racks["Rack-01"].level, racks["Rack-01"].reason], ["warn", "Load 65 %"]);
+  assert.deepEqual([racks["Rack-02"].level, racks["Rack-02"].reason], ["alarm", "Load 85 %"]);
+  assert.deepEqual([racks["Rack-03"].level, racks["Rack-03"].reason], ["ok", "Online"]);
+  assert.deepEqual([racks["Rack-04"].level, racks["Rack-04"].reason], ["alarm", "Unreachable"]);
+});
+
 test("openAlerts: the newest message per subject decides; a recovery closes the alert", () => {
   const recent = [
     { id: "a", subject: "[DCIM alert] OPT71 is not answering ping", created_at: "2026-10-26T10:00:00+00:00" },
@@ -279,14 +302,17 @@ test("layout helpers: the rack grid and lists fit without scrolling and rotate",
   assert.deepEqual([many.cols, many.rows, many.perPage], [5, 5, 25]);
   assert.ok(many.cellH >= opts.minH && many.cellH * many.rows + opts.gap * (many.rows - 1) <= 700);
   assert.deepEqual(gridLayout(3, 0, 0, opts).perPage, 1);
-  // More racks than one page of normal cards: compact cards, so 30 racks need at most two pages at 1920 x 1080.
-  const em = 16, panel = [1000, 430];
-  const normal = rackGrid(8, ...panel, em);
-  assert.equal(normal.compact, false);
-  assert.equal(normal.gapEm, RACK_CARD_EM.gap);
-  const thirty = rackGrid(30, ...panel, em);
-  assert.equal(thirty.compact, true);
-  assert.ok(Math.ceil(30 / thirty.perPage) <= 2, JSON.stringify(thirty));
+  // The Racks panel body on a 24-inch monitor at 1920 x 1080 (and the same in em at 1536 x 864): the fixture's 8 racks
+  // on one page of normal cards, three across; more racks than that: compact cards, so 30 racks need at most two pages.
+  for (const [em, panel] of [[16, [932, 530]], [12.8, [745, 424]], [16, [932, 470]]]) {
+    const normal = rackGrid(8, ...panel, em);
+    assert.equal(normal.compact, false, JSON.stringify(normal));
+    assert.equal(normal.cols, 3);
+    assert.equal(normal.gapEm, RACK_CARD_EM.gap);
+    const thirty = rackGrid(30, ...panel, em);
+    assert.equal(thirty.compact, true);
+    assert.ok(Math.ceil(30 / thirty.perPage) <= 2, JSON.stringify(thirty));
+  }
   assert.equal(rowsThatFit(300, 50, 10), 5);
   assert.equal(rowsThatFit(0, 50, 10), 1);
   const list = Array.from({ length: 7 }, (_, i) => i);

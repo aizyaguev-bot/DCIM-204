@@ -20,16 +20,16 @@ export const HUMIDITY_WARN = 70;
 export const RATED_AMPS = 16;
 export const LOAD_WARN_PCT = 60;
 export const LOAD_ALARM_PCT = 80;
-// Row heights in em of the display's base size; the page sets them inline and fits lists with the same numbers.
-export const ROW_EM = { attention: 4, load: 2.6, inUse: 2.4, ticker: 2.6 };
-export const RACK_CARD_EM = { minW: 14, minH: 10, maxH: 11, gap: 0.8 };
+// Row heights in em of the display's base size (16 px at 1920 x 1080); the page sets them inline and fits lists with
+// the same numbers. Sized for a 24-inch monitor read from 2-3 m: three rack cards across, four Attention rows.
+export const ROW_EM = { attention: 4.4, inUse: 2.5, ticker: 2.4 };
+export const RACK_CARD_EM = { minW: 17, minH: 9, maxH: 12, gap: 0.8 };
 // More racks than fit at that size: compact cards (name, on / total, state) so every rack is seen in two pages or fewer.
-export const RACK_CARD_COMPACT_EM = { minW: 11, minH: 5.2, maxH: 6, gap: 0.6 };
+export const RACK_CARD_COMPACT_EM = { minW: 15, minH: 5.2, maxH: 6.4, gap: 0.6 };
 // The lab's own time zone: a TV stick or mini-PC set to UTC still shows lab time.
 export const LAB_TZ = "Asia/Jerusalem";
 export const LIST_GAP_EM = 0.45;
-export const LOAD_COL_EM = 26;   // Power by PDU: a second column once the panel is this wide (per column)
-export const TICKER_ITEM_EM = 31;   // recent changes: one entry per this much strip width
+export const TICKER_ITEM_EM = 38;   // recent changes: one entry per this much strip width
 
 // The same text as DcimView.jsx NON_SERVER_LABEL / isDefaultOutletLabel (lab-display.test.js keeps them equal).
 const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
@@ -124,6 +124,9 @@ export function buildRacks(devices, pduStatuses = {}, servers = [], maintenance 
     else if (summary.status === "unavailable") issues.push({ level: "warn", order: 3, reason: "No reading" });
     else if (summary.status === "online" && noReading > 0) issues.push({ level: "warn", order: 3, reason: "Partial reading" });
     if (inMaintenance) issues.push({ level: "maint", order: -1, reason: "Maintenance" });
+    // A PDU of this rack drawing near its rating (the display has no per-PDU panel: the card and Attention say it).
+    const peak = loads.reduce((max, l) => (l.pct != null && l.pct > (max?.pct ?? -1) ? l : max), null);
+    if (peak && peak.pct >= LOAD_WARN_PCT) issues.push({ level: peak.pct >= LOAD_ALARM_PCT ? "alarm" : "warn", order: 2, reason: `Load ${formatNumber(peak.pct, 0)} %` });
     for (const s of asArray(sensors)) {
       if (s?.rack !== rack) continue;
       if (s.leak === true) issues.push({ level: "alarm", order: 0, reason: "Water leak" });
@@ -224,7 +227,7 @@ export function openAlerts(recent) {
 }
 
 const SEVERITY = { alarm: 0, warn: 1, info: 2 };
-const KIND_ORDER = ["leak", "temperature", "alert", "pdu", "ping", "kvm", "humidity", "monitor"];
+const KIND_ORDER = ["leak", "temperature", "alert", "pdu", "load", "ping", "kvm", "humidity", "monitor"];
 
 // Everything that needs a look, most severe first: unreachable devices, servers that stopped answering ping, open
 // alerts, sensors past a threshold. Maintenance has its own band (maintenanceEntries). Each entry: {key, severity,
@@ -247,6 +250,12 @@ export function attentionItems({ devices = [], pduStatuses = {}, kvmStatuses = {
       if (state === "offline") add(`pdu:${d.id}`, "alarm", "pdu", d.rack, [name, own(" unreachable")], [...where, impact]);
       else if (state === "unavailable") add(`pdu:${d.id}`, "warn", "pdu", d.rack, [name, own(": status not available")], [...where, impact]);
       else if (state === "error") add(`pdu:${d.id}`, "warn", "pdu", d.rack, [name, own(" reports an error")], [...where, own("Readings may be incomplete")]);
+      // Load near the PDU's rating (Racks page bands): warning from LOAD_WARN_PCT, alarm from LOAD_ALARM_PCT.
+      const load = status == null ? null : pduLoad(d, status);
+      if (load?.pct != null && load.pct >= LOAD_WARN_PCT) {
+        add(`load:${d.id}`, load.pct >= LOAD_ALARM_PCT ? "alarm" : "warn", "load", d.rack, [name, own(` load ${formatNumber(load.pct, 0)} %`)],
+          [...where, own(`${formatNumber(load.amps, 1)} A of ${RATED_AMPS} A${load.estimated ? " (estimated)" : ""}`)]);
+      }
     } else {
       if (state === "offline") add(`kvm:${d.id}`, "warn", "kvm", d.rack, [name, own(" unreachable")], [...where, own("Remote consoles are unavailable")]);
       else if (state === "unavailable") add(`kvm:${d.id}`, "warn", "kvm", d.rack, [name, own(": status not available")], [...where, own("Console state unknown")]);

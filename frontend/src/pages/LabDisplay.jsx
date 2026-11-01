@@ -2,16 +2,18 @@
 // what a Viewer may read, refreshes every 15 s without blanking (the last good data stays up; after 60 s without data
 // a NOT LIVE banner covers the top and the panels turn grey), recovers by itself after a network loss, never scrolls
 // (long lists and the rack grid turn pages every 10 s, alarms stay pinned) and has no buttons, dialogs, assistant or
-// footer. Helpers and thresholds: ../labDisplay.js.
+// footer. Laid out for a 24-inch monitor at the lab entrance (1920 x 1080, or 1536 x 864 at 125 % scaling) read from
+// 2-3 m: every size follows the screen, so larger and smaller 16:9 screens show the same layout. Helpers and
+// thresholds: ../labDisplay.js.
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
 import nvidiaLogo from "../assets/nvidia-logo.svg";
 import {
   REFRESH_MS, STALE_MS, STALE_ALARM_MS, ROTATE_MS, REQUEST_TIMEOUT_MS, OVERRIDES_EVERY, INCIDENT_LIMIT, ROW_EM,
-  LIST_GAP_EM, LOAD_COL_EM, TICKER_ITEM_EM, RATED_AMPS,
+  LIST_GAP_EM, TICKER_ITEM_EM,
   buildServers, buildRacks, environment, kpis, attentionItems, consolesInUse, recentChanges, maintenanceEntries,
-  rackGrid, rowsThatFit, pageOf, pinnedPage, labStatus, sourceAfter, relativeAge, formatNumber, formatKw, formatRange,
+  rackGrid, rowsThatFit, pageOf, pinnedPage, labStatus, sourceAfter, relativeAge, formatKw, formatRange,
   clockTime, longDate, changeTime, connectionState, pruneStatuses,
 } from "../labDisplay";
 
@@ -315,12 +317,11 @@ function DisplayScreen() {
         : <>
           <Kpis view={view} />
           <MaintenanceBand entries={view.maintenance} source={feed.sources.maintenance} rotation={rotation} />
+          {/* Two columns: the racks on the left, what needs a look and who is working on the right. A PDU near its
+              rating shows on its rack card and in Attention (no per-PDU panel: too small to read from the door). */}
           <main className="ld-main" aria-label="Lab status">
+            <RacksPanel racks={view.racks} rotation={rotation} />
             <div className="ld-column">
-              <RacksPanel racks={view.racks} rotation={rotation} />
-              <LoadPanel loads={view.kpi.loads} rotation={rotation} />
-            </div>
-            <div className="ld-column ld-side">
               <AttentionPanel items={view.attention} rotation={rotation} />
               <InUsePanel rows={view.inUse} kvmTotal={view.kpi.kvms.total} rotation={rotation} stale={stale} />
             </div>
@@ -414,6 +415,8 @@ function useFitWidth(key) {
   return ref;
 }
 
+// Three lines, the same on every tile: the label, the number, then the status word (CHECK / ALARM / PARTIAL) when
+// there is one, else a short line of detail. The word never shares a line with the number, so it never squeezes it.
 function Tile({ label, value, unit, sub, level = "idle", testId, chip }) {
   const fitRef = useFitWidth(`${value}|${unit}|${level}`);
   return (
@@ -422,9 +425,9 @@ function Tile({ label, value, unit, sub, level = "idle", testId, chip }) {
       <div className="ld-tile-row">
         <p ref={fitRef} className="ld-tile-value">{value}{unit && <small>{unit}</small>}</p>
       </div>
-      {/* The word on its own line, so it never squeezes the number. */}
-      {(chip || CHIP[level]) && <p className="ld-tile-flag"><Chip level={level} testId={`${testId}-chip`} text={chip} /></p>}
-      <p className="ld-tile-sub">{sub}</p>
+      <p className="ld-tile-foot">
+        {chip || CHIP[level] ? <Chip level={level} testId={`${testId}-chip`} text={chip} /> : <span className="ld-tile-sub">{sub}</span>}
+      </p>
     </section>
   );
 }
@@ -434,13 +437,12 @@ function Kpis({ view }) {
   const s = kpi.servers;
   const pdusDown = kpi.pdus.read - kpi.pdus.reachable;
   const kvmsDown = kpi.kvms.read - kpi.kvms.reachable;
-  const missing = kpi.pdus.total - kpi.power.known;
   const envLevel = env.hasSensors ? env.level : "idle";
   return (
     <div className="ld-kpis">
-      <Tile testId="kpi-on" label="Servers on" value={s.on} level={s.total ? "ok" : "idle"} sub={`of ${s.total} servers`} />
-      <Tile testId="kpi-off" label="Servers off" value={s.off} level={s.off ? "neutral" : "idle"} sub="Outlet switched off" />
-      <Tile testId="kpi-noreading" label="No reading" value={s.noReading} level={s.noReading ? "warn" : "idle"} sub="Power unknown" />
+      {/* Servers switched off are a normal state: counted under Servers on, not a tile of their own. */}
+      <Tile testId="kpi-on" label="Servers on" value={s.on} level={s.total ? "ok" : "idle"} sub={`of ${s.total} · ${s.off} off`} />
+      <Tile testId="kpi-noreading" label="No reading" value={s.noReading} level={s.noReading ? "warn" : "idle"} sub="Every server read" />
       <Tile testId="kpi-pdus" label="PDUs online" value={kpi.pdus.reachable} unit={` / ${kpi.pdus.total}`}
         level={!kpi.pdus.total ? "idle" : pdusDown > 0 ? "alarm" : "ok"}
         sub={pdusDown > 0 ? `${pdusDown} unreachable` : kpi.pdus.maintenance ? `${kpi.pdus.maintenance} in maintenance` : kpi.pdus.total ? "All answering" : "No PDUs"} />
@@ -450,14 +452,14 @@ function Kpis({ view }) {
       <Tile testId="kpi-power" label="Total power" value={formatKw(kpi.power.watts)} unit={kpi.power.watts == null ? "" : " kW"}
         // A total in kW is neither healthy nor unhealthy: neutral, or PARTIAL when some PDUs gave no reading.
         level={kpi.power.watts == null ? "idle" : kpi.power.complete ? "neutral" : "warn"} chip={kpi.power.watts != null && !kpi.power.complete ? "PARTIAL" : undefined}
-        sub={kpi.power.watts == null ? "No PDU reading" : kpi.power.complete ? `${kpi.pdus.total} ${kpi.pdus.total === 1 ? "PDU" : "PDUs"}` : missing > 0 ? `${kpi.power.known} of ${kpi.pdus.total} PDUs read` : "Some outlets unread"} />
+        sub={kpi.power.watts == null ? "No PDU reading" : `${kpi.pdus.total} ${kpi.pdus.total === 1 ? "PDU" : "PDUs"}`} />
       <section className="ld-tile ld-env" data-level={envLevel} data-testid="kpi-env" aria-label="Environment">
         <h2>Environment <Chip level={envLevel} testId="kpi-env-chip" /></h2>
         {env.hasSensors ? <dl>
           <div data-level={env.tempLevel}><dt>Temp</dt><dd>{formatRange(env.tempMin, env.tempMax, env.tempMin === env.tempMax ? 1 : 0)}<small> °C</small></dd></div>
           <div data-level={env.humLevel}><dt>Humidity</dt><dd>{formatRange(env.humMin, env.humMax, 0)}<small> %</small></dd></div>
           <div data-level={env.leakLevel}><dt>Leak</dt><dd>{env.leakSensors ? env.leak ? "YES" : "None" : "—"}</dd></div>
-        </dl> : <><p className="ld-tile-value ld-muted">—</p><p className="ld-tile-sub">No PDU sensors reporting</p></>}
+        </dl> : <><p className="ld-tile-value ld-muted">—</p><p className="ld-tile-foot"><span className="ld-tile-sub">No sensors reporting</span></p></>}
       </section>
     </div>
   );
@@ -523,19 +525,17 @@ function RacksPanel({ racks, rotation }) {
             {items.map(r => {
               // No reading for any server: never a 0 that reads as "all off".
               const unknown = !r.storage && r.total > 0 && r.noReading >= r.total;
-              const extra = r.storage ? [] : unknown ? ["Power unknown"] : [r.watts == null ? "— kW" : `${formatKw(r.watts)} kW`,
-                r.off > 0 && `${r.off} off`, r.noReading > 0 && `${r.noReading} unknown`].filter(Boolean);
+              const counted = !r.storage && r.total > 0;
               return (
                 <article key={r.rack} className="ld-rack" data-level={r.level} data-rack={r.rack}>
+                  {/* Line 1: the name (and MAINT). Line 2: servers on / total and the rack's power. Line 3: its state. */}
                   <h3 dir="auto">{r.rack}</h3>
+                  {r.maintenancePdus.length > 0 && <span className="ld-badge" data-level="maint">Maint</span>}
                   {/* A compact card has no room for a sentence: storage and empty racks say so in the state line. */}
-                  {r.storage || r.total === 0 ? !layout.compact && <p className="ld-rack-servers ld-muted">{r.storage ? "Equipment storage" : "No servers"}</p>
+                  {!counted ? !layout.compact && <p className="ld-rack-servers ld-muted">{r.storage ? "Equipment storage" : "No servers"}</p>
                     : unknown ? <p className="ld-rack-servers" data-unknown="true"><strong>—</strong><span> / {r.total}</span></p>
-                    : <p className="ld-rack-servers"><strong>{r.on}</strong><span> / {r.total} on</span></p>}
-                  {!layout.compact && <p className="ld-rack-extra">
-                    {r.maintenancePdus.length > 0 && <span className="ld-badge" data-level="maint">Maint</span>}
-                    <span>{extra.join(" · ")}</span>
-                  </p>}
+                    : <p className="ld-rack-servers"><strong>{r.on}</strong><span> / {r.total}{layout.compact ? "" : " on"}</span></p>}
+                  {!layout.compact && counted && !unknown && <p className="ld-rack-power">{r.watts == null ? "— kW" : `${formatKw(r.watts)} kW`}</p>}
                   <p className="ld-rack-state" data-level={r.level}>{layout.compact ? r.reason || (r.storage ? "Storage" : "No servers") : r.reason}</p>
                 </article>
               );
@@ -568,39 +568,6 @@ function AttentionPanel({ items, rotation }) {
             {moreAlarms > 0 && <li className="ld-attn ld-attn-more" data-level="alarm" style={{ height: `${ROW_EM.attention}em` }}>
               <span className="ld-attn-tag">Alarm</span><span className="ld-attn-more-text">+{moreAlarms} more {moreAlarms === 1 ? "alarm" : "alarms"}</span>
             </li>}
-          </ul>}
-      </div>
-    </section>
-  );
-}
-
-function LoadPanel({ loads, rotation }) {
-  const [ref, box] = useBox();
-  // Two columns of PDUs when the panel is wide enough for two readable rows side by side.
-  const cols = box.width >= 2 * LOAD_COL_EM * box.em ? 2 : 1;
-  const perPage = cols * rowsThatFit(box.height, ROW_EM.load * box.em, LIST_GAP_EM * box.em);
-  const { items, page, pages } = pageOf(loads, perPage, rotation.tick);
-  return (
-    <section className="ld-panel ld-load" aria-label="Power by PDU">
-      <PanelHead title="Power by PDU" note={`Load vs ${RATED_AMPS} A`} pager={<Pager more={loads.length - items.length} page={page} pages={pages} rotation={rotation} />} />
-      <div ref={ref} className="ld-panel-body">
-        {loads.length === 0 ? <p className="ld-empty">No PDUs are set up.</p> :
-          <ul className="ld-list ld-load-list" style={{ gap: `${LIST_GAP_EM}em 2.4em`, gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-            {items.map(l => {
-              const down = l.state === "offline" || l.state === "unavailable";
-              const pct = l.pct == null ? 0 : Math.max(0, Math.min(100, l.pct));
-              return (
-                <li key={l.id} className="ld-loadrow" data-level={l.level} data-pdu={l.name} style={{ height: `${ROW_EM.load}em` }}>
-                  <span className="ld-load-name"><strong dir="auto">{l.name}</strong></span>
-                  <span className="ld-bar" aria-hidden="true"><i style={{ width: `${pct}%` }} /></span>
-                  <span className="ld-load-value">
-                    {down ? <b>{l.state === "offline" ? "Unreachable" : "No reading"}</b>
-                      : l.state === "loading" ? "Reading…"
-                      : <>{l.watts == null ? "—" : `${formatKw(l.watts)} kW`}<b>{l.pct == null ? "—" : `${formatNumber(l.pct, 0)}%`}</b></>}
-                  </span>
-                </li>
-              );
-            })}
           </ul>}
       </div>
     </section>
