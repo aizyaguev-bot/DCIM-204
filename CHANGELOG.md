@@ -2,6 +2,19 @@
 
 ---
 
+## v2.45.2 — 2026-11-01 — Lab entrance screen readable on a 24-inch monitor
+
+### Changed
+- **Lab entrance TV screen is sized for a 24-inch monitor** read from the door. All
+  text is much larger (smallest text 32 px at 1920x1080, alarm titles 40 px, status
+  words 36 px, big numbers 80 px) and the screen scales evenly at 1536x864, 1920x1200
+  and 2560x1440. Racks and Attention share the middle of the screen; "Working now" and
+  "Recent" are one line each along the bottom. Text never overlaps or wraps; a long
+  name or maintenance reason is shortened with "…" (Hebrew keeps its first words), and
+  every Attention page is full, with "+N more" matching the pager.
+
+---
+
 ## v2.45.1 — 2026-11-01 — SSH buttons no longer grey out at random
 
 ### Fixed
