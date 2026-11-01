@@ -300,6 +300,9 @@ LAB_CACHE_SECONDS = 60
 LAB_CACHE_MAX = 4096
 STATUS_LAB_DEADLINE = 4      # Seconds GET /api/ssh/status waits for lab-network lookups.
 _LAB_CACHE: dict = {}         # "networks" -> (expires, frozenset); ("host", token) -> (expires, addresses or None)
+FAILED_LOOKUP_SECONDS = 10    # A failed lookup is retried soon, not after a minute.
+LAST_GOOD_SECONDS = 6 * 3600  # A status keeps a host's last good answer this long through a passing DNS failure.
+_LAST_GOOD: dict = {}         # host token -> (expires, addresses)
 
 
 def lab_network_of(value):
@@ -337,7 +340,9 @@ async def lab_networks(db):
 
 
 async def host_addresses(host, *, cached=True):
-    """Every address `host` resolves to (canonical), or None when the VM cannot resolve it. Cached briefly."""
+    """Every address `host` resolves to (canonical), or None when the VM cannot resolve it. Cached briefly.
+    A cached (status) lookup that fails or times out keeps the host's last good answer, so a slow or briefly failing
+    DNS does not grey out its SSH button; a connection always looks up again (cached=False) and never uses it."""
     token = ("host", host_token(host))
     now = time.monotonic()
     hit = _LAB_CACHE.get(token) if cached else None
@@ -352,9 +357,17 @@ async def host_addresses(host, *, cached=True):
             addresses = sorted({canonical_ip(answer[4][0]) for answer in answers}) or None
         except (OSError, asyncio.TimeoutError, UnicodeError, ValueError):
             addresses = None
+    if addresses:
+        if len(_LAST_GOOD) >= LAB_CACHE_MAX:
+            _LAST_GOOD.clear()
+        _LAST_GOOD[token] = (now + LAST_GOOD_SECONDS, addresses)
+    elif cached:
+        good = _LAST_GOOD.get(token)
+        if good and good[0] > now:
+            return good[1]
     if len(_LAB_CACHE) >= LAB_CACHE_MAX:
         _LAB_CACHE.clear()
-    _LAB_CACHE[token] = (now + LAB_CACHE_SECONDS, addresses)
+    _LAB_CACHE[token] = (now + (LAB_CACHE_SECONDS if addresses else FAILED_LOOKUP_SECONDS), addresses)
     return addresses
 
 

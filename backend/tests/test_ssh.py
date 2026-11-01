@@ -2723,3 +2723,25 @@ def test_agent_socket_uses_only_a_live_socket_of_this_account(tmp_path, monkeypa
     assert env["SSH_AUTH_SOCK"] == "/run/given.sock"  # Passed through as the service has it.
     monkeypatch.setattr(ssh_store, "agent_socket", lambda environ=None: "/run/user/1000/openssh_agent")
     assert ssh.system_env({"HOME": "/home/lab"})["SSH_AUTH_SOCK"] == "/run/user/1000/openssh_agent"
+
+
+async def test_status_lookup_keeps_the_last_good_answer_through_a_dns_failure(monkeypatch):
+    monkeypatch.setattr(ssh, "_LAB_CACHE", {})
+    monkeypatch.setattr(ssh, "_LAST_GOOD", {})
+    answers = {"value": [(socket_module.AF_INET, socket_module.SOCK_STREAM, 6, "", ("10.9.8.7", 22))]}
+
+    async def getaddrinfo(host, port, type=0):
+        if answers["value"] is None:
+            raise OSError("temporary failure in name resolution")
+        return answers["value"]
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
+    assert await ssh.host_addresses("opt106") == ["10.9.8.7"]
+    answers["value"] = None
+    ssh._LAB_CACHE.clear()
+    # The status keeps the last good answer (no greyed-out SSH button); a connection looks up again and fails.
+    assert await ssh.host_addresses("opt106") == ["10.9.8.7"]
+    assert await ssh.host_addresses("opt106", cached=False) is None
+    # A host that never resolved stays unresolved, and the failure is retried after FAILED_LOOKUP_SECONDS.
+    assert await ssh.host_addresses("ghost") is None
+    assert ssh._LAB_CACHE[("host", ssh.host_token("ghost"))][0] - time.monotonic() <= ssh.FAILED_LOOKUP_SECONDS

@@ -2,6 +2,16 @@
 
 ---
 
+## v2.45.1 — 2026-11-01 — SSH buttons no longer grey out at random
+
+### Fixed
+- The SSH button of some servers kept turning grey for a minute and coming back. A
+  slow or briefly failing name lookup on the VM was remembered for a minute; the page
+  now keeps the server's last good address through it and retries a failed lookup
+  after 10 seconds. Opening a terminal still looks the address up fresh.
+
+---
+
 ## v2.45.0 — 2026-11-01 — Scan a barcode to add a unit, lab entrance TV screen, stay signed in
 
 ### Added
