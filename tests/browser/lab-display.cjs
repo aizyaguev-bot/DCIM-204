@@ -3,7 +3,7 @@
 // 3840 x 2160. Checks: only GET requests, no page errors, no header / footer / assistant / What's new / dialogs /
 // controls, no scrolling or clipped panels, an orderly layout (no text wider than its box, no panel or line overlapping
 // another), the numbers the fixture implies (an unreadable rack shows "—", never 0), text sizes at 1920 x 1080
-// (smallest >= 22 px, status words and panel titles >= 26-28 px, KPI numbers >= 64 px), two refresh cycles without re-mounting or memory
+// (smallest >= 32 px, status words and panel titles >= 36 px, alarm titles >= 40 px, KPI numbers >= 72 px), two refresh cycles without re-mounting or memory
 // growth, page rotation with alarms pinned, a network loss (last data kept, Reconnecting, NOT LIVE banner, greyed
 // panels) and the recovery, one failing source ("Live · partial"), the role warning, the TV sign-in, the narrow-screen
 // notice and the header link for both roles. Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
@@ -74,7 +74,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         controls: document.querySelectorAll('button, input, select, textarea, a[href], [contenteditable="true"], [tabindex]:not([tabindex="-1"])').length,
         seen: (() => { try { return localStorage.getItem('dcim.seenVersion'); } catch { return 'unavailable'; } })(),
         scroll: [document.documentElement.scrollWidth - innerWidth, document.documentElement.scrollHeight - innerHeight],
-        clipped: [...document.querySelectorAll('.ld-panel-body, .ld-changes-body, .ld-tile, .ld-rack, .ld-attn, .ld-inuse-row, .ld-top, .ld-kpis, .ld-main')]
+        clipped: [...document.querySelectorAll('.ld-panel-body, .ld-strip-body, .ld-tile, .ld-rack, .ld-attn, .ld-strip li, .ld-top, .ld-kpis, .ld-main, .ld-bottom')]
           .filter(e => e.scrollHeight > e.clientHeight + 1 || e.scrollWidth > e.clientWidth + 1).map(e => e.className),
         outside: [...document.querySelectorAll('.lab-display *')].filter(e => { const r = e.getBoundingClientRect(); return r.width && (r.right > innerWidth + 0.5 || r.bottom > innerHeight + 0.5); }).length,
         title: document.title,
@@ -92,7 +92,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         return {
           on: t('[data-testid="kpi-on"] .ld-tile-value'), onSub: t('[data-testid="kpi-on"] .ld-tile-sub'), none: t('[data-testid="kpi-noreading"] .ld-tile-value'),
           pdus: t('[data-testid="kpi-pdus"] .ld-tile-value'), kvms: t('[data-testid="kpi-kvms"] .ld-tile-value'), power: t('[data-testid="kpi-power"] .ld-tile-value'),
-          env: t('[data-testid="kpi-env"] dl'), racks: t('.ld-racks .ld-count'), attention: t('.ld-attention .ld-count'), inUse: t('.ld-inuse .ld-list'),
+          env: t('[data-testid="kpi-env"] dl'), racks: t('.ld-racks .ld-count'), attention: t('.ld-attention .ld-count'), inUse: t('.ld-inuse ul'),
           firstAttention: t('.ld-attn strong'), changes: t('.ld-changes ul'),
         };
       });
@@ -115,7 +115,8 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         const shown = e => e.getClientRects().length && e.innerText.trim();
         const texts = [...document.querySelectorAll('.lab-display *')].filter(e => e.getClientRects().length && [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()));
         const smallestOf = list => list.reduce((m, e) => (px(e) < m.px ? { px: px(e), what: `${e.className || e.tagName}: ${e.innerText.slice(0, 30)}` } : m), { px: Infinity });
-        const words = [...document.querySelectorAll('.ld-attn-tag, .ld-rack-state, .ld-badge, .ld-conn-state, .ld-status, .ld-chip, .ld-maint-label, .ld-stale-banner')].filter(shown);
+        // Status words (the MAINT badge beside a rack name is 32 px: the smallest-text rule covers it).
+        const words = [...document.querySelectorAll('.ld-attn-tag, .ld-rack-state, .ld-conn-state, .ld-status, .ld-chip, .ld-maint-label, .ld-stale-banner')].filter(shown);
         const kpis = [...document.querySelectorAll('.ld-tile-value')].filter(shown);
         const titles = [...document.querySelectorAll('.ld-panel-head h2')].filter(shown);
         return { base: px(document.querySelector('.lab-display')), kpi: smallestOf(kpis), clock: px(document.querySelector('.ld-clock-time')),
@@ -123,10 +124,10 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       });
       // A hair under the round numbers: the base size is 0.8333vw, 15.9994 px at 1920.
       const min = n => n * scale - 0.05;
-      assert.ok(sizes.base >= min(16) && sizes.kpi.px >= min(64) && sizes.clock >= min(76) && sizes.attention >= min(25) && sizes.title.px >= min(26),
+      assert.ok(sizes.base >= min(16) && sizes.kpi.px >= min(72) && sizes.clock >= min(76) && sizes.attention >= min(40) && sizes.title.px >= min(36),
         `${label}: ${JSON.stringify(sizes)}`);
-      assert.ok(sizes.smallest.px >= min(22), `${label}: smallest text ${JSON.stringify(sizes.smallest)}`);
-      assert.ok(sizes.words >= 5 && sizes.word.px >= min(28), `${label}: smallest status word ${JSON.stringify(sizes.word)}`);
+      assert.ok(sizes.smallest.px >= min(32), `${label}: smallest text ${JSON.stringify(sizes.smallest)}`);
+      assert.ok(sizes.words >= 5 && sizes.word.px >= min(36), `${label}: smallest status word ${JSON.stringify(sizes.word)}`);
       return sizes;
     }
     // Orderly: no text is wider than its box (no clipped number, status word or line), nothing overlaps (the screen's
@@ -152,9 +153,9 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         const overlap = (a, b) => { const r = a.getBoundingClientRect(), q = b.getBoundingClientRect(); return Math.min(r.right, q.right) - Math.max(r.left, q.left) > 1 && Math.min(r.bottom, q.bottom) - Math.max(r.top, q.top) > 1; };
         const inside = (child, box) => { const r = child.getBoundingClientRect(), q = box.getBoundingClientRect(); return r.left >= q.left - 1 && r.right <= q.right + 1 && r.top >= q.top - 1 && r.bottom <= q.bottom + 1; };
         const pairs = list => { const out = []; list.forEach((a, i) => list.slice(i + 1).forEach(b => { if (overlap(a, b)) out.push(`${name(a)} / ${name(b)}`); })); return out; };
-        const blocks = [...document.querySelectorAll('.ld-top, .ld-stale-banner, .ld-role-warn, .ld-tile, .ld-maint-band, .ld-panel, .ld-changes')].filter(visible);
+        const blocks = [...document.querySelectorAll('.ld-top, .ld-stale-banner, .ld-role-warn, .ld-tile, .ld-maint-band, .ld-panel, .ld-strip')].filter(visible);
         const overlaps = pairs(blocks), outside = [];
-        for (const box of document.querySelectorAll('.ld-top, .ld-brand, .ld-conn, .ld-clock, .ld-tile, .ld-tile-row, .ld-tile-foot, .ld-env dl, .ld-env dl > div, .ld-maint-band, .ld-panel-head, .ld-rack, .ld-rack-grid, .ld-attn, .ld-attn-text, .ld-inuse-row, .ld-changes, .ld-changes li')) {
+        for (const box of document.querySelectorAll('.ld-top, .ld-brand, .ld-conn, .ld-clock, .ld-tile, .ld-tile-row, .ld-tile-foot, .ld-env dl, .ld-env dl > div, .ld-maint-band, .ld-maint-text, .ld-panel-head, .ld-rack, .ld-rack-head, .ld-rack-line, .ld-rack-grid, .ld-attn, .ld-attn-text, .ld-strip, .ld-strip li')) {
           const kids = [...box.children].filter(visible);
           overlaps.push(...pairs(kids));
           outside.push(...kids.filter(k => !inside(k, box)).map(k => `${name(k)} outside ${name(box)}`));
@@ -200,7 +201,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       assert.match(await text(page, '[data-testid="lab-status"]'), /^\d+ ALARMS?$/);
       assert.equal(await page.locator('[data-testid="kpi-power"]').getAttribute('data-level'), 'warn');
       assert.equal(await text(page, '[data-testid="kpi-power-chip"]'), 'PARTIAL');
-      assert.match((await text(page, '[data-testid="maint-band"]')).replace(/\s+/g, ' '), /^MAINTENANCE IN PROGRESS Rack-03 · PDU 03 · outlets 1, 2 off since \d\d:\d\d · admin · Rewiring PSU feeds$/);
+      assert.match((await text(page, '[data-testid="maint-band"]')).replace(/\s+/g, ' '), /^MAINTENANCE Rack-03 · PDU 03 · outlets 1, 2 off since \d\d:\d\d · admin · Rewiring PSU feeds$/);
       assert.equal(await page.locator('[data-testid="maint-band"] bdi[dir="auto"]').count(), 4, 'user text isolated in <bdi dir="auto">');
       assert.equal(await page.locator('[data-testid="role-warning"]').count(), 0, 'no role warning for a Viewer');
       assert.equal(await text(page, '[data-testid="display-role"]'), 'Viewer');
@@ -261,7 +262,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       await page.waitForFunction(() => document.querySelector('.lab-display').dataset.stale === 'true', null, { timeout: 15000 });
       assert.equal((await figures(page)).pdus, '6 / 7', 'data kept while stale');
       assert.match(await text(page, '[data-testid="stale-banner"]'), /^NOT LIVE · last update \d\d:\d\d \(\d+ (s|min) ago\) · Lab Manager is not answering$/);
-      const greyed = await page.evaluate(() => ['.ld-kpis', '.ld-main', '.ld-changes'].map(s => getComputedStyle(document.querySelector(s)).filter));
+      const greyed = await page.evaluate(() => ['.ld-kpis', '.ld-main', '.ld-bottom'].map(s => getComputedStyle(document.querySelector(s)).filter));
       assert.deepEqual(greyed, ['grayscale(1)', 'grayscale(1)', 'grayscale(1)'], 'panels grey while not live');
       assert.equal(await text(page, '[data-testid="inuse-unknown"]'), 'Unknown while the display is not live');
       const bannerPx = await page.locator('[data-testid="stale-banner"]').evaluate(e => parseFloat(getComputedStyle(e).fontSize));
@@ -337,7 +338,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       if (role === 'operator') {
         assert.equal(await text(page, '.ld-racks .ld-count'), '30');
         const first = await pager(page, '.ld-racks');
-        assert.match(first, /^\d\/2$/, 'compact cards: 30 racks in two pages');
+        assert.match(first, /^\d\/3$/, 'compact cards: 30 racks in three pages');
         assert.equal(await page.locator('.ld-rack-grid').getAttribute('data-compact'), 'true');
         await orderly(page, 'operator 1280 compact racks');
         const names = () => page.locator('.ld-rack h3').allInnerTexts();

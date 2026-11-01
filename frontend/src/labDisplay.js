@@ -21,15 +21,17 @@ export const RATED_AMPS = 16;
 export const LOAD_WARN_PCT = 60;
 export const LOAD_ALARM_PCT = 80;
 // Row heights in em of the display's base size (16 px at 1920 x 1080); the page sets them inline and fits lists with
-// the same numbers. Sized for a 24-inch monitor read from 2-3 m: three rack cards across, four Attention rows.
-export const ROW_EM = { attention: 4.4, inUse: 2.5, ticker: 2.4 };
-export const RACK_CARD_EM = { minW: 17, minH: 9, maxH: 12, gap: 0.8 };
-// More racks than fit at that size: compact cards (name, on / total, state) so every rack is seen in two pages or fewer.
-export const RACK_CARD_COMPACT_EM = { minW: 15, minH: 5.2, maxH: 6.4, gap: 0.6 };
+// the same numbers. Sized for a 24-inch monitor read from 2-3 m (index.css): nine rack cards (three across) and five
+// Attention rows at 1920 x 1080 with the maintenance band shown (the rows then share the panel height).
+export const ROW_EM = { attention: 5.8, strip: 2.6 };
+export const RACK_CARD_EM = { minW: 17, minH: 10, maxH: 12.5, gap: 0.7 };
+// More racks than fit at that size: compact cards (name and on / total, state), twelve on a page at 1920 x 1080.
+export const RACK_CARD_COMPACT_EM = { minW: 16, minH: 6.2, maxH: 8.5, gap: 0.6 };
 // The lab's own time zone: a TV stick or mini-PC set to UTC still shows lab time.
 export const LAB_TZ = "Asia/Jerusalem";
 export const LIST_GAP_EM = 0.45;
-export const TICKER_ITEM_EM = 38;   // recent changes: one entry per this much strip width
+// The two one-line strips along the bottom: one entry per this much strip width (em).
+export const STRIP_ITEM_EM = { inUse: 24, changes: 40 };
 
 // The same text as DcimView.jsx NON_SERVER_LABEL / isDefaultOutletLabel (lab-display.test.js keeps them equal).
 const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
@@ -246,7 +248,7 @@ export function attentionItems({ devices = [], pduStatuses = {}, kvmStatuses = {
     const name = typed(d.name);
     if (d.kind === "pdu") {
       const count = servers.filter(s => s.pduId === d.id).length;
-      const impact = own(count ? `${count} ${count === 1 ? "server has" : "servers have"} no power reading` : "No power reading");
+      const impact = own(count ? `No reading from ${count} ${count === 1 ? "server" : "servers"}` : "No power reading");
       if (state === "offline") add(`pdu:${d.id}`, "alarm", "pdu", d.rack, [name, own(" unreachable")], [...where, impact]);
       else if (state === "unavailable") add(`pdu:${d.id}`, "warn", "pdu", d.rack, [name, own(": status not available")], [...where, impact]);
       else if (state === "error") add(`pdu:${d.id}`, "warn", "pdu", d.rack, [name, own(" reports an error")], [...where, own("Readings may be incomplete")]);
@@ -319,8 +321,11 @@ export function maintenanceEntries({ devices = [], maintenance = null }) {
     const failed = asArray(state?.failed).length;
     if (failed) parts.push(own(` · ${failed} did not switch off`));
     if (state?.started_by) parts.push(own(" · "), typed(state.started_by));
-    if (state?.reason) parts.push(own(" · "), typed(String(state.reason).slice(0, 120)));
-    rows.push({ key: `maint:${id}`, rack: pdu?.rack || "", name: pdu?.name || String(id), parts, text: partsText(parts) });
+    // head: where, when and who; reason: why, shown apart so a long one is cut at its own end (also in Hebrew).
+    const head = [...parts];
+    const reason = state?.reason ? String(state.reason).slice(0, 120) : "";
+    if (reason) parts.push(own(" · "), typed(reason));
+    rows.push({ key: `maint:${id}`, rack: pdu?.rack || "", name: pdu?.name || String(id), parts, head, reason, text: partsText(parts) });
   }
   return rows.sort((a, b) => naturalCompare(a.rack, b.rack) || naturalCompare(a.name, b.name));
 }
@@ -407,6 +412,14 @@ export function rowsThatFit(height, rowH, gap = 0) {
   return Math.max(1, Math.floor((height + gap) / (rowH + gap)));
 }
 
+// A list that fills its box: how many rows of rowH px fit and, when the page is full (count >= rows), the row height
+// that shares the whole box among them (at most maxScale x rowH), so a full list ends at the bottom of its panel.
+export function fillRows(height, rowH, gap = 0, count = Infinity, maxScale = 1.4) {
+  const rows = rowsThatFit(height, rowH, gap);
+  if (!(height > 0) || !(rowH > 0) || count < rows) return { rows, rowH };
+  return { rows, rowH: Math.max(rowH, Math.floor(Math.min(rowH * maxScale, (height - gap * (rows - 1)) / rows) * 10) / 10) };
+}
+
 // The page of `items` shown at rotation step `tick`.
 export function pageOf(items, perPage, tick = 0) {
   const list = asArray(items);
@@ -416,7 +429,8 @@ export function pageOf(items, perPage, tick = 0) {
   return { items: list.slice(page * size, page * size + size), page, pages };
 }
 
-// Attention paging: alarms are pinned to the first rows of every page and only the other items rotate below them.
+// Attention paging: alarms are pinned to the first rows of every page and only the other items rotate below them;
+// every page is full (the last one wraps round to the first items).
 // When there are more alarms than rows, the alarms turn pages among themselves and the last row counts the alarms
 // not shown (moreAlarms). `more`: items not on this page.
 export function pinnedPage(items, rows, tick = 0) {
@@ -434,7 +448,11 @@ export function pinnedPage(items, rows, tick = 0) {
     return { items: shown, moreAlarms: alarms.length - shown.length, more: list.length - shown.length, page, pages };
   }
   if (alarms.length === size) return { items: alarms, moreAlarms: 0, more: rest.length, page: 0, pages: 1 };
-  const { items: shown, page, pages } = pageOf(rest, size - alarms.length, tick);
+  // Every page is full: the last one wraps round to the start of the rest, so the panel never ends half empty.
+  const per = size - alarms.length;
+  const pages = Math.ceil(rest.length / per);
+  const page = ((Math.floor(tick) % pages) + pages) % pages;
+  const shown = Array.from({ length: per }, (_, i) => rest[(page * per + i) % rest.length]);
   return { items: [...alarms, ...shown], moreAlarms: 0, more: rest.length - shown.length, page, pages };
 }
 

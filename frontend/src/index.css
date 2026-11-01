@@ -740,12 +740,14 @@ button:disabled { opacity: .5; cursor: not-allowed; }
    Made for a 24-inch monitor read from 2-3 m (1920 x 1080, or 1536 x 864 at 125 % Windows scaling). Every size is in
    em of one base size that follows the screen (16 px at 1920 x 1080, 12.8 px at 1536 x 864, 21.3 px at 2560 x 1440), so
    every 16:9 screen shows the same layout; the page fits rows with the same em values (labDisplay.js ROW_EM /
-   RACK_CARD_EM). Type scale at 1920 x 1080: detail text 1.4em (22 px, the smallest), panel titles 1.75em (28 px),
-   status words 1.75em (28 px), KPI numbers 4.2em (67 px), clock 5em (80 px). One idea per line: text never wraps;
-   only free text (names, reasons, alert titles) may end in "…", never a number or a status word. Status is never
-   colour alone: blue = normal, orange outline + "!" = check, solid red fill + "▲" = alarm, violet stripes =
-   maintenance, and words (CHECK / ALARM, the state text) on every one. Text colours keep at least 4.5:1 and ok / warn /
-   alarm stay apart for deuteranopia and protanopia (lab-display.test.js checks both). */
+   RACK_CARD_EM). Type scale at 1920 x 1080 (1 px = 0.277 mm on a 24-inch screen): detail text 2em (32 px, the
+   smallest), status words, panel titles and rack names 2.25em (36 px), alarm titles 2.5em (40 px), KPI numbers up to
+   5em (80 px), clock 5em. Few things, big: Racks and Attention share the middle, Working now and Recent are one line
+   each along the bottom. One idea per line: text never wraps; only free text (names, reasons, alert titles) may end in
+   "…", never a number or a status word. Status is never colour alone: blue = normal, orange outline + "!" = check,
+   solid red fill + "▲" = alarm, violet stripes = maintenance, and words (CHECK / ALARM, the state text) on every one.
+   Text colours keep at least 4.5:1 and ok / warn / alarm stay apart for deuteranopia and protanopia
+   (lab-display.test.js checks both). */
 .display-link { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border: 1px solid #333333; border-radius: 2px; color: #ccc; font-size: 12px; white-space: nowrap; }
 .display-link:hover { color: #9fe040; border-color: #3f6a14; }
 @media (max-width: 1699px) { .display-link-text { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; } }
@@ -754,9 +756,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .lab-display {
   --ld-bg: #000000; --ld-panel: #111111; --ld-card: #181818; --ld-line: #2e2e2e;
   --ld-text: #ffffff; --ld-muted: #b3b3b3; --ld-ok: #5ab4ff; --ld-warn: #ffb52e; --ld-alarm: #ff4f4f; --ld-maint: #c9a7ff; --ld-idle: #a7a7a7;
-  position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; gap: .9em;
+  position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; gap: .7em;
   /* Burn-in care: the page moves the layout by --ld-shift-x / -y (0-4 px, every 5 min) inside a constant total padding. */
-  padding: calc(1em + var(--ld-shift-y, 0px)) calc(1.3em + 4px - var(--ld-shift-x, 0px)) calc(1em + 4px - var(--ld-shift-y, 0px)) calc(1.3em + var(--ld-shift-x, 0px));
+  padding: calc(.8em + var(--ld-shift-y, 0px)) calc(1.1em + 4px - var(--ld-shift-x, 0px)) calc(.7em + 4px - var(--ld-shift-y, 0px)) calc(1.1em + var(--ld-shift-x, 0px));
   overflow: hidden; background: var(--ld-bg); color: var(--ld-text); line-height: 1.2; font-variant-numeric: tabular-nums;
   font-size: min(.8333vw, 1.4815vh, 64px);
 }
@@ -778,136 +780,140 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .ld-maint-band[data-level="warn"] .ld-maint-label::before { content: "!\00A0"; }
 .ld-status[data-level="ok"]::before { content: "\2713\00A0"; }
 /* top bar: the lab, its status in one word, live or not, the clock */
-.ld-top { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 2em; padding-bottom: .7em; border-bottom: 2px solid var(--ld-line); }
-.ld-brand { display: flex; align-items: center; gap: 1em; min-width: 0; }
-.ld-brand img { width: auto; height: 2.1em; flex-shrink: 0; }
-.ld-brand-rule { width: 2px; height: 3.4em; background: #76b900; flex-shrink: 0; }
+.ld-top { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 1.6em; padding-bottom: .5em; border-bottom: 2px solid var(--ld-line); }
+.ld-brand { display: flex; align-items: center; gap: .9em; min-width: 0; }
+.ld-brand img { width: auto; height: 2.3em; flex-shrink: 0; }
+.ld-brand-rule { width: 2px; height: 3.8em; background: #76b900; flex-shrink: 0; }
 .ld-brand h1 { min-width: 0; font-size: 3em; font-weight: 800; letter-spacing: -.01em; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ld-brand h1 span { color: var(--ld-muted); font-weight: 600; }
-.ld-status { flex-shrink: 0; padding: .08em .45em; border-radius: 2px; font-size: 2.1em; font-weight: 800; letter-spacing: .03em; line-height: 1.15; white-space: nowrap; color: var(--ld-c); box-shadow: inset 0 0 0 .1em var(--ld-c); }
+.ld-status { flex-shrink: 0; padding: .06em .4em; border-radius: 2px; font-size: 2.5em; font-weight: 800; letter-spacing: .03em; line-height: 1.15; white-space: nowrap; color: var(--ld-c); box-shadow: inset 0 0 0 .1em var(--ld-c); }
 .ld-status[data-level="alarm"] { color: #000; background: var(--ld-alarm); }
-.ld-conn { display: flex; flex-direction: column; align-items: flex-end; gap: .25em; text-align: right; }
-.ld-conn-state { display: inline-flex; align-items: center; gap: .45em; font-size: 1.75em; font-weight: 800; color: var(--ld-c); white-space: nowrap; }
-.ld-conn-state i { width: .55em; height: .55em; border-radius: 50%; background: currentColor; }
+.ld-conn { display: flex; flex-direction: column; align-items: flex-end; gap: .2em; text-align: right; }
+.ld-conn-state { display: inline-flex; align-items: center; gap: .4em; font-size: 2.25em; font-weight: 800; color: var(--ld-c); white-space: nowrap; }
+.ld-conn-state i { width: .5em; height: .5em; border-radius: 50%; background: currentColor; }
 .ld-conn[data-level="ok"] .ld-conn-state i { animation: ld-pulse 2.4s ease-in-out infinite; }
 .lab-display[data-stale="true"] .ld-conn-state i { animation: none; }
-.ld-conn-updated { display: inline-flex; align-items: center; gap: .5em; font-size: 1.4em; color: var(--ld-muted); white-space: nowrap; }
-.ld-role { padding: 0 .35em; border: 1px solid #5a5a5a; border-radius: 2px; font-weight: 700; color: var(--ld-text); }
-.ld-clock { display: flex; flex-direction: column; align-items: flex-end; padding-left: 1.6em; border-left: 2px solid var(--ld-line); }
+.ld-conn-updated { display: inline-flex; align-items: center; gap: .4em; font-size: 2em; color: var(--ld-muted); white-space: nowrap; }
+.ld-role { padding: 0 .3em; border: 1px solid #5a5a5a; border-radius: 2px; font-weight: 700; color: var(--ld-text); }
+.ld-clock { display: flex; flex-direction: column; align-items: flex-end; padding-left: 1.4em; border-left: 2px solid var(--ld-line); }
 .ld-clock-time { font-size: 5em; font-weight: 800; line-height: 1; letter-spacing: -.02em; color: var(--ld-text); white-space: nowrap; }
 .ld-clock-time small { font-size: .42em; font-weight: 700; color: var(--ld-muted); margin-left: .1em; }
-.ld-clock-date { margin-top: .2em; font-size: 1.4em; color: var(--ld-muted); white-space: nowrap; }
+.ld-clock-date { margin-top: .1em; font-size: 2em; color: var(--ld-muted); white-space: nowrap; }
 @keyframes ld-pulse { 50% { opacity: .35; } }
 /* not live: a banner nobody misses, and everything below it greyed out */
-.ld-stale-banner { padding: .2em .55em; border-radius: 2px; font-size: 2em; font-weight: 800; line-height: 1.2; color: #000; background: var(--ld-warn); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-stale-banner { padding: .15em .45em; border-radius: 2px; font-size: 2.25em; font-weight: 800; line-height: 1.2; color: #000; background: var(--ld-warn); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ld-stale-banner[data-level="alarm"] { background: var(--ld-alarm); }
-.lab-display[data-stale="true"] :is(.ld-kpis, .ld-maint-band, .ld-main, .ld-changes) { filter: grayscale(1); opacity: .45; }
-.ld-role-warn { padding: .2em .55em; border-radius: 2px; font-size: 1.6em; font-weight: 800; color: var(--ld-warn); box-shadow: inset 0 0 0 .12em var(--ld-warn); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lab-display[data-stale="true"] :is(.ld-kpis, .ld-maint-band, .ld-main, .ld-bottom) { filter: grayscale(1); opacity: .45; }
+.ld-role-warn { padding: .15em .45em; border-radius: 2px; font-size: 2em; font-weight: 800; color: var(--ld-warn); box-shadow: inset 0 0 0 .1em var(--ld-warn); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* first load / no connection yet */
 .ld-first { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; }
-.ld-first p { max-width: 36em; font-size: 2.4em; font-weight: 700; color: var(--ld-muted); }
+.ld-first p { max-width: 30em; font-size: 3em; font-weight: 700; color: var(--ld-muted); }
 /* KPI tiles, three lines each (label, number, word or detail): warn = orange outline + CHECK, alarm = solid red tile +
    ALARM. Five tiles and a wider Environment tile. */
-.ld-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 1.75fr); gap: .8em; }
-.ld-tile { container-type: inline-size; min-width: 0; display: flex; flex-direction: column; padding: .6em .9em .65em; background: var(--ld-panel); border: 1px solid var(--ld-line); border-left: .4em solid var(--ld-c, var(--ld-idle)); border-radius: 2px; }
+.ld-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 1.8fr); gap: .7em; }
+.ld-tile { container-type: inline-size; min-width: 0; display: flex; flex-direction: column; padding: .45em .7em .5em; background: var(--ld-panel); border: 1px solid var(--ld-line); border-left: .4em solid var(--ld-c, var(--ld-idle)); border-radius: 2px; }
 .ld-tile[data-level="warn"] { box-shadow: inset 0 0 0 .2em var(--ld-warn); }
 .ld-tile[data-level="alarm"] { background: var(--ld-alarm); border-color: var(--ld-alarm); }
 .ld-tile[data-level="alarm"] :is(h2, .ld-tile-value, .ld-tile-value small, .ld-tile-sub, dt, dd, dd small) { color: #000; }
-.ld-tile h2 { font-size: 1.4em; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ld-tile-row { display: flex; align-items: center; min-width: 0; margin-top: .05em; }
-/* A number is never cut: it scales with its tile (30 % of the tile width at most, 4.2em on a 16:9 screen) and the page
+.ld-tile h2 { font-size: 2em; font-weight: 800; letter-spacing: .01em; text-transform: uppercase; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-tile-row { display: flex; align-items: center; min-width: 0; }
+/* A number is never cut: it scales with its tile (34 % of the tile width at most, 5em on a 16:9 screen) and the page
    draws it smaller still when a long value would not fit (LabDisplay.jsx useFitWidth). */
-.ld-tile-value { min-width: 0; font-size: min(4.2em, 30cqi); font-weight: 800; line-height: 1.1; color: var(--ld-c, var(--ld-text)); white-space: nowrap; overflow: hidden; text-overflow: clip; }
+.ld-tile-value { min-width: 0; font-size: min(5em, 34cqi); font-weight: 800; line-height: 1.05; color: var(--ld-c, var(--ld-text)); white-space: nowrap; overflow: hidden; text-overflow: clip; }
 .ld-tile[data-level="idle"] .ld-tile-value, .ld-tile[data-level="neutral"] .ld-tile-value { color: var(--ld-text); }
 .ld-tile-value small { font-size: .5em; font-weight: 700; color: var(--ld-muted); }
-.ld-tile-foot { display: flex; align-items: center; min-width: 0; min-height: 2.15em; margin-top: auto; }
-.ld-tile-sub { min-width: 0; font-size: 1.4em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ld-chip { display: inline-block; flex-shrink: 0; padding: .06em .35em; border-radius: 2px; font-size: 1.75em; font-weight: 800; letter-spacing: .02em; line-height: 1.15; white-space: nowrap; color: #000; background: var(--ld-c); }
+.ld-tile-foot { display: flex; align-items: center; min-width: 0; min-height: 2.75em; margin-top: auto; }
+.ld-tile-sub { min-width: 0; font-size: 2em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-chip { display: inline-block; flex-shrink: 0; padding: .04em .3em; border-radius: 2px; font-size: 2.25em; font-weight: 800; letter-spacing: .02em; line-height: 1.12; white-space: nowrap; color: #000; background: var(--ld-c); }
 .ld-tile[data-level="alarm"] .ld-chip { color: var(--ld-alarm); background: #000; }
-.ld-env h2 { display: flex; align-items: center; gap: .5em; overflow: visible; }
-.ld-env h2 .ld-chip { font-size: 1.25em; }
-.ld-env dl { display: flex; justify-content: space-between; gap: 0 1em; margin-top: auto; min-width: 0; }
+.ld-env h2 { display: flex; align-items: center; gap: .4em; overflow: visible; }
+.ld-env h2 .ld-chip { font-size: 1.125em; }
+.ld-env dl { display: flex; justify-content: space-between; gap: 0 .8em; margin-top: auto; min-width: 0; }
 .ld-env dl > div { min-width: 0; }
-.ld-env dt { font-size: 1.4em; color: var(--ld-muted); white-space: nowrap; }
-.ld-env dd { font-size: 2.2em; font-weight: 800; line-height: 1.1; color: var(--ld-c, var(--ld-text)); white-space: nowrap; }
-.ld-env dd small { font-size: .66em; color: var(--ld-muted); }
+.ld-env dt { font-size: 2em; color: var(--ld-muted); white-space: nowrap; }
+.ld-env dd { font-size: 2.5em; font-weight: 800; line-height: 1.1; color: var(--ld-c, var(--ld-text)); white-space: nowrap; }
+.ld-env dd small { font-size: .8em; color: var(--ld-muted); }
 .ld-env [data-level="idle"] dd { color: var(--ld-text); }
-/* maintenance in progress: a violet striped band under the KPIs, who and why on one line */
-.ld-maint-band { display: flex; align-items: center; gap: .6em; min-width: 0; padding: .25em .5em; border-radius: 2px; font-size: 1.75em; font-weight: 700; line-height: 1.2; color: #fff;
-  background: repeating-linear-gradient(135deg, #2c2140 0 .7em, #140f1f .7em 1.4em); box-shadow: inset 0 0 0 .12em var(--ld-maint); }
-.ld-maint-label { flex-shrink: 0; padding: .02em .4em; border-radius: 2px; font-weight: 800; letter-spacing: .03em; white-space: nowrap; color: #000; background: var(--ld-maint); }
-.ld-maint-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ld-maint-count { flex-shrink: 0; margin-left: auto; font-size: .8em; color: var(--ld-muted); white-space: nowrap; }
-.ld-maint-band[data-level="warn"] { background: #1d1404; box-shadow: inset 0 0 0 .12em var(--ld-warn); }
+/* maintenance in progress: a violet striped band under the KPIs, who and why on one line. A reason too long for the
+   line is cut at its own end (its first words stay, also in Hebrew); where, when and who are never cut first. */
+.ld-maint-band { display: flex; align-items: center; gap: .5em; min-width: 0; padding: .2em .45em; border-radius: 2px; font-size: 2.25em; font-weight: 700; line-height: 1.2; color: #fff;
+  background: repeating-linear-gradient(135deg, #2c2140 0 .6em, #140f1f .6em 1.2em); box-shadow: inset 0 0 0 .1em var(--ld-maint); }
+.ld-maint-label { flex-shrink: 0; padding: .02em .35em; border-radius: 2px; font-weight: 800; letter-spacing: .03em; white-space: nowrap; color: #000; background: var(--ld-maint); }
+.ld-maint-text { flex: 1 1 auto; display: flex; align-items: baseline; min-width: 0; white-space: nowrap; overflow: hidden; }
+.ld-maint-where { flex: none; }
+.ld-maint-sep { flex: none; margin: 0 .3em; }
+.ld-maint-why { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ld-maint-count { flex-shrink: 0; margin-left: auto; font-size: .9em; color: var(--ld-muted); white-space: nowrap; }
+.ld-maint-band[data-level="warn"] { background: #1d1404; box-shadow: inset 0 0 0 .1em var(--ld-warn); }
 .ld-maint-band[data-level="warn"] .ld-maint-label { background: var(--ld-warn); }
-/* panels: Racks on the left; Attention over Working now on the right */
-.ld-main { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); gap: .8em; }
-.ld-column { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: .8em; }
-.ld-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: .8em 1em; background: var(--ld-panel); border: 1px solid var(--ld-line); border-radius: 2px; }
+/* panels: Racks on the left, Attention on the right */
+.ld-main, .ld-bottom { display: grid; grid-template-columns: minmax(0, 1.06fr) minmax(0, 1fr); gap: .7em; }
+.ld-main { flex: 1 1 0; min-height: 0; }
+.ld-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: .6em .8em .7em; background: var(--ld-panel); border: 1px solid var(--ld-line); border-radius: 2px; }
 .ld-panel-head { display: flex; align-items: baseline; gap: .8em; min-width: 0; }
-.ld-panel-head h2 { display: flex; align-items: baseline; gap: .45em; flex-shrink: 0; font-size: 1.75em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
-.ld-count { padding: 0 .35em; border-radius: 2px; font-size: .85em; font-weight: 800; color: var(--ld-text); background: #2a2a2a; }
+.ld-panel-head h2 { display: flex; align-items: baseline; gap: .4em; flex-shrink: 0; font-size: 2.25em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
+.ld-count { padding: 0 .3em; border-radius: 2px; font-size: .9em; font-weight: 800; color: var(--ld-text); background: #2a2a2a; }
 .ld-attention[data-level="alarm"] .ld-count { color: #000; background: var(--ld-alarm); }
 .ld-attention[data-level="warn"] .ld-count { color: #000; background: var(--ld-warn); }
-.ld-panel-note { min-width: 0; font-size: 1.4em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ld-pager { margin-left: auto; flex-shrink: 0; font-size: 1.4em; font-weight: 700; color: var(--ld-muted); white-space: nowrap; }
-.ld-panel-body { flex: 1 1 0; min-height: 0; margin-top: .6em; overflow: hidden; }
+.ld-pager { margin-left: auto; flex-shrink: 0; font-size: 2em; font-weight: 700; color: var(--ld-muted); white-space: nowrap; }
+.ld-panel-body { flex: 1 1 0; min-height: 0; margin-top: .5em; overflow: hidden; }
 .ld-list { display: flex; flex-direction: column; list-style: none; padding: 0; }
-.ld-empty, .ld-allclear { font-size: 1.6em; color: var(--ld-muted); }
-.ld-allclear { display: flex; align-items: center; gap: .6em; color: var(--ld-ok); font-weight: 700; }
-.ld-allclear i { width: .7em; height: .7em; border-radius: 50%; background: currentColor; flex-shrink: 0; }
-/* rack cards, three lines (name; on / total and kW; state): alarm = solid red card, warn = orange outline, maintenance =
-   violet striped top */
+.ld-empty, .ld-allclear { font-size: 2.25em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-allclear { display: flex; align-items: center; gap: .5em; color: var(--ld-ok); font-weight: 700; }
+.ld-allclear i { width: .6em; height: .6em; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+/* rack cards, three lines (name and MAINT; on / total and kW; state): alarm = solid red card, warn = orange outline,
+   maintenance = violet striped top. The name has the whole line unless MAINT shares it; the kW figure stands on the
+   same baseline as the count and steps aside (wraps out of view) when a big count leaves it no room. */
 .ld-rack-grid { display: grid; height: 100%; align-content: start; }
-.ld-rack { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto 1fr auto; align-items: center; column-gap: .8em;
-  padding: .45em .8em .5em; overflow: hidden; background: var(--ld-card); border: 1px solid var(--ld-line); border-top: .38em solid var(--ld-c); border-radius: 2px; }
+.ld-rack { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: .15em;
+  padding: .3em .6em .35em; overflow: hidden; background: var(--ld-card); border: 1px solid var(--ld-line); border-top: .4em solid var(--ld-c); border-radius: 2px; }
 .ld-rack[data-level="warn"] { box-shadow: inset 0 0 0 .2em var(--ld-warn); }
 .ld-rack[data-level="alarm"] { background: var(--ld-alarm); border-color: var(--ld-alarm); }
 .ld-rack[data-level="alarm"] :is(h3, .ld-rack-servers, .ld-rack-servers strong, .ld-rack-power, .ld-rack-state) { color: #000; }
 .ld-rack[data-level="maint"] { border-top-color: transparent;
-  background: repeating-linear-gradient(135deg, var(--ld-maint) 0 .45em, #3a2d52 .45em .9em) left top / 100% .38em no-repeat border-box, var(--ld-card); }
-.ld-rack h3 { grid-column: 1; grid-row: 1; min-width: 0; font-size: 2em; font-weight: 800; line-height: 1.15; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ld-badge { grid-column: 2; grid-row: 1; justify-self: end; padding: 0 .3em; border-radius: 2px; font-size: 1.75em; font-weight: 800; letter-spacing: .02em; line-height: 1.15; text-transform: uppercase; white-space: nowrap; color: #000; background: var(--ld-maint); }
+  background: repeating-linear-gradient(135deg, var(--ld-maint) 0 .45em, #3a2d52 .45em .9em) left top / 100% .4em no-repeat border-box, var(--ld-card); }
+.ld-rack-head { display: flex; align-items: baseline; gap: .5em; min-width: 0; }
+.ld-rack h3 { flex: 1 1 auto; min-width: 0; font-size: 2.25em; font-weight: 800; line-height: 1.15; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-badge { flex: none; padding: 0 .2em; border-radius: 2px; font-size: 2em; font-weight: 800; letter-spacing: .01em; line-height: 1.15; text-transform: uppercase; white-space: nowrap; color: #000; background: var(--ld-maint); }
 .ld-rack[data-level="alarm"] .ld-badge { color: var(--ld-maint); background: #000; }
-.ld-rack-servers { grid-column: 1; grid-row: 2; min-width: 0; font-size: 1.4em; color: var(--ld-muted); white-space: nowrap; }
-.ld-rack-servers strong { font-size: 2em; font-weight: 800; line-height: 1; color: var(--ld-text); }
+.ld-rack-line { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; column-gap: .9em; min-width: 0; height: 3.05em; overflow: hidden; }
+.ld-rack-servers { flex: none; font-size: 2em; line-height: 1.2; color: var(--ld-muted); white-space: nowrap; }
+.ld-rack-servers strong { font-size: 1.5em; font-weight: 800; line-height: 1; color: var(--ld-text); }
 .ld-rack[data-level="ok"] .ld-rack-servers strong { color: var(--ld-ok); }
 .ld-rack-servers[data-unknown] strong { color: var(--ld-muted); }
-.ld-rack-power { grid-column: 2; grid-row: 2; justify-self: end; font-size: 1.4em; font-weight: 700; color: var(--ld-muted); white-space: nowrap; }
-.ld-rack-state { grid-column: 1 / -1; grid-row: 3; min-width: 0; min-height: 1.2em; font-size: 1.75em; font-weight: 800; color: var(--ld-c); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-rack-power { flex: none; font-size: 2em; line-height: 1.2; font-weight: 700; color: var(--ld-muted); white-space: nowrap; }
+.ld-rack-state { min-width: 0; font-size: 2.25em; font-weight: 800; line-height: 1.15; color: var(--ld-c); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ld-rack[data-level="idle"] .ld-rack-state { color: var(--ld-muted); }
 /* compact cards (more racks than one page of normal cards): name and on / total on the first line, the state below */
-.ld-rack-grid[data-compact="true"] .ld-rack { grid-template-rows: auto auto; align-content: center; align-items: baseline; padding: .3em .7em .35em; }
-.ld-rack-grid[data-compact="true"] .ld-rack h3 { font-size: 1.75em; line-height: 1.1; }
-.ld-rack-grid[data-compact="true"] .ld-rack-servers { grid-column: 2; grid-row: 1; text-align: right; }
+.ld-rack-grid[data-compact="true"] .ld-rack { gap: .05em; padding: .25em .6em .3em; }
+.ld-rack-grid[data-compact="true"] .ld-rack h3 { line-height: 1.1; }
 .ld-rack-grid[data-compact="true"] .ld-rack-servers strong { font-size: 1.25em; }
-.ld-rack-grid[data-compact="true"] .ld-badge { display: none; }
-.ld-rack-grid[data-compact="true"] .ld-rack-state { grid-row: 2; line-height: 1.1; }
+.ld-rack-grid[data-compact="true"] .ld-rack-state { line-height: 1.1; }
 /* attention: alarm rows are solid red, warning rows outlined orange; the word in a column of its own */
-.ld-attn { display: grid; grid-template-columns: 11.6em minmax(0, 1fr); align-items: center; gap: .8em; padding: 0 .8em 0 0; background: color-mix(in srgb, var(--ld-c) 7%, var(--ld-panel)); border-left: .38em solid var(--ld-c); border-radius: 2px; }
+.ld-attn { display: grid; grid-template-columns: 14.2em minmax(0, 1fr); align-items: center; gap: .8em; padding: 0 .8em 0 0; background: color-mix(in srgb, var(--ld-c) 7%, var(--ld-panel)); border-left: .4em solid var(--ld-c); border-radius: 2px; }
 .ld-attn[data-level="warn"] { box-shadow: inset 0 0 0 .15em var(--ld-warn); }
 .ld-attn[data-level="alarm"] { background: var(--ld-alarm); }
 .ld-attn[data-level="alarm"] :is(.ld-attn-text strong, .ld-attn-text > span, .ld-attn-more-text) { color: #000; }
-.ld-attn-tag { justify-self: start; margin-left: .3em; padding: .02em .3em; border-radius: 2px; font-size: 1.75em; font-weight: 800; letter-spacing: .02em; line-height: 1.2; text-transform: uppercase; white-space: nowrap; color: #000; background: var(--ld-c); }
+.ld-attn-tag { justify-self: start; margin-left: .25em; padding: .02em .25em; border-radius: 2px; font-size: 2.25em; font-weight: 800; letter-spacing: .02em; line-height: 1.2; text-transform: uppercase; white-space: nowrap; color: #000; background: var(--ld-c); }
 .ld-attn[data-level="alarm"] .ld-attn-tag { color: var(--ld-alarm); background: #000; }
 .ld-attn-text { display: flex; flex-direction: column; gap: .1em; min-width: 0; }
-.ld-attn-text strong { font-size: 1.6em; font-weight: 800; line-height: 1.15; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ld-attn-text > span { font-size: 1.4em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ld-attn-more-text { font-size: 1.6em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
-/* working now: always room for two rows (ROW_EM.inUse, LIST_GAP_EM); Attention takes the rest of the column */
-.ld-inuse .ld-panel-body { flex: none; height: calc(2 * 2.5em + .6em); }
-.ld-inuse-row { display: flex; align-items: center; gap: .7em; min-width: 0; padding-left: .7em; border-left: .3em solid var(--ld-ok); }
-.ld-inuse-row strong { flex-shrink: 0; font-size: 1.6em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
-.ld-inuse-row span { min-width: 0; font-size: 1.4em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* recent changes */
-.ld-changes { display: flex; align-items: center; gap: 1.1em; padding-top: .5em; border-top: 2px solid var(--ld-line); }
-.ld-changes h2 { flex-shrink: 0; font-size: 1.4em; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--ld-muted); }
-.ld-changes-body { flex: 1 1 0; min-width: 0; display: flex; align-items: center; overflow: hidden; }
-.ld-changes-body > span { font-size: 1.4em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ld-changes ul { flex: 1; min-width: 0; display: grid; gap: 1.4em; list-style: none; padding: 0; }
-.ld-changes li { display: flex; align-items: baseline; gap: .6em; min-width: 0; padding-left: .6em; border-left: .3em solid var(--ld-c, var(--ld-idle)); }
-.ld-changes time { flex-shrink: 0; font-size: 1.4em; font-weight: 700; color: var(--ld-muted); }
-.ld-changes li span { min-width: 0; font-size: 1.4em; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-attn-text strong { font-size: 2.5em; font-weight: 800; line-height: 1.15; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-attn-text > span { font-size: 2em; color: var(--ld-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-attn-more-text { font-size: 2.5em; font-weight: 800; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* along the bottom, one line each: who is working now (remote consoles open) and recent changes */
+.ld-bottom { padding-top: .4em; border-top: 2px solid var(--ld-line); }
+.ld-strip { display: flex; align-items: center; gap: .8em; min-width: 0; }
+.ld-strip h2 { display: flex; align-items: baseline; gap: .4em; flex-shrink: 0; font-size: 2em; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; color: var(--ld-muted); white-space: nowrap; }
+.ld-strip h2 .ld-count { font-size: 1em; text-transform: none; }
+.ld-strip-body { flex: 1 1 0; min-width: 0; display: flex; align-items: center; overflow: hidden; }
+.ld-strip-body > span { min-width: 0; font-size: 2em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-strip ul { flex: 1; min-width: 0; display: grid; gap: 1.2em; list-style: none; padding: 0; }
+.ld-strip li { display: flex; align-items: baseline; gap: .5em; min-width: 0; padding-left: .5em; border-left: .3em solid var(--ld-c, var(--ld-idle)); }
+.ld-inuse li { --ld-c: var(--ld-ok); }
+.ld-inuse li strong { flex-shrink: 0; font-size: 2em; font-weight: 800; color: var(--ld-text); white-space: nowrap; }
+.ld-strip time { flex-shrink: 0; font-size: 2em; font-weight: 700; color: var(--ld-muted); }
+.ld-strip li span { min-width: 0; font-size: 2em; color: var(--ld-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ld-inuse li span { color: var(--ld-muted); }
 /* phones, small windows and portrait screens get a notice instead of the TV layout */
 .lab-display-narrow { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: #000; color: #fff; text-align: center; }
 .lab-display-narrow p { max-width: 26em; font-size: 20px; font-weight: 700; line-height: 1.45; }

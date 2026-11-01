@@ -11,9 +11,9 @@ import { useAccounts } from "../accounts";
 import nvidiaLogo from "../assets/nvidia-logo.svg";
 import {
   REFRESH_MS, STALE_MS, STALE_ALARM_MS, ROTATE_MS, REQUEST_TIMEOUT_MS, OVERRIDES_EVERY, INCIDENT_LIMIT, ROW_EM,
-  LIST_GAP_EM, TICKER_ITEM_EM,
+  LIST_GAP_EM, STRIP_ITEM_EM,
   buildServers, buildRacks, environment, kpis, attentionItems, consolesInUse, recentChanges, maintenanceEntries,
-  rackGrid, rowsThatFit, pageOf, pinnedPage, labStatus, sourceAfter, relativeAge, formatKw, formatRange,
+  rackGrid, fillRows, pageOf, pinnedPage, labStatus, sourceAfter, relativeAge, formatKw, formatRange,
   clockTime, longDate, changeTime, connectionState, pruneStatuses,
 } from "../labDisplay";
 
@@ -317,16 +317,17 @@ function DisplayScreen() {
         : <>
           <Kpis view={view} />
           <MaintenanceBand entries={view.maintenance} source={feed.sources.maintenance} rotation={rotation} />
-          {/* Two columns: the racks on the left, what needs a look and who is working on the right. A PDU near its
-              rating shows on its rack card and in Attention (no per-PDU panel: too small to read from the door). */}
+          {/* Two halves: the racks on the left, what needs a look on the right. A PDU near its rating shows on its rack
+              card and in Attention (no per-PDU panel: too small to read from the door). */}
           <main className="ld-main" aria-label="Lab status">
             <RacksPanel racks={view.racks} rotation={rotation} />
-            <div className="ld-column">
-              <AttentionPanel items={view.attention} rotation={rotation} />
-              <InUsePanel rows={view.inUse} kvmTotal={view.kpi.kvms.total} rotation={rotation} stale={stale} />
-            </div>
+            <AttentionPanel items={view.attention} rotation={rotation} />
           </main>
-          <ChangesStrip rows={view.changes} rotation={rotation} />
+          {/* One line each along the bottom: who is working now, and what changed recently. */}
+          <footer className="ld-bottom">
+            <InUseStrip rows={view.inUse} kvmTotal={view.kpi.kvms.total} rotation={rotation} stale={stale} />
+            <ChangesStrip rows={view.changes} rotation={rotation} />
+          </footer>
         </>}
     </div>
   );
@@ -395,7 +396,7 @@ function Chip({ level, testId, text }) {
 }
 
 // A number is never cut off: when it does not fit its tile (a long value, a narrow tile) it is drawn smaller until it
-// does. The CSS size (min(3.6em, 31cqi)) already fits the usual values; this covers the rest.
+// does. The CSS size (min(5em, 34cqi)) already fits the usual values; this covers the rest.
 function useFitWidth(key) {
   const ref = useRef(null);
   useLayoutEffect(() => {
@@ -471,16 +472,21 @@ function MaintenanceBand({ entries, source, rotation }) {
     return (
       <div className="ld-maint-band" data-level="warn" data-testid="maint-band" role="status">
         <strong className="ld-maint-label">MAINTENANCE</strong>
-        <span className="ld-maint-text">Maintenance status unavailable since {clockTime(source.since)}</span>
+        <span className="ld-maint-text"><span className="ld-maint-where">Maintenance status unavailable since {clockTime(source.since)}</span></span>
       </div>
     );
   }
   if (!entries.length) return null;
   const { items: [entry], page, pages } = pageOf(entries, 1, rotation.tick);
+  // Where, when and who, then the reason in a box of its own: a reason too long for the line loses its last words
+  // (its own end, also in Hebrew), never its first ones or the where / who.
   return (
     <div className="ld-maint-band" data-level="maint" data-testid="maint-band" role="status">
-      <strong className="ld-maint-label">MAINTENANCE IN PROGRESS</strong>
-      <span className="ld-maint-text"><Parts parts={entry.parts} /></span>
+      <strong className="ld-maint-label">MAINTENANCE</strong>
+      <span className="ld-maint-text">
+        <span className="ld-maint-where"><Parts parts={entry.head || entry.parts} /></span>
+        {entry.head && entry.reason && <><span className="ld-maint-sep" aria-hidden="true">·</span><bdi dir="auto" className="ld-maint-why">{entry.reason}</bdi></>}
+      </span>
       {pages > 1 && <span className="ld-maint-count" data-page={`${page + 1}/${pages}`}>{page + 1} of {pages}</span>}
     </div>
   );
@@ -501,11 +507,10 @@ function Pager({ more, page, pages, rotation }) {
   );
 }
 
-function PanelHead({ title, count, note, pager }) {
+function PanelHead({ title, count, pager }) {
   return (
     <div className="ld-panel-head">
       <h2>{title}{count != null && <span className="ld-count">{count}</span>}</h2>
-      {note && <span className="ld-panel-note">{note}</span>}
       {pager}
     </div>
   );
@@ -526,16 +531,23 @@ function RacksPanel({ racks, rotation }) {
               // No reading for any server: never a 0 that reads as "all off".
               const unknown = !r.storage && r.total > 0 && r.noReading >= r.total;
               const counted = !r.storage && r.total > 0;
+              const servers = !counted ? !layout.compact && <p className="ld-rack-servers">{r.storage ? "Storage" : "No servers"}</p>
+                : unknown ? <p className="ld-rack-servers" data-unknown="true"><strong>—</strong><span> / {r.total}</span></p>
+                : <p className="ld-rack-servers"><strong>{r.on}</strong><span> / {r.total}{layout.compact ? "" : " on"}</span></p>;
               return (
                 <article key={r.rack} className="ld-rack" data-level={r.level} data-rack={r.rack}>
-                  {/* Line 1: the name (and MAINT). Line 2: servers on / total and the rack's power. Line 3: its state. */}
-                  <h3 dir="auto">{r.rack}</h3>
-                  {r.maintenancePdus.length > 0 && <span className="ld-badge" data-level="maint">Maint</span>}
+                  {/* Line 1: the name (the whole line, or beside MAINT; a compact card adds on / total). Line 2: servers
+                      on / total and the rack's power on one baseline. Line 3: its state. */}
+                  <div className="ld-rack-head">
+                    <h3 dir="auto">{r.rack}</h3>
+                    {!layout.compact && r.maintenancePdus.length > 0 && <span className="ld-badge" data-level="maint">Maint</span>}
+                    {layout.compact && servers}
+                  </div>
+                  {!layout.compact && <div className="ld-rack-line">
+                    {servers}
+                    {counted && !unknown && <p className="ld-rack-power">{r.watts == null ? "— kW" : `${formatKw(r.watts)} kW`}</p>}
+                  </div>}
                   {/* A compact card has no room for a sentence: storage and empty racks say so in the state line. */}
-                  {!counted ? !layout.compact && <p className="ld-rack-servers ld-muted">{r.storage ? "Equipment storage" : "No servers"}</p>
-                    : unknown ? <p className="ld-rack-servers" data-unknown="true"><strong>—</strong><span> / {r.total}</span></p>
-                    : <p className="ld-rack-servers"><strong>{r.on}</strong><span> / {r.total}{layout.compact ? "" : " on"}</span></p>}
-                  {!layout.compact && counted && !unknown && <p className="ld-rack-power">{r.watts == null ? "— kW" : `${formatKw(r.watts)} kW`}</p>}
                   <p className="ld-rack-state" data-level={r.level}>{layout.compact ? r.reason || (r.storage ? "Storage" : "No servers") : r.reason}</p>
                 </article>
               );
@@ -550,23 +562,27 @@ const SEVERITY_TEXT = { alarm: "Alarm", warn: "Warning", info: "Info" };
 
 function AttentionPanel({ items, rotation }) {
   const [ref, box] = useBox();
-  const rows = rowsThatFit(box.height, ROW_EM.attention * box.em, LIST_GAP_EM * box.em);
+  // As many rows as fit; a full page shares the panel's height among them, so the list ends at the panel's bottom.
+  const { rows, rowH } = fillRows(box.height, ROW_EM.attention * box.em, LIST_GAP_EM * box.em, items.length);
   const { items: shown, moreAlarms, more, page, pages } = pinnedPage(items, rows, rotation.tick);
   const alarms = items.filter(i => i.severity === "alarm").length;
+  const height = box.height ? `${rowH}px` : `${ROW_EM.attention}em`;
   return (
     <section className="ld-panel ld-attention" aria-label="Attention" data-level={alarms ? "alarm" : items.length ? "warn" : "ok"}>
       <PanelHead title="Attention" count={items.length} pager={<Pager more={more} page={page} pages={pages} rotation={rotation} />} />
       <div ref={ref} className="ld-panel-body">
-        {items.length === 0 ? <p className="ld-allclear"><i aria-hidden="true" />All clear: every device answers and nothing needs a look.</p> :
+        {items.length === 0 ? <p className="ld-allclear"><i aria-hidden="true" />All clear: nothing needs a look.</p> :
           <ul className="ld-list" style={{ gap: `${LIST_GAP_EM}em` }}>
             {shown.map(item => (
-              <li key={item.key} className="ld-attn" data-level={item.severity} data-kind={item.kind} style={{ height: `${ROW_EM.attention}em` }}>
+              <li key={item.key} className="ld-attn" data-level={item.severity} data-kind={item.kind} style={{ height }}>
                 <span className="ld-attn-tag">{SEVERITY_TEXT[item.severity]}</span>
                 <span className="ld-attn-text"><strong dir="auto"><Parts parts={item.titleParts} /></strong><span dir="auto"><Parts parts={item.parts} /></span></span>
               </li>
             ))}
-            {moreAlarms > 0 && <li className="ld-attn ld-attn-more" data-level="alarm" style={{ height: `${ROW_EM.attention}em` }}>
-              <span className="ld-attn-tag">Alarm</span><span className="ld-attn-more-text">+{moreAlarms} more {moreAlarms === 1 ? "alarm" : "alarms"}</span>
+            {/* The same count as the pager above ("+N more"), with how many of them are alarms. */}
+            {moreAlarms > 0 && <li className="ld-attn ld-attn-more" data-level="alarm" style={{ height }}>
+              <span className="ld-attn-tag">Alarm</span>
+              <span className="ld-attn-more-text">+{more} more{more > moreAlarms ? ` · ${moreAlarms}` : ""} {moreAlarms === 1 ? "alarm" : "alarms"}</span>
             </li>}
           </ul>}
       </div>
@@ -574,39 +590,38 @@ function AttentionPanel({ items, rotation }) {
   );
 }
 
-function InUsePanel({ rows, kvmTotal, rotation, stale }) {
+// Who is working now: the remote consoles open from this site, one line; more than fit turn pages.
+function InUseStrip({ rows, kvmTotal, rotation, stale }) {
   const [ref, box] = useBox();
-  const perPage = rowsThatFit(box.height, ROW_EM.inUse * box.em, LIST_GAP_EM * box.em);
+  const perPage = Math.max(1, Math.floor(box.width / (STRIP_ITEM_EM.inUse * box.em)) || 1);
   const { items, page, pages } = pageOf(rows, perPage, rotation.tick);
   return (
-    <section className="ld-panel ld-inuse" aria-label="Working now">
-      <PanelHead title="Working now" count={stale ? null : rows.length} note="Remote consoles open"
-        pager={stale ? null : <Pager more={rows.length - items.length} page={page} pages={pages} rotation={rotation} />} />
-      <div ref={ref} className="ld-panel-body">
-        {stale ? <p className="ld-empty" data-testid="inuse-unknown">Unknown while the display is not live</p>
-          : rows.length === 0 ? <p className="ld-empty">{kvmTotal ? "No remote consoles are open." : "No KVMs are set up."}</p> :
-          <ul className="ld-list" style={{ gap: `${LIST_GAP_EM}em` }}>
+    <section className="ld-strip ld-inuse" aria-label="Working now">
+      <h2>Working now{!stale && <span className="ld-count">{rows.length}</span>}</h2>
+      <div ref={ref} className="ld-strip-body" style={{ height: `${ROW_EM.strip}em` }}>
+        {stale ? <span className="ld-muted" data-testid="inuse-unknown">Unknown while the display is not live</span>
+          : rows.length === 0 ? <span className="ld-muted">{kvmTotal ? "No remote consoles open" : "No KVMs are set up"}</span> :
+          <ul style={{ gridTemplateColumns: `repeat(${perPage}, minmax(0, 1fr))` }}>
             {items.map(r => (
-              <li key={r.key} className="ld-inuse-row" style={{ height: `${ROW_EM.inUse}em` }}>
-                <strong dir="auto">{r.server}</strong><span><bdi dir="auto">{r.kvm}</bdi> · port {r.port}</span>
-              </li>
+              <li key={r.key}><strong dir="auto">{r.server}</strong><span><bdi dir="auto">{r.kvm}</bdi> · port {r.port}</span></li>
             ))}
           </ul>}
       </div>
+      {!stale && <Pager more={rows.length - items.length} page={page} pages={pages} rotation={rotation} />}
     </section>
   );
 }
 
 function ChangesStrip({ rows, rotation }) {
   const [ref, box] = useBox();
-  // A row of changes across the strip, newest first; more than fit turn pages.
-  const perPage = Math.max(1, Math.floor(box.width / (TICKER_ITEM_EM * box.em)) || 1);
+  // Changes across the strip, newest first; more than fit turn pages.
+  const perPage = Math.max(1, Math.floor(box.width / (STRIP_ITEM_EM.changes * box.em)) || 1);
   const { items, page, pages } = pageOf(rows, perPage, rotation.tick);
   return (
-    <footer className="ld-changes" aria-label="Recent changes">
+    <section className="ld-strip ld-changes" aria-label="Recent changes">
       <h2>Recent</h2>
-      <div ref={ref} className="ld-changes-body" style={{ height: `${ROW_EM.ticker}em` }}>
-        {rows.length === 0 ? <span className="ld-muted">No maintenance or ping changes recorded recently.</span> :
+      <div ref={ref} className="ld-strip-body" style={{ height: `${ROW_EM.strip}em` }}>
+        {rows.length === 0 ? <span className="ld-muted">No recent maintenance or ping changes</span> :
           <ul style={{ gridTemplateColumns: `repeat(${perPage}, minmax(0, 1fr))` }}>
             {items.map(r => (
               <li key={r.key} data-level={r.kind}><time dateTime={new Date(r.at).toISOString()}>{changeTime(r.at)}</time><span dir="auto"><Parts parts={r.parts} /></span></li>
@@ -614,6 +629,6 @@ function ChangesStrip({ rows, rotation }) {
           </ul>}
       </div>
       <Pager more={rows.length - items.length} page={page} pages={pages} rotation={rotation} />
-    </footer>
+    </section>
   );
 }

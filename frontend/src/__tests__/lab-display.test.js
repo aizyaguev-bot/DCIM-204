@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   isServerLabel, buildServers, pduLoad, buildRacks, environment, kpis, openAlerts, attentionItems, consolesInUse,
   recentChanges, gridLayout, rowsThatFit, pageOf, relativeAge, formatKw, formatRange, connectionState, pruneStatuses,
-  changeTime, clockTime, longDate, rackGrid, RACK_CARD_EM, pinnedPage, labStatus, sourceAfter, maintenanceEntries, outletRuns, partsText, STALE_MS, TICKER_MAX, RATED_AMPS,
+  changeTime, clockTime, longDate, rackGrid, RACK_CARD_EM, ROW_EM, LIST_GAP_EM, fillRows, pinnedPage, labStatus, sourceAfter, maintenanceEntries, outletRuns, partsText, STALE_MS, TICKER_MAX, RATED_AMPS,
 } from "../labDisplay.js";
 
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
@@ -145,7 +145,7 @@ test("PDU load near its rating: an Attention item and the rack card's state (the
   const pduStatuses = { pdu1: online(1, undefined, amps(10.4)), pdu2: online(2, undefined, amps(13.6)), pdu3: online(3), pdu4: offline(4) };
   const items = attentionItems({ devices, pduStatuses, now });
   assert.deepEqual(items.map(i => [i.key, i.severity, i.title, i.detail]), [
-    ["pdu:pdu4", "alarm", "PDU 04 unreachable", "Rack-04 · 2 servers have no power reading"],
+    ["pdu:pdu4", "alarm", "PDU 04 unreachable", "Rack-04 · No reading from 2 servers"],
     ["load:pdu2", "alarm", "PDU 02 load 85 %", "Rack-02 · 13.6 A of 16 A"],
     ["load:pdu1", "warn", "PDU 01 load 65 %", "Rack-01 · 10.4 A of 16 A"],
   ]);
@@ -193,7 +193,7 @@ test("attentionItems: most severe first, with every source", () => {
   ]);
   const byKey = Object.fromEntries(items.map(i => [i.key, i]));
   assert.equal(byKey["pdu:pdu2"].title, "PDU 02 unreachable");
-  assert.equal(byKey["pdu:pdu2"].detail, "Rack-02 · 2 servers have no power reading");
+  assert.equal(byKey["pdu:pdu2"].detail, "Rack-02 · No reading from 2 servers");
   assert.equal(byKey["pdu:pdu2"].rack, "Rack-02");
   assert.equal(byKey["ping:t1"].detail, "Rack-02 · last answered 30 min ago");
   assert.equal(byKey["alert:e1"].detail, "Alert sent 10 min ago");
@@ -226,6 +226,10 @@ test("user text stays in separate parts, in logical order", () => {
   ]);
   assert.equal(entry.text, `Rack-03 · PDU 03 · outlets 1–3, 5 off since 11:38 · ${who} · ${reason}`);
   assert.equal(partsText(entry.parts), entry.text);
+  // The band shows the reason in a box of its own (cut at its own end): head = where, when and who; reason = why.
+  assert.deepEqual([partsText(entry.head), entry.reason], [`Rack-03 · PDU 03 · outlets 1–3, 5 off since 11:38 · ${who}`, reason]);
+  const [plain] = maintenanceEntries({ devices, maintenance: { pdus: { pdu3: { outlets_off: [1] } } } });
+  assert.deepEqual([partsText(plain.head), plain.reason], ["Rack-03 · PDU 03 · outlet 1 off", ""]);
   // An alert title and a ping target name are user parts too; the English around them is not.
   const items = attentionItems({ devices, pduStatuses: { pdu3: online(3) }, now, monitoring: { service: "ok",
     targets: [{ id: "h", name: "שרת-בדיקה", rack: "מעבדה", status: "down", enabled: true }],
@@ -247,7 +251,8 @@ test("pinnedPage: alarms stay on every page, the rest rotate below them", () => 
   const p0 = pinnedPage(list, 4, 0), p1 = pinnedPage(list, 4, 1), p2 = pinnedPage(list, 4, 2);
   assert.deepEqual(keys(p0), ["alarm1", "alarm2", "warn1", "warn2"]);
   assert.deepEqual(keys(p1), ["alarm1", "alarm2", "warn3", "warn4"]);
-  assert.deepEqual(keys(p2), ["alarm1", "alarm2", "info1"]);
+  // The last page is full too: it wraps round to the first of the rest.
+  assert.deepEqual(keys(p2), ["alarm1", "alarm2", "info1", "warn1"]);
   assert.deepEqual([p0.pages, p0.more, p0.moreAlarms], [3, 3, 0]);
   // More alarms than rows: they turn pages among themselves and the last row counts the rest.
   const alarms = Array.from({ length: 6 }, (_, i) => item("alarm", i));
@@ -302,17 +307,30 @@ test("layout helpers: the rack grid and lists fit without scrolling and rotate",
   assert.deepEqual([many.cols, many.rows, many.perPage], [5, 5, 25]);
   assert.ok(many.cellH >= opts.minH && many.cellH * many.rows + opts.gap * (many.rows - 1) <= 700);
   assert.deepEqual(gridLayout(3, 0, 0, opts).perPage, 1);
-  // The Racks panel body on a 24-inch monitor at 1920 x 1080 (and the same in em at 1536 x 864): the fixture's 8 racks
-  // on one page of normal cards, three across; more racks than that: compact cards, so 30 racks need at most two pages.
-  for (const [em, panel] of [[16, [932, 530]], [12.8, [745, 424]], [16, [932, 470]]]) {
-    const normal = rackGrid(8, ...panel, em);
-    assert.equal(normal.compact, false, JSON.stringify(normal));
-    assert.equal(normal.cols, 3);
-    assert.equal(normal.gapEm, RACK_CARD_EM.gap);
+  // The Racks panel body on a 24-inch monitor at 1920 x 1080 with the maintenance band (and the same in em at
+  // 1536 x 864, measured by tests/browser/lab-display.cjs): nine normal cards fit, three across, so the fixture's 8 racks
+  // are one page; more racks than that: compact cards, twelve on a page, so 30 racks take three pages.
+  for (const [em, panel] of [[16, [934, 509]], [12.8, [747, 405]]]) {
+    for (const count of [8, 9]) {
+      const normal = rackGrid(count, ...panel, em);
+      assert.deepEqual([normal.compact, normal.cols, normal.perPage, normal.gapEm], [false, 3, count, RACK_CARD_EM.gap], JSON.stringify(normal));
+      assert.ok(normal.cellH >= RACK_CARD_EM.minH * em - 1, JSON.stringify(normal));
+    }
     const thirty = rackGrid(30, ...panel, em);
     assert.equal(thirty.compact, true);
-    assert.ok(Math.ceil(30 / thirty.perPage) <= 2, JSON.stringify(thirty));
+    assert.ok(Math.ceil(30 / thirty.perPage) <= 3, JSON.stringify(thirty));
   }
+  // With the role warning or the NOT LIVE banner too, the 8 racks still fit one page, as compact cards.
+  const short = rackGrid(8, 934, 444, 16);
+  assert.deepEqual([short.compact, short.perPage], [true, 8]);
+  // Attention: rows of ROW_EM.attention; a full page shares the panel height (at most 1.4 x), a short list does not.
+  const full = fillRows(509, ROW_EM.attention * 16, LIST_GAP_EM * 16, 7);
+  assert.equal(full.rows, 5);
+  assert.ok(Math.abs(full.rows * full.rowH + (full.rows - 1) * LIST_GAP_EM * 16 - 509) < 1, JSON.stringify(full));
+  assert.deepEqual(fillRows(509, ROW_EM.attention * 16, LIST_GAP_EM * 16, 2), { rows: 5, rowH: ROW_EM.attention * 16 });
+  assert.equal(fillRows(300, 100, 0, 9, 1.4).rowH, 100);
+  assert.equal(fillRows(390, 100, 0, 9, 1.4).rowH, 130);
+  assert.equal(fillRows(250, 100, 0, 9, 1.2).rowH, 120);
   assert.equal(rowsThatFit(300, 50, 10), 5);
   assert.equal(rowsThatFit(0, 50, 10), 1);
   const list = Array.from({ length: 7 }, (_, i) => i);
