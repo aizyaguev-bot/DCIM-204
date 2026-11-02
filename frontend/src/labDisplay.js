@@ -456,12 +456,13 @@ export function pinnedPage(items, rows, tick = 0) {
   return { items: [...alarms, ...shown], moreAlarms: 0, more: rest.length - shown.length, page, pages };
 }
 
-// The lab in one word for the top bar: ALL NORMAL, N WARNINGS or N ALARMS.
+// The lab in one word for the top bar: ALL NORMAL, N TO CHECK or N ALARMS (CHECK / ALARM, as the Attention tags and the
+// rack chips say it).
 export function labStatus(items) {
   const alarms = asArray(items).filter(i => i?.severity === "alarm").length;
   const warnings = asArray(items).filter(i => i?.severity === "warn").length;
   if (alarms) return { level: "alarm", text: `${alarms} ${alarms === 1 ? "ALARM" : "ALARMS"}`, alarms, warnings };
-  if (warnings) return { level: "warn", text: `${warnings} ${warnings === 1 ? "WARNING" : "WARNINGS"}`, alarms, warnings };
+  if (warnings) return { level: "warn", text: `${warnings} TO CHECK`, alarms, warnings };
   return { level: "ok", text: "ALL NORMAL", alarms, warnings };
 }
 

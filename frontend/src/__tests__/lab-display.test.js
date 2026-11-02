@@ -262,7 +262,8 @@ test("pinnedPage: alarms stay on every page, the rest rotate below them", () => 
   assert.deepEqual(pinnedPage([...alarms.slice(0, 4), item("warn", 1)], 4, 0), { items: alarms.slice(0, 4), moreAlarms: 0, more: 1, page: 0, pages: 1 });
   assert.deepEqual(pinnedPage(list.slice(0, 2), 4, 9), { items: list.slice(0, 2), moreAlarms: 0, more: 0, page: 0, pages: 1 });
   assert.deepEqual(labStatus([]), { level: "ok", text: "ALL NORMAL", alarms: 0, warnings: 0 });
-  assert.equal(labStatus([item("warn", 1)]).text, "1 WARNING");
+  assert.equal(labStatus([item("warn", 1)]).text, "1 TO CHECK");
+  assert.equal(labStatus([item("warn", 1), item("warn", 2), item("warn", 3)]).text, "3 TO CHECK");
   assert.equal(labStatus(list).text, "2 ALARMS");
 });
 
