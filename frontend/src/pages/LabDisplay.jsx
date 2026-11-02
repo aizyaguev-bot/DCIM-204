@@ -418,7 +418,8 @@ function useFitWidth(key) {
 
 // Free text too long for its line (an Attention title, a maintenance reason, a rack name) is drawn smaller, step by
 // step, down to FIT_MIN_EM of the screen's base size (2em: 32 px at 1920 x 1080, the smallest text on the screen); only
-// what still does not fit then ends in "…" (CSS), at the text's own end (also in Hebrew). It is measured before paint,
+// what still does not fit then ends in "…" (CSS), at the text's own end: the line takes the text's direction (dir="auto"
+// on the line itself, or textDir when the text sits in <bdi> parts), so Hebrew keeps its first words. It is measured before paint,
 // once per text and per change of the line's width (a refresh that changes nothing changes nothing on screen), and
 // never wraps.
 const FIT_MIN_EM = 2;
@@ -456,6 +457,18 @@ function useShrinkToFit(key, minEm = FIT_MIN_EM) {
     return () => { alive = false; observer.disconnect(); };
   }, [key, minEm]);
   return ref;
+}
+
+// The direction of a line from its first letter that has one (Hebrew / Arabic: rtl, Latin: ltr), as dir="auto" would
+// find it; for a line whose text is all inside <bdi> parts, where dir="auto" on the line itself finds no letter.
+const RTL_LETTER = /[\u0590-\u08FF\uFB1D-\uFDFD\uFE70-\uFEFC]/;
+const LTR_LETTER = /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF]/;
+function textDir(text) {
+  for (const ch of String(text || "")) {
+    if (RTL_LETTER.test(ch)) return "rtl";
+    if (LTR_LETTER.test(ch)) return "ltr";
+  }
+  return "auto";
 }
 
 // One line of free text that shrinks to fit (useShrinkToFit); `text` is what it says (the measure runs again when it
@@ -607,9 +620,7 @@ function RacksPanel({ racks, rotation }) {
   );
 }
 
-// The same words as the status chips (CHECK / ALARM): a short tag leaves the title its room (the tag column is as
-// wide as the widest tag, "▲ ALARM").
-const SEVERITY_TEXT = { alarm: "Alarm", warn: "Check", info: "Info" };
+const SEVERITY_TEXT = { alarm: "Alarm", warn: "Warning", info: "Info" };
 
 function AttentionPanel({ items, rotation }) {
   const [ref, box] = useBox();
@@ -623,11 +634,11 @@ function AttentionPanel({ items, rotation }) {
       <PanelHead title="Attention" count={items.length} pager={<Pager more={more} page={page} pages={pages} rotation={rotation} />} />
       <div ref={ref} className="ld-panel-body">
         {items.length === 0 ? <p className="ld-allclear"><i aria-hidden="true" />All clear: nothing needs a look.</p> :
-          <ul className="ld-list" style={{ gap: `${LIST_GAP_EM}em` }}>
+          <ul className="ld-list ld-attn-list" style={{ gap: `${LIST_GAP_EM}em` }}>
             {shown.map(item => (
               <li key={item.key} className="ld-attn" data-level={item.severity} data-kind={item.kind} style={{ height }}>
                 <span className="ld-attn-tag">{SEVERITY_TEXT[item.severity]}</span>
-                <span className="ld-attn-text"><FitText as="strong" dir="auto" text={item.title}><Parts parts={item.titleParts} /></FitText><span dir="auto"><Parts parts={item.parts} /></span></span>
+                <span className="ld-attn-text"><FitText as="strong" dir={textDir(item.title)} text={item.title}><Parts parts={item.titleParts} /></FitText><span dir="auto"><Parts parts={item.parts} /></span></span>
               </li>
             ))}
             {/* The same count as the pager above ("+N more"), with how many of them are alarms. */}

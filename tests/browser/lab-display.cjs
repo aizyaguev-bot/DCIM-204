@@ -23,6 +23,7 @@ const LONG_TITLES = ['gpu-node-114-bmc: network reachability', 'Inlet current ab
 const LONG_REASON = 'Rewiring PSU feeds on the left side';
 const LONG_RACK = 'Rack-05-Training';
 const HEBREW_REASON = 'החלפת כבלי החשמל בספקי הכוח של השרתים בצד השמאלי של הארון לפני העברת כל הציוד לחדר החדש בקומה השנייה';
+const HEBREW_TITLE = 'התראה ראשונה: ספק כוח 2 בשרת gpu-node-114 לא מגיב לבדיקות החום והמתח כבר יותר משעה שלמה';
 const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, name: `QA rack ${i}`, kind: 'rack', model: 'Compute', ip: '0.0.0.0', rack: `Rack-${String(i + 20).padStart(2, '0')}`, labels: {}, enabled: true, port_count: 0, notes: '' }));
 
 (async () => {
@@ -36,7 +37,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
     assert.equal((await (await probe.request.get(origin + '/api/version')).json()).version, 'LOCAL PREVIEW - TEST DATA', 'Refuse any real lab environment');
     await probe.close();
 
-    async function open(role, viewport, { extraRacks = false, clock = false, longText = false, reason = null } = {}) {
+    async function open(role, viewport, { extraRacks = false, clock = false, longText = false, reason = null, title = null } = {}) {
       const context = await browser.newContext({ viewport });
       const login = await context.request.post(origin + '/api/auth/login', { data: { username: role, password: PASSWORD } });
       assert.equal(login.status(), 200, `${role} signs in`);
@@ -65,7 +66,8 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         });
         if (url.pathname === '/api/monitoring') return patch(j => {
           const alert = (id, title, ago) => ({ id, subject: `[DCIM alert] ${title}`, created_at: new Date(Date.now() - ago).toISOString(), sent_at: null, attempts: 0, error: null });
-          j.email_alerts.recent = [alert('qa-alert', 'QA inlet current above 15 A', 600000), ...(longText ? LONG_TITLES.map((t, i) => alert(`qa-long-${i}`, t, 700000 + i * 1000)) : [])];
+          j.email_alerts.recent = [alert('qa-alert', 'QA inlet current above 15 A', 600000), ...(longText ? LONG_TITLES.map((t, i) => alert(`qa-long-${i}`, t, 700000 + i * 1000)) : []),
+            ...(title ? [alert('qa-title', title, 650000)] : [])];
         });
         return route.continue();
       });
@@ -333,6 +335,15 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       // The first title does not fit at 40 px: it was drawn smaller, not cut.
       assert.ok(m.titles[0].px < 39.5, `title 1 drawn smaller to fit: ${m.titles[0].px}px`);
       assert.ok(m.short.px >= 39.95 && m.shortRack.px >= 35.95, `short text keeps its size: ${JSON.stringify([m.short, m.shortRack])}`);
+      // One tag column for every row (as wide as the widest tag shown, never wider than 14.2em): all titles start at one x.
+      const column = await page.evaluate(() => {
+        const base = parseFloat(getComputedStyle(document.querySelector('.lab-display')).fontSize);
+        const tags = [...document.querySelectorAll('.ld-attn-tag')].map(e => e.getBoundingClientRect().right);
+        const starts = [...document.querySelectorAll('.ld-attn-text, .ld-attn-more-text')].map(e => Math.round(e.getBoundingClientRect().left));
+        const first = document.querySelector('.ld-attn').getBoundingClientRect().left;
+        return { starts: [...new Set(starts)], tagsEnd: Math.max(...tags), width: starts[0] - first, limit: 14.2 * base + 0.4 * base + 0.8 * base + 1 };
+      });
+      assert.ok(column.starts.length === 1 && column.tagsEnd < column.starts[0] && column.width <= column.limit, `one tag column: ${JSON.stringify(column)}`);
       await textSizes(page, 'viewer 1920 long text', 1, { attentionMin: 32 });
       await numbersWhole(page, 'viewer 1920 long text');
       const lines = await orderly(page, 'viewer 1920 long text');
@@ -355,22 +366,30 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 
-    // ── A Hebrew maintenance reason too long even at 32 px: cut at its own end, its first words stay in view ──
+    // ── A Hebrew maintenance reason and a Hebrew Attention title too long even at 32 px: each is cut at its own end, its
+    //    first words stay in view ──
     {
-      const { context, page } = await open('viewer', { width: 1920, height: 1080 }, { reason: HEBREW_REASON });
-      const why = await page.locator('.ld-maint-why').evaluate(e => {
-        const node = e.firstChild, text = node.textContent, r = e.getBoundingClientRect();
+      const { context, page } = await open('viewer', { width: 1920, height: 1080 }, { reason: HEBREW_REASON, title: HEBREW_TITLE });
+      const ends = e => {
+        const node = document.createTreeWalker(e, NodeFilter.SHOW_TEXT).nextNode(), text = node.textContent, r = e.getBoundingClientRect();
         const rectOf = (from, to) => { const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); return range.getBoundingClientRect(); };
         const firstEnd = text.indexOf(' '), lastStart = text.lastIndexOf(' ') + 1;
         const inView = q => q.left >= r.left - 1 && q.right <= r.right + 1;
         return { px: parseFloat(getComputedStyle(e).fontSize), dir: getComputedStyle(e).direction, cut: e.scrollWidth > e.clientWidth,
           ellipsis: getComputedStyle(e).textOverflow, first: inView(rectOf(0, firstEnd)), last: inView(rectOf(lastStart, text.length)), text };
-      });
+      };
+      const why = await page.locator('.ld-maint-why').evaluate(ends);
       assert.equal(why.text, HEBREW_REASON);
       assert.deepEqual([why.dir, why.cut, why.ellipsis, why.first, why.last], ['rtl', true, 'ellipsis', true, false], JSON.stringify(why));
       assert.ok(why.px >= 31.95 && why.px <= 32.05, `drawn at the 32 px floor before it is cut: ${why.px}px`);
+      const strong = page.locator('.ld-attn strong').filter({ hasText: HEBREW_TITLE.split(' ')[0] });
+      await strong.waitFor({ timeout: 12000 });
+      const title = await strong.evaluate(ends);
+      assert.equal(title.text, HEBREW_TITLE);
+      assert.deepEqual([title.dir, title.cut, title.ellipsis, title.first, title.last], ['rtl', true, 'ellipsis', true, false], JSON.stringify(title));
+      assert.ok(title.px >= 31.95 && title.px <= 32.05, `title drawn at the 32 px floor before it is cut: ${title.px}px`);
       await page.screenshot({ path: path.join(shots, 'viewer-1920x1080-hebrew-reason.png') });
-      checks.push(`viewer 1920: a long Hebrew reason is drawn at ${why.px}px, right to left, cut at its own end with its first words in view`);
+      checks.push(`viewer 1920: a long Hebrew reason (${why.px}px) and a long Hebrew Attention title (${title.px}px) are drawn right to left, cut at their own end with their first words in view`);
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 

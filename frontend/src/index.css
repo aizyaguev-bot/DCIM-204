@@ -891,8 +891,14 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .ld-rack-grid[data-compact="true"] .ld-rack-servers strong { font-size: 1.25em; }
 .ld-rack-grid[data-compact="true"] .ld-rack-state { line-height: 1.1; }
 /* attention: alarm rows are solid red, warning rows outlined orange; the word in a column of its own */
-.ld-attn { display: grid; grid-template-columns: 12.6em minmax(0, 1fr); align-items: center; gap: .8em; padding: 0 .8em 0 0; background: color-mix(in srgb, var(--ld-c) 7%, var(--ld-panel)); border-left: .4em solid var(--ld-c); border-radius: 2px; }
+.ld-attn { display: grid; grid-template-columns: 14.2em minmax(0, 1fr); align-items: center; gap: .8em; padding: 0 .8em 0 0; background: color-mix(in srgb, var(--ld-c) 7%, var(--ld-panel)); border-left: .4em solid var(--ld-c); border-radius: 2px; }
 .ld-attn[data-level="warn"] { box-shadow: inset 0 0 0 .15em var(--ld-warn); }
+/* Every row shares one tag column, as wide as the widest tag on the page ("! WARNING" when one is shown, else
+   "▲ ALARM"): a page of alarms only leaves its titles that much more room. Without subgrid: the fixed 14.2em above. */
+@supports (grid-template-columns: subgrid) {
+  .ld-attn-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-content: start; }
+  .ld-attn-list > .ld-attn { grid-column: 1 / -1; grid-template-columns: subgrid; }
+}
 .ld-attn[data-level="alarm"] { background: var(--ld-alarm); }
 .ld-attn[data-level="alarm"] :is(.ld-attn-text strong, .ld-attn-text > span, .ld-attn-more-text) { color: #000; }
 .ld-attn-tag { justify-self: start; margin-left: .25em; padding: .02em .25em; border-radius: 2px; font-size: 2.25em; font-weight: 800; letter-spacing: .02em; line-height: 1.2; text-transform: uppercase; white-space: nowrap; color: #000; background: var(--ld-c); }
