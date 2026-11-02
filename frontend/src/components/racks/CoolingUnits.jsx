@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { validShelf, shelfLabel, describePlace, placeChanges } from "./chillers.js";
+import { validShelf, floorLabel, placeWord, describePlace, placeChanges } from "./chillers.js";
 
 // ─── chip ─────────────────────────────────────────────────────────────────────
-// One cooling unit as a button: on its shelf, in a rack's "not on a shelf" strip, or in the page panel.
+// One cooling unit as a button: on its floor, in a rack's "not on a floor" strip, or in the page panel.
 // dragHandle: dnd-kit listeners/attributes/setNodeRef for Edit mode on the overview (null otherwise).
-// actionLabel ("Place…"): the chip opens the unit to be placed (an Operator outside Edit mode); it replaces "no shelf".
+// actionLabel ("Place…"): the chip opens the unit to be placed (an Operator outside Edit mode); it replaces "no floor".
 export function CoolingChip({ unit, variant = "shelf", onOpen, dragHandle = null, highlighted = false, actionLabel = null }) {
   const placed = validShelf(unit.u);
-  const where = actionLabel || (placed ? shelfLabel(unit.u) : unit.rack ? "no shelf" : "no rack");
+  const where = actionLabel || (placed ? floorLabel(unit.u, unit.rack) : unit.rack ? `no ${placeWord(unit.rack)}` : "no rack");
   const { setNodeRef, listeners, attributes, isDragging } = dragHandle || {};
   const label = `${actionLabel ? `${actionLabel.replace("…", "")} cooling unit` : "Cooling unit"} ${unit.name}, ${describePlace(unit)}`;
   // Only the pointer drags (no keyboard sensor): dnd-kit's role and keyboard instructions are dropped; the keyboard
@@ -27,7 +27,7 @@ export function CoolingChip({ unit, variant = "shelf", onOpen, dragHandle = null
 const placeLabel = (unit, needsRack = false) => (validShelf(unit.u) && !needsRack ? "Move…" : "Place…");
 
 // ─── strip ────────────────────────────────────────────────────────────────────
-// The rack's units that are not on a shelf, under its shelves. In Edit mode it is also the "not on a shelf" drop
+// The rack's units that are not on a floor, under its floors. In Edit mode it is also the "not on a floor" drop
 // target and offers "+ Cooling". list: the rack detail's form, one line per unit with its place and action.
 // canEdit: the unit can be placed or moved (Place… / Move…; outside Edit mode that turns Edit on), else Details.
 export function CoolingStrip({ rack, units, canEdit, canAdd = canEdit, editMode, onOpen, onAdd, list = false, dropRef = null, isOver = false, renderChip = null, matchKeys = null }) {
@@ -38,7 +38,7 @@ export function CoolingStrip({ rack, units, canEdit, canAdd = canEdit, editMode,
     return <div className="cooling-list" ref={dropRef}>
       {all.length ? <ul>{all.map(unit => <li key={unit.id} data-unit-id={unit.id}>
         <span aria-hidden="true" className="cooling-glyph">❄</span><span dir="auto" className="cooling-name">{unit.name}</span>
-        <span className="cooling-where">{validShelf(unit.u) ? shelfLabel(unit.u) : "Not on a shelf"}</span>
+        <span className="cooling-where">{validShelf(unit.u) ? floorLabel(unit.u, rack) : `Not on a ${placeWord(rack)}`}</span>
         <button type="button" className="racks-btn racks-btn-sm" onClick={e => onOpen(unit, e.currentTarget)}
           aria-label={`${canEdit ? placeLabel(unit).replace("…", "") : "Details of"} ${unit.name}`}>
           {canEdit ? placeLabel(unit) : "Details"}</button>
@@ -48,7 +48,7 @@ export function CoolingStrip({ rack, units, canEdit, canAdd = canEdit, editMode,
   }
   if (!unplaced.length && !(editMode && canAdd)) return null;
   return <div className="cooling-strip" ref={dropRef} data-rack={rack} data-over={isOver ? "" : undefined}>
-    <span className="cooling-strip-label">{unplaced.length ? "Not on a shelf" : "Cooling"}</span>
+    <span className="cooling-strip-label">{unplaced.length ? `Not on a ${placeWord(rack)}` : "Cooling"}</span>
     {unplaced.map(unit => renderChip ? renderChip(unit)
       : <CoolingChip key={unit.id} unit={unit} variant="strip" onOpen={onOpen} highlighted={!!matchKeys?.has(`c:${unit.id}`)}/>)}
     {editMode && canAdd && <button type="button" className="cooling-add" onClick={e => onAdd(rack, e.currentTarget)}
@@ -147,7 +147,7 @@ function CoolingHistory({ canRestore, currentIds, currentPlaces, onLoad, onResto
 
 // ─── panel ────────────────────────────────────────────────────────────────────
 // The cooling units that need a place first: units with no rack (or a rack that is gone) and every rack's units that
-// are not on a shelf; units on a shelf are one line per rack until "Show all". A search shows only the units it
+// are not on a floor; units on a floor are one line per rack until "Show all". A search shows only the units it
 // matches. Rows offer Place… / Move… (canPlace: Operator and up; outside Edit mode it turns Edit on), else Details.
 // On a phone the panel can be folded to its header (expanded / onExpand).
 export function CoolingPanel({ groups, rackNames, loaded, loadError, canEdit, canPlace, canOperate, editMode, lastChange, matchKeys,
@@ -197,16 +197,16 @@ export function CoolingPanel({ groups, rackNames, loaded, loadError, canEdit, ca
             {needsRows.length > 0 && <div className="cooling-group" data-group="needs-rack">
               <h3>Needs a rack ({needsRows.length})</h3>
               <ul>{needsRows.map(({ unit, reason }) => row(unit, reason === "rack-not-found"
-                ? `${unit.rack} (not found)${validShelf(unit.u) ? ` · ${shelfLabel(unit.u)}` : ""}` : "No rack", true))}</ul>
+                ? `${unit.rack} (not found)${validShelf(unit.u) ? ` · ${floorLabel(unit.u, unit.rack)}` : ""}` : "No rack", true))}</ul>
             </div>}
             {rackGroups.map(r => <div key={r.rack} className="cooling-group" data-rack={r.rack}>
-              <h3><bdi>{r.rack}</bdi> {detailed ? `(${r.rows.length})` : `· not on a shelf (${r.rows.length})`}</h3>
-              <ul>{r.rows.map(unit => row(unit, validShelf(unit.u) ? shelfLabel(unit.u) : "Not on a shelf"))}</ul>
+              <h3><bdi>{r.rack}</bdi> {detailed ? `(${r.rows.length})` : `· not on a ${placeWord(r.rack)} (${r.rows.length})`}</h3>
+              <ul>{r.rows.map(unit => row(unit, validShelf(unit.u) ? floorLabel(unit.u, r.rack) : `Not on a ${placeWord(r.rack)}`))}</ul>
             </div>)}
-          </div> : !searching && <p className="racks-muted">Every cooling unit is on a shelf.</p>}
+          </div> : !searching && <p className="racks-muted">Every cooling unit is on a floor.</p>}
           {onShelf.length > 0 && <div className="cooling-on-shelf">
-            <span className="racks-muted">On a shelf:</span>
-            <ul>{onShelf.map(r => <li key={r.rack} data-rack={r.rack} title={`${r.rack}: ${r.placed.length} on a shelf`}><bdi>{r.rack}</bdi> · {r.placed.length}</li>)}</ul>
+            <span className="racks-muted">On a floor:</span>
+            <ul>{onShelf.map(r => <li key={r.rack} data-rack={r.rack} title={`${r.rack}: ${r.placed.length} on a ${placeWord(r.rack)}`}><bdi>{r.rack}</bdi> · {r.placed.length}</li>)}</ul>
           </div>}
         </>}
       {(loaded && !loadError && total > 0 && !searching) || (!editMode && canOperate) ? <div className="cooling-panel-foot">

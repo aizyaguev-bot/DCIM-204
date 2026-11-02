@@ -1,6 +1,9 @@
 // Racks page view model: row states, rack summaries, compacted shelves, search and filters. Pure (no DOM, no React).
 import { deviceState } from "../../api/client.js";
-import { validShelf, shelfLabel } from "./chillers.js";
+import { validShelf, floorLabel, MAX_SHELF } from "./chillers.js";
+import { RACK_FLOORS, rackHasFloors } from "./floors.js";
+
+export { RACK_FLOORS };
 
 export const maintenanceFor = (maintenance, pduId) => maintenance?.pdus?.[String(pduId)] || null;
 
@@ -65,9 +68,6 @@ export function withCoolingRows(rows, coolingUs) {
   const merged = [...shelves, ...added].sort((a, b) => a.u - b.u);
   return [...merged, ...rows.filter(r => !(r.u > 0))];
 }
-
-// A rack has four floors (1 at the top … 4 at the bottom, like the 3D Twin's SHELF 1 (TOP) … SHELF 4 (BOTTOM)).
-export const RACK_FLOORS = 4;
 
 // The shelves a rack card draws: always floors 1-4 (an empty floor stays a row), then "other": a shelf above floor 4
 // that holds something (old or hand-edited data; shown so nothing is hidden), then the rack level (u 0). Empty shelves
@@ -158,18 +158,21 @@ export function matchesFilter(visual, filter) {
   return true;
 }
 
-// Shelf choices for the cooling dialog: "not on a shelf" first, then U01-U42 with up to two names on each.
-export function shelfOptions(rows, max = 42, coolingPlaced = {}) {
+// Place choices for the cooling dialog in that rack: "not on a floor" first, then the rack's floors 1-RACK_FLOORS as
+// its card numbers them ("Floor 2 · OPT42, Switch 04 +2"); Main storage: its shelves 1-42.
+export function floorOptions(rows, coolingPlaced = {}, rack = null) {
+  const floors = rackHasFloors(rack);
+  const max = floors ? RACK_FLOORS : MAX_SHELF;
   const names = new Map();
   for (const row of rows || []) {
     if (!(row.u > 0)) continue;
     names.set(row.u, row.items.map(i => i.data?.name).filter(Boolean));
   }
-  const options = [{ value: "", label: "Not on a shelf (rack level)" }];
+  const options = [{ value: "", label: `Not on a ${floors ? "floor" : "shelf"} (rack level)` }];
   for (let u = 1; u <= max; u++) {
     const list = [...(names.get(u) || []), ...((coolingPlaced[u] || []).map(c => c.name).filter(Boolean))];
     const shown = list.slice(0, 2).join(", ") + (list.length > 2 ? ` +${list.length - 2}` : "");
-    options.push({ value: String(u), label: `${shelfLabel(u)} · ${shown || "empty"}` });
+    options.push({ value: String(u), label: `${floorLabel(u, rack)} · ${shown || "empty"}` });
   }
   return options;
 }

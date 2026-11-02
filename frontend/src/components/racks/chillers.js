@@ -1,15 +1,28 @@
 // Cooling units (chillers.json): pure helpers for the Racks page. A unit is { id, name, rack, u } plus any extra
-// fields another client saved; rack null = not in any rack, u null = in the rack but not on a shelf.
+// fields another client saved; rack null = not in any rack, u null = in the rack but not on a floor (rack level).
+// A rack has floors 1-RACK_FLOORS (floors.js); Main storage has numbered shelves. A saved u above the rack's floors
+// (old data, e.g. 17) is kept as it is and drawn under the rack card's "Other" line, never moved without a choice.
 // Cooling units are never deleted here: there is no delete helper, and assertKeepsUnits refuses an edit that drops one.
+import { RACK_FLOORS, rackHasFloors, validFloor } from "./floors.js";
 
 export const COOLING_DELETE_ERROR = "Cooling units cannot be deleted. Move the unit to another rack or leave it unassigned instead.";
 
 const isObject = value => value != null && typeof value === "object" && !Array.isArray(value);
 
-// A shelf a unit can sit on: a whole number from 1 to 42 (a string, 0 or 99 is not a shelf).
+// A numbered place (U) a unit can be saved on: a whole number from 1 to 42 (a string, 0 or 99 is not one). In a rack
+// only floors 1-RACK_FLOORS are offered (validPlace); a higher U is old data, shown as it is.
+export const MAX_SHELF = 42;
 export function validShelf(u) {
-  return Number.isInteger(u) && u >= 1 && u <= 42;
+  return Number.isInteger(u) && u >= 1 && u <= MAX_SHELF;
 }
+
+// A place the cooling dialog offers in that rack: a floor (1-RACK_FLOORS), or a shelf 1-42 in Main storage.
+export function validPlace(u, rack) {
+  return rackHasFloors(rack) ? validFloor(u) : validShelf(u);
+}
+
+// "floor" in a rack, "shelf" in Main storage.
+export const placeWord = rack => (rackHasFloors(rack) ? "floor" : "shelf");
 
 export function normalizeChillers(doc) {
   const base = isObject(doc) ? doc : {};
@@ -79,17 +92,27 @@ export function assertKeepsUnits(before, after) {
 
 export const shelfLabel = u => `U${String(u).padStart(2, "0")}`;
 
+// A cooling unit's numbered place as the rack card numbers it: "Floor 2" (floors 1-RACK_FLOORS), "U17" above them
+// (the card's "Other" line), "Shelf 7" in Main storage.
+export function floorLabel(u, rack) {
+  if (!rackHasFloors(rack)) return `Shelf ${u}`;
+  return validFloor(u) ? `Floor ${u}` : `U${u}`;
+}
+
 export function describePlace(unit) {
   const rack = unit?.rack ?? null;
   if (rack === null || rack === "") return "No rack";
-  return validShelf(unit.u) ? `${rack} · ${shelfLabel(unit.u)}` : `${rack} · not on a shelf`;
+  return validShelf(unit.u) ? `${rack} · ${floorLabel(unit.u, rack)}` : `${rack} · not on a ${placeWord(rack)}`;
 }
 
-// The shelf part of a unit's place, as the dialog shows it: "U03", "Not on a shelf" or "Invalid shelf "x"".
-export function describeShelf(unit) {
-  if (validShelf(unit?.u)) return shelfLabel(unit.u);
-  if (unit?.u == null || unit?.u === "") return "Not on a shelf";
-  return `Invalid shelf "${String(unit.u)}"`;
+// The floor part of a unit's place, as the dialog shows it: "Floor 3", "Not on a floor", "U17 (not one of floors
+// 1-4)" or "Invalid floor "x"" (Main storage: "Shelf 7", "Not on a shelf", …).
+export function describeFloor(unit) {
+  const rack = unit?.rack ?? null, word = placeWord(rack);
+  if (validPlace(unit?.u, rack)) return floorLabel(unit.u, rack);
+  if (validShelf(unit?.u)) return `${floorLabel(unit.u, rack)} (not one of floors 1–${RACK_FLOORS})`;
+  if (unit?.u == null || unit?.u === "") return `Not on a ${word}`;
+  return `Invalid ${word} "${String(unit.u)}"`;
 }
 
 // One cooling change, kept so it can be undone: before/after are { name, rack, u }.

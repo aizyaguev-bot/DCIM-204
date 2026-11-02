@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as mod from "../components/racks/chillers.js";
 const { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits,
-  describePlace, describeShelf, coolingChange, undoCoolingChange, COOLING_DELETE_ERROR } = mod;
+  describePlace, describeFloor, floorLabel, validPlace, placeWord, coolingChange, undoCoolingChange, COOLING_DELETE_ERROR } = mod;
 
 const RACKS = ["Rack-01", "Rack-04"];
 const doc = () => ({
@@ -90,15 +90,30 @@ test("there is no delete helper", () => {
   for (const name of ["removeChiller", "deleteChiller", "dropChiller"]) assert.equal(typeof mod[name], "undefined", name);
 });
 
-test("describePlace and describeShelf", () => {
-  assert.equal(describePlace({ rack: "Rack-04", u: 3 }), "Rack-04 · U03");
-  assert.equal(describePlace({ rack: "Rack-04", u: null }), "Rack-04 · not on a shelf");
-  assert.equal(describePlace({ rack: "Rack-04", u: "3" }), "Rack-04 · not on a shelf");
+test("describePlace and describeFloor: floors 1-4 as the rack card numbers them, Main storage shelves", () => {
+  assert.equal(describePlace({ rack: "Rack-04", u: 3 }), "Rack-04 · Floor 3");
+  assert.equal(describePlace({ rack: "Rack-04", u: null }), "Rack-04 · not on a floor");
+  assert.equal(describePlace({ rack: "Rack-04", u: "3" }), "Rack-04 · not on a floor");
+  assert.equal(describePlace({ rack: "Rack-04", u: 17 }), "Rack-04 · U17", "old data above floor 4 is shown as it is");
+  assert.equal(describePlace({ rack: "Storage-Main", u: 7 }), "Storage-Main · Shelf 7");
+  assert.equal(describePlace({ rack: "Storage-Main", u: null }), "Storage-Main · not on a shelf");
   assert.equal(describePlace({ rack: null, u: 3 }), "No rack");
   assert.equal(describePlace({}), "No rack");
-  assert.equal(describeShelf({ u: 12 }), "U12");
-  assert.equal(describeShelf({ u: null }), "Not on a shelf");
-  assert.equal(describeShelf({ u: "x" }), 'Invalid shelf "x"');
+  assert.equal(describeFloor({ rack: "Rack-04", u: 4 }), "Floor 4");
+  assert.equal(describeFloor({ rack: "Rack-04", u: 17 }), "U17 (not one of floors 1–4)");
+  assert.equal(describeFloor({ rack: "Rack-04", u: null }), "Not on a floor");
+  assert.equal(describeFloor({ rack: "Rack-04", u: "x" }), 'Invalid floor "x"');
+  assert.equal(describeFloor({ rack: "Storage-Main", u: 12 }), "Shelf 12");
+  assert.equal(describeFloor({ rack: "Storage-Main", u: 99 }), 'Invalid shelf "99"');
+});
+
+test("validPlace: a rack offers floors 1-4 only, Main storage shelves 1-42", () => {
+  assert.deepEqual([0, 1, 4, 5, 17, 42, "2", 2.5, null].map(u => validPlace(u, "Rack-04")), [false, true, true, false, false, false, false, false, false]);
+  assert.deepEqual([1, 17, 42, 43].map(u => validPlace(u, "Storage-Main")), [true, true, true, false]);
+  assert.equal(floorLabel(2, "Rack-01"), "Floor 2");
+  assert.equal(floorLabel(5, "Rack-01"), "U5");
+  assert.equal(placeWord("Rack-01"), "floor");
+  assert.equal(placeWord("Storage-Main"), "shelf");
 });
 
 test("an undo restores the unit, and is refused when it was changed again since", () => {
@@ -126,10 +141,10 @@ test("placeChanges lists moves, renames, additions and units left out, for the c
   const after = [{ id: "c3", name: "Chiller-3", rack: "Rack-04", u: null }, { id: "c1", name: "Cooling-A", rack: "Rack-01", u: 2 },
     { id: "c7", name: "Same", rack: "Rack-02", u: 1 }, { id: "cn", name: "New", rack: "Rack-05", u: 9 }];
   assert.deepEqual(mod.placeChanges(before, after), [
-    { id: "c3", name: "Chiller-3", from: "Rack-04 · U05", to: "Rack-04 · not on a shelf", renamedFrom: null },
-    { id: "c1", name: "Cooling-A", from: "Rack-01 · U02", to: "Rack-01 · U02", renamedFrom: "Cooling" },
+    { id: "c3", name: "Chiller-3", from: "Rack-04 · U5", to: "Rack-04 · not on a floor", renamedFrom: null },
+    { id: "c1", name: "Cooling-A", from: "Rack-01 · Floor 2", to: "Rack-01 · Floor 2", renamedFrom: "Cooling" },
     { id: "c9", name: "Old", from: "No rack", to: null, renamedFrom: null },
-    { id: "cn", name: "New", from: null, to: "Rack-05 · U09", renamedFrom: null },
+    { id: "cn", name: "New", from: null, to: "Rack-05 · U9", renamedFrom: null },
   ]);
   assert.deepEqual(mod.placeChanges(before, before), []);
   assert.deepEqual(mod.placeChanges(null, undefined), []);

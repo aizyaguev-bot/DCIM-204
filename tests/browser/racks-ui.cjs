@@ -13,8 +13,8 @@ const ONLY=(process.env.RACKS_UI_ONLY||'').split(',').filter(Boolean);
 const run=n=>!ONLY.length||ONLY.includes(String(n));
 const PASSWORD='test-password-123';
 const EXTRA=[
- {id:'ch4b',name:'Chiller-2',rack:'Rack-04',u:3},          // two units on one shelf
- {id:'ch4c',name:'Chiller-3',rack:'Rack-04',u:null},       // in the rack, not on a shelf (the owner's case)
+ {id:'ch4b',name:'Chiller-2',rack:'Rack-04',u:3},          // two units on one floor
+ {id:'ch4c',name:'Chiller-3',rack:'Rack-04',u:null},       // in the rack, not on a floor (the owner's case)
  {id:'ch-free',name:'צ׳ילר נייד',rack:null,u:null},        // unassigned, Hebrew name
  {id:'ch-lost',name:'Chiller-9',rack:'Rack-99',u:2},       // rack not found
 ];
@@ -432,14 +432,14 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    const p=await open(admin);
    const puts=[];p.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/api/chillers'))puts.push(r.postData());});
    const r4=card(p,'Rack-04');
-   assert.equal(await r4.locator('[data-u-slot="3"] .cooling-chip').count(),2,'two units on U03 are both drawn');
+   assert.equal(await r4.locator('[data-u-slot="3"] .cooling-chip').count(),2,'two units on floor 3 are both drawn');
    // outside Edit mode the strip offers Place… (it turns Edit on)
    assert.match(await r4.locator('.cooling-strip .cooling-chip[data-unit-id="ch4c"]').innerText(),/Chiller-3\s*Place…/);
    const panel=p.locator('#cooling-panel');
    await panel.waitFor();   // opens by itself: a unit needs a rack
    assert.match(await panel.locator('[data-group="needs-rack"]').innerText(),/צ׳ילר נייד[\s\S]*No rack/);
    assert.match(await panel.locator('li[data-unit-id="ch-lost"]').innerText(),/Rack-99 \(not found\)/);
-   // first the units that need a place (no rack, rack not found, not on a shelf); the rest after "Show all"
+   // first the units that need a place (no rack, rack not found, not on a floor); the rest after "Show all"
    assert.deepEqual((await panel.locator('li[data-unit-id]').evaluateAll(els=>els.map(e=>e.dataset.unitId))).sort(),['ch-free','ch-lost','ch4c'].sort());
    assert.match(await panel.locator('.cooling-on-shelf').innerText(),/Rack-04 · 2/);
    await shot(p,'cooling-panel');
@@ -457,7 +457,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await p.keyboard.press('Escape');await dlg.waitFor({state:'detached'});
    await setEdit(p,false);
    assert.equal(puts.length,0);
-   // keyboard only, Edit mode: Chiller-3 to Rack-05 U02
+   // keyboard only, Edit mode: Chiller-3 to Rack-05 floor 2
    await setEdit(p,true);
    const chip=r4.locator('.cooling-strip .cooling-chip[data-unit-id="ch4c"]');
    await chip.focus();await p.keyboard.press('Enter');
@@ -465,9 +465,13 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    assert.equal(await p.evaluate(()=>document.activeElement?.id),'cooling-rack','the Rack select has focus');
    for(let i=0;i<12&&await p.evaluate(()=>document.activeElement.value)!=='Rack-05';i++)await p.keyboard.press('ArrowDown');
    assert.equal(await p.evaluate(()=>document.activeElement.value),'Rack-05');
-   await p.keyboard.press('Tab');assert.equal(await p.evaluate(()=>document.activeElement?.id),'cooling-shelf');
+   await p.keyboard.press('Tab');assert.equal(await p.evaluate(()=>document.activeElement?.id),'cooling-floor');
+   // the rack's floors only (1-4, as its card numbers them), not shelves 1-42
+   assert.equal(await dlg.locator('label[for="cooling-floor"]').innerText(),'Floor');
+   assert.deepEqual(await dlg.locator('#cooling-floor option').evaluateAll(o=>o.map(e=>[e.value,e.textContent.split(' · ')[0]])),
+    [['','Not on a floor (rack level)'],['1','Floor 1'],['2','Floor 2'],['3','Floor 3'],['4','Floor 4']]);
    for(let i=0;i<4&&await p.evaluate(()=>document.activeElement.value)!=='2';i++)await p.keyboard.press('ArrowDown');
-   assert.match(await p.evaluate(()=>document.activeElement.selectedOptions[0].textContent),/^U02 · /);
+   assert.match(await p.evaluate(()=>document.activeElement.selectedOptions[0].textContent),/^Floor 2 · /);
    await shot(p,'cooling-dialog-edit');
    await p.keyboard.press('Tab');assert.equal(await p.evaluate(()=>document.activeElement?.textContent),'Save');
    await p.keyboard.press('Enter');await dlg.waitFor({state:'detached'});
@@ -476,38 +480,49 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    const moved=p.locator('[data-rack-id="Rack-05"] [data-u-slot="2"] [data-unit-id="ch4c"]');
    await moved.waitFor();
    await p.waitForFunction(()=>document.activeElement?.matches('[data-rack-id="Rack-05"] [data-u-slot="2"] [data-unit-id="ch4c"]'));
-   assert.match(await p.locator('.toast').innerText(),/Chiller-3 moved to Rack-05 · U02/);
+   assert.match(await p.locator('.toast').innerText(),/Chiller-3 moved to Rack-05 · Floor 2/);
    await shot(p,'toast-undo');
    await p.locator('.toast').getByRole('button',{name:'Undo'}).click();
-   await p.waitForFunction(()=>/is back at Rack-04 · not on a shelf/.test(document.querySelector('.toast')?.textContent||''));
+   await p.waitForFunction(()=>/is back at Rack-04 · not on a floor/.test(document.querySelector('.toast')?.textContent||''));
    await expectUnit('ch4c',{rack:'Rack-04',u:null});
    assert.equal(await unitCount(),UNITS);
-   // Take off shelf keeps the rack; "Undo last change" in the panel puts it back
+   // Take off floor keeps the rack; "Undo last change" in the panel puts it back
    await r4.locator('[data-u-slot="3"] .cooling-chip[data-unit-id="ch4"]').click();await dlg.waitFor();
-   await dlg.getByRole('button',{name:'Take off shelf'}).click();await dlg.waitFor({state:'detached'});
+   assert.match(await dlg.locator('#cooling-offshelf-hint').innerText(),/Take off floor keeps it in Rack-04, not on a floor\./);
+   await dlg.getByRole('button',{name:'Take off floor'}).click();await dlg.waitFor({state:'detached'});
    await expectUnit('ch4',{rack:'Rack-04',u:null});
    await r4.locator('.cooling-strip [data-unit-id="ch4"]').waitFor();
    await panel.getByRole('button',{name:'Undo last change'}).click();
    await r4.locator('[data-u-slot="3"] [data-unit-id="ch4"]').waitFor();
    await expectUnit('ch4',{rack:'Rack-04',u:3});
    assert.equal(await unitCount(),UNITS);
-   // the Hebrew unit to Rack-02 U06: its shelf is shown (not folded) and its name reads right to left
+   // the Hebrew unit to Rack-02 floor 2: it is drawn on that floor and its name reads right to left
    await panel.locator('li[data-unit-id="ch-free"] button').click();await dlg.waitFor();
-   await dlg.locator('#cooling-rack').selectOption('Rack-02');await dlg.locator('#cooling-shelf').selectOption('6');
+   await dlg.locator('#cooling-rack').selectOption('Rack-02');await dlg.locator('#cooling-floor').selectOption('2');
    await dlg.getByRole('button',{name:'Save'}).click();await dlg.waitFor({state:'detached'});
+   await expectUnit('ch-free',{rack:'Rack-02',u:2});
    await setEdit(p,false);
-   const heb=card(p,'Rack-02').locator('[data-u-slot="6"] .cooling-chip[data-unit-id="ch-free"] .cooling-name');
+   const heb=card(p,'Rack-02').locator('[data-u-slot="2"] .cooling-chip[data-unit-id="ch-free"] .cooling-name');
    await heb.waitFor();
    assert.equal(await heb.getAttribute('dir'),'auto');
    assert.equal(await heb.evaluate(e=>getComputedStyle(e).direction),'rtl');
-   assert.equal(await card(p,'Rack-02').locator('.shelf-row[data-u-slot="6"][data-cooling-only]').count(),1,'U06 is shown, not hidden');
-   // above floor 4 it is listed under "Other"; no empty shelves are drawn around it
+   // old data: saved on U6 (above floor 4) by another client. The card lists it under "Other" (no empty shelves around
+   // it); the dialog says the saved floor is invalid and keeps U6 until a floor is chosen (nothing moves by itself)
+   assert.equal((await putChillers(d=>{d.units.find(u=>u.id==='ch-free').u=6;return d;})).status(),200);
+   await p.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+   await card(p,'Rack-02').locator('[data-u-slot="6"] .cooling-chip[data-unit-id="ch-free"]').waitFor({timeout:20000});
+   assert.equal(await card(p,'Rack-02').locator('.shelf-row[data-u-slot="6"][data-cooling-only]').count(),1,'U6 is shown, not hidden');
    assert.equal(await card(p,'Rack-02').locator('.floors-other').innerText(),'Other · not on floors 1–4');
    assert.equal(await card(p,'Rack-02').locator('.shelf-gap, [data-u-slot="5"], [data-u-slot="7"], [data-u-slot="8"]').count(),0);
-   // a stale undo changes nothing
    await setEdit(p,true);
    await card(p,'Rack-02').locator('[data-unit-id="ch-free"]').click();await dlg.waitFor();
-   await dlg.locator('#cooling-shelf').selectOption('');await dlg.getByRole('button',{name:'Save'}).click();await dlg.waitFor({state:'detached'});
+   assert.match(await dlg.locator('#cooling-floor-hint').innerText(),/^Saved floor is invalid \(6\); choose a floor or leave it off the floors\./);
+   assert.equal(await dlg.locator('#cooling-floor').inputValue(),'6','the saved U6 stays selected');
+   assert.deepEqual(await dlg.locator('#cooling-floor option').evaluateAll(o=>o.map(e=>e.value)),['','1','2','3','4','6']);
+   assert.equal(await dlg.getByRole('button',{name:'Save'}).isDisabled(),true,'nothing to save until something changes');
+   await shot(p,'cooling-dialog-invalid-floor');
+   // a stale undo changes nothing
+   await dlg.locator('#cooling-floor').selectOption('');await dlg.getByRole('button',{name:'Save'}).click();await dlg.waitFor({state:'detached'});
    await putChillers(d=>{d.units.find(u=>u.id==='ch-free').u=7;return d;});
    await p.locator('.toast').getByRole('button',{name:'Undo'}).click();
    await p.waitForFunction(()=>/changed in another session/.test(document.querySelector('.toast')?.textContent||''));
@@ -521,10 +536,10 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     const newest=panel.locator('.cooling-history-list > li').first();await newest.waitFor();
     const rev=await newest.getAttribute('data-revision');
     // each version says what the save after it changed; the newest is "Before the last change"
-    assert.match(await newest.innerText(),/Before the last change[\s\S]*צ׳ילר נייד: Rack-02 · not on a shelf → Rack-02 · U07/);
+    assert.match(await newest.innerText(),/Before the last change[\s\S]*צ׳ילר נייד: Rack-02 · not on a floor → Rack-02 · U7/);
     assert.match(await panel.locator('.cooling-history summary').innerText(),/Change history \(\d+ versions?\)/);
     await shot(p,'cooling-history');
-    // the newest version is the document before the other session's change (Hebrew unit not on a shelf)
+    // the newest version is the document before the other session's change (Hebrew unit not on a floor)
     await newest.getByRole('button',{name:'Restore…'}).click();
     await newest.getByRole('button',{name:`Restore #${rev}`}).click();
     await p.waitForFunction(r=>document.querySelector('.toast')?.textContent.includes(`restored to version #${r}`),rev);
@@ -533,7 +548,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     passed.push(`5b cooling history: version #${rev} restored through the panel (If-Match), no unit lost`);
    }
    await setEdit(p,false);await p.close();
-   passed.push('5 cooling: 2 units on U03, Chiller-3 "Place…" in the strip, panel (needs a rack, Rack-99 not found, not on a shelf first; Show all lists every unit), view dialog Move… turns Edit on (Rack focused, nothing saved), keyboard move to Rack-05 U02 (1 PUT, focus on the chip), Undo, Take off shelf + Undo last change, Hebrew unit on U06 rtl, stale undo refused, unit count unchanged');
+   passed.push('5 cooling: 2 units on floor 3, Chiller-3 "Place…" in the strip, panel (needs a rack, Rack-99 not found, not on a floor first; Show all lists every unit), view dialog Move… turns Edit on (Rack focused, nothing saved), dialog offers Floor 1-4 only, keyboard move to Rack-05 floor 2 (1 PUT, focus on the chip), Undo, Take off floor + Undo last change, Hebrew unit on floor 2 rtl, old U6 under "Other" with the invalid-floor hint (kept until changed), stale undo refused, unit count unchanged');
   }
 
   // ── 6. keyboard and focus ──
@@ -679,7 +694,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     await admin.c.request.put(origin+'/api/rack-positions',{data:d,headers:H(admin,g.headers()['etag'])});
    }
    await setEdit(p,false);await p.close();
-   passed.push('11 Edit-mode drag: a cooling unit onto Rack-05 U02 (saved, Undo), an OPT to the top of its rack (order saved; restored)');
+   passed.push('11 Edit-mode drag: a cooling unit onto Rack-05 floor 2 (saved, Undo), an OPT to the top of its rack (order saved; restored)');
   }
 
   // ── 12. Operator outside Edit mode: Place… / Move… turn Edit on; in Edit mode cooling units keep reloading, so Undo
@@ -689,7 +704,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    const panel=p.locator('#cooling-panel');await panel.waitFor();
    const dlg=p.locator('[role="dialog"][data-dialog="cooling"]');
    const chip=card(p,'Rack-04').locator('.cooling-strip .cooling-chip[data-unit-id="ch4c"]');
-   assert.equal(await chip.getAttribute('aria-label'),'Place cooling unit Chiller-3, Rack-04 · not on a shelf');
+   assert.equal(await chip.getAttribute('aria-label'),'Place cooling unit Chiller-3, Rack-04 · not on a floor');
    await chip.click();await dlg.waitFor();
    await p.waitForFunction(()=>document.activeElement?.id==='cooling-rack');
    assert.equal(await editToggle(p).getAttribute('aria-pressed'),'true','Place… turned Edit on');
@@ -703,19 +718,19 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await p.waitForFunction(()=>document.activeElement?.id==='cooling-rack');
    await p.keyboard.press('Escape');await dlg.waitFor({state:'detached'});
    assert.equal(await editToggle(p).getAttribute('aria-pressed'),'true');
-   // another session moves ch5 to U08 while this page is in Edit mode: the page shows it, and Undo returns there
-   assert.equal((await putChillers(d=>{d.units.find(u=>u.id==='ch5').u=8;return d;})).status(),200);
+   // another session moves ch5 to floor 4 while this page is in Edit mode: the page shows it, and Undo returns there
+   assert.equal((await putChillers(d=>{d.units.find(u=>u.id==='ch5').u=4;return d;})).status(),200);
    try{
     await p.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
-    const at8=card(p,'Rack-05').locator('[data-u-slot="8"] .cooling-chip[data-unit-id="ch5"]');
-    await at8.waitFor({timeout:20000});
-    await at8.click();await dlg.waitFor();
-    assert.equal(await dlg.locator('#cooling-shelf').inputValue(),'8','the dialog shows the current shelf');
-    await dlg.locator('#cooling-rack').selectOption('Rack-01');await dlg.locator('#cooling-shelf').selectOption('6');
+    const at4=card(p,'Rack-05').locator('[data-u-slot="4"] .cooling-chip[data-unit-id="ch5"]');
+    await at4.waitFor({timeout:20000});
+    await at4.click();await dlg.waitFor();
+    assert.equal(await dlg.locator('#cooling-floor').inputValue(),'4','the dialog shows the current floor');
+    await dlg.locator('#cooling-rack').selectOption('Rack-01');await dlg.locator('#cooling-floor').selectOption('2');
     await dlg.getByRole('button',{name:'Save'}).click();await dlg.waitFor({state:'detached'});
-    await expectUnit('ch5',{rack:'Rack-01',u:6});
+    await expectUnit('ch5',{rack:'Rack-01',u:2});
     await p.locator('.toast').getByRole('button',{name:'Undo'}).click();
-    await expectUnit('ch5',{rack:'Rack-05',u:8},'Undo returns to the place before this move (the other session\'s U08)');
+    await expectUnit('ch5',{rack:'Rack-05',u:4},'Undo returns to the place before this move (the other session\'s floor 4)');
    }finally{await putChillers(d=>{const u=d.units.find(x=>x.id==='ch5');u.rack='Rack-05';u.u=3;return d;});}
    assert.equal(await unitCount(),UNITS);
    await setEdit(p,false);await p.close();
@@ -734,7 +749,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await a.keyboard.press('Escape');await side.waitFor({state:'detached'});
    assert.equal(puts.length,0,'Cancel deletes nothing');
    await setEdit(a,false);await a.close();
-   passed.push('12 Operator: strip Place… and dialog Move… turn Edit on with the Rack select focused; Edit mode shows another session\'s move (U08) and Undo returns there; equipment Delete asks in the panel (Cancel focused, nothing saved)');
+   passed.push('12 Operator: strip Place… and dialog Move… turn Edit on with the Rack select focused; Edit mode shows another session\'s move (floor 4) and Undo returns there; equipment Delete asks in the panel (Cancel focused, nothing saved)');
   }
 
   // ── Edit-mode screenshot ──

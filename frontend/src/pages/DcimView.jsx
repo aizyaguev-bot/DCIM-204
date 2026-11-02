@@ -11,8 +11,8 @@ import SshButton, { useSshStatus } from "../components/SshButton";
 import { findServer } from "../api/ssh";
 import { serverIdentity } from "../api/locations";
 import { deviceState } from "../api/client";
-import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, rackFloors, RACK_FLOORS, buildSearchIndex, searchIndex, matchesFilter, shelfOptions } from "../components/racks/rackView.js";
-import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, shelfLabel, sameDocument } from "../components/racks/chillers.js";
+import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, rackFloors, RACK_FLOORS, buildSearchIndex, searchIndex, matchesFilter, floorOptions } from "../components/racks/rackView.js";
+import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, shelfLabel, placeWord, sameDocument } from "../components/racks/chillers.js";
 import { BLOCK, serverPowerGroup, planServerPower, sameTargets, serverDisplayName } from "../components/racks/serverPower.js";
 import ServerPowerControl, { PowerActionButtons } from "../components/racks/ServerPowerControl.jsx";
 import PowerConfirmDialog from "../components/racks/PowerConfirmDialog.jsx";
@@ -418,7 +418,7 @@ function EquipCell({ item, onSelect, onRename }) {
   </div>;
 }
 
-// A cooling unit on a shelf or in a rack's strip; in Edit mode on the overview it can also be dragged (pointer only).
+// A cooling unit on a floor or in a rack's strip; in Edit mode on the overview it can also be dragged (pointer only).
 function RackCoolingChip({ unit, variant }) {
   const editMode = useContext(EditContext);
   const { coolingDraggable, onOpenCooling, onPlaceCooling, matchKeys } = useContext(RackViewContext);
@@ -538,7 +538,7 @@ function attentionText(r, summary) {
   if (summary.off) parts.push(`${summary.off} off`);
   if (summary.noReading) parts.push(`${summary.noReading} no reading`);
   if (summary.maintenancePdus.length) parts.push("PDU in maintenance");
-  if (summary.coolingUnplaced) parts.push(`${summary.coolingUnplaced} cooling ${summary.coolingUnplaced === 1 ? "unit needs" : "units need"} a shelf`);
+  if (summary.coolingUnplaced) parts.push(`${summary.coolingUnplaced} cooling ${summary.coolingUnplaced === 1 ? "unit needs" : "units need"} a ${placeWord(r.rack)}`);
   return parts.length ? parts.join(" · ") : summary.total ? `All ${summary.total} on` : "No servers";
 }
 
@@ -546,7 +546,7 @@ const slug = text => String(text).toLowerCase().replace(/[^a-z0-9]+/g, "-").repl
 
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
 // One rack card: header (name opens the detail), figures, load bar, its four floors (plus an "Other" line for anything
-// on a U above floor 4, and the rack level) and the rack's cooling units that are not on a shelf. Main storage keeps
+// on a U above floor 4, and the rack level) and the rack's cooling units that are not on a floor. Main storage keeps
 // its occupied shelves. In the rack detail (detail) the header is plain text.
 function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, fixed = false, external = false, externalActiveId = null, detail = false, collapsed = false, onToggleCollapse = null }) {
   const {canAdmin} = useAccounts();
@@ -1846,7 +1846,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
 
   const crossSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const activeServer = activeId ? rackStats.flatMap(rs => rs.servers).find(s => s.id === activeId) : null;
-  // A cooling drag only sees shelves and "not on a shelf" strips; a server drag never sees them.
+  // A cooling drag only sees floors (shelves) and "not on a floor" strips; a server drag never sees them.
   const collision = useCallback(args => {
     const isCooling = String(args.active?.id).startsWith("cooling:");
     const droppableContainers = args.droppableContainers.filter(c => {
@@ -2532,10 +2532,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [coolingDialog, setCoolingDialog] = useState(null);   // { mode, unitId?, rack?, newId?, focusUnit? }
   const coolingEditable = !!canOperate && chillersLoaded && !loadErrors.cooling;
   const unitById = useCallback(id => chillerDoc.units.find(u => u?.id === id) || null, [chillerDoc]);
-  const shelfOptionsFor = useCallback(rackName => {
+  // The cooling dialog offers the rack's floors 1-RACK_FLOORS (Main storage: its shelves), named as on the rack card.
+  const floorOptionsFor = useCallback(rackName => {
     const rs = rackStats.find(x => x.rack === rackName);
     const rows = rs ? buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems).rows : [];
-    return shelfOptions(rows, 42, coolingGroups.byRack[rackName]?.placed || {});
+    return floorOptions(rows, coolingGroups.byRack[rackName]?.placed || {}, rackName);
   }, [rackStats, rackOrder, rackSlots, customItems, coolingGroups]);
   const openCooling = useCallback(unit => setCoolingDialog({ mode: editMode && coolingEditable ? "edit" : "view", unitId: unit.id }), [editMode, coolingEditable]);
   // Place… / Move… outside Edit mode: Edit turns on (App's own toggle) and the unit opens to be edited, Rack focused.
@@ -2581,10 +2582,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const saved = await saveCooling(doc => updateChiller(doc, unit.id, { u: null }), coolingChange(unit, { name: unit.name, rack: unit.rack, u: null }))
       .catch(e => { throw new Error(`The cooling assignment was not saved: ${e.message}`); });
     setCoolingDialog(null);
-    showToast(<><bdi>{unit.name}</bdi> is off its shelf; it stays in {unit.rack}.</>, "ok", () => undoCooling(saved));
+    showToast(<><bdi>{unit.name}</bdi> is off its {placeWord(unit.rack)}; it stays in {unit.rack}.</>, "ok", () => undoCooling(saved));
     focusUnit(unit.id);
   }, [coolingDialog, unitById, saveCooling, showToast, undoCooling, focusUnit]);
-  // A drag in Edit mode on the overview: shelf (u) or the rack's "not on a shelf" strip (u null).
+  // A drag in Edit mode on the overview: a floor (u) or the rack's "not on a floor" strip (u null).
   const placeCooling = useCallback(async (id, rackName, u) => {
     const unit = unitById(id);
     if (!unit || (unit.rack === rackName && (validShelf(unit.u) ? unit.u : null) === u)) return;
@@ -2936,7 +2937,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         // A new key per mode: "Move…" in the view dialog opens a fresh edit dialog with the Rack select focused.
         return <Portal>
           <CoolingUnitDialog key={`${coolingDialog.unitId || coolingDialog.newId}:${mode}`} mode={mode}
-            unit={dialogUnit} rackNames={racks} shelfOptionsFor={shelfOptionsFor} canOperate={!!canOperate}
+            unit={dialogUnit} rackNames={racks} floorOptionsFor={floorOptionsFor} canOperate={!!canOperate}
             onRequestEdit={mode === "view" && canPlaceCooling ? () => editCooling(dialogUnit) : null}
             onSave={saveCoolingDialog} onTakeOffShelf={takeOffShelf} onClose={() => setCoolingDialog(null)}/>
         </Portal>;

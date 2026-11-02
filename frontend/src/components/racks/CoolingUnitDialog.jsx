@@ -1,14 +1,20 @@
 import { useMemo, useRef, useState } from "react";
 import useDialogFocus from "./useDialogFocus.js";
-import { validShelf, describeShelf } from "./chillers.js";
+import { validShelf, validPlace, placeWord, describeFloor } from "./chillers.js";
+import { RACK_FLOORS } from "./floors.js";
 
-// View, edit or add one cooling unit. Units are never deleted: "Take off shelf" keeps the rack, "No rack" keeps the
+// View, edit or add one cooling unit. Units are never deleted: "Take off floor" keeps the rack, "No rack" keeps the
 // unit unassigned. onSave({ name, rack, u }) and onTakeOffShelf() throw Error(message) for this dialog to show.
 // onRequestEdit (view mode, Operator and up): "Move…" / "Place…" turns Edit on and reopens this unit to be edited.
-export default function CoolingUnitDialog({ mode, unit, rackNames, shelfOptionsFor, canOperate, onRequestEdit = null, onSave, onTakeOffShelf, onClose }) {
+// floorOptionsFor(rack): the rack's floors 1-RACK_FLOORS (Main storage: its shelves) as { value, label }.
+// A unit saved on a U the rack does not offer (old data, e.g. 17) keeps that U unless a floor is chosen: its rack
+// offers it as its own choice, selected, with a hint; nothing is moved by a rename.
+export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsFor, canOperate, onRequestEdit = null, onSave, onTakeOffShelf, onClose }) {
   const editing = mode === "edit" || mode === "create";
   const initialRack = unit?.rack ?? "";
-  const initialShelf = validShelf(unit?.u) ? String(unit.u) : "";
+  const savedOff = !!initialRack && validShelf(unit?.u) && !validPlace(unit.u, initialRack);   // e.g. U17 in a rack
+  const savedBad = unit?.u != null && unit?.u !== "" && !validPlace(unit.u, initialRack);
+  const initialShelf = validShelf(unit?.u) && (savedOff || validPlace(unit.u, initialRack)) ? String(unit.u) : "";
   const [name, setName] = useState(unit?.name ?? "");
   const [rack, setRack] = useState(initialRack);
   const [shelf, setShelf] = useState(initialShelf);
@@ -24,7 +30,12 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, shelfOptionsF
   useDialogFocus(panelRef, { initialRef: editing ? rackRef : onRequestEdit ? moveRef : closeRef, busyRef, onEscape: onClose });
 
   const knownRack = !initialRack || rackNames.includes(initialRack);
-  const options = useMemo(() => (rack ? shelfOptionsFor(rack) : [{ value: "", label: "Not on a shelf (rack level)" }]), [rack, shelfOptionsFor]);
+  const word = placeWord(rack || initialRack);
+  const options = useMemo(() => {
+    if (!rack) return [{ value: "", label: "Not on a floor (rack level)" }];
+    const list = floorOptionsFor(rack);
+    return savedOff && rack === initialRack ? [...list, { value: String(unit.u), label: `U${unit.u} · saved, not one of floors 1–${RACK_FLOORS}` }] : list;
+  }, [rack, floorOptionsFor, savedOff, initialRack, unit]);
   const trimmed = name.trim();
   const changed = mode === "create" ? true : trimmed !== (unit?.name ?? "") || rack !== initialRack || shelf !== initialShelf;
   const titleId = "cooling-dialog-title";
@@ -57,7 +68,7 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, shelfOptionsF
         <dl className="racks-dl">
           <div><dt>Name</dt><dd dir="auto">{unit.name}</dd></div>
           <div><dt>Rack</dt><dd dir="auto">{unit.rack ? <>{unit.rack}{!knownRack && " (not found)"}</> : "No rack"}</dd></div>
-          <div><dt>Shelf</dt><dd>{describeShelf(unit)}</dd></div>
+          <div><dt>{placeWord(unit.rack) === "floor" ? "Floor" : "Shelf"}</dt><dd>{describeFloor(unit)}</dd></div>
           <div><dt>Id</dt><dd className="racks-mono">{unit.id}</dd></div>
         </dl>
         <p className="racks-dialog-note">{onRequestEdit ? "This turns on Edit mode, where changes save immediately." : canOperate ? "Turn on Edit to move this unit." : "Viewer · read only"}</p>
@@ -84,20 +95,21 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, shelfOptionsF
           </select>
         </div>
         <div className="racks-field">
-          <label htmlFor="cooling-shelf">Shelf</label>
-          <select id="cooling-shelf" value={rack ? shelf : ""} disabled={busy || !rack} onChange={e => setShelf(e.target.value)}>
+          <label htmlFor="cooling-floor">{word === "floor" ? "Floor" : "Shelf"}</label>
+          <select id="cooling-floor" value={rack ? shelf : ""} disabled={busy || !rack} onChange={e => setShelf(e.target.value)}
+            aria-describedby={savedBad ? "cooling-floor-hint" : undefined}>
             {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          {unit && !validShelf(unit.u) && unit.u != null && unit.u !== "" && <p className="racks-field-hint">Saved shelf is invalid ("{String(unit.u)}"); choose a shelf or leave it off the shelves.</p>}
+          {unit && savedBad && <p id="cooling-floor-hint" className="racks-field-hint">Saved {placeWord(initialRack)} is invalid ({String(unit.u)}); choose a {word} or leave it off the {word === "floor" ? "floors" : "shelves"}.{savedOff ? " Until you do, it stays where it is." : ""}</p>}
         </div>
         {error && <p ref={errorRef} tabIndex={-1} role="alert" dir="auto" className="racks-dialog-error">{error}</p>}
         <div className="racks-dialog-actions racks-dialog-actions-primary-first">
           <button type="submit" className="racks-btn racks-btn-primary" disabled={busy || !changed}>{busy ? "Saving…" : mode === "create" ? "Add" : "Save"}</button>
           {mode === "edit" && validShelf(unit?.u) && <button type="button" className="racks-btn" disabled={busy}
-            aria-describedby="cooling-offshelf-hint" onClick={() => run(onTakeOffShelf)}>Take off shelf</button>}
+            aria-describedby="cooling-offshelf-hint" onClick={() => run(onTakeOffShelf)}>Take off {placeWord(unit.rack)}</button>}
           <button type="button" className="racks-btn" disabled={busy} onClick={onClose}>Cancel</button>
         </div>
-        {mode === "edit" && validShelf(unit?.u) && <p id="cooling-offshelf-hint" className="racks-field-hint">Take off shelf keeps it in <bdi>{unit.rack}</bdi>, not on a shelf.</p>}
+        {mode === "edit" && validShelf(unit?.u) && <p id="cooling-offshelf-hint" className="racks-field-hint">Take off {placeWord(unit.rack)} keeps it in <bdi>{unit.rack}</bdi>, not on a {placeWord(unit.rack)}.</p>}
       </form>}
     </section>
   </div>;
