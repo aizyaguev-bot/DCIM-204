@@ -12,7 +12,7 @@ import { findServer } from "../api/ssh";
 import { serverIdentity } from "../api/locations";
 import { deviceState } from "../api/client";
 import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, rackFloors, RACK_FLOORS, buildSearchIndex, searchIndex, matchesFilter, floorOptions } from "../components/racks/rackView.js";
-import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, shelfLabel, placeWord, sameDocument } from "../components/racks/chillers.js";
+import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, validPlace, shelfLabel, placeWord, sameDocument } from "../components/racks/chillers.js";
 import { BLOCK, serverPowerGroup, planServerPower, sameTargets, serverDisplayName } from "../components/racks/serverPower.js";
 import ServerPowerControl, { PowerActionButtons } from "../components/racks/ServerPowerControl.jsx";
 import PowerConfirmDialog from "../components/racks/PowerConfirmDialog.jsx";
@@ -445,7 +445,9 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
   const { coolingByRack, coolingDrop } = useContext(RackViewContext);
   const { scanUnit } = useContext(ServerActionsContext);
   const cooling = u > 0 ? coolingByRack?.[rack]?.placed?.[u] || [] : [];
-  const { setNodeRef, isOver } = useDroppable({ id: `shelf:${rack}:${u}`, disabled: !coolingDrop || !(u > 0) });
+  // Only a place the cooling dialog offers takes a cooling drop: floors 1-RACK_FLOORS (Main storage: its shelves), never
+  // a row on the card's "Other" line (old data above the floors).
+  const { setNodeRef, isOver } = useDroppable({ id: `shelf:${rack}:${u}`, disabled: !coolingDrop || !validPlace(u, rack) });
   const servers = items.filter(i => i.kind === "server");
   const equipment = items.filter(i => i.kind === "custom");
   const index = shelfIndex(u, floors, auto);
@@ -2590,6 +2592,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   // A drag in Edit mode on the overview: a floor (u) or the rack's "not on a floor" strip (u null).
   const placeCooling = useCallback(async (id, rackName, u) => {
     const unit = unitById(id);
+    // Only the places the dialog offers: a floor of that rack (Main storage: a shelf), or no floor (u null).
+    if (u != null && !validPlace(u, rackName)) return;
     if (!unit || (unit.rack === rackName && (validShelf(unit.u) ? unit.u : null) === u)) return;
     try {
       coolingMoved(await saveCooling(doc => placeChiller(doc, id, rackName, u), coolingChange(unit, { name: unit.name, rack: rackName, u })));

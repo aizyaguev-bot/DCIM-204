@@ -639,8 +639,12 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   if(run(7)){
    const p=await open(operator);
    await openPanel(p);
+   // Colours are read once no CSS transition runs: a switch whose first reading just arrived fades its track in from
+   // transparent (state unknown -> on) for .15 s, and a colour read in that moment is not the colour on screen. A
+   // contrast problem that is still there half a second later is real.
+   const settled=()=>p.waitForFunction(()=>!document.getAnimations().some(a=>a instanceof CSSTransition&&a.playState==='running'),null,{timeout:5000}).catch(()=>{});
    const check=async label=>{
-    const bad=await p.evaluate(()=>{
+    let bad;for(let i=0;i<2&&(i===0||bad.length);i++){if(i)await sleep(500);await settled();bad=await p.evaluate(()=>{
      const lum=c=>{const [r,g,b]=c.map(v=>{v/=255;return v<=0.03928?v/12.92:((v+0.055)/1.055)**2.4;});return 0.2126*r+0.7152*g+0.0722*b;};
      const rgb=s=>{const m=s.match(/rgba?\(([^)]+)\)/);if(!m)return null;const p=m[1].split(/[ ,/]+/).filter(Boolean).map(Number);return p.length>3&&p[3]===0?null:p.slice(0,3);};
      const bg=el=>{for(let e=el;e;e=e.parentElement){const c=rgb(getComputedStyle(e).backgroundColor);if(c)return c;}return [12,12,12];};
@@ -657,7 +661,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
       if(ratio<(large?3:4.5))out.push(`${t.slice(0,30)}: ${ratio.toFixed(2)}:1 (${cs.color} on ${bg(el)})`);
      }}
      return [...new Set(out)].slice(0,20);
-    });
+    });}
     assert.deepEqual(bad,[],`${label}: text size/contrast`);
    };
    assert.ok(await p.locator('.shelf-row[data-auto] .shelf-index').count()>0,'auto shelf numbers are on the page');
@@ -718,6 +722,20 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await expectUnit('ch4c',{rack:'Rack-05',u:2},'cooling drag');
    await p.locator('.toast').getByRole('button',{name:'Undo'}).click();
    await expectUnit('ch4c',{rack:'Rack-04',u:null},'drag undone');
+   // a row on the "Other" line (old data, here ch-free at U17) is no cooling drop target: dropping there saves nothing
+   const keptFree=await unitOf('ch-free');
+   assert.equal((await putChillers(d=>{Object.assign(d.units.find(u=>u.id==='ch-free'),{rack:'Rack-04',u:17});return d;})).status(),200);
+   try{
+    await p.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+    const other=card(p,'Rack-04').locator('[data-u-slot="17"]');await other.waitFor({timeout:20000});
+    const before=await unitOf('ch4c');let puts=0;const count=r=>{if(r.method()==='PUT'&&r.url().endsWith('/api/chillers'))puts++;};p.on('request',count);
+    await drag(card(p,'Rack-04').locator('.cooling-strip [data-unit-id="ch4c"]'),other);await sleep(800);
+    p.off('request',count);
+    assert.equal(puts,0,'no save for a drop on the Other line');
+    await expectUnit('ch4c',{rack:before.rack??null,u:before.u??null},'a drop on U17 (Other) changes nothing');
+   }finally{
+    await putChillers(d=>{Object.assign(d.units.find(u=>u.id==='ch-free'),{rack:keptFree?.rack??null,u:keptFree?.u??null});return d;});
+   }
    const positions=async()=>(await(await admin.c.request.get(origin+'/api/rack-positions')).json());
    const kept=await positions();
    try{
@@ -730,7 +748,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     await admin.c.request.put(origin+'/api/rack-positions',{data:d,headers:H(admin,g.headers()['etag'])});
    }
    await setEdit(p,false);await p.close();
-   passed.push('11 Edit-mode drag: a cooling unit onto Rack-05 floor 2 (saved, Undo), an OPT to the top of its rack (order saved; restored)');
+   passed.push('11 Edit-mode drag: a cooling unit onto Rack-05 floor 2 (saved, Undo), not onto a U17 row under Other (nothing saved), an OPT to the top of its rack (order saved; restored)');
   }
 
   // ── 12. Operator outside Edit mode: Place… / Move… turn Edit on; in Edit mode cooling units keep reloading, so Undo
