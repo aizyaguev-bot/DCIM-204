@@ -6,7 +6,8 @@
 // (smallest >= 32 px, status words and panel titles >= 36 px, alarm titles >= 40 px, KPI numbers >= 72 px), two refresh cycles without re-mounting or memory
 // growth, page rotation with alarms pinned, a network loss (last data kept, Reconnecting, NOT LIVE banner, greyed
 // panels) and the recovery, one failing source ("Live · partial"), the role warning, the TV sign-in, the narrow-screen
-// notice and the header link for both roles. Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
+// notice and the header link for both roles, long free text (Attention titles, a maintenance reason, a rack name) drawn
+// smaller to fit before it is cut (Hebrew keeps its first words). Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
 // to GET responses in the browser only; the fixture is never written.
 // Run: DCIM_TEST_ACCOUNTS=1 python tests/browser/preview-server.py 9311, then
 // DCIM_PREVIEW_URL=http://127.0.0.1:9311 node tests/browser/lab-display.cjs (screenshots: DCIM_QA_SHOTS, default C:/t/lb-shots).
@@ -17,6 +18,11 @@ const path = require('node:path');
 const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
 const shots = process.env.DCIM_QA_SHOTS || 'C:/t/lb-shots';
 const PASSWORD = 'test-password-123';
+// Free text that does not fit its line at full size (40 px titles, 36 px reason and rack name at 1920 x 1080).
+const LONG_TITLES = ['gpu-node-114-bmc: network reachability', 'Inlet current above 15 A on PDU 3'];
+const LONG_REASON = 'Rewiring PSU feeds on the left side';
+const LONG_RACK = 'Rack-05-Training';
+const HEBREW_REASON = 'החלפת כבלי החשמל בספקי הכוח של השרתים בצד השמאלי של הארון לפני העברת כל הציוד לחדר החדש בקומה השנייה';
 const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, name: `QA rack ${i}`, kind: 'rack', model: 'Compute', ip: '0.0.0.0', rack: `Rack-${String(i + 20).padStart(2, '0')}`, labels: {}, enabled: true, port_count: 0, notes: '' }));
 
 (async () => {
@@ -30,7 +36,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
     assert.equal((await (await probe.request.get(origin + '/api/version')).json()).version, 'LOCAL PREVIEW - TEST DATA', 'Refuse any real lab environment');
     await probe.close();
 
-    async function open(role, viewport, { extraRacks = false, clock = false } = {}) {
+    async function open(role, viewport, { extraRacks = false, clock = false, longText = false, reason = null } = {}) {
       const context = await browser.newContext({ viewport });
       const login = await context.request.post(origin + '/api/auth/login', { data: { username: role, password: PASSWORD } });
       assert.equal(login.status(), 200, `${role} signs in`);
@@ -43,17 +49,24 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
         if (state.failMaintenance && url.pathname === '/api/pdus/maintenance') return route.fulfill({ status: 500, json: { detail: 'QA failure' } });
         if (request.method() !== 'GET') return route.continue();
         const patch = async edit => { const response = await route.fetch(); const json = await response.json(); return route.fulfill({ response, json: edit(json) ?? json }); };
-        if (url.pathname === '/api/devices/') { state.devicesGets++; if (extraRacks) return patch(list => [...list, ...EXTRA_RACKS]); }
+        if (url.pathname === '/api/devices/') {
+          state.devicesGets++;
+          if (extraRacks) return patch(list => [...list, ...EXTRA_RACKS]);
+          if (longText) return patch(list => list.map(d => (d.rack === 'Rack-05' ? { ...d, rack: LONG_RACK } : d)));
+        }
         if (url.pathname === '/api/pdus/pdu2/status') return patch(j => Object.assign(j, { temperature: 27.5, humidity: 48, leak_detected: false }));
         if (url.pathname === '/api/pdus/pdu3/status') return patch(j => Object.assign(j, { temperature: 22.1, humidity: 41, leak_detected: false }));
         if (url.pathname === '/api/kvms/kvm1/status') return patch(j => { j.ports = j.ports.map(p => p.number === 2 ? { ...p, in_use: true } : p); });
         if (url.pathname === '/api/pdus/maintenance') return patch(j => {
           const t = Date.now() / 1000;
-          j.pdus = { pdu3: { device_id: 'pdu3', started_at: t - 1500, started_by: 'admin', reason: 'Rewiring PSU feeds', outlets_off: [1, 2], failed: [] } };
+          j.pdus = { pdu3: { device_id: 'pdu3', started_at: t - 1500, started_by: 'admin', reason: reason || (longText ? LONG_REASON : 'Rewiring PSU feeds'), outlets_off: [1, 2], failed: [] } };
           j.log = [{ at: t - 1500, device_id: 'pdu3', action: 'shutdown', by: 'admin', reason: 'Rewiring', ok: 2, failed: 0 },
                    { at: t - 1600, device_id: 'pdu3', action: 'denied', by: 'viewer', reason: '', ok: 0, failed: 0 }];
         });
-        if (url.pathname === '/api/monitoring') return patch(j => { j.email_alerts.recent = [{ id: 'qa-alert', subject: '[DCIM alert] QA inlet current above 15 A', created_at: new Date(Date.now() - 600000).toISOString(), sent_at: null, attempts: 0, error: null }]; });
+        if (url.pathname === '/api/monitoring') return patch(j => {
+          const alert = (id, title, ago) => ({ id, subject: `[DCIM alert] ${title}`, created_at: new Date(Date.now() - ago).toISOString(), sent_at: null, attempts: 0, error: null });
+          j.email_alerts.recent = [alert('qa-alert', 'QA inlet current above 15 A', 600000), ...(longText ? LONG_TITLES.map((t, i) => alert(`qa-long-${i}`, t, 700000 + i * 1000)) : [])];
+        });
         return route.continue();
       });
       const page = await context.newPage();
@@ -109,7 +122,8 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
     }
     // Every size follows the screen: `scale` is the screen's base size over 16 px (1 at 1920 x 1080, 0.8 at 1536 x 864),
     // so the minimums below are the 1920 x 1080 ones (read from 2-3 m on a 24-inch monitor) times that scale.
-    async function textSizes(page, label, scale = 1) {
+    // attentionMin: the first Attention title is 40 px unless it was drawn smaller to fit its line (then >= 32 px).
+    async function textSizes(page, label, scale = 1, { attentionMin = 40 } = {}) {
       const sizes = await page.evaluate(() => {
         const px = e => parseFloat(getComputedStyle(e).fontSize);
         const shown = e => e.getClientRects().length && e.innerText.trim();
@@ -124,7 +138,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       });
       // A hair under the round numbers: the base size is 0.8333vw, 15.9994 px at 1920.
       const min = n => n * scale - 0.05;
-      assert.ok(sizes.base >= min(16) && sizes.kpi.px >= min(72) && sizes.clock >= min(76) && sizes.attention >= min(40) && sizes.title.px >= min(36),
+      assert.ok(sizes.base >= min(16) && sizes.kpi.px >= min(72) && sizes.clock >= min(76) && sizes.attention >= min(attentionMin) && sizes.title.px >= min(36),
         `${label}: ${JSON.stringify(sizes)}`);
       assert.ok(sizes.smallest.px >= min(32), `${label}: smallest text ${JSON.stringify(sizes.smallest)}`);
       assert.ok(sizes.words >= 5 && sizes.word.px >= min(36), `${label}: smallest status word ${JSON.stringify(sizes.word)}`);
@@ -290,6 +304,73 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       for (let i = 0; i < 100 && await text(page, '.ld-conn-state') !== 'Live'; i++) { await page.clock.fastForward(1000); await page.waitForTimeout(300); }
       assert.equal(await text(page, '.ld-conn-state'), 'Live');
       checks.push('viewer 1920: a source failing for over 60 s shows "Live · partial" and "Maintenance status unavailable"');
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── Long free text at 1920 x 1080: Attention titles, the maintenance reason and a rack name too long for their line
+    //    at full size are drawn smaller (never under 32 px) and shown whole; short ones keep their size; a refresh that
+    //    changes nothing changes no size (no jump) ──
+    {
+      const { context, page, state } = await open('viewer', { width: 1920, height: 1080 }, { longText: true });
+      const measure = () => page.evaluate(([titles, reason, rack]) => {
+        const px = e => parseFloat(getComputedStyle(e).fontSize);
+        const info = e => e && { text: e.innerText, px: px(e), whole: e.scrollWidth <= e.clientWidth && !/…/.test(e.innerText) };
+        const attn = [...document.querySelectorAll('.ld-attn strong')];
+        return {
+          titles: titles.map(t => info(attn.find(e => e.innerText === t))), reason: info(document.querySelector('.ld-maint-why')),
+          rack: info([...document.querySelectorAll('.ld-rack h3')].find(e => e.innerText === rack)),
+          short: info(attn.find(e => e.innerText === 'QA inlet current above 15 A')), shortRack: info(document.querySelector('[data-rack="Rack-01"] h3')),
+        };
+      }, [LONG_TITLES, LONG_REASON, LONG_RACK]);
+      const m = await measure();
+      for (const [what, got, full, text] of [['title 1', m.titles[0], 40, LONG_TITLES[0]], ['title 2', m.titles[1], 40, LONG_TITLES[1]],
+        ['maintenance reason', m.reason, 36, LONG_REASON], ['rack name', m.rack, 36, LONG_RACK]]) {
+        assert.ok(got, `${what} is shown (${JSON.stringify(m)})`);
+        assert.equal(got.text, text, `${what} is shown whole`);
+        assert.ok(got.whole, `${what} fits its line: ${JSON.stringify(got)}`);
+        assert.ok(got.px >= 31.95 && got.px <= full + 0.05, `${what}: drawn at most at full size, never under 32 px: ${got.px}px`);
+      }
+      // The first title does not fit at 40 px: it was drawn smaller, not cut.
+      assert.ok(m.titles[0].px < 39.5, `title 1 drawn smaller to fit: ${m.titles[0].px}px`);
+      assert.ok(m.short.px >= 39.95 && m.shortRack.px >= 35.95, `short text keeps its size: ${JSON.stringify([m.short, m.shortRack])}`);
+      await textSizes(page, 'viewer 1920 long text', 1, { attentionMin: 32 });
+      await numbersWhole(page, 'viewer 1920 long text');
+      const lines = await orderly(page, 'viewer 1920 long text');
+      await page.screenshot({ path: path.join(shots, 'viewer-1920x1080-long-text.png') });
+      // A refresh with the same data: no font size is set again (no jump or flicker on each poll).
+      await page.evaluate(() => {
+        window.__qaFit = 0;
+        const observer = new MutationObserver(list => { window.__qaFit += list.length; });
+        document.querySelectorAll('.ld-attn strong, .ld-maint-why, .ld-rack h3').forEach(e => observer.observe(e, { attributes: true, attributeFilter: ['style'] }));
+      });
+      const gets0 = state.devicesGets;
+      for (let i = 0; i < 60 && state.devicesGets < gets0 + 1; i++) await page.waitForTimeout(500);
+      assert.ok(state.devicesGets > gets0, 'a refresh ran');
+      await page.waitForTimeout(1500);
+      assert.equal(await page.evaluate(() => window.__qaFit), 0, 'a refresh sets no font size again');
+      // (Attention may have turned a page meanwhile: the reason and the rack names stay on screen.)
+      const again = await measure();
+      assert.deepEqual([again.reason, again.rack, again.shortRack], [m.reason, m.rack, m.shortRack], 'the same sizes after a refresh');
+      checks.push(`viewer 1920 long text: titles ${m.titles.map(t => `${t.px}px`).join(', ')}, reason ${m.reason.px}px, rack name ${m.rack.px}px, all whole (short title ${m.short.px}px); ${lines} text boxes, none cut off or overlapping; a refresh changes no size`);
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── A Hebrew maintenance reason too long even at 32 px: cut at its own end, its first words stay in view ──
+    {
+      const { context, page } = await open('viewer', { width: 1920, height: 1080 }, { reason: HEBREW_REASON });
+      const why = await page.locator('.ld-maint-why').evaluate(e => {
+        const node = e.firstChild, text = node.textContent, r = e.getBoundingClientRect();
+        const rectOf = (from, to) => { const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); return range.getBoundingClientRect(); };
+        const firstEnd = text.indexOf(' '), lastStart = text.lastIndexOf(' ') + 1;
+        const inView = q => q.left >= r.left - 1 && q.right <= r.right + 1;
+        return { px: parseFloat(getComputedStyle(e).fontSize), dir: getComputedStyle(e).direction, cut: e.scrollWidth > e.clientWidth,
+          ellipsis: getComputedStyle(e).textOverflow, first: inView(rectOf(0, firstEnd)), last: inView(rectOf(lastStart, text.length)), text };
+      });
+      assert.equal(why.text, HEBREW_REASON);
+      assert.deepEqual([why.dir, why.cut, why.ellipsis, why.first, why.last], ['rtl', true, 'ellipsis', true, false], JSON.stringify(why));
+      assert.ok(why.px >= 31.95 && why.px <= 32.05, `drawn at the 32 px floor before it is cut: ${why.px}px`);
+      await page.screenshot({ path: path.join(shots, 'viewer-1920x1080-hebrew-reason.png') });
+      checks.push(`viewer 1920: a long Hebrew reason is drawn at ${why.px}px, right to left, cut at its own end with its first words in view`);
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 

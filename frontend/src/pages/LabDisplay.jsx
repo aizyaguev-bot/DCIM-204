@@ -416,6 +416,55 @@ function useFitWidth(key) {
   return ref;
 }
 
+// Free text too long for its line (an Attention title, a maintenance reason, a rack name) is drawn smaller, step by
+// step, down to FIT_MIN_EM of the screen's base size (2em: 32 px at 1920 x 1080, the smallest text on the screen); only
+// what still does not fit then ends in "…" (CSS), at the text's own end (also in Hebrew). It is measured before paint,
+// once per text and per change of the line's width (a refresh that changes nothing changes nothing on screen), and
+// never wraps.
+const FIT_MIN_EM = 2;
+const FIT_STEP_PX = 0.5;
+function useShrinkToFit(key, minEm = FIT_MIN_EM) {
+  const ref = useRef(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const box = el?.parentElement;
+    if (!el || !box) return undefined;
+    let width = -1;
+    let alive = true;
+    const fit = force => {
+      if (!alive || (!force && box.clientWidth === width)) return;
+      width = box.clientWidth;
+      el.style.fontSize = "";
+      if (el.scrollWidth <= el.clientWidth) return;
+      const base = parseFloat(getComputedStyle(el.closest(".lab-display") || el).fontSize) || 16;
+      const floor = Math.round(minEm * base * 10) / 10;
+      let px = parseFloat(getComputedStyle(el).fontSize) || 0;
+      if (px <= floor) return;
+      // First the size the width ratio implies, then smaller steps until it fits or reaches the floor.
+      px = Math.max(floor, Math.floor(px * (el.clientWidth / el.scrollWidth) * 10) / 10);
+      el.style.fontSize = `${px}px`;
+      while (px > floor && el.scrollWidth > el.clientWidth) {
+        px = Math.max(floor, Math.round((px - FIT_STEP_PX) * 10) / 10);
+        el.style.fontSize = `${px}px`;
+      }
+    };
+    fit(true);
+    const observer = new ResizeObserver(() => fit(false));
+    observer.observe(box);
+    // A web font that arrives late changes the text's width, not the line's.
+    document.fonts?.ready?.then(() => fit(true));
+    return () => { alive = false; observer.disconnect(); };
+  }, [key, minEm]);
+  return ref;
+}
+
+// One line of free text that shrinks to fit (useShrinkToFit); `text` is what it says (the measure runs again when it
+// changes), children what it shows (by default the text).
+function FitText({ as: Tag = "span", text, className, dir, children }) {
+  const ref = useShrinkToFit(text);
+  return <Tag ref={ref} className={className} dir={dir}>{children ?? text}</Tag>;
+}
+
 // Three lines, the same on every tile: the label, the number, then the status word (CHECK / ALARM / PARTIAL) when
 // there is one, else a short line of detail. The word never shares a line with the number, so it never squeezes it.
 function Tile({ label, value, unit, sub, level = "idle", testId, chip }) {
@@ -485,7 +534,7 @@ function MaintenanceBand({ entries, source, rotation }) {
       <strong className="ld-maint-label">MAINTENANCE</strong>
       <span className="ld-maint-text">
         <span className="ld-maint-where"><Parts parts={entry.head || entry.parts} /></span>
-        {entry.head && entry.reason && <><span className="ld-maint-sep" aria-hidden="true">·</span><bdi dir="auto" className="ld-maint-why">{entry.reason}</bdi></>}
+        {entry.head && entry.reason && <><span className="ld-maint-sep" aria-hidden="true">·</span><FitText as="bdi" dir="auto" className="ld-maint-why" text={entry.reason} /></>}
       </span>
       {pages > 1 && <span className="ld-maint-count" data-page={`${page + 1}/${pages}`}>{page + 1} of {pages}</span>}
     </div>
@@ -539,7 +588,7 @@ function RacksPanel({ racks, rotation }) {
                   {/* Line 1: the name (the whole line, or beside MAINT; a compact card adds on / total). Line 2: servers
                       on / total and the rack's power on one baseline. Line 3: its state. */}
                   <div className="ld-rack-head">
-                    <h3 dir="auto">{r.rack}</h3>
+                    <FitText as="h3" dir="auto" text={r.rack} />
                     {!layout.compact && r.maintenancePdus.length > 0 && <span className="ld-badge" data-level="maint">Maint</span>}
                     {layout.compact && servers}
                   </div>
@@ -558,7 +607,9 @@ function RacksPanel({ racks, rotation }) {
   );
 }
 
-const SEVERITY_TEXT = { alarm: "Alarm", warn: "Warning", info: "Info" };
+// The same words as the status chips (CHECK / ALARM): a short tag leaves the title its room (the tag column is as
+// wide as the widest tag, "▲ ALARM").
+const SEVERITY_TEXT = { alarm: "Alarm", warn: "Check", info: "Info" };
 
 function AttentionPanel({ items, rotation }) {
   const [ref, box] = useBox();
@@ -576,7 +627,7 @@ function AttentionPanel({ items, rotation }) {
             {shown.map(item => (
               <li key={item.key} className="ld-attn" data-level={item.severity} data-kind={item.kind} style={{ height }}>
                 <span className="ld-attn-tag">{SEVERITY_TEXT[item.severity]}</span>
-                <span className="ld-attn-text"><strong dir="auto"><Parts parts={item.titleParts} /></strong><span dir="auto"><Parts parts={item.parts} /></span></span>
+                <span className="ld-attn-text"><FitText as="strong" dir="auto" text={item.title}><Parts parts={item.titleParts} /></FitText><span dir="auto"><Parts parts={item.parts} /></span></span>
               </li>
             ))}
             {/* The same count as the pager above ("+N more"), with how many of them are alarms. */}

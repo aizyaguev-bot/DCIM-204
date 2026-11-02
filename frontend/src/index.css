@@ -743,8 +743,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
    RACK_CARD_EM). Type scale at 1920 x 1080 (1 px = 0.277 mm on a 24-inch screen): detail text 2em (32 px, the
    smallest), status words, panel titles and rack names 2.25em (36 px), alarm titles 2.5em (40 px), KPI numbers up to
    5em (80 px), clock 5em. Few things, big: Racks and Attention share the middle, Working now and Recent are one line
-   each along the bottom. One idea per line: text never wraps; only free text (names, reasons, alert titles) may end in
-   "…", never a number or a status word. Status is never colour alone: blue = normal, orange outline + "!" = check,
+   each along the bottom. One idea per line: text never wraps; free text (names, reasons, alert titles) too long for its
+   line is first drawn smaller, down to 2em (32 px; LabDisplay.jsx useShrinkToFit), and only then ends in "…", never a
+   number or a status word. Status is never colour alone: blue = normal, orange outline + "!" = check,
    solid red fill + "▲" = alarm, violet stripes = maintenance, and words (CHECK / ALARM, the state text) on every one.
    Text colours keep at least 4.5:1 and ok / warn / alarm stay apart for deuteranopia and protanopia
    (lab-display.test.js checks both). */
@@ -890,7 +891,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .ld-rack-grid[data-compact="true"] .ld-rack-servers strong { font-size: 1.25em; }
 .ld-rack-grid[data-compact="true"] .ld-rack-state { line-height: 1.1; }
 /* attention: alarm rows are solid red, warning rows outlined orange; the word in a column of its own */
-.ld-attn { display: grid; grid-template-columns: 14.2em minmax(0, 1fr); align-items: center; gap: .8em; padding: 0 .8em 0 0; background: color-mix(in srgb, var(--ld-c) 7%, var(--ld-panel)); border-left: .4em solid var(--ld-c); border-radius: 2px; }
+.ld-attn { display: grid; grid-template-columns: 12.6em minmax(0, 1fr); align-items: center; gap: .8em; padding: 0 .8em 0 0; background: color-mix(in srgb, var(--ld-c) 7%, var(--ld-panel)); border-left: .4em solid var(--ld-c); border-radius: 2px; }
 .ld-attn[data-level="warn"] { box-shadow: inset 0 0 0 .15em var(--ld-warn); }
 .ld-attn[data-level="alarm"] { background: var(--ld-alarm); }
 .ld-attn[data-level="alarm"] :is(.ld-attn-text strong, .ld-attn-text > span, .ld-attn-more-text) { color: #000; }
