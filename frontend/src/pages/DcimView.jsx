@@ -2392,7 +2392,9 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     }
   }, [saveCooling, showToast]);
   const coolingMoved = useCallback(change => {
-    showToast(<><bdi>{change.name}</bdi> {change.after.rack ? `moved to ${describePlace(change.after)}` : "has no rack now"}.</>, "ok", () => undoCooling(change));
+    // A rename that keeps the place (old data such as U17 or 99 included) does not say "moved".
+    const stayed = change.before.rack === change.after.rack && change.before.u === change.after.u;
+    showToast(<><bdi>{change.name}</bdi> {!change.after.rack ? "has no rack now" : stayed ? `renamed; it stays in ${describePlace(change.after)}` : `moved to ${describePlace(change.after)}`}.</>, "ok", () => undoCooling(change));
   }, [showToast, undoCooling]);
 
   const handleSlotSave = useCallback((rack, id, u) => {

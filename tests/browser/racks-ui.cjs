@@ -521,6 +521,12 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    assert.deepEqual(await dlg.locator('#cooling-floor option').evaluateAll(o=>o.map(e=>e.value)),['','1','2','3','4','6']);
    assert.equal(await dlg.getByRole('button',{name:'Save'}).isDisabled(),true,'nothing to save until something changes');
    await shot(p,'cooling-dialog-invalid-floor');
+   // another rack and back: the saved U6 is selected again (nothing to save)
+   await dlg.locator('#cooling-rack').selectOption('Rack-03');
+   assert.equal(await dlg.locator('#cooling-floor').inputValue(),'','another rack starts off its floors');
+   await dlg.locator('#cooling-rack').selectOption('Rack-02');
+   assert.equal(await dlg.locator('#cooling-floor').inputValue(),'6','back on Rack-02 the saved U6 is selected again');
+   assert.equal(await dlg.getByRole('button',{name:'Save'}).isDisabled(),true,'back where it was: nothing to save');
    // a stale undo changes nothing
    await dlg.locator('#cooling-floor').selectOption('');await dlg.getByRole('button',{name:'Save'}).click();await dlg.waitFor({state:'detached'});
    await putChillers(d=>{d.units.find(u=>u.id==='ch-free').u=7;return d;});
@@ -547,6 +553,36 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     assert.equal(await unitCount(),UNITS);
     passed.push(`5b cooling history: version #${rev} restored through the panel (If-Match), no unit lost`);
    }
+   // old data: a rename keeps u 99 in a rack (not a U); u 5 with no rack has no floors, so no hint and no Take off
+   const hebName=(await unitOf('ch-free')).name;
+   assert.equal((await putChillers(d=>{Object.assign(d.units.find(u=>u.id==='ch-free'),{rack:'Rack-02',u:6});return d;})).status(),200);
+   await p.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+   await card(p,'Rack-02').locator('[data-u-slot="6"] .cooling-chip[data-unit-id="ch-free"]').waitFor({timeout:20000});
+   assert.equal((await putChillers(d=>{d.units.find(u=>u.id==='ch-free').u=99;return d;})).status(),200);
+   await p.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+   await card(p,'Rack-02').locator('[data-u-slot="6"] .cooling-chip[data-unit-id="ch-free"]').waitFor({state:'detached',timeout:20000});
+   await card(p,'Rack-02').locator('.cooling-chip[data-unit-id="ch-free"]').click();await dlg.waitFor();
+   assert.match(await dlg.locator('#cooling-floor-hint').innerText(),/^Saved floor is invalid \(99\); choose a floor or leave it off the floors\. Until you do, the saved value is kept\./);
+   assert.equal(await dlg.locator('#cooling-floor').inputValue(),'saved','the saved 99 stays selected');
+   await dlg.locator('#cooling-name').fill('QA-Rename-99');await dlg.getByRole('button',{name:'Save'}).click();await dlg.waitFor({state:'detached'});
+   await expectUnit('ch-free',{rack:'Rack-02',u:99},'a rename keeps the saved 99');
+   assert.match(await p.locator('.toast').innerText(),/QA-Rename-99 renamed; it stays in Rack-02 · not on a floor\./);
+   assert.equal((await unitOf('ch-free')).name,'QA-Rename-99');
+   assert.equal((await putChillers(d=>{Object.assign(d.units.find(u=>u.id==='ch-free'),{rack:null,u:5});return d;})).status(),200);
+   await p.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+   await card(p,'Rack-02').locator('[data-unit-id="ch-free"]').waitFor({state:'detached',timeout:20000});
+   await panel.locator('li[data-unit-id="ch-free"] button').click();await dlg.waitFor();
+   assert.equal(await dlg.locator('#cooling-rack').inputValue(),'');
+   assert.equal(await dlg.locator('#cooling-floor-hint').count(),0,'no rack, no floors: no invalid-floor hint');
+   assert.equal(await dlg.getByRole('button',{name:/^Take off/}).count(),0,'no rack: nothing to take off');
+   assert.equal(await dlg.locator('#cooling-offshelf-hint').count(),0);
+   await shot(p,'cooling-dialog-no-rack-u5');
+   await dlg.locator('#cooling-name').fill(hebName);await dlg.getByRole('button',{name:'Save'}).click();await dlg.waitFor({state:'detached'});
+   await expectUnit('ch-free',{rack:null,u:null},'a unit with no rack has no u (updateChiller, as before)');
+   assert.equal((await unitOf('ch-free')).name,hebName);
+   assert.equal((await putChillers(d=>{Object.assign(d.units.find(u=>u.id==='ch-free'),{rack:'Rack-02',u:null});return d;})).status(),200);
+   assert.equal(await unitCount(),UNITS);
+   passed.push('5c cooling old data: Rack-02 -> Rack-03 -> Rack-02 brings the saved U6 back; a rename keeps u 99 in a rack; a unit with no rack (old u 5) gets no invalid-floor hint and no Take off');
    await setEdit(p,false);await p.close();
    passed.push('5 cooling: 2 units on floor 3, Chiller-3 "Place…" in the strip, panel (needs a rack, Rack-99 not found, not on a floor first; Show all lists every unit), view dialog Move… turns Edit on (Rack focused, nothing saved), dialog offers Floor 1-4 only, keyboard move to Rack-05 floor 2 (1 PUT, focus on the chip), Undo, Take off floor + Undo last change, Hebrew unit on floor 2 rtl, old U6 under "Other" with the invalid-floor hint (kept until changed), stale undo refused, unit count unchanged');
   }

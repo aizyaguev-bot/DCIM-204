@@ -7,14 +7,19 @@ import { RACK_FLOORS } from "./floors.js";
 // unit unassigned. onSave({ name, rack, u }) and onTakeOffShelf() throw Error(message) for this dialog to show.
 // onRequestEdit (view mode, Operator and up): "Move…" / "Place…" turns Edit on and reopens this unit to be edited.
 // floorOptionsFor(rack): the rack's floors 1-RACK_FLOORS (Main storage: its shelves) as { value, label }.
-// A unit saved on a U the rack does not offer (old data, e.g. 17) keeps that U unless a floor is chosen: its rack
-// offers it as its own choice, selected, with a hint; nothing is moved by a rename.
+// A unit saved on a place its rack does not offer (old data: U17, 99, "x") keeps that value unless a floor is chosen:
+// its rack offers it as its own choice, selected, with a hint, and choosing the rack again brings it back. A unit with
+// no rack has no floors, so its saved u gets no hint (and keeps none: updateChiller). A rename changes only the name.
+const KEPT = "saved";   // the select value of a bad saved place that is not U1-42 (99, "x")
+
 export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsFor, canOperate, onRequestEdit = null, onSave, onTakeOffShelf, onClose }) {
   const editing = mode === "edit" || mode === "create";
   const initialRack = unit?.rack ?? "";
-  const savedOff = !!initialRack && validShelf(unit?.u) && !validPlace(unit.u, initialRack);   // e.g. U17 in a rack
-  const savedBad = unit?.u != null && unit?.u !== "" && !validPlace(unit.u, initialRack);
-  const initialShelf = validShelf(unit?.u) && (savedOff || validPlace(unit.u, initialRack)) ? String(unit.u) : "";
+  const hasU = unit?.u != null && unit?.u !== "";
+  const savedBad = !!initialRack && hasU && !validPlace(unit.u, initialRack);   // e.g. U17, 99 or "x" in a rack
+  // The select value of a bad saved place: "17" (a U that is no floor 1-4, never one of the offered values), else KEPT.
+  const savedValue = savedBad ? (validShelf(unit.u) ? String(unit.u) : KEPT) : "";
+  const initialShelf = savedBad ? savedValue : hasU && validPlace(unit.u, initialRack) ? String(unit.u) : "";
   const [name, setName] = useState(unit?.name ?? "");
   const [rack, setRack] = useState(initialRack);
   const [shelf, setShelf] = useState(initialShelf);
@@ -34,8 +39,11 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
   const options = useMemo(() => {
     if (!rack) return [{ value: "", label: "Not on a floor (rack level)" }];
     const list = floorOptionsFor(rack);
-    return savedOff && rack === initialRack ? [...list, { value: String(unit.u), label: `U${unit.u} · saved, not one of floors 1–${RACK_FLOORS}` }] : list;
-  }, [rack, floorOptionsFor, savedOff, initialRack, unit]);
+    if (!savedBad || rack !== initialRack) return list;
+    const label = validShelf(unit.u) ? `U${unit.u} · saved, not one of floors 1–${RACK_FLOORS}`
+      : `"${String(unit.u)}" · saved, not a ${placeWord(initialRack)}`;
+    return [...list, { value: savedValue, label }];
+  }, [rack, floorOptionsFor, savedBad, savedValue, initialRack, unit]);
   const trimmed = name.trim();
   const changed = mode === "create" ? true : trimmed !== (unit?.name ?? "") || rack !== initialRack || shelf !== initialShelf;
   const titleId = "cooling-dialog-title";
@@ -58,7 +66,9 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
     if (!trimmed || trimmed.length > 40) { setNameError("Enter a name (1–40 characters)."); return; }
     setNameError("");
     if (!changed) return;
-    run(() => onSave({ name: trimmed, rack: rack || null, u: rack && shelf ? Number(shelf) : null }));
+    // The place as it was saved when neither the rack nor the floor changed (old data is never cleared by a rename).
+    const u = rack === initialRack && shelf === initialShelf ? (hasU ? unit.u : null) : rack && shelf ? Number(shelf) : null;
+    run(() => onSave({ name: trimmed, rack: rack || null, u }));
   }
 
   return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !busyRef.current) onClose(); }}>
@@ -88,7 +98,7 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
         <div className="racks-field">
           <label htmlFor="cooling-rack">Rack</label>
           <select id="cooling-rack" ref={rackRef} value={rack} disabled={busy}
-            onChange={e => { setRack(e.target.value); setShelf(""); }}>
+            onChange={e => { setRack(e.target.value); setShelf(e.target.value === initialRack ? initialShelf : ""); }}>
             {rackNames.map(r => <option key={r} value={r}>{r}</option>)}
             {!knownRack && <option value={initialRack}>{initialRack} (not found)</option>}
             <option value="">No rack (unassigned)</option>
@@ -100,16 +110,16 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
             aria-describedby={savedBad ? "cooling-floor-hint" : undefined}>
             {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          {unit && savedBad && <p id="cooling-floor-hint" className="racks-field-hint">Saved {placeWord(initialRack)} is invalid ({String(unit.u)}); choose a {word} or leave it off the {word === "floor" ? "floors" : "shelves"}.{savedOff ? " Until you do, it stays where it is." : ""}</p>}
+          {unit && savedBad && <p id="cooling-floor-hint" className="racks-field-hint">Saved {placeWord(initialRack)} is invalid ({String(unit.u)}); choose a {word} or leave it off the {word === "floor" ? "floors" : "shelves"}.{validShelf(unit.u) ? " Until you do, it stays where it is." : " Until you do, the saved value is kept."}</p>}
         </div>
         {error && <p ref={errorRef} tabIndex={-1} role="alert" dir="auto" className="racks-dialog-error">{error}</p>}
         <div className="racks-dialog-actions racks-dialog-actions-primary-first">
           <button type="submit" className="racks-btn racks-btn-primary" disabled={busy || !changed}>{busy ? "Saving…" : mode === "create" ? "Add" : "Save"}</button>
-          {mode === "edit" && validShelf(unit?.u) && <button type="button" className="racks-btn" disabled={busy}
+          {mode === "edit" && initialRack && hasU && <button type="button" className="racks-btn" disabled={busy}
             aria-describedby="cooling-offshelf-hint" onClick={() => run(onTakeOffShelf)}>Take off {placeWord(unit.rack)}</button>}
           <button type="button" className="racks-btn" disabled={busy} onClick={onClose}>Cancel</button>
         </div>
-        {mode === "edit" && validShelf(unit?.u) && <p id="cooling-offshelf-hint" className="racks-field-hint">Take off {placeWord(unit.rack)} keeps it in <bdi>{unit.rack}</bdi>, not on a {placeWord(unit.rack)}.</p>}
+        {mode === "edit" && initialRack && hasU && <p id="cooling-offshelf-hint" className="racks-field-hint">Take off {placeWord(unit.rack)} keeps it in <bdi>{unit.rack}</bdi>, not on a {placeWord(unit.rack)}.</p>}
       </form>}
     </section>
   </div>;
