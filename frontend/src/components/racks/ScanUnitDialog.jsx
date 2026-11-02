@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import useDialogFocus from "./useDialogFocus.js";
 import { parseUnitBarcode } from "../../api/scanParse.js";
-import { placeScannedUnit, undoScannedUnit, canUndo, placeText, floorText } from "../../api/unitScan.js";
-import { MAIN_STORAGE } from "../../api/inventory.js";
+import { placeScannedUnit, undoScannedUnit, canUndo, filledFields, placeText, floorText } from "../../api/unitScan.js";
+import { MAIN_STORAGE, UNIT_DETAILS } from "../../api/inventory.js";
 
 // Add units to a server's floor (or a rack's floor) by scanning their barcodes: each scan looks the code up and, in
 // one step, registers a new unit there or moves the unit that already has that barcode or serial (never a second
@@ -28,12 +28,28 @@ export function scanErrorText(error) {
   return error.message;
 }
 
+// "serial number, model and MAC address": the fields a scan added to a known unit.
+export function filledText(fields) {
+  const names = UNIT_DETAILS.filter(([field]) => fields.includes(field)).map(([field, label]) => (field === "mac" ? label : label.toLowerCase()));
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
 function resultText(result, label) {
   const name = <bdi>{result.item.name}</bdi>;
   const here = <bdi>{placeText(result.after, label)}</bdi>;
+  const filled = filledFields(result);
+  const added = filled.length ? <> Added its {filledText(filled)}.</> : null;
+  const notSaved = result.fillError ? <> Its scanned details were not saved: {result.fillError}</> : null;
   if (result.action === "created") return <>Added {name} to {here}.</>;
-  if (result.action === "moved") return <>Moved {name} to {here} (it was in <bdi>{placeText(result.before)}</bdi>).</>;
-  return <>{name} is already on {here}. Nothing changed.</>;
+  if (result.action === "moved") return <>Moved {name} to {here} (it was in <bdi>{placeText(result.before)}</bdi>).{added}{notSaved}</>;
+  return <>{name} is already on {here}.{added || notSaved ? <>{added}{notSaved}</> : " Nothing changed."}</>;
+}
+
+function undoneText(result) {
+  const name = <bdi>{result.item.name}</bdi>;
+  if (result.action === "created") return <>Undone: {name} was removed.</>;
+  if (result.action === "confirmed") return <>Undone: the {filledText(filledFields(result))} added to {name} {filledFields(result).length > 1 ? "were" : "was"} removed.</>;
+  return <>Undone: {name} is back in <bdi>{placeText(result.before)}</bdi>{filledFields(result).length ? <>, without the {filledText(filledFields(result))} the scan added</> : null}.</>;
 }
 
 function CameraScanner({ onCode, onStop }) {
@@ -118,8 +134,7 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
       const saved = await undoScannedUnit(entry.result);
       entry.state.undo = "done"; update(entry.key, { undo: "done" });
       onItemsChanged(saved);
-      onToast(entry.result.action === "created" ? <>Undone: <bdi>{entry.result.item.name}</bdi> was removed.</>
-        : <>Undone: <bdi>{entry.result.item.name}</bdi> is back in <bdi>{placeText(entry.result.before)}</bdi>.</>, "ok");
+      onToast(undoneText(entry.result), "ok");
       // Undo from the page's toast moves focus out of this dialog: the next scan must land in the field again.
       if (mounted.current) inputRef.current?.focus();
       return true;
@@ -143,7 +158,7 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
       const entry = { key, code: parsed.code, result, label: target.label, undo: canUndo(result) ? "ready" : null };
       entry.state = { undo: entry.undo };
       if (mounted.current) setLog(list => [entry, ...list]);
-      if (result.action !== "confirmed") onItemsChanged(null);
+      if (result.action !== "confirmed" || filledFields(result).length) onItemsChanged(null);
       onToast(resultText(result, target.label), "ok", entry.undo ? () => undo(entry) : null);
     } catch (e) {
       if (e?.status === 409 || e?.status === 404) onItemsChanged(null);

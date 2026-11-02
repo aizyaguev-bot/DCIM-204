@@ -102,3 +102,44 @@ export function parseLocationCode(code) {
     throw new Error("Invalid shelf label. Choose a rack and shelf manually.");
   }
 }
+
+// A unit's serial number, part number, model and MAC address: separate fields of the equipment record (stored names),
+// in the order the panels show them. The server trims them, stores a MAC as 00:1A:2B:3C:4D:5E and drops a blank one.
+export const UNIT_DETAILS = [["serial_number", "Serial number"], ["part_number", "Part number"], ["model", "Model"], ["mac", "MAC address"]];
+export const UNIT_DETAIL_FIELDS = UNIT_DETAILS.map(([field]) => field);
+export const UNIT_DETAIL_LIMITS = { serial_number: 200, part_number: 120, model: 120, mac: 40 };
+export const MAC_ERROR = "MAC address must be six pairs of hex digits, like 00:1A:2B:3C:4D:5E.";
+
+// "00-1a-2b-3c-4d-5e", "001A2B3C4D5E" or "001a.2b3c.4d5e" -> "00:1A:2B:3C:4D:5E"; anything else -> "".
+export function normalizeMac(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  const pairs = /^([0-9a-f]{2})([:-])([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})\2([0-9a-f]{2})$/i.exec(text);
+  const digits = pairs ? [1, 3, 4, 5, 6, 7].map(i => pairs[i]).join("")
+    : /^[0-9a-f]{12}$/i.test(text) ? text
+    : /^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$/i.test(text) ? text.replace(/\./g, "") : "";
+  return digits ? digits.toUpperCase().match(/../g).join(":") : "";
+}
+
+export function detailText(item, field) {
+  const value = item?.[field];
+  return value == null ? "" : String(value);
+}
+
+// The edit panel's detail fields against the saved record: { changes, errors }. Only edited fields are in `changes`
+// ("" clears one); an unedited legacy value is never rewritten. errors: { field: sentence }.
+export function unitDetailChanges(item, values) {
+  const changes = {}, errors = {};
+  for (const [field, label] of UNIT_DETAILS) {
+    if (!(field in values)) continue;
+    const raw = String(values[field] ?? "");
+    if (raw === detailText(item, field)) continue;
+    let value = raw.trim();
+    if (value && /[\x00-\x1f\x7f]/.test(value)) { errors[field] = `${label} cannot contain control characters.`; continue; }
+    if (field === "mac" && value) {
+      value = normalizeMac(value);
+      if (!value) { errors[field] = MAC_ERROR; continue; }
+    } else if (value.length > UNIT_DETAIL_LIMITS[field]) { errors[field] = `${label} can be at most ${UNIT_DETAIL_LIMITS[field]} characters.`; continue; }
+    if (value !== detailText(item, field).trim() || (!value && field in item)) changes[field] = value;
+  }
+  return { changes, errors };
+}

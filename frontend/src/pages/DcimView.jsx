@@ -1,7 +1,7 @@
 import { sumKnown, reading } from "../power";
 import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
-import { loadRackItems, saveRackItems, MAIN_STORAGE } from "../api/inventory";
+import { loadRackItems, saveRackItems, MAIN_STORAGE, UNIT_DETAILS, unitDetailChanges, detailText } from "../api/inventory";
 import { loadLayout, saveLayout } from "../api/layout";
 import { splitSections, sectionHeading, versionOf } from "../api/changelog";
 import { SectionBody, plain } from "../components/WhatsNew";
@@ -760,6 +760,8 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   const [type,      setType]      = useState(draft?.type ?? (item.type || "other"));
   const [u,         setU]         = useState(String(draft?.u ?? item.u ?? 0));
   const [notes,     setNotes]     = useState(draft?.notes ?? (item.notes || ""));
+  // Serial number, part number, model and MAC address: separate fields, each saved only when edited here.
+  const [details,   setDetails]   = useState(() => Object.fromEntries(UNIT_DETAILS.map(([field]) => [field, draft?.[field] ?? detailText(item, field)])));
   const [busy,      setBusy]      = useState(false);
   const [saved,     setSaved]     = useState(false);
   const [moveRack,  setMoveRack]  = useState("");
@@ -791,10 +793,13 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   if (type !== (item.type || "other")) changes.type = type;
   if (uChanged && slot !== null && slot !== (item.u ?? 0)) changes.u = slot;
   if (notes.trim() !== (item.notes || "")) changes.notes = notes.trim();
+  const { changes: detailChanges, errors: detailErrors } = unitDetailChanges(item, details);
+  Object.assign(changes, detailChanges);
+  const detailError = Object.keys(detailErrors).length > 0;
   const dirty = Object.keys(changes).length > 0;
 
   async function submit() {
-    if (busy || uError || !name.trim()) return;
+    if (busy || uError || detailError || !name.trim()) return;
     if (!dirty) { setUnchanged(true); return; }
     setBusy(true); setUnchanged(false);
     try { await onSave(item.id, changes); setSaved(true); setTimeout(()=>setSaved(false),2000); }
@@ -847,8 +852,15 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
             <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 resize-none"/>
           </div>
+          {UNIT_DETAILS.map(([field, label]) => <div key={field}><SL>{label}</SL>
+            <input value={details[field]} onChange={e => { const value = e.target.value; setDetails(d => ({ ...d, [field]: value })); }}
+              onKeyDown={e=>e.key==="Enter"&&submit()} spellCheck={false} autoComplete="off" data-detail={field}
+              aria-label={label} aria-invalid={detailErrors[field] ? true : undefined} aria-describedby={detailErrors[field] ? `edit-equipment-${field}-error` : undefined}
+              placeholder={field === "mac" ? "00:1A:2B:3C:4D:5E" : "Not recorded"}
+              className={`w-full bg-zinc-900 border rounded-lg px-3 py-2 text-sm font-mono text-zinc-200 focus:outline-none ${detailErrors[field] ? "border-rose-700 focus:border-rose-500" : "border-zinc-800 focus:border-nv-400/50"}`}/>
+            {detailErrors[field] && <div id={`edit-equipment-${field}-error`} role="alert" className="mt-1 text-[11px] text-rose-400">{detailErrors[field]}</div>}
+          </div>)}
           <div className="text-xs text-zinc-400 space-y-1">
-            {item.serial_number && <div>SN: <span className="font-mono">{item.serial_number}</span></div>}
             {item.barcode && <div>Barcode: <span className="font-mono">{item.barcode}</span></div>}
             {item.shelf_position && <div>Position: {item.shelf_position}</div>}
             <div className="text-zinc-500">Use Scan & Track for barcode linking and shelf positions.</div>
@@ -868,7 +880,7 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
               </div>
             </div>
           )}
-          <button onClick={submit} disabled={busy || !name.trim() || !!uError}
+          <button onClick={submit} disabled={busy || !name.trim() || !!uError || detailError}
             className={`w-full py-2 text-sm font-bold rounded-lg transition flex items-center justify-center gap-2
               ${saved?"bg-emerald-900/50 text-emerald-400 border border-emerald-800/50":"bg-nv-400 text-zinc-950 disabled:opacity-40"}`}>
             {busy?<Spinner/>:saved?Icon.check:null}{saved?"Saved":"Save changes"}
@@ -2236,7 +2248,7 @@ function ReadOnlyAsset({ item, owner, onClose, sshName }) {
   return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
     <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="asset-details-title" tabIndex={-1} onClick={e=>e.stopPropagation()} className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-6">
       <div className="flex justify-between gap-3"><h2 id="asset-details-title" dir="auto" className="font-mono text-xl text-white break-all">{item.name}</h2><div className="flex items-start gap-2 flex-shrink-0">{sshName&&<SshButton name={sshName} size="md"/>}<CloseBtn onClose={onClose}/></div></div>
-      <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, Barcode:item.barcode, Shelf:item.u, Owner:owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words">{value}</dd></div>)}</dl>
+      <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, "Part number":item.part_number, Model:item.model, "MAC address":item.mac, Barcode:item.barcode, Shelf:item.u, Owner:owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words">{value}</dd></div>)}</dl>
       <p className="text-xs text-zinc-400">Turn on Edit to change this equipment.</p>
     </section>
   </div>;
