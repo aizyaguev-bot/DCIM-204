@@ -120,7 +120,7 @@ async def inventory(response: Response, code: str | None = Query(default=None, m
     data = store.read_items()
     items = [view_item(rack, item) for rack, group in data.items() for item in group]
     keys = store.lookup_keys(code) if code is not None else set()
-    matches = [item for item in items if keys & store.identifiers(item)] if keys else []
+    matches = [item for item in items if keys & store.identity_keys(item)] if keys else []
     set_headers(response, data)
     return {"items": items, "matches": matches, "racks": sorted(racks | set(data)), "history_limit": store.HISTORY_LIMIT}
 

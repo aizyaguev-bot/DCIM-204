@@ -357,6 +357,27 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     await equip.getByText('Save changes').waitFor();
     const field=label=>equip.getByRole('textbox',{name:label,exact:true});
     assert.deepEqual(await Promise.all(['Serial number','Part number','Model','MAC address'].map(l=>field(l).inputValue())),[F,'MQM8790-HS2F','QM8790',MAC1]);
+    // Save stays in view on a 1536x864 screen, below the scrolling fields.
+    await op.setViewportSize({width:1536,height:864});
+    const saveBox=await equip.getByRole('button',{name:'Save changes'}).boundingBox();
+    assert.ok(saveBox&&saveBox.y+saveBox.height<=864,`Save changes is in view at 1536x864 (y=${saveBox&&saveBox.y})`);
+    // A MAC or serial number of another unit is refused with that reason at the field, not as a change elsewhere.
+    const opDialogs=[];op.on('dialog',d=>{opDialogs.push(d.message());d.dismiss().catch(()=>{});});
+    for(const [label,value,reason] of [['MAC address',MAC3.toLowerCase().replace(/:/g,'-'),'This MAC address already belongs to another item.'],['Serial number',G.toLowerCase(),'This barcode or serial number already belongs to another item.']]){
+      const original=await field(label).inputValue();
+      await field(label).fill(value);
+      const refused=op.waitForResponse(r=>r.url().endsWith('/api/rack-items')&&r.request().method()==='PUT');
+      await equip.getByRole('button',{name:'Save changes'}).click();
+      assert.equal((await refused).status(),409);
+      await equip.getByRole('alert').filter({hasText:reason}).waitFor();
+      assert.equal(await equip.getByRole('button',{name:'Save changes'}).isDisabled(),true,'the taken value cannot be saved again');
+      assert.equal(await equip.getByRole('status').filter({hasText:'changed in another session'}).count(),0);
+      assert.equal(await field(label).getAttribute('aria-invalid'),'true');
+      await field(label).fill(original);
+      await equip.getByRole('alert').filter({hasText:reason}).waitFor({state:'detached'});
+    }
+    assert.deepEqual(opDialogs,[],'a taken value is shown in the panel, never as a browser alert');
+    await op.setViewportSize({width:1440,height:1000});
     await field('MAC address').fill('12:34');
     await equip.getByRole('alert').filter({hasText:'MAC address must be six pairs of hex digits'}).waitFor();
     assert.equal(await equip.getByRole('button',{name:'Save changes'}).isDisabled(),true,'a bad MAC cannot be saved');
@@ -377,7 +398,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     for(const part of ['Serial number',F,'Part number','MQM8790-HS2R','MAC address',MAC4])assert.ok(text.includes(part),`details show ${part}`);
     assert.equal(await shown.getByRole('textbox').count(),0,'the view is read-only outside Edit');
     await op.keyboard.press('Escape');await shown.waitFor({state:'detached'});
-    passed.push('SCAN-10 the four fields are shown and edited in the equipment panel (bad MAC refused, MAC cleaned, blank clears) and shown read-only outside Edit');
+    passed.push('SCAN-10 the four fields are shown and edited in the equipment panel (Save in view at 1536x864, a taken MAC or serial shown at its field, bad MAC refused, MAC cleaned, blank clears) and shown read-only outside Edit');
 
     const unexpected=writes.filter(w=>!SCAN_WRITE.test(w.split(' ')[1]));
     assert.deepEqual(unexpected,[],'Scanning writes only inventory registrations, locations and the equipment list (Undo)');

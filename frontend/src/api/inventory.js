@@ -27,7 +27,17 @@ export async function loadRackItems() {
   return data;
 }
 
-export async function saveRackItems(updated, previous, { alert = true } = {}) {
+// The server's 409 when a barcode, serial number or MAC address already names another unit (inventory_store.py
+// DUPLICATE_CODE / DUPLICATE_MAC). It is not a stale revision: nothing changed elsewhere, the value is taken.
+const DUPLICATE_IDENTITY = /already belongs to another item\.$/;
+
+// The unit field a duplicate refusal is about: "mac" or "serial_number" (a barcode/serial clash), else "".
+export function duplicateField(error) {
+  if (!error?.duplicate) return "";
+  return /MAC address/.test(error.message) ? "mac" : "serial_number";
+}
+
+export async function saveRackItems(updated, previous, { alert = true, alertDuplicates = true } = {}) {
   try {
     const revision = versions.get(previous);
     if (!revision) throw new Error("Reload DCIM before editing equipment.");
@@ -39,6 +49,12 @@ export async function saveRackItems(updated, previous, { alert = true } = {}) {
     versions.set(saved.data, saved.revision);
     return saved.data;
   } catch (error) {
+    // A duplicate barcode, serial or MAC keeps the server's reason and the list as it is: the revision is still current.
+    if (error.status === 409 && DUPLICATE_IDENTITY.test(error.message)) {
+      error.duplicate = true;
+      if (alert && alertDuplicates) window.alert(error.message);
+      throw error;
+    }
     // A stale revision would fail every later save too; callers apply error.reloaded instead.
     if (error.status === 409 || error.status === 428) {
       error.reloaded = await loadRackItems().catch(() => null);

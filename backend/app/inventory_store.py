@@ -192,18 +192,31 @@ def mac_key(value):
 
 
 def identifiers(item):
-    """Every value that names exactly one unit: its id, serial, barcode and MAC."""
+    """Every value that names exactly one unit, as text to search by: its id, serial, barcode and MAC."""
     return ({str(item.get(key) or "").strip().casefold() for key in ("id", "serial_number", "barcode")} | {mac_key(item.get("mac"))}) - {""}
 
 
+def identity_key(value):
+    """The one comparable form of an identifier: anything that reads as a MAC in any spelling becomes its
+    normalised MAC, so 'B8CEF6001122', 'b8-ce-f6-00-11-22' and 'B8:CE:F6:00:11:22' are the same identifier."""
+    text = str(value or "").strip()
+    return (normalize_mac(text) or text).casefold()
+
+
+def identity_keys(item):
+    """The identity keys of a unit (id, serial, barcode, MAC). Lookup and the duplicate rule both use these."""
+    return {identity_key(item.get(key)) for key in ("id", "serial_number", "barcode", "mac")} - {""}
+
+
 def lookup_keys(code):
-    """A scanned or typed code as lookup keys: as it is, and as a MAC when it is one (00-1A-... finds 00:1A:...)."""
-    return {code.strip().casefold(), *([normalize_mac(code).casefold()] if normalize_mac(code) else [])} - {""}
+    """A scanned or typed code as lookup keys, compared with `identity_keys` (00-1A-... finds 00:1A:... and 001A...)."""
+    return {identity_key(code)} - {""}
 
 
 def ensure_unique(data, code, exclude_id=None, detail=DUPLICATE_CODE):
-    key = code.strip().casefold()
-    if key and any(key in identifiers(item) and item["id"] != exclude_id for items in data.values() for item in items):
+    """`code` must not be an identity of another unit, compared exactly as a lookup compares it."""
+    key = identity_key(code)
+    if key and any(key in identity_keys(item) and item["id"] != exclude_id for items in data.values() for item in items):
         raise HTTPException(409, detail)
 
 

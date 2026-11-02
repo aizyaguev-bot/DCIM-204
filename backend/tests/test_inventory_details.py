@@ -190,8 +190,40 @@ def test_mac_normalisation():
     assert store.normalize_mac("b8ce.f600.1122") == "B8:CE:F6:00:11:22"
     for bad in ("b8:ce:f6:00:11", "b8:ce-f6:00:11:22", "b8cef600112", "zz:ce:f6:00:11:22", "", None, 5):
         assert store.normalize_mac(bad) is None
-    # A 12-digit numeric barcode is not taken for another unit's MAC when checking barcodes.
-    assert "001122334455" not in store.identifiers({"id": "x", "mac": "00:11:22:33:44:55"})
+    # Every spelling of a MAC is one identity key, whether it is stored as a MAC or as a barcode.
+    assert store.identity_keys({"id": "x", "barcode": "B8CEF6001122"}) == {"x", "b8:ce:f6:00:11:22"}
+    assert store.lookup_keys("b8-ce-f6-00-11-22") == store.lookup_keys("B8CEF6001122") == {"b8:ce:f6:00:11:22"}
+
+
+async def test_a_mac_names_one_unit_in_every_spelling_as_barcode_or_mac(inventory_client):
+    """The duplicate rule compares exactly as a lookup does, so a lookup never finds two units for one MAC."""
+    c = inventory_client
+    labelled = await c.post("/api/inventory", json={**NEW, "code": "B8CEF6001122"}, headers=await headers(c))
+    assert labelled.status_code == 201
+    before = store.ITEMS_FILE.read_bytes()
+    # A MAC equal to another unit's 12-hex barcode is refused, as are barcodes in other spellings of it.
+    for body in ({**NEW, "code": "LABEL-B", "mac": "b8:ce:f6:00:11:22"}, {**NEW, "code": "b8-ce-f6-00-11-22"},
+                 {**NEW, "code": "LABEL-C", "serial": "b8ce.f600.1122"}):
+        refused = await c.post("/api/inventory", json=body, headers=await headers(c))
+        assert refused.status_code == 409, body
+    assert store.ITEMS_FILE.read_bytes() == before
+    # A unit holding a MAC refuses that MAC as another unit's barcode in any spelling.
+    with_mac = await c.post("/api/inventory", json={**NEW, "code": "LABEL-X", "mac": "AA:BB:CC:DD:EE:01"}, headers=await headers(c))
+    assert with_mac.status_code == 201
+    before = store.ITEMS_FILE.read_bytes()
+    for code in ("AA-BB-CC-DD-EE-01", "AABBCCDDEE01", "aabb.ccdd.ee01", "aa:bb:cc:dd:ee:01"):
+        refused = await c.post("/api/inventory", json={**NEW, "code": code}, headers=await headers(c))
+        assert refused.status_code == 409, code
+    assert store.ITEMS_FILE.read_bytes() == before
+    # The details endpoint follows the same rule.
+    other = labelled.json()["id"]
+    refused = await c.post(f"/api/inventory/{other}/details", json={"mac": "aabbccddee01"}, headers=await headers(c))
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == store.DUPLICATE_MAC
+    # Every spelling finds exactly one unit.
+    for code, expected in (("B8CEF6001122", labelled), ("B8:CE:F6:00:11:22", labelled), ("aabbccddee01", with_mac)):
+        found = (await c.get("/api/inventory", params={"code": code})).json()["matches"]
+        assert [m["id"] for m in found] == [expected.json()["id"]], code
 
 
 @pytest.mark.parametrize("path,method,role", [

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { locationCode, parseLocationCode, rackCode, mainStorageCode, MAIN_STORAGE, labelCode, loadRackItems, saveRackItems,
-  normalizeMac, unitDetailChanges, detailText, UNIT_DETAILS, UNIT_DETAIL_FIELDS } from "../api/inventory.js";
+  normalizeMac, unitDetailChanges, detailText, UNIT_DETAILS, UNIT_DETAIL_FIELDS, duplicateField } from "../api/inventory.js";
 
 test("every printed label value (shared by its barcode and QR code) scans back to the same location", () => {
   const shelf = { rack: "Rack:01 / בדיקה", u: 4, position: "Left: front / A" };
@@ -103,4 +103,41 @@ test("an equipment save sends the edited detail fields with the rest of the reco
   const { changes } = unitDetailChanges(loaded["Rack-01"][0], { serial_number: "MT1", part_number: "P-1", model: "M-1", mac: "001a2b3c4d5e" });
   await saveRackItems({ "Rack-01": [{ ...loaded["Rack-01"][0], ...changes }] }, loaded);
   assert.deepEqual(sent[0]["Rack-01"][0], { id: "ci-1", name: "Switch 01", u: 2, serial_number: "MT1", part_number: "P-1", model: "M-1", mac: "00:1A:2B:3C:4D:5E" });
+});
+
+test("a serial number or MAC address taken by another unit is reported as that, not as a change in another session", async t => {
+  const realFetch = globalThis.fetch, realWindow = globalThis.window;
+  const alerts = [], requests = [];
+  const list = { "Rack-03": [{ id: "ci-a", name: "Alpha", u: 1, mac: "02:00:00:00:00:AA" }, { id: "ci-b", name: "Beta", u: 1 }] };
+  const replies = [
+    { body: list, etag: '"v1"' },
+    { status: 409, body: { detail: "This MAC address already belongs to another item." } },
+    { status: 409, body: { detail: "This barcode or serial number already belongs to another item." } },
+    { body: list, etag: '"v2"' },
+  ];
+  globalThis.window = { alert: message => alerts.push(message) };
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push(`${options.method || "GET"} ${options.headers?.["If-Match"] ?? ""}`.trim());
+    const reply = replies.shift();
+    return new Response(JSON.stringify(reply.body), { status: reply.status ?? 200, headers: reply.etag ? { ETag: reply.etag } : {} });
+  };
+  t.after(() => { globalThis.fetch = realFetch; globalThis.window = realWindow; });
+  const loaded = await loadRackItems();
+  const withMac = { "Rack-03": [list["Rack-03"][0], { ...list["Rack-03"][1], mac: "02:00:00:00:00:AA" }] };
+  const mac = await saveRackItems(withMac, loaded).then(() => null, e => e);
+  assert.equal(mac?.status, 409);
+  assert.equal(mac.duplicate, true);
+  assert.equal(mac.message, "This MAC address already belongs to another item.");
+  assert.equal(mac.reloaded, undefined, "nothing changed elsewhere, so the list is not reloaded");
+  assert.equal(duplicateField(mac), "mac");
+  assert.deepEqual(alerts, ["This MAC address already belongs to another item."]);
+  // The equipment panel shows it at the field itself instead of an alert.
+  const serial = await saveRackItems({ "Rack-03": [list["Rack-03"][0], { ...list["Rack-03"][1], serial_number: "alpha-1" }] }, loaded, { alertDuplicates: false }).then(() => null, e => e);
+  assert.equal(duplicateField(serial), "serial_number");
+  assert.match(serial.message, /barcode or serial number already belongs/);
+  assert.equal(alerts.length, 1);
+  assert.equal(duplicateField(new Error("Equipment changed in another session.")), "");
+  // The revision is still current: the next save uses it.
+  await saveRackItems(list, loaded);
+  assert.deepEqual(requests, ["GET", 'PUT "v1"', 'PUT "v1"', 'PUT "v1"']);
 });

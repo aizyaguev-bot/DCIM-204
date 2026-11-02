@@ -1,7 +1,7 @@
 import { sumKnown, reading } from "../power";
 import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
-import { loadRackItems, saveRackItems, MAIN_STORAGE, UNIT_DETAILS, unitDetailChanges, detailText } from "../api/inventory";
+import { loadRackItems, saveRackItems, MAIN_STORAGE, UNIT_DETAILS, unitDetailChanges, detailText, duplicateField } from "../api/inventory";
 import { loadLayout, saveLayout } from "../api/layout";
 import { splitSections, sectionHeading, versionOf } from "../api/changelog";
 import { SectionBody, plain } from "../components/WhatsNew";
@@ -767,6 +767,8 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   const [moveRack,  setMoveRack]  = useState("");
   const [moving,    setMoving]    = useState(false);
   const [unchanged, setUnchanged] = useState(false);
+  // A serial number or MAC address that already names another unit: the server's reason, shown at that field.
+  const [taken,     setTaken]     = useState(null);
   // Delete is asked in the panel itself (never window.confirm), the same two steps as "Remove from DCIM".
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -795,6 +797,8 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   if (notes.trim() !== (item.notes || "")) changes.notes = notes.trim();
   const { changes: detailChanges, errors: detailErrors } = unitDetailChanges(item, details);
   Object.assign(changes, detailChanges);
+  // The refusal stays until that field is edited again.
+  if (taken && details[taken.field] === taken.value) detailErrors[taken.field] = detailErrors[taken.field] || taken.message;
   const detailError = Object.keys(detailErrors).length > 0;
   const dirty = Object.keys(changes).length > 0;
 
@@ -803,7 +807,15 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
     if (!dirty) { setUnchanged(true); return; }
     setBusy(true); setUnchanged(false);
     try { await onSave(item.id, changes); setSaved(true); setTimeout(()=>setSaved(false),2000); }
-    catch { /* the save already told the user why */ }
+    catch (e) {
+      // Other refusals were already reported (a stale list reopens this panel on the saved values).
+      const field = duplicateField(e);
+      if (field) {
+        setTaken({ field, value: details[field], message: e.message });
+        document.querySelector(`[data-detail="${field}"]`)?.focus();
+        requestAnimationFrame(() => document.getElementById(`edit-equipment-${field}-error`)?.scrollIntoView({ block: "nearest" }));
+      }
+    }
     finally { setBusy(false); }
   }
 
@@ -854,7 +866,7 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
           </div>
           {UNIT_DETAILS.map(([field, label]) => <div key={field}><SL>{label}</SL>
             <input value={details[field]} onChange={e => { const value = e.target.value; setDetails(d => ({ ...d, [field]: value })); }}
-              onKeyDown={e=>e.key==="Enter"&&submit()} spellCheck={false} autoComplete="off" data-detail={field}
+              onKeyDown={e=>e.key==="Enter"&&submit()} spellCheck={false} autoComplete="off" data-detail={field} dir="auto"
               aria-label={label} aria-invalid={detailErrors[field] ? true : undefined} aria-describedby={detailErrors[field] ? `edit-equipment-${field}-error` : undefined}
               placeholder={field === "mac" ? "00:1A:2B:3C:4D:5E" : "Not recorded"}
               className={`w-full bg-zinc-900 border rounded-lg px-3 py-2 text-sm font-mono text-zinc-200 focus:outline-none ${detailErrors[field] ? "border-rose-700 focus:border-rose-500" : "border-zinc-800 focus:border-nv-400/50"}`}/>
@@ -880,14 +892,15 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
               </div>
             </div>
           )}
+        </div>
+        {/* Save stays in view below the scrolling fields, so a short screen never hides it. */}
+        <div className="px-5 py-4 border-t border-zinc-800/40 space-y-3">
           <button onClick={submit} disabled={busy || !name.trim() || !!uError || detailError}
             className={`w-full py-2 text-sm font-bold rounded-lg transition flex items-center justify-center gap-2
               ${saved?"bg-emerald-900/50 text-emerald-400 border border-emerald-800/50":"bg-nv-400 text-zinc-950 disabled:opacity-40"}`}>
             {busy?<Spinner/>:saved?Icon.check:null}{saved?"Saved":"Save changes"}
           </button>
           {unchanged && !dirty && <div role="status" className="text-[11px] text-zinc-400 text-center">No changes to save.</div>}
-        </div>
-        <div className="px-5 py-4 border-t border-zinc-800/40">
           {confirmDelete ? <div role="group" aria-label={`Delete ${item.name} from ${rackName}`} className="space-y-2"
             onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); cancelDelete(); } }}>
             <p className="text-xs text-rose-300" dir="auto">Delete <bdi>{item.name}</bdi> from <bdi>{rackName}</bdi>? This removes it from the rack layout.</p>
@@ -2248,7 +2261,7 @@ function ReadOnlyAsset({ item, owner, onClose, sshName }) {
   return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
     <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="asset-details-title" tabIndex={-1} onClick={e=>e.stopPropagation()} className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-6">
       <div className="flex justify-between gap-3"><h2 id="asset-details-title" dir="auto" className="font-mono text-xl text-white break-all">{item.name}</h2><div className="flex items-start gap-2 flex-shrink-0">{sshName&&<SshButton name={sshName} size="md"/>}<CloseBtn onClose={onClose}/></div></div>
-      <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, "Part number":item.part_number, Model:item.model, "MAC address":item.mac, Barcode:item.barcode, Shelf:item.u, Owner:owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words">{value}</dd></div>)}</dl>
+      <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, "Part number":item.part_number, Model:item.model, "MAC address":item.mac, Barcode:item.barcode, Shelf:item.u, Owner:owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words" dir="auto">{value}</dd></div>)}</dl>
       <p className="text-xs text-zinc-400">Turn on Edit to change this equipment.</p>
     </section>
   </div>;
@@ -2430,10 +2443,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
 
   // inventory.js reports a rejected equipment save; a stale list is replaced by the reloaded one, and an open
   // equipment panel is reopened on its fresh record (it closes if the item was deleted meanwhile).
-  const saveItems = useCallback(async (updated) => {
+  const saveItems = useCallback(async (updated, options) => {
     itemsSeq.current++;
     try {
-      const saved = await saveRackItems(updated, customItems);
+      const saved = await saveRackItems(updated, customItems, options);
       setCustomItems(saved);
       return saved;
     } catch (e) {
@@ -2803,7 +2816,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     if (!rackName) return;
     const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===id ? {...i, ...changes} : i) };
     try {
-      await saveItems(updated);
+      // The panel shows a taken serial number or MAC address next to the field itself.
+      await saveItems(updated, { alertDuplicates: false });
       setCustomPanel(p => ({...p, draft: null, notice: false}));
     } catch (e) {
       if (e.reloaded) setCustomPanel(p => ({...p, draft: changes}));
