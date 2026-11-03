@@ -5,8 +5,13 @@ import { MAIN_STORAGE } from "../../api/inventory.js";
 export const RACK_FLOORS = 4;
 export const STORAGE_SHELVES = 16;
 
-// Main storage has shelves; every other rack has floors.
-export const rackHasFloors = rack => rack !== MAIN_STORAGE;
+// Racks whose type is Storage (their PDU's model is "Storage"; the rack card says "storage"): the Racks page sets
+// them from its rack list, and they are storage units of shelves like Main storage.
+let storageRacks = new Set();
+export const setStorageRacks = names => { storageRacks = new Set(names); };
+
+// Main storage and storage-type racks have shelves; every other rack has floors.
+export const rackHasFloors = rack => rack !== MAIN_STORAGE && !storageRacks.has(rack);
 
 // How many numbered places the rack has: floors 1-RACK_FLOORS, or Main storage's shelves 1-STORAGE_SHELVES.
 export const floorsFor = rack => (rackHasFloors(rack) ? RACK_FLOORS : STORAGE_SHELVES);

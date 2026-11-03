@@ -2,6 +2,16 @@
 
 ---
 
+## v2.46.2 — 2026-11-03 — Every storage rack has 16 shelves
+
+### Fixed
+- **Every storage rack has 16 shelves**, not only Main storage: a rack whose type is
+  Storage now shows shelves 1-16 (empty ones too), one simple list per shelf without the
+  server-beside-unit columns, and its "+", scan, cooling and shelf choices offer shelves
+  1-16. Anything saved above shelf 16 is listed under "Other", nothing is lost.
+
+---
+
 ## v2.46.1 — 2026-11-03 — Main storage has 16 shelves; safer scan Undo; lab screen fixes
 
 ### Changed

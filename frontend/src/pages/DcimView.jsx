@@ -12,7 +12,7 @@ import { findServer } from "../api/ssh";
 import { serverIdentity } from "../api/locations";
 import { deviceState } from "../api/client";
 import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, rackFloors, RACK_FLOORS, buildSearchIndex, searchIndex, matchesFilter, floorOptions } from "../components/racks/rackView.js";
-import { STORAGE_SHELVES, floorsFor, placesWord, rackHasFloors, validFloor } from "../components/racks/floors.js";
+import { STORAGE_SHELVES, floorsFor, placesWord, rackHasFloors, setStorageRacks, validFloor } from "../components/racks/floors.js";
 import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, validPlace, shelfLabel, placeWord, sameDocument } from "../components/racks/chillers.js";
 import { BLOCK, serverPowerGroup, planServerPower, sameTargets, serverDisplayName } from "../components/racks/serverPower.js";
 import ServerPowerControl, { PowerActionButtons } from "../components/racks/ServerPowerControl.jsx";
@@ -184,8 +184,8 @@ export function buildRackRows(servers, rackName, rackOrder, rackSlots, customIte
     return { u, items, auto: items.some(i => i.kind === "server" && slots[i.data.id] == null) };
   };
   const rows = [];
-  if (rackName === MAIN_STORAGE) {
-    // Main storage is a unit of STORAGE_SHELVES shelves: every shelf (an empty one too), then any occupied shelf above
+  if (!rackHasFloors(rackName)) {
+    // Main storage (and every storage-type rack) is a unit of STORAGE_SHELVES shelves: every shelf (an empty one too), then any occupied shelf above
     // them (old data, listed under "Other" by the card), then the whole-unit equipment.
     for (let u = 1; u <= STORAGE_SHELVES; u++) rows.push(row(u));
     [...groups.keys()].filter(u => u > STORAGE_SHELVES).sort((a, b) => a - b).forEach(u => rows.push(row(u)));
@@ -2603,6 +2603,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const rackType=rn===MAIN_STORAGE||rPdus[0]?.model==="Storage"?"storage":"compute";
     return{rack:rn,pdus:allPdus,pduData,servers:rServers,totalWatts,wattsComplete,totalAmps,ampsComplete,outletsOn,outletsTotal,maxWatts,pduOnline,rackType,currentEstimated:pduData.some(p=>p.currentEstimated)};
   }),[racks,rackDevices,pduStatuses,servers]);
+  // Storage-type racks are shelf units: set before the rack cards render, so their rows and dialogs use the shelves.
+  useMemo(() => setStorageRacks(rackStats.filter(rs => rs.rackType === "storage").map(rs => rs.rack)), [rackStats]);
 
   useEffect(() => { onSummary?.(`${racks.length} racks · ${servers.length} OPTs · ${Object.values(customItems).flat().length} equipment items`); }, [racks.length, servers.length, customItems, onSummary]);
 
