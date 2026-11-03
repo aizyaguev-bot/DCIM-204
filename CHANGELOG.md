@@ -2,6 +2,29 @@
 
 ---
 
+## v2.46.1 — 2026-11-03 — Main storage has 16 shelves; safer scan Undo; lab screen fixes
+
+### Changed
+- **Main storage is a 16-shelf storage unit.** Its card and detail always show shelves
+  1-16, each shelf one simple list of everything on it (no server-beside-unit columns),
+  with one "+" per shelf to scan a unit onto it. Equipment, servers, scans and cooling
+  units can be placed on a shelf (or on the whole storage unit). Anything saved earlier
+  above shelf 16 is listed under "Other · not on shelves 1-16", nothing is lost.
+
+### Fixed
+- **Scan Undo never removes someone else's work:** if the unit was changed after the
+  scan (name, type, notes or any detail), Undo leaves it and says so. A label whose
+  serial number or MAC contradicts the unit it found is refused, a lookup that races
+  another session's change is redone, and the camera turns off when the scan box is
+  closed while it is still starting.
+- **Lab entrance screen:** long names shrink again when a badge or another entry takes
+  room beside them; a stuck server no longer piles up requests (they are cancelled);
+  a server fed by two PDUs counts as on when either feed is on (also on the Racks page).
+- Faster save of the equipment list with many units; the session-ending endpoints are
+  covered by the reviewed permission list.
+
+---
+
 ## v2.46.0 — 2026-11-03 — Scanned units keep serial, part number, model and MAC; cooling on floors 1-4
 
 ### Added
