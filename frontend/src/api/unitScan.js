@@ -81,7 +81,9 @@ async function lookUp(parsed) {
   throw failure("The inventory kept changing in another session while this code was looked up, so nothing was changed. Scan the unit again.");
 }
 
-const sameText = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+// The server's identity rule: a value that reads as a MAC address is that MAC in any spelling, anything else ignores case.
+const identityOf = value => { const text = String(value || "").trim(); return normalizeMac(text) || text.toLowerCase(); };
+const sameText = (a, b) => identityOf(a) === identityOf(b);
 
 // The label's serial number or MAC address against the unit it found: a value on both that differs means the label
 // belongs to another unit (or the record is wrong). Returns a refusal Error, or null.
