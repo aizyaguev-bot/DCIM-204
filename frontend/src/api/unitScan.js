@@ -17,17 +17,19 @@ export function samePlace(a, b) {
   return !!a && !!b && a.rack === b.rack && a.u === b.u && (a.position || "") === (b.position || "");
 }
 
-// "floor 2", "rack level", "U7" in a rack (no rack given: a rack); "shelf 7" or "whole storage" in Main storage.
+// "floor 2", "rack level", "U7" in a rack (no rack given: a rack); "shelf 7" or "whole storage" in a storage rack.
 export function floorText(u, rack = null) {
   if (!rackHasFloors(rack)) return Number.isInteger(u) && u > 0 ? `shelf ${u}` : "whole storage";
   if (!Number.isInteger(u) || u === 0) return "rack level";
   return u <= floorsFor(rack) ? `floor ${u}` : `U${u}`;
 }
 
-// "OPT12 · floor 2", "Rack-01 · rack level"; Main storage: "Main storage · shelf 7", or "Main storage" (the whole unit).
+// "OPT12 · floor 2", "Rack-01 · rack level"; Main storage: "Main storage · shelf 7", or "Main storage" (the whole unit);
+// another storage rack: "Storage shelf · shelf 7", or "Storage shelf · whole storage".
 export function placeText(place, label = "") {
   if (!place?.rack) return "no rack";
   if (place.rack === MAIN_STORAGE) return Number.isInteger(place.u) && place.u > 0 ? `Main storage · ${floorText(place.u, place.rack)}` : "Main storage";
+  if (!rackHasFloors(place.rack)) return `${place.rack} · ${floorText(place.u, place.rack)}`;
   return `${label || place.rack} · ${floorText(place.u)}`;
 }
 

@@ -361,85 +361,102 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .kvm-open { display: inline-flex; align-items: center; min-height: 32px; padding: 0 8px; font-size: 11px; }
 .kvm-open-compact { padding: 0 8px; }
 
-/* rack floors (v2.43.2): a rack card is its four floors, 1 at the top. A floor is its number on the left, one line per
-   server in the middle and, beside them on the right, a column of compact cards for the floor's other units (equipment,
-   cooling); on a narrow card (a phone) those cards wrap under the servers inside the floor. A server line: status
-   stripe on the left edge (the LED: green on, grey off, amber when the feeds disagree, purple in maintenance, dashed
-   grey when unknown or unreachable), name, state and watts, then KVM, SSH and the power switch at the line's end. The
-   PDU feed chips, the KVM chip and the owner / host / switch column appear only when the line has room for them, so the
-   line never wraps; their columns line up from floor to floor. An empty floor is one compact dashed "Free" slot; a
-   shelf above floor 4 is listed under "Other". Blue edge = the line in use. */
-.rack-shelves { container: shelves / inline-size; padding: 8px 8px 2px; border-color: #27272a; border-radius: 8px; background: #141518; }
-.shelf-row { gap: 6px; min-height: 0; margin: 0 0 6px; }
-.shelf-row + .shelf-row, .shelf-empty + .shelf-row, .shelf-gap + .shelf-row { padding-top: 0; border-top: 0; }
-.shelf-index { flex: 0 0 18px; justify-content: center; font-size: 12px; font-weight: 700; color: #a1a1aa; }
-.shelf-row > .shelf-index { min-height: 44px; }
-.shelf-index:has(.floor-add) { flex-direction: column; gap: 3px; }
-.shelf-empty .shelf-index:has(.floor-add) { flex-direction: row; flex-basis: 40px; gap: 4px; }
-.floor-add { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 1px dashed #52525b;
+/* rack floors (v2.47 floor template): a rack card is its four floors, 1 at the top, and every floor is one box of the
+   same size, filled or empty, in every card of the grid (so floors line up side by side) and, larger, in the rack
+   detail. A floor box: its number (with the "+" that scans a unit onto it) | the server zone: one server in two lines
+   (line 1: status stripe, name, state word, watts, then SSH and the power switch at a fixed place; line 2: a missing
+   reading, owner, KVM console port, SSH host, switch port and PDU feeds, ending in "…" when too long), or "Free" |
+   under it the units row: a fixed number of unit slots (2 on a card, 3 in the detail), each a box of fixed size with
+   the unit's labelled fields at fixed places (type and name; P/N; S/N, model, MAC), drawn with their labels when empty
+   too; the last slot is "+N units" when there are more, and opens the rest in a list over the floors below. Nothing in
+   a floor ever wraps. A storage rack (16 shelves) draws each shelf as one row of the same unit slots (name and P/N; a
+   server: name, state and its details), the same height on every shelf. Status stripe: green on, grey off, amber when
+   the feeds disagree, purple in maintenance, dashed grey when unknown or unreachable. Blue edge = the line in use. */
+.rack-shelves { container: shelves / inline-size; padding: 8px 8px 2px; border-color: #27272a; border-radius: 8px; background: #141518;
+  --f-index: 22px; --f-row1: 32px; --f-row2: 16px; --f-server: calc(var(--f-row1) + var(--f-row2) + 10px); --f-line: 15px;
+  --f-slot3: calc(3 * var(--f-line) + 8px); --f-slot2: calc(2 * var(--f-line) + 8px); --f-name: 14px; --f-facts: 11px; }
+.rack-card[data-detail] .rack-shelves { --f-row1: 34px; --f-row2: 18px; --f-line: 16px; --f-name: 15px; --f-facts: 12px; }
+@media (pointer: coarse), (max-width: 640px) {
+  .rack-shelves, .rack-card[data-detail] .rack-shelves { --f-row1: 40px; }
+}
+.rack-shelves .floor-box { position: relative; display: grid; grid-template-columns: var(--f-index) minmax(0, 1fr);
+  grid-template-rows: var(--f-server) var(--f-slot3); grid-template-areas: "index server" "index units"; column-gap: 6px; row-gap: 4px;
+  align-items: stretch; height: calc(var(--f-server) + 4px + var(--f-slot3)); min-height: 0; margin: 0 0 8px; padding: 0; border: 0; }
+.rack-shelves .floor-box > .shelf-index { grid-area: index; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 4px;
+  min-width: 0; min-height: 0; height: 100%; padding-top: 6px; font-size: 12px; font-weight: 700; color: #a1a1aa; white-space: nowrap; }
+.rack-shelves .floor-box[data-auto] > .shelf-index { font-style: italic; }
+.floor-add { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 18px; height: 18px; padding: 0; border: 1px dashed #52525b;
   border-radius: 4px; background: transparent; color: #a1a1aa; font-size: 13px; font-weight: 700; line-height: 1; cursor: pointer; }
 .floor-add:hover, .floor-add:focus-visible { border-style: solid; border-color: #9fe040; color: #9fe040; }
-.shelf-content { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 6px; flex: 1; min-width: 0; }
-.floor-servers { container: servers / inline-size; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.floor-no-server { display: flex; align-items: center; min-height: 44px; padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; font-size: 11px; color: #a1a1aa; }
-.floor-units { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px; min-width: 0; }
-.floor-units > * { flex: 0 1 auto; min-width: 0; max-width: 100%; }
-@container shelves (min-width: 396px) {
-  .shelf-row[data-units] .shelf-content { grid-template-columns: minmax(0, 1fr) 96px; }
-  .floor-units { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
-}
-/* Main storage: shelves 1-16, each shelf one simple list of everything on it (servers, equipment and cooling units, one
-   per line, full width); no server | units columns. */
-.shelf-list { container: servers / inline-size; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.shelf-list-item { min-width: 0; }
-.shelf-list-item > .equipment-cell { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; }
-.shelf-list-item > .equipment-cell .equipment-type { flex: 0 0 auto; }
-.shelf-list-item > .cooling-chip { width: 100%; max-width: 100%; min-height: 44px; }
+/* the server zone */
+.rack-shelves .floor-box > .floor-servers { grid-area: server; position: relative; display: flex; min-width: 0; min-height: 0; height: 100%; }
+.floor-servers > .unit-sortable, .floor-servers > .server-cell { flex: 1 1 auto; min-width: 0; height: 100%; }
+.floor-servers > .unit-sortable > .server-cell { height: 100%; }
+.rack-shelves .floor-box .shelf-empty-line, .rack-shelves .floor-box .floor-no-server { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; height: 100%; min-height: 0;
+  padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; background: transparent; font-size: 12px; color: #a1a1aa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the units row: a fixed number of slots of the same width */
+.rack-shelves .floor-box > .floor-units { grid-area: units; display: grid; grid-template-columns: repeat(var(--slots, 2), minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr);
+  gap: 4px; min-width: 0; min-height: 0; height: 100%; }
+.floor-unit { display: flex; min-width: 0; min-height: 0; }
+.floor-unit > * { flex: 1 1 auto; min-width: 0; }
+/* a storage shelf: number and "+" | one row of slots (two lines each) */
+.rack-shelves .floor-box.shelf-line { grid-template-columns: 44px minmax(0, 1fr); grid-template-rows: var(--f-slot2); grid-template-areas: "index list"; height: var(--f-slot2); margin-bottom: 6px; }
+.rack-shelves .floor-box.shelf-line > .shelf-index { flex-direction: row; align-items: center; justify-content: flex-start; padding-top: 0; }
+.rack-shelves .floor-box.shelf-line > .shelf-list { grid-area: list; }
+.shelf-list { display: grid; grid-template-columns: repeat(var(--slots, 3), minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); gap: 4px; min-width: 0; height: 100%; }
+.shelf-list-item { display: flex; min-width: 0; min-height: 0; }
+.shelf-list-item > * { flex: 1 1 auto; min-width: 0; }
+.shelf-list-item > .unit-sortable > .server-cell { height: 100%; }
 .floors-other { margin: 2px 0 6px; padding-left: 24px; font-size: 11px; font-weight: 600; letter-spacing: .03em; color: #a1a1aa; }
-.shelf-empty { height: 28px; margin: 0 0 6px; gap: 6px; }
-.shelf-empty .shelf-index { color: #a1a1aa; }
-.shelf-empty-line { display: flex; align-items: center; flex: 1; height: 100%; padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; background: transparent; font-size: 11px; color: #a1a1aa; }
 .shelf-gap { height: 28px; margin: 0 0 6px; padding: 0 10px; border: 1px dashed #3f3f46; border-radius: 8px; color: #a1a1aa; }
+/* a server: two lines (head | actions, facts across) in the server zone; two lines without actions in a storage slot */
 .unit-row { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 44px; padding: 5px 6px 5px 13px;
   border: 1px solid #3f3f46; border-radius: 8px; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
-.unit-main { grid-area: main; display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; }
-.unit-main > .server-open, .unit-main > .server-rename { flex: 0 1 auto; min-width: 0; max-width: 100%; }
-.unit-state { grid-area: state; display: flex; align-items: center; gap: 5px; flex: 0 0 auto; min-width: 0; white-space: nowrap; font-size: 11px; color: #a7a7a7; }
+.rack-shelves .server-cell[data-variant="floor"], .floor-more-list .server-cell[data-variant="floor"] { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: var(--f-row1) var(--f-row2); grid-template-areas: "head actions" "facts facts"; column-gap: 6px; row-gap: 2px; align-items: center;
+  height: 100%; min-height: 0; padding: 4px 6px 4px 13px; }
+.rack-shelves .server-cell[data-variant="floor"]:has(> .floor-more) { grid-template-areas: "head actions" "facts more"; }
+.unit-head { grid-area: head; display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.unit-head > .server-open, .unit-head > .server-rename { flex: 0 1 auto; min-width: 3ch; max-width: 100%; }
+.unit-state { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-width: 0; white-space: nowrap; font-size: 11px; color: #a7a7a7; }
 /* A floor in maintenance shows the badge in place of the watts (the details still have them). */
 .unit-state .maint-badge ~ .server-watts { display: none; }
-.unit-details { grid-area: details; display: none; flex: 0 1 auto; align-items: center; column-gap: 6px; min-width: 0; }
-.unit-col { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
-.unit-col > * { min-width: 0; max-width: 100%; }
-.unit-chip { display: inline-block; height: 20px; padding: 0 6px; border: 1px solid #52525b; border-radius: 4px; background: #1d1e22; color: #e4e4e7;
-  font: 11px/18px "JetBrains Mono", Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.feed-chip[data-partial] { border-color: #8a6a10; background: #2a2008; color: #f0c060; }
-.kvm-chip { border-color: #5b3f8f; background: #1e1033; color: #d8b4fe; }
-.unit-host { font: 11px "JetBrains Mono", Consolas, monospace; color: #a7a7a7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.unit-net .server-switch { font: 11px "JetBrains Mono", Consolas, monospace; }
+.unit-facts { grid-area: facts; display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font: var(--f-facts)/var(--f-row2) "JetBrains Mono", Consolas, monospace; color: #c4c4cc; }
+.unit-fact + .unit-fact::before { content: " · "; color: #a1a1aa; }
+.unit-fact[data-fact="reading"] { color: #fca5a5; }
+.unit-fact[data-fact="owner"] { color: #e4e4e7; }
+.unit-fact[data-fact="kvm"] { color: #d8b4fe; }
+.unit-fact[data-fact="switch"] { color: #7dd3fc; }
+.unit-fact-none { color: #a1a1aa; }
+.server-cell > .floor-more { grid-area: more; justify-self: end; min-width: 0; }
+/* KVM, SSH and the power switch: each in its own column, so they are at the same place on every floor (an empty KVM
+   column when the server has no console port). */
 .unit-actions { grid-area: actions; display: grid; flex: none; margin-left: auto; grid-template-columns: 38px 38px 56px; grid-template-areas: "kvm ssh power"; column-gap: 4px; align-items: center; width: 144px; }
 .unit-actions[data-edit] { grid-template-columns: 38px 38px; grid-template-areas: "kvm ssh"; width: 80px; }
 .unit-actions .power-toggle { grid-area: power; min-width: 0; width: 56px; padding: 0; }
 .unit-actions .kvm-open { grid-area: kvm; justify-content: center; width: 100%; padding: 0; }
 .unit-actions .ssh-open-compact { grid-area: ssh; justify-content: center; width: 100%; padding: 0; }
-.unit-row .shelf-grip { flex: 0 0 20px; width: 20px; align-self: stretch; min-height: 30px; margin-left: -4px; }
+/* No console port: no empty KVM column (SSH and the switch keep their places at the line's end), more room for the name. */
+.unit-actions:not(:has(.kvm-open)) { grid-template-columns: 38px 56px; grid-template-areas: "ssh power"; width: 98px; }
+.unit-actions[data-edit]:not(:has(.kvm-open)) { grid-template-columns: 38px; grid-template-areas: "ssh"; width: 38px; }
+/* The name comes first: the state word stays, the watts go when a narrow card has no room for them (details have them). */
+.unit-head > .server-open { flex-shrink: 0; max-width: 62%; }
+.unit-state { flex-shrink: 1; overflow: hidden; }
+@container shelves (max-width: 399px) { .rack-shelves .server-cell[data-variant="floor"] .server-watts { display: none; } }
+.unit-row .shelf-grip { flex: 0 0 20px; width: 20px; align-self: stretch; min-height: 0; margin-left: -4px; }
 .unit-row .server-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* Room for more on the line: the PDU feed chips, then the KVM chip, then owner / host / switch. Name, state and the
-   chips get fixed widths there, so they start at the same place on every floor; the actions stay at the line's end. */
-@container servers (min-width: 500px) {
-  .unit-main { flex: 0 0 7rem; }
-  .unit-state { flex: 0 0 6.5rem; }
-  .unit-details { display: flex; gap: 6px; }
-  .unit-feeds { flex: 0 0 5.75rem; }
-  .unit-kvm, .unit-owner, .unit-net { display: none; }
-}
-@container servers (min-width: 630px) {
-  .unit-main { flex-basis: 8rem; }
-  .unit-kvm { display: flex; flex: 0 0 7.5rem; }
-}
-@container servers (min-width: 770px) {
-  .unit-owner { display: flex; flex: 0 1 9rem; }
-  .unit-net { display: flex; flex: 0 1 auto; }
-}
+.rack-shelves .server-cell .server-name { font-size: var(--f-name); line-height: 1.25; }
+.rack-shelves .server-cell.server-chip, .floor-more-list .server-cell.server-chip { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, var(--f-line));
+  grid-template-areas: "head" "facts"; align-content: center; row-gap: 0; height: 100%; min-height: 0; padding: 3px 6px 3px 12px; }
+.server-chip .unit-facts { line-height: var(--f-line); font-size: 11px; }
+.server-chip .server-name { font-size: 12px; }
+.server-chip > .server-led { top: 5px; bottom: 5px; }
+/* the drag overlay of a server (Edit mode) keeps its floor size */
+.rack-shelves.drag-overlay { padding: 0; border: 0; background: transparent; height: var(--f-server); }
+.rack-shelves.drag-overlay > .server-cell { height: 100%; }
+.rack-shelves .floor-box + .floor-box, .rack-shelves .shelf-gap + .floor-box { padding-top: 0; border-top: 0; }
+.rack-shelves .floor-box > .shelf-index { align-self: stretch; }
 .server-cell { box-shadow: 0 1px 2px rgba(0, 0, 0, .35); cursor: pointer; }
 .server-cell[data-state] { border-color: #3f3f46; background: #2b2d33; }
 .server-cell:hover, .server-cell[data-state]:hover { border-color: #5b5b66; background: #303239; }
@@ -460,28 +477,53 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .server-cell .owner-pill { display: inline-block; height: 20px; max-width: 100%; padding: 0 7px; border: 1px solid #52525b; border-radius: 10px; background: #1d1e22; color: #e4e4e7;
   font-size: 11px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .server-cell .kvm-open, .server-cell .server-actions .ssh-open-compact { min-height: 32px; border-radius: 6px; font-size: 11px; }
-/* Equipment beside the servers: a compact card, type chip over name. */
-.equipment-cell { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 2px; min-width: 0; min-height: 44px; padding: 4px 8px;
-  border: 1px solid #3f3f46; border-radius: 8px; transition: border-color .15s ease, background-color .15s ease; }
+/* Unit slots (the floor template's units row, a storage shelf, a "+N" list): a box of fixed size whose lines are fixed
+   places for the unit's labelled fields: type and name; P/N; S/N · model · MAC. Each line ends in "…" when too long. */
+.unit-slot { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: var(--f-line, 15px); align-content: center; min-width: 0; min-height: 0; height: 100%;
+  padding: 3px 7px; border: 1px solid #3f3f46; border-radius: 8px; overflow: hidden; text-align: start; }
+.unit-slot-empty { border-style: dashed; background: transparent; }
+.slot-line { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 11px; line-height: var(--f-line, 15px); }
+.slot-field { display: inline-flex; align-items: baseline; gap: 4px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.slot-field + .slot-field { margin-left: 4px; }
+.slot-label { flex: 0 0 auto; font-size: 11px; font-weight: 700; letter-spacing: .03em; color: #a1a1aa; }
+.slot-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "JetBrains Mono", Consolas, monospace; color: #e4e4e7; }
+.unit-slot-empty .slot-value { color: #a1a1aa; }
+.slot-more-fields .slot-field:last-child { flex: 1 1 auto; }
+.equipment-cell { min-width: 0; transition: border-color .15s ease, background-color .15s ease; }
 .equipment-cell, .equipment-cell[data-type="switch"], .equipment-cell[data-type="ups"] { border-color: #3f3f46; background: #232429; color: #fafafa; cursor: pointer; }
 .equipment-cell:hover, .equipment-cell[data-type]:hover { border-color: #5b5b66; background: #292a30; }
 .equipment-cell:focus-visible { outline: 2px solid #9fe040; outline-offset: 2px; border-color: #38bdf8; }
-.equipment-type { display: inline-flex; align-items: center; height: 16px; max-width: 100%; padding: 0 5px; border: 1px solid #52525b; border-radius: 4px; background: #3f3f46; color: #e4e4e7;
-  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; overflow: hidden; }
+.equipment-type { display: inline-flex; align-items: center; flex: 0 0 auto; height: 14px; max-width: 100%; padding: 0 4px; border: 1px solid #52525b; border-radius: 3px; background: #3f3f46; color: #e4e4e7;
+  font-size: 11px; font-weight: 700; letter-spacing: .03em; line-height: 1; text-transform: uppercase; white-space: nowrap; overflow: hidden; opacity: 1; }
 .equipment-cell[data-type="switch"] .equipment-type { border-color: #1f5163; background: #0c2a36; color: #7dd3fc; }
 .equipment-cell[data-type="ups"] .equipment-type { border-color: #26502a; background: #0f2a14; color: #86efac; }
-.equipment-name { display: block; min-width: 0; max-width: 100%; font-size: 12px; font-weight: 600; color: #fafafa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.equipment-name { display: block; flex: 0 1 auto; min-width: 0; max-width: 100%; font-size: 12px; font-weight: 600; color: #fafafa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .equipment-serial { display: block; font-size: 11px; color: #a7a7a7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.floor-units .cooling-chip { max-width: 100%; }
-/* A unit is as tall as a server line; beside the servers, both columns fill the floor's height, so the server and the
-   unit next to it are the same height. */
-.floor-units > * { min-height: 44px; }
-@container shelves (min-width: 396px) {
-  .shelf-row[data-units] .shelf-content { align-items: stretch; }
-  .shelf-row[data-units] .floor-servers > *, .shelf-row[data-units] .floor-units > * { flex: 1 0 auto; }
-  .shelf-row[data-units] .unit-sortable { display: flex; flex-direction: column; }
-  .shelf-row[data-units] .unit-sortable > .unit-row { flex: 1 0 auto; }
-}
+/* a cooling unit in a slot: the same lines (name; type; place) */
+.cooling-chip[data-variant="slot"] { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: var(--f-line, 15px); align-content: center; gap: 0;
+  max-width: none; width: 100%; height: 100%; min-height: 0; padding: 3px 7px; border-radius: 8px; text-align: start; }
+.cooling-chip[data-variant="slot"] .slot-name { color: #7dd3fc; font-size: 12px; font-weight: 600; }
+/* the "+N" chip (a slot, or the "+1 server" chip at the end of a server's second line) and its list */
+.floor-more { position: relative; display: flex; min-width: 0; min-height: 0; }
+.floor-unit > .floor-more, .shelf-list-item > .floor-more { height: 100%; }
+.floor-more-toggle { flex: 1 1 auto; min-width: 0; padding: 0 8px; border: 1px solid #52525b; border-radius: 8px; background: #1d1e22; color: #e4e4e7;
+  font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.server-cell > .floor-more > .floor-more-toggle { height: var(--f-row2, 16px); padding: 0 6px; border-radius: 4px; font-size: 11px; line-height: 1; }
+.floor-more-toggle:hover { border-color: #71717a; background: #26272c; }
+.floor-more-toggle:focus-visible { outline: 2px solid #9fe040; outline-offset: 1px; }
+.floor-more-toggle[aria-expanded="true"] { border-color: #38bdf8; }
+.floor-more-toggle[data-match] { outline: 2px solid #9fe040; outline-offset: -2px; }
+.floor-more-list { position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; display: flex; flex-direction: column; gap: 4px; width: max(100%, 260px); max-width: min(360px, 90vw);
+  max-height: 320px; padding: 6px; overflow-y: auto; border: 1px solid #52525b; border-radius: 8px; background: #18181b; box-shadow: 0 8px 24px rgba(0, 0, 0, .6); --f-line: 15px; --f-row1: 32px; --f-row2: 16px; }
+.floor-more-list[hidden] { display: none; }
+.floor-more-item { display: flex; flex: 0 0 auto; min-width: 0; height: calc(3 * var(--f-line) + 8px); }
+.floor-more-item > * { flex: 1 1 auto; min-width: 0; }
+.floor-more-item:has(> .server-cell[data-variant="floor"]), .floor-more-item:has(> .unit-sortable) { height: calc(var(--f-row1) + var(--f-row2) + 10px); }
+.floor-more-item > .unit-sortable > .server-cell { height: 100%; }
+/* An open "+N" list is drawn over the cards below it. */
+.rack-shelves:has(.floor-more[data-open]) { position: relative; z-index: 20; }
+/* A card without a reading keeps the load bar's place, so the floors of the cards in a grid row line up. */
+.rack-load-none { background: transparent; }
 
 /* power switch: a pill with its state written in it (ON / OFF) and a round knob with the power symbol. Blocked = dashed
    and muted (the reason is in its title), unknown = empty dashed pill with the knob in the middle, split feeds = amber

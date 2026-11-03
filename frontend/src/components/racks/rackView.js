@@ -177,3 +177,45 @@ export function floorOptions(rows, coolingPlaced = {}, rack = null) {
   }
   return options;
 }
+
+// ── floor template (v2.47) ──
+// Every floor of a compute rack is one box of the same size: floor number | server zone, and under it a row of
+// FLOOR_UNIT_SLOTS unit slots (each a fixed box with the unit's labelled fields: name, P/N, S/N, model, MAC); a storage
+// shelf is one row of SHELF_SLOTS slots (servers and units alike). Slots are drawn when empty too. When more items are
+// on a floor than it has slots, the last slot becomes a "+N" chip that opens the rest, so a full floor is never taller
+// than an empty one. card: the overview's rack cards (and phones); detail: the larger rack detail.
+export const FLOOR_UNIT_SLOTS = { card: 2, detail: 3 };
+export const SHELF_SLOTS = { card: 3, detail: 4 };
+
+// How many of count items a template with that many slots shows, and how many the "+N" chip holds.
+export function slotOverflow(count, slots) {
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  const s = Math.max(1, Math.floor(Number(slots) || 1));
+  if (n <= s) return { shown: n, more: 0 };
+  return { shown: s - 1, more: n - (s - 1) };
+}
+
+// Splits a list for a template: the items drawn in its slots, and the rest (behind the "+N" chip).
+export function splitSlots(list, slots) {
+  const items = Array.isArray(list) ? list : [];
+  const { shown, more } = slotOverflow(items.length, slots);
+  return { shown: items.slice(0, shown), rest: items.slice(shown), more };
+}
+
+// "+1 server", "+2 servers", "+1 unit", "+3 units", "+3 more" for a "+N" chip.
+export const moreText = (n, noun = "more") => (noun === "server" || noun === "unit" ? `+${n} ${noun}${n === 1 ? "" : "s"}` : `+${n} ${noun}`);
+
+// The second line of a server on its floor: what the app knows about it besides name, state and watts, in this order: a
+// missing reading (why), owner, KVM console port, switch port and PDU feeds. Each is { key, text, title }; nothing for
+// what is not known. (The SSH host, known to Operators from the SSH status, is drawn after the KVM port by the page.)
+export function serverFacts({ visual = null, owner = "", kvm = null, sw = null, feeds = [] } = {}) {
+  const out = [];
+  if (visual && (visual.state === "unreachable" || visual.state === "unknown") && visual.title) out.push({ key: "reading", text: visual.title, title: visual.title });
+  if (owner) out.push({ key: "owner", text: String(owner), title: `Owner: ${owner}` });
+  if (kvm?.kvmName) out.push({ key: "kvm", text: `${kvm.kvmName} · port ${kvm.port}`, title: `KVM console: ${kvm.kvmName}, port ${kvm.port}` });
+  if (sw?.switch) out.push({ key: "switch", text: `${sw.switch}${sw.port ? `:${sw.port}` : ""}`, title: `Switch ${sw.switch}${sw.port ? ` · port ${sw.port}` : ""}` });
+  const list = (feeds || []).filter(f => f && f.pduName);
+  if (list.length) out.push({ key: "feeds", text: list.map(f => `${f.pduName} · ${f.outlet}`).join(", "),
+    title: list.map(f => `${f.pduName} outlet ${f.outlet}${f.state === "on" || f.state === "off" ? ` (${f.state})` : ""}`).join(", ") });
+  return out;
+}
