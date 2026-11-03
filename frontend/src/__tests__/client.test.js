@@ -24,6 +24,23 @@ test("labels PATCH sends If-Match only with the device's labels_revision", async
   assert.deepEqual(calls[3].init.headers, {});
 });
 
+test("the display's reads take an optional AbortSignal; other callers send exactly what they sent before", async () => {
+  const calls = stubFetch(ok([]));
+  const controller = new AbortController();
+  await api.getDevices({ signal: controller.signal });
+  await api.getPduStatus("pdu1", { signal: controller.signal });
+  await api.getKvmStatus("kvm1", { signal: controller.signal });
+  await api.maintenanceList({ signal: controller.signal });
+  await api.getDevices();
+  await api.getPduStatus("pdu1");
+  assert.deepEqual(calls.map(c => c.url), ["/api/devices/", "/api/pdus/pdu1/status", "/api/kvms/kvm1/status", "/api/pdus/maintenance", "/api/devices/", "/api/pdus/pdu1/status"]);
+  for (const call of calls.slice(0, 4)) assert.equal(call.init.signal, controller.signal);
+  for (const call of calls.slice(4)) {
+    assert.equal("signal" in call.init, false);
+    assert.deepEqual(call.init, { method: "GET", headers: {}, body: undefined });
+  }
+});
+
 test("a stale revision's 409 carries the status and the server detail", async () => {
   const detail = "Port labels on this device were changed in another session. Reload and try again.";
   stubFetch({ ok: false, status: 409, text: async () => JSON.stringify({ detail }) });

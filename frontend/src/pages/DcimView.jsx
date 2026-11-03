@@ -24,6 +24,7 @@ import UndoToast from "../components/racks/UndoToast.jsx";
 import ScanUnitDialog from "../components/racks/ScanUnitDialog.jsx";
 import useDialogFocus from "../components/racks/useDialogFocus.js";
 import { useStoredState, useMediaQuery, useDebounced, flash, prefersReducedMotion } from "../components/racks/hooks.js";
+import { mergeServerFeeds } from "../labDisplay.js";
 
 const EditContext = createContext(false);
 // Server actions in the rack views: the KVM port of each server (by server identity), the console opener and SSH
@@ -2488,7 +2489,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const racks = useMemo(()=>[...new Set([...rackDevices.map(d=>d.rack).filter(Boolean), ...Object.keys(customItems)])].sort(),[rackDevices, customItems]);
 
   const servers = useMemo(()=>{
-    const map=new Map();
+    // Every outlet that names a server is one feed of it. A server on two feeds (the same label on two outlets) is on
+    // when any feed is on, its watts add up, and it names the PDU / outlet of the feed that decides its state
+    // (mergeServerFeeds, the lab display's rule): a second feed never overwrites the first one's reading.
+    const feeds=new Map();
+    const add=(key,feed)=>{const list=feeds.get(key);if(list)list.push(feed);else feeds.set(key,[feed]);};
     pdus.forEach(pdu=>{
       const stored=pdu.labels||{},live=pduStatuses[pdu.id]?.outlets||[];
       const liveByN=Object.fromEntries((pduStatuses[pdu.id]?.reachable ? live : []).map(o=>[String(o.number),o]));
@@ -2496,16 +2501,15 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         // A reachable PDU's live outlet list already carries the latest saved labels (the dashboard shows the same):
         // an older saved label for that outlet must not keep a server that has moved away.
         if(liveByN[num])return;
-        if(!isServerLabel(label))return;const key=label.trim().toLowerCase();if(map.has(key))return;
-        const lo=liveByN[num];map.set(key,{id:key,name:label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:lo?.state??"unknown",watts:lo?.watts??null});
+        if(!isServerLabel(label))return;const key=label.trim().toLowerCase();
+        add(key,{id:key,name:label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:parseInt(num,10),state:"unknown",watts:null});
       });
       (pduStatuses[pdu.id]?.reachable ? live : []).forEach(o=>{
         if(!isServerLabel(o.label))return;const key=o.label.trim().toLowerCase();
-        if(map.has(key)){const e=map.get(key);e.state=o.state;e.watts=o.watts??null;return;}
-        map.set(key,{id:key,name:o.label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts??null});
+        add(key,{id:key,name:o.label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts??null});
       });
     });
-    return [...map.values()].sort((a,b)=>a.name.localeCompare(b.name));
+    return [...feeds.values()].map(mergeServerFeeds).sort((a,b)=>a.name.localeCompare(b.name));
   },[pdus,pduStatuses,rackOverrides]);
 
   const rackStats = useMemo(()=>racks.map(rn=>{
