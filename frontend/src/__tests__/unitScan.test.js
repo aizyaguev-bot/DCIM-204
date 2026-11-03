@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseUnitBarcode } from "../api/scanParse.js";
-import { placeScannedUnit, undoScannedUnit, canUndo, placeText, floorText, scanDetails, identityConflict, LOOKUP_ATTEMPTS } from "../api/unitScan.js";
+import { placeScannedUnit, undoScannedUnit, canUndo, placeText, floorText, scanDetails, identityConflict, claimsFor, LOOKUP_ATTEMPTS } from "../api/unitScan.js";
 
 // A small stand-in for backend/app/routers/inventory.py and PUT /api/rack-items: revisions (If-Match), exact
 // case-insensitive matches on id / serial / barcode / MAC, the 409 for a code that already belongs to another unit, and
@@ -75,7 +75,8 @@ test("a new barcode adds one unit on the floor; scanning it again changes nothin
   const unit = parseUnitBarcode("(21)MT2614X01234(240)MQM8790-HS2F");
   const first = await placeScannedUnit(unit, shelf2);
   assert.equal(first.action, "created");
-  assert.equal(first.item.name, "MQM8790-HS2F MT2614X01234");
+  assert.equal(first.item.name, "Quantum QM8700 switch");
+  assert.equal(first.item.serial_number, "MT2614X01234");
   assert.equal(first.item.type, "switch");
   assert.equal(first.item.barcode, "MT2614X01234");
   assert.equal(first.item.u, 2);
@@ -171,7 +172,8 @@ test("the scanned serial, part number, model and MAC are sent as the unit's own 
   assert.deepEqual(scanDetails(parseUnitBarcode(LABEL)),
     { serial_number: "MT2614X09999", part_number: "MQM8790-HS2F", model: "QM8790", mac: "B8:CE:F6:00:11:22" });
   assert.deepEqual(scanDetails(parseUnitBarcode("(21)MT2614X01234(240)MQM8790-HS2F")), { serial_number: "MT2614X01234", part_number: "MQM8790-HS2F" });
-  assert.deepEqual(scanDetails(parseUnitBarcode("PLAIN-CODE")), {});
+  assert.deepEqual(scanDetails(parseUnitBarcode("PLAIN-CODE")), { serial_number: "PLAIN-CODE" }, "a plain code is the serial number");
+  assert.deepEqual(scanDetails(parseUnitBarcode("b8cef6a1b2c3")), { mac: "B8:CE:F6:A1:B2:C3" }, "a MAC is not a serial number");
   // A MAC the server would refuse is left out, so it can never fail the scan.
   assert.deepEqual(scanDetails({ serial: "S1", mac: "not a mac" }), { serial_number: "S1" });
 });
@@ -248,6 +250,60 @@ test("a label whose MAC finds unit Q but whose serial differs from Q's is refuse
   const result = await placeScannedUnit(parseUnitBarcode("SN: q-serial; MAC: b8-ce-f6-00-11-22"), shelf2);
   assert.equal(result.action, "moved");
   assert.equal(result.item.id, "ci-q");
+});
+
+test("a plain code makes a unit whose serial number is that code and whose name is the product, not the code", async t => {
+  const state = fakeServer(t, { "Rack-01": [] });
+  const result = await placeScannedUnit(parseUnitBarcode("TESTSN12345"), shelf2);
+  assert.equal(result.action, "created");
+  const item = stored(state, result.item.id);
+  assert.deepEqual([item.barcode, item.serial_number, item.name, item.type], ["TESTSN12345", "TESTSN12345", "Unit", "other"]);
+  const again = await placeScannedUnit(parseUnitBarcode("testsn12345"), shelf2);
+  assert.deepEqual([again.action, again.item.id, again.filled], ["confirmed", item.id, {}], "the same code (any case) finds it again, no second row");
+  assert.equal(count(state, "TESTSN12345"), 1);
+
+  const nic = await placeScannedUnit(parseUnitBarcode("SN: MT2245X01234; PN: MCX75310AAS-NEAT"), shelf2);
+  const card = stored(state, nic.item.id);
+  assert.deepEqual([card.name, card.serial_number, card.part_number, card.barcode], ["ConnectX-7 NIC", "MT2245X01234", "MCX75310AAS-NEAT", "MT2245X01234"]);
+});
+
+test("an existing unit found by its barcode: its serial number is filled when it has none, and it is never renamed", async t => {
+  const state = fakeServer(t, { "Rack-01": [], "Rack-03": [{ id: "ci-3", name: "Old switch", type: "switch", barcode: "TAG-3", u: 1, shelf_position: "" }] });
+  const result = await placeScannedUnit(parseUnitBarcode("tag-3"), shelf2);
+  assert.equal(result.action, "moved");
+  assert.deepEqual(result.filled, { serial_number: "tag-3" });
+  const item = stored(state, "ci-3");
+  assert.deepEqual([item.rack, item.name, item.barcode, item.serial_number], ["Rack-01", "Old switch", "TAG-3", "tag-3"]);
+  // Undo puts it back without the serial number the scan added.
+  await undoScannedUnit(result);
+  const back = stored(state, "ci-3");
+  assert.deepEqual([back.rack, back.name, "serial_number" in back], ["Rack-03", "Old switch", false]);
+});
+
+test("an existing unit found by its barcode that already has another serial number is moved, without a conflict or a change", async t => {
+  const state = fakeServer(t, { "Rack-01": [], "Rack-03": [{ id: "ci-3", name: "Old switch", barcode: "TAG-3", serial_number: "MT0000X00003", u: 1 }] });
+  const result = await placeScannedUnit(parseUnitBarcode("TAG-3"), shelf2);
+  assert.deepEqual([result.action, result.filled], ["moved", {}]);
+  const item = stored(state, "ci-3");
+  assert.deepEqual([item.rack, item.name, item.serial_number], ["Rack-01", "Old switch", "MT0000X00003"]);
+  assert.equal(state.requests.filter(r => r.endsWith("/details")).length, 0, "nothing is filled");
+});
+
+test("a unit found by its id is moved; the id is never taken as its serial number", async t => {
+  const byId = fakeServer(t, { "Rack-01": [], "Rack-04": [{ id: "ci-4", name: "Spare", u: 1 }] });
+  const moved = await placeScannedUnit(parseUnitBarcode("ci-4"), shelf2);
+  assert.deepEqual([moved.action, moved.filled, "serial_number" in stored(byId, "ci-4")], ["moved", {}, false]);
+});
+
+test("a code taken as a serial number is no claim against the barcode or id it was found by; a label's own serial still is", () => {
+  const unit = { id: "ci-1", name: "Switch 01", barcode: "TAG-1", serial_number: "OLD" };
+  assert.equal(identityConflict(unit, parseUnitBarcode("tag-1")), null);
+  assert.equal(claimsFor(unit, parseUnitBarcode("TAG-1")).serial, "");
+  assert.equal(claimsFor({ id: "ci-1", barcode: "TAG-1" }, parseUnitBarcode("TAG-1")).serial, "TAG-1", "a unit without a serial gets the code");
+  assert.equal(claimsFor({ id: "ci-1" }, parseUnitBarcode("ci-1")).serial, "", "an id is never a serial");
+  assert.equal(identityConflict(unit, parseUnitBarcode("SN: TAG-1")).conflict, "serial_number", "a label that says SN is compared");
+  assert.equal(identityConflict({ id: "ci-2", name: "X", serial_number: "OTHER" }, parseUnitBarcode("TAG-1")).conflict, "serial_number",
+    "found by something else (not its barcode or id), the code is compared as a serial");
 });
 
 test("identity check: only a value on both sides that differs is a conflict", () => {

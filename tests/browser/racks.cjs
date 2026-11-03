@@ -1,9 +1,9 @@
 // DCIM Racks view on the isolated fixture (tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1):
 // RACK-1 stale equipment panel after a 409, RACK-2 U validation, RACK-3 equipment reload, RACK-4 phone width,
-// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, SCAN-1..12 Scan barcode (add units to a
+// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, SCAN-1..13 Scan barcode (add units to a
 // server's floor with a USB scanner or a stubbed camera; serial, part number, model and MAC saved as the unit's own
 // fields, shown and edited in its panels; Undo keeps a unit someone else changed; a label that contradicts its unit is
-// refused). Every change it makes is undone.
+// refused; the scanned code is the Serial number and the Name is the product). Every change it makes is undone.
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
@@ -230,11 +230,11 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.match(await dialog.innerText(),/Units go to Main storage · shelf 7\./);
     await page.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
     await page.keyboard.type(code);await page.keyboard.press('Enter');
-    await page.locator('.toast-region .toast').filter({hasText:`Added ${code} to Main storage · shelf 7.`}).waitFor();
+    await page.locator('.toast-region .toast').filter({hasText:`Added Unit (SN ${code}) to Main storage · shelf 7.`}).waitFor();
     const saved=Object.entries((await items()).data).flatMap(([rack,list])=>list.map(i=>({...i,rack}))).filter(i=>i.serial_number===code||i.barcode===code);
-    assert.deepEqual(saved.map(i=>[i.rack,i.u]),[['Storage-Main',7]]);
+    assert.deepEqual(saved.map(i=>[i.rack,i.u,i.serial_number,i.name]),[['Storage-Main',7,code,'Unit']]);
     await dialog.getByRole('button',{name:'Done'}).click();await dialog.waitFor({state:'detached'});
-    await storage.locator(`[data-u-slot="7"][data-shelf-list] .equipment-cell[aria-label="View ${code}"]`).waitFor();
+    await storage.locator(`[data-u-slot="7"][data-shelf-list] .equipment-cell[data-item-id="${saved[0].id}"][aria-label="View Unit"]`).waitFor();
     // The storage detail: the same 16 shelves, its table says Shelf N
     await storage.locator('.rack-card-name').click();await page.getByRole('button',{name:'All racks'}).waitFor();
     assert.equal(await page.locator('.rack-detail [data-rack-id="Storage-Main"] [data-u-slot]').count(),16);
@@ -250,7 +250,9 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
   // ── SCAN-1..8: "Scan barcode" adds units to a server's floor in one step (USB scanner = typed code + Enter) ──
   {
    const run=Date.now().toString(36).toUpperCase();
-   const ours=i=>[i.barcode,i.serial_number].some(v=>String(v||'').toUpperCase().includes(run));
+   // SCAN-13 scans the owner's exact example codes; they are removed with this run's units.
+   const EXAMPLES=['TESTSN12345','MT2245X01234'];
+   const ours=i=>[i.barcode,i.serial_number].some(v=>String(v||'').toUpperCase().includes(run)||EXAMPLES.includes(String(v||'').toUpperCase()));
    const dropScans=d=>{for(const rack of Object.keys(d))d[rack]=d[rack].filter(i=>!ours(i));};
    const all=async()=>Object.entries((await items()).data).flatMap(([rack,list])=>list.map(i=>({...i,rack})));
    const withCode=async code=>(await all()).filter(i=>[i.barcode,i.serial_number].some(v=>String(v||'').toLowerCase()===code.toLowerCase()));
@@ -282,11 +284,11 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     // SCAN-1: a GS1 serial + part number: type, name and place are filled in and saved; the unit shows on the floor.
     const A=`SNA${run}`;
     await wedge(`(21)${A}(240)MQM8790-HS2F`);
-    await toast.filter({hasText:`Added MQM8790-HS2F ${A} to OPT22 · floor ${floor}.`}).waitFor();
+    await toast.filter({hasText:`Added Quantum QM8700 switch (SN ${A}) to OPT22 · floor ${floor}.`}).waitFor();
     let found=await withCode(A);
     assert.equal(found.length,1);
-    assert.deepEqual([found[0].rack,found[0].u,found[0].type,found[0].name],['Rack-02',floor,'switch',`MQM8790-HS2F ${A}`]);
-    await op.locator(`[data-rack-id="Rack-02"] [data-u-slot="${floor}"] .equipment-cell[aria-label="View MQM8790-HS2F ${A}"]`).waitFor({state:'attached'});
+    assert.deepEqual([found[0].rack,found[0].u,found[0].type,found[0].name,found[0].serial_number],['Rack-02',floor,'switch','Quantum QM8700 switch',A]);
+    await op.locator(`[data-rack-id="Rack-02"] [data-u-slot="${floor}"] .equipment-cell[data-item-id="${found[0].id}"][aria-label="View Quantum QM8700 switch"]`).waitFor({state:'attached'});
     assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode','Focus stays in the scan field');
     passed.push(`SCAN-1 server dialog -> Scan barcode: GS1 serial added as a switch on OPT22 floor ${floor}, shown on the floor, focus kept`);
 
@@ -300,14 +302,14 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     passed.push('SCAN-2 three wedge scans back to back (Enter / Tab), two repeats: no duplicate row, repeats change nothing');
 
     // SCAN-3: Undo in the list removes the unit this scan added; the toast's Undo does the same. Focus returns to the field.
-    await log.filter({hasText:`Added ${B}`}).getByRole('button',{name:'Undo'}).click();
-    await log.filter({hasText:`Added ${B}`}).getByText('Undone').waitFor();
+    await log.filter({hasText:`Added Unit (SN ${B})`}).getByRole('button',{name:'Undo'}).click();
+    await log.filter({hasText:`Added Unit (SN ${B})`}).getByText('Undone').waitFor();
     assert.equal((await withCode(B)).length,0);
     assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode');
     const C=`SNC${run}`;
     await wedge(C);
-    await toast.filter({hasText:`Added ${C} to OPT22`}).getByRole('button',{name:'Undo'}).click();
-    await toast.filter({hasText:`Undone: ${C} was removed.`}).waitFor();
+    await toast.filter({hasText:`Added Unit (SN ${C}) to OPT22`}).getByRole('button',{name:'Undo'}).click();
+    await toast.filter({hasText:`Undone: Unit (SN ${C}) was removed.`}).waitFor();
     assert.equal((await withCode(C)).length,0);
     await op.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
     passed.push('SCAN-3 Undo (list and toast) removes the unit the scan added; focus goes back to the scan field');
@@ -316,11 +318,11 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     const M=`SNM${run}`;
     await putItems(d=>{d['Rack-03']=[...(d['Rack-03']||[]),{id:`ci-move-${run}`,name:`Moved ${run}`,type:'cable',serial_number:M,u:1,shelf_position:'R'}];});
     await wedge(M.toLowerCase());
-    await toast.filter({hasText:`Moved Moved ${run} to OPT22 · floor ${floor} (it was in Rack-03 · floor 1).`}).waitFor();
+    await toast.filter({hasText:`Moved Moved ${run} (SN ${M}) to OPT22 · floor ${floor} (it was in Rack-03 · floor 1).`}).waitFor();
     found=await withCode(M);
     assert.deepEqual([found.length,found[0].rack,found[0].u,found[0].id],[1,'Rack-02',floor,`ci-move-${run}`]);
     await log.filter({hasText:`Moved Moved ${run}`}).getByRole('button',{name:'Undo'}).click();
-    await toast.filter({hasText:`Undone: Moved ${run} is back in Rack-03 · floor 1.`}).waitFor();
+    await toast.filter({hasText:`Undone: Moved ${run} (SN ${M}) is back in Rack-03 · floor 1.`}).waitFor();
     found=await withCode(M);
     assert.deepEqual([found[0].rack,found[0].u,found[0].shelf_position],['Rack-03',1,'R']);
     passed.push('SCAN-4 a known serial (any case) moves that unit to the floor; Undo puts it back with its position');
@@ -328,10 +330,10 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     // SCAN-11: Undo never removes or moves back a unit that someone else changed after the scan (here: renamed).
     const H=`SNH${run}`;
     await wedge(H);
-    await toast.filter({hasText:`Added ${H} to OPT22`}).waitFor();
+    await toast.filter({hasText:`Added Unit (SN ${H}) to OPT22`}).waitFor();
     await putItems(d=>{const i=d['Rack-02'].find(x=>x.serial_number===H||x.barcode===H);i.name=`Renamed ${run}`;});
-    await log.filter({hasText:`Added ${H}`}).getByRole('button',{name:'Undo'}).click();
-    await log.filter({hasText:`Added ${H}`}).getByText('Someone else changed the unit after the scan, so the scan was not undone and the unit was left as it is.').waitFor();
+    await log.filter({hasText:`Added Unit (SN ${H})`}).getByRole('button',{name:'Undo'}).click();
+    await log.filter({hasText:`Added Unit (SN ${H})`}).getByText('Someone else changed the unit after the scan, so the scan was not undone and the unit was left as it is.').waitFor();
     found=await withCode(H);
     assert.deepEqual([found.length,found[0].name,found[0].rack,found[0].u],[1,`Renamed ${run}`,'Rack-02',floor],'the renamed unit is kept where it is');
     assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode');
@@ -340,7 +342,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     // SCAN-9: a label with serial, part number, model and MAC: all four are saved as the unit's own fields (MAC cleaned).
     const F=`SNF${run}`;
     await wedge(`SN: ${F}; PN: MQM8790-HS2F; Model: QM8790; MAC: ${MAC1.toLowerCase().replace(/:/g,'-')}`);
-    await toast.filter({hasText:`Added QM8790 ${F} to OPT22 · floor ${floor}.`}).waitFor();
+    await toast.filter({hasText:`Added QM8790 (SN ${F}) to OPT22 · floor ${floor}.`}).waitFor();
     found=await withCode(F);
     assert.deepEqual([found.length,found[0].serial_number,found[0].part_number,found[0].model,found[0].mac,found[0].type],[1,F,'MQM8790-HS2F','QM8790',MAC1,'switch']);
     // A known unit (serial and part number only) scanned with a full label: moved here, only its missing fields are
@@ -348,19 +350,40 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     const G=`SNG${run}`;
     await putItems(d=>{d['Rack-03']=[...(d['Rack-03']||[]),{id:`ci-fill-${run}`,name:`Fill ${run}`,type:'cable',serial_number:G,part_number:'KEEP-PN',u:1,shelf_position:'R'}];});
     await wedge(`SN: ${G}; PN: OTHER-PN; Model: QM8790; MAC: ${MAC2}`);
-    await toast.filter({hasText:`Moved Fill ${run} to OPT22 · floor ${floor} (it was in Rack-03 · floor 1). Added its model and MAC address.`}).waitFor();
+    await toast.filter({hasText:`Moved Fill ${run} (SN ${G}) to OPT22 · floor ${floor} (it was in Rack-03 · floor 1). Added its model and MAC address.`}).waitFor();
     found=await withCode(G);
     assert.deepEqual([found[0].rack,found[0].u,found[0].part_number,found[0].model,found[0].mac],['Rack-02',floor,'KEEP-PN','QM8790',MAC2]);
     await log.filter({hasText:`Moved Fill ${run}`}).getByRole('button',{name:'Undo'}).click();
-    await toast.filter({hasText:`Undone: Fill ${run} is back in Rack-03 · floor 1, without the model and MAC address the scan added.`}).waitFor();
+    await toast.filter({hasText:`Undone: Fill ${run} (SN ${G}) is back in Rack-03 · floor 1, without the model and MAC address the scan added.`}).waitFor();
     found=await withCode(G);
     assert.deepEqual([found[0].rack,found[0].u,found[0].shelf_position,found[0].part_number,'model' in found[0],'mac' in found[0]],['Rack-03',1,'R','KEEP-PN',false,false]);
     // The same unit scanned by its MAC alone is found (lookup matches the MAC field) once it has one.
     await putItems(d=>{const i=d['Rack-03'].find(x=>x.id===`ci-fill-${run}`);i.mac=MAC3.toLowerCase();});
     await wedge(MAC3.replace(/:/g,''));
-    await toast.filter({hasText:`Moved Fill ${run} to OPT22 · floor ${floor}`}).waitFor();
+    await toast.filter({hasText:`Moved Fill ${run} (SN ${G}) to OPT22 · floor ${floor}`}).waitFor();
     assert.equal((await withCode(G))[0].mac,MAC3,'a MAC saved through the DCIM edit endpoint is stored cleaned');
     passed.push('SCAN-9 serial, part number, model and MAC saved as separate fields; a known unit gets only missing fields; Undo restores it; a MAC scan finds its unit');
+
+    // SCAN-13: the scanned code is the unit's Serial number and its Name is the product, never the code.
+    await wedge('TESTSN12345');
+    await toast.filter({hasText:`Added Unit (SN TESTSN12345) to OPT22 · floor ${floor}.`}).waitFor();
+    found=await withCode('TESTSN12345');
+    assert.deepEqual([found.length,found[0].serial_number,found[0].barcode,found[0].name,found[0].rack,found[0].u],[1,'TESTSN12345','TESTSN12345','Unit','Rack-02',floor]);
+    await wedge('SN: MT2245X01234; PN: MCX75310AAS-NEAT');
+    await toast.filter({hasText:`Added ConnectX-7 NIC (SN MT2245X01234) to OPT22 · floor ${floor}.`}).waitFor();
+    found=await withCode('MT2245X01234');
+    assert.deepEqual([found.length,found[0].name,found[0].serial_number,found[0].part_number],[1,'ConnectX-7 NIC','MT2245X01234','MCX75310AAS-NEAT']);
+    // A unit already in DCIM by its barcode only (no serial): scanning it fills its Serial number and keeps its Name.
+    const L=`LEGACY${run}`;
+    await putItems(d=>{d['Rack-03']=[...(d['Rack-03']||[]),{id:`ci-legacy-${run}`,name:`Legacy ${run}`,type:'switch',barcode:L,u:1,shelf_position:''}];});
+    await wedge(L);
+    await toast.filter({hasText:`Moved Legacy ${run} (SN ${L}) to OPT22 · floor ${floor} (it was in Rack-03 · floor 1). Added its serial number.`}).waitFor();
+    found=await withCode(L);
+    assert.deepEqual([found.length,found[0].id,found[0].name,found[0].barcode,found[0].serial_number],[1,`ci-legacy-${run}`,`Legacy ${run}`,L,L]);
+    // The same code again: found, nothing changed (no "another unit has this serial" refusal).
+    await wedge(L.toLowerCase());
+    await toast.filter({hasText:`Legacy ${run} (SN ${L}) is already on OPT22 · floor ${floor}. Nothing changed.`}).waitFor();
+    passed.push('SCAN-13 a plain code TESTSN12345 is saved as Serial number with Name "Unit"; an SN + PN label gives "ConnectX-7 NIC"; a known barcode-only unit gets its serial filled and keeps its name; scanning it again changes nothing');
 
     // SCAN-5: refusals are sentences and write nothing: a location label, a code on two units, a part number only.
     // The API refuses to create two units with one code, so the legacy duplicate is the lookup's answer, stubbed here.
@@ -407,7 +430,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await op.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
     const E=`SNE${run}`;
     await wedge(`SN: ${E}`);
-    await toast.filter({hasText:`Added ${E} to Rack-02 · floor 3.`}).waitFor();
+    await toast.filter({hasText:`Added Unit (SN ${E}) to Rack-02 · floor 3.`}).waitFor();
     found=await withCode(E);assert.deepEqual([found.length,found[0].rack,found[0].u],[1,'Rack-02',3]);
     await dialog.getByRole('button',{name:'Done'}).click();await dialog.waitFor({state:'detached'});
     await op.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').first().click();
@@ -418,7 +441,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     // SCAN-10: the unit's panels show the four fields: editable in Edit mode (Operator), read-only otherwise.
     await op.getByRole('dialog',{name:'OPT22'}).waitFor({state:'detached'});
     const equip=op.locator('div.fixed.inset-0.z-50.flex.justify-end');
-    await op.locator(`.equipment-cell[aria-label="View QM8790 ${F}"] .equipment-type`).first().click();
+    const F_ID=(await withCode(F))[0].id;
+    await op.locator(`.equipment-cell[data-item-id="${F_ID}"][aria-label="View QM8790"] .equipment-type`).first().click();
     await equip.getByText('Save changes').waitFor();
     const field=label=>equip.getByRole('textbox',{name:label,exact:true});
     assert.deepEqual(await Promise.all(['Serial number','Part number','Model','MAC address'].map(l=>field(l).inputValue())),[F,'MQM8790-HS2F','QM8790',MAC1]);
@@ -456,8 +480,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.deepEqual([found[0].serial_number,found[0].part_number,'model' in found[0],found[0].mac],[F,'MQM8790-HS2R',false,MAC4]);
     await op.keyboard.press('Escape');await equip.waitFor({state:'detached'});
     await op.locator('button.edit-toggle').click();
-    await op.locator(`.equipment-cell[aria-label="View QM8790 ${F}"] .equipment-type`).first().click();
-    const shown=op.getByRole('dialog',{name:`QM8790 ${F}`});
+    await op.locator(`.equipment-cell[data-item-id="${F_ID}"] .equipment-type`).first().click();
+    const shown=op.getByRole('dialog',{name:'QM8790',exact:true});
     await shown.waitFor();
     const text=await shown.innerText();
     for(const part of ['Serial number',F,'Part number','MQM8790-HS2R','MAC address',MAC4])assert.ok(text.includes(part),`details show ${part}`);
@@ -486,7 +510,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await camDialog.locator('video').waitFor();
     const K=`SNK${run}`;
     await cam.evaluate(code=>{window.__cameraCode=code;},K);
-    await cam.locator('.toast-region .toast').filter({hasText:`Added ${K} to OPT22 · floor ${floor}.`}).waitFor();
+    await cam.locator('.toast-region .toast').filter({hasText:`Added Unit (SN ${K}) to OPT22 · floor ${floor}.`}).waitFor();
     await cam.waitForTimeout(700);
     assert.equal((await withCode(K)).length,1,'The code held in view is saved once');
     assert.equal(await camDialog.locator('.scan-unit-log > li').count(),1,'The code held in view is read once');
@@ -518,11 +542,19 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await vp.getByRole('dialog',{name:'OPT22'}).getByText('Viewer · read only').waitFor();
     assert.equal(await vp.getByRole('button',{name:'Scan barcode'}).count(),0);
     await vp.keyboard.press('Escape');await vp.getByRole('dialog',{name:'OPT22'}).waitFor({state:'detached'});
-    await vp.locator(`.equipment-cell[aria-label="View QM8790 ${F}"] .equipment-type`).first().click();
-    const viewerUnit=vp.getByRole('dialog',{name:`QM8790 ${F}`});
+    await vp.locator(`.equipment-cell[data-item-id="${F_ID}"] .equipment-type`).first().click();
+    const viewerUnit=vp.getByRole('dialog',{name:'QM8790',exact:true});
     await viewerUnit.waitFor();
     assert.ok((await viewerUnit.innerText()).includes('MQM8790-HS2R'),'Viewer sees the part number');
     assert.equal(await viewerUnit.getByRole('textbox').count(),0,'Viewer cannot edit the fields');
+    await vp.keyboard.press('Escape');await viewerUnit.waitFor({state:'detached'});
+    // SCAN-13 in the unit panel: the scanned NIC reads as its product, with its serial and part number in their fields.
+    const NIC_ID=(await withCode('MT2245X01234'))[0].id;
+    await vp.locator(`.equipment-cell[data-item-id="${NIC_ID}"][aria-label="View ConnectX-7 NIC"] .equipment-type`).first().click();
+    const nicUnit=vp.getByRole('dialog',{name:'ConnectX-7 NIC',exact:true});
+    await nicUnit.waitFor();
+    const nicText=await nicUnit.innerText();
+    for(const part of ['Serial number','MT2245X01234','Part number','MCX75310AAS-NEAT'])assert.ok(nicText.includes(part),`NIC panel shows ${part}`);
     assert.equal(await vp.locator('button.edit-toggle').count(),0,'Viewer has no Edit mode');
     await viewer.c.close();
     passed.push('SCAN-8 Viewer: no Scan barcode in the server dialog or the rack; unit details read-only');

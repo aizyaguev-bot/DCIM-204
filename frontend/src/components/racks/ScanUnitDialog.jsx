@@ -34,8 +34,17 @@ export function filledText(fields) {
   return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
+// "ConnectX-7 NIC (SN MT2245X01234)": a scanned unit is named after its product, so units of one product share a name;
+// the serial number tells them apart. A name that already shows the serial is not repeated.
+export function unitText(item) {
+  const name = String(item?.name || item?.id || "");
+  const serial = String(item?.serial_number || "").trim();
+  const showSerial = serial && !name.toLowerCase().includes(serial.toLowerCase());
+  return <><bdi>{name}</bdi>{showSerial ? <> (SN <bdi className="racks-mono">{serial}</bdi>)</> : null}</>;
+}
+
 function resultText(result, label) {
-  const name = <bdi>{result.item.name}</bdi>;
+  const name = unitText(result.item);
   const here = <bdi>{placeText(result.after, label)}</bdi>;
   const filled = filledFields(result);
   const added = filled.length ? <> Added its {filledText(filled)}.</> : null;
@@ -46,7 +55,7 @@ function resultText(result, label) {
 }
 
 function undoneText(result) {
-  const name = <bdi>{result.item.name}</bdi>;
+  const name = unitText(result.item);
   if (result.action === "created") return <>Undone: {name} was removed.</>;
   if (result.action === "confirmed") return <>Undone: the {filledText(filledFields(result))} added to {name} {filledFields(result).length > 1 ? "were" : "was"} removed.</>;
   return <>Undone: {name} is back in <bdi>{placeText(result.before)}</bdi>{filledFields(result).length ? <>, without the {filledText(filledFields(result))} the scan added</> : null}.</>;
@@ -243,7 +252,7 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
         {log.map(entry => <li key={entry.key} data-action={entry.result?.action || "error"} data-undo={entry.undo || undefined}>
           {entry.result ? <span className="scan-unit-text">{resultText(entry.result, entry.label)}</span>
             : <span className="scan-unit-text scan-unit-error">{entry.code ? <><bdi className="racks-mono">{entry.code}</bdi>: </> : null}{entry.error}</span>}
-          {entry.matches && <ul className="scan-unit-matches">{entry.matches.map(m => <li key={m.id}><bdi>{m.name}</bdi> · <bdi>{placeText({ rack: m.rack, u: m.u })}</bdi> · <span className="racks-mono">{m.id}</span></li>)}</ul>}
+          {entry.matches && <ul className="scan-unit-matches">{entry.matches.map(m => <li key={m.id}>{unitText(m)} ·<bdi>{placeText({ rack: m.rack, u: m.u })}</bdi> · <span className="racks-mono">{m.id}</span></li>)}</ul>}
           {entry.undo === "ready" && <button type="button" className="racks-btn racks-btn-sm" onClick={() => { inputRef.current?.focus(); undo(entry); }}>Undo</button>}
           {entry.undo === "busy" && <span className="racks-muted">Undoing…</span>}
           {entry.undo === "done" && <span className="racks-muted">Undone</span>}
