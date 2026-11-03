@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseUnitBarcode } from "../api/scanParse.js";
-import { placeScannedUnit, undoScannedUnit, canUndo, placeText, floorText, scanDetails } from "../api/unitScan.js";
+import { placeScannedUnit, undoScannedUnit, canUndo, placeText, floorText, scanDetails, identityConflict, LOOKUP_ATTEMPTS } from "../api/unitScan.js";
 
 // A small stand-in for backend/app/routers/inventory.py and PUT /api/rack-items: revisions (If-Match), exact
 // case-insensitive matches on id / serial / barcode / MAC, the 409 for a code that already belongs to another unit, and
@@ -109,7 +109,7 @@ test("Undo removes a unit the scan added, unless it changed since", async t => {
 
   const moved = await placeScannedUnit(parseUnitBarcode("NEW-2"), shelf2);
   await placeScannedUnit(parseUnitBarcode("NEW-2"), { rack: "Rack-01", u: 3, position: "" });
-  await assert.rejects(undoScannedUnit(moved), /changed after the scan/);
+  await assert.rejects(undoScannedUnit(moved), /changed the unit after the scan/);
   assert.equal(count(state, "NEW-2"), 1, "a unit moved after the scan is kept");
 });
 
@@ -117,7 +117,7 @@ test("Undo of a move does nothing when the unit was moved again meanwhile", asyn
   const state = fakeServer(t, { "Rack-01": [], "Rack-03": [{ id: "ci-3", name: "Switch 03", barcode: "TEST-003", u: 1, shelf_position: "" }] });
   const result = await placeScannedUnit(parseUnitBarcode("TEST-003"), shelf2);
   await placeScannedUnit(parseUnitBarcode("TEST-003"), { rack: "Rack-01", u: 4, position: "" });
-  await assert.rejects(undoScannedUnit(result), /changed after the scan/);
+  await assert.rejects(undoScannedUnit(result), /changed the unit after the scan/);
   assert.equal(state.data["Rack-01"][0].u, 4);
 });
 
@@ -191,7 +191,7 @@ test("Undo keeps a new unit whose fields were edited after the scan", async t =>
   const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
   state.data["Rack-01"][0].model = "Edited";
   state.version++;
-  await assert.rejects(undoScannedUnit(result), /changed after the scan/);
+  await assert.rejects(undoScannedUnit(result), /changed the unit after the scan/);
   assert.equal(stored(state, result.item.id).model, "Edited");
 });
 
@@ -216,13 +216,103 @@ test("a known unit found by its MAC is moved and gets only the fields it lacks; 
   assert.equal(state.requests.filter(r => r === "PUT /api/rack-items").length, 1);
 });
 
-test("a stored serial is never overwritten by a different scanned one", async t => {
+test("a label whose serial contradicts the unit it found is refused: nothing is moved or overwritten", async t => {
   const state = fakeServer(t, { "Rack-01": [{ id: "ci-1", name: "Switch 01", barcode: "TAG-1", serial_number: "OLD", u: 1 }] });
-  // The unit is found by its barcode; the label's other serial is not written over the stored one.
-  const result = await placeScannedUnit({ ...parseUnitBarcode("TAG-1"), serial: "NEW", model: "QM8790" }, shelf2);
+  // The unit is found by its barcode, but the label carries another serial number.
+  const error = await placeScannedUnit({ ...parseUnitBarcode("TAG-1"), serial: "NEW", model: "QM8790" }, shelf2).then(() => null, e => e);
+  assert.equal(error.message, "This label's serial number (NEW) does not match Switch 01's (OLD). Nothing was changed. Check the label, or correct the unit's serial number first.");
+  assert.deepEqual(error.matches.map(m => m.id), ["ci-1"], "the unit is listed like an ambiguous match");
+  assert.equal(state.requests.filter(r => !r.startsWith("GET")).length, 0, "nothing is written");
+  const item = stored(state, "ci-1");
+  assert.deepEqual([item.u, item.serial_number, item.model], [1, "OLD", undefined]);
+});
+
+test("a label whose MAC finds unit Q but whose serial differs from Q's is refused, and the other way round", async t => {
+  const q = { id: "ci-q", name: "Switch Q", serial_number: "Q-SERIAL", mac: "B8:CE:F6:00:11:22", u: 3, shelf_position: "" };
+  const state = fakeServer(t, { "Rack-01": [], "Rack-07": [structuredClone(q)] });
+  // LABEL: SN MT2614X09999 (not Q's), MAC B8:CE:F6:00:11:22 (Q's).
+  await assert.rejects(placeScannedUnit(parseUnitBarcode(LABEL), shelf2),
+    /^Error: This label's serial number \(MT2614X09999\) does not match Switch Q's \(Q-SERIAL\)\. Nothing was changed\./);
+  // Found by its serial, but the label's MAC is another unit's.
+  await assert.rejects(placeScannedUnit(parseUnitBarcode("SN: q-serial; MAC: 02:00:00:00:00:01"), shelf2),
+    /^Error: This label's MAC address \(02:00:00:00:00:01\) does not match Switch Q's \(B8:CE:F6:00:11:22\)\. Nothing was changed\./);
+  assert.equal(state.requests.filter(r => !r.startsWith("GET")).length, 0, "nothing is written");
+  const item = stored(state, "ci-q");
+  delete item.rack;
+  assert.deepEqual(item, q);
+  // The same identity in another spelling (case, MAC separators) is no conflict: the unit is moved.
+  const result = await placeScannedUnit(parseUnitBarcode("SN: q-serial; MAC: b8-ce-f6-00-11-22"), shelf2);
   assert.equal(result.action, "moved");
-  assert.deepEqual(result.filled, { model: "QM8790" });
-  assert.equal(stored(state, "ci-1").serial_number, "OLD");
+  assert.equal(result.item.id, "ci-q");
+});
+
+test("identity check: only a value on both sides that differs is a conflict", () => {
+  const unit = { id: "u", name: "U", serial_number: "S1", mac: "00:1a:2b:3c:4d:5e" };
+  assert.equal(identityConflict(unit, { serial: "s1 ", mac: "001A2B3C4D5E" }), null);
+  assert.equal(identityConflict(unit, { serial: "", mac: "" }), null);
+  assert.equal(identityConflict({ id: "u", name: "U" }, { serial: "S2", mac: "00:00:00:00:00:01" }), null, "a unit without a stored value has no conflict");
+  assert.equal(identityConflict(unit, { serial: "S1", mac: "not a mac" }), null, "a MAC that is not one is not compared (it is never saved)");
+  assert.equal(identityConflict(unit, { serial: "S2" }).conflict, "serial_number");
+  assert.equal(identityConflict(unit, { mac: "00:1A:2B:3C:4D:5F" }).conflict, "mac");
+});
+
+test("the lookup combines matches from one inventory revision only, and saves with that revision", async t => {
+  const state = fakeServer(t, { "Rack-01": [], "Rack-09": [{ id: "ci-9", name: "Switch 09", serial_number: "MT2614X09999", u: 1 }] });
+  let gets = 0;
+  state.before = async (method, path) => {
+    // Another session writes between this scan's second and third lookup.
+    if (method === "GET" && path === "/api/inventory" && ++gets === 2) { state.data["Rack-01"].push({ id: "ci-x", name: "Unrelated", u: 4 }); state.version++; }
+  };
+  const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+  assert.equal(result.action, "moved");
+  const lookups = state.requests.filter(r => r.startsWith("GET /api/inventory"));
+  assert.equal(lookups.length, 2 + 3, "the lookup stops at the revision change and is done again in full");
+  assert.equal(state.requests.filter(r => r.startsWith("POST")).length, 2, "the move and the fill are each saved once, with the current revision (no 409)");
+  assert.deepEqual([stored(state, "ci-9").rack, stored(state, "ci-9").mac], ["Rack-01", "B8:CE:F6:00:11:22"]);
+});
+
+test("an inventory that keeps changing during the lookup is refused after a few tries, without writing", async t => {
+  const state = fakeServer(t, { "Rack-01": [] });
+  state.before = async (method, path) => { if (method === "GET" && path === "/api/inventory") state.version++; };
+  await assert.rejects(placeScannedUnit(parseUnitBarcode(LABEL), shelf2), /kept changing in another session .* nothing was changed/);
+  assert.equal(state.requests.filter(r => r.startsWith("GET")).length, LOOKUP_ATTEMPTS * 2);
+  assert.equal(state.requests.filter(r => !r.startsWith("GET")).length, 0);
+});
+
+test("Undo keeps a new unit that someone renamed or whose type, notes, barcode or details changed", async t => {
+  const edits = { name: "Renamed", type: "cable", notes: "Checked by Dana", barcode: "OTHER-TAG", serial_number: "S-2", part_number: "PN-2", model: "M-2", mac: "02:00:00:00:00:09", shelf_position: "R" };
+  for (const [field, value] of Object.entries(edits)) await t.test(field, async t => {
+    const state = fakeServer(t, { "Rack-01": [] });
+    const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+    state.data["Rack-01"][0][field] = value;
+    state.version++;
+    await assert.rejects(undoScannedUnit(result), /^Error: Someone else changed the unit after the scan, so the scan was not undone and the unit was left as it is\./, field);
+    assert.equal(stored(state, result.item.id)[field], value, `${field}: the unit is kept as edited`);
+    assert.equal(state.requests.filter(r => r.startsWith("PUT")).length, 0, `${field}: nothing is saved`);
+  });
+});
+
+test("Undo of a move does nothing once anything else on the unit changed", async t => {
+  // Someone edits the notes after the scan moved the unit.
+  const state = fakeServer(t, { "Rack-01": [], "Rack-05": [{ id: "ci-5", name: "Switch 05", serial_number: "TEST-005", u: 3, shelf_position: "L", notes: "" }] });
+  const moved = await placeScannedUnit(parseUnitBarcode("TEST-005"), shelf2);
+  state.data["Rack-01"][0].notes = "Cable it to OPT22";
+  state.version++;
+  await assert.rejects(undoScannedUnit(moved), /changed the unit after the scan/);
+  assert.deepEqual([stored(state, "ci-5").rack, stored(state, "ci-5").notes], ["Rack-01", "Cable it to OPT22"]);
+  assert.equal(state.requests.filter(r => r.startsWith("POST")).length, 1, "only the scan's own move was saved");
+});
+
+test("Undo of a move with a fill does nothing once the unit was renamed", async t => {
+  // The filled fields themselves are untouched; another field changed.
+  const state = fakeServer(t, { "Rack-01": [], "Rack-02": [{ id: "ci-2", name: "Switch 02", serial_number: "MT2614X09999", u: 1 }] });
+  const filled = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+  assert.ok(Object.keys(filled.filled).length);
+  state.data["Rack-01"][0].name = "Switch 02 (spare)";
+  state.version++;
+  await assert.rejects(undoScannedUnit(filled), /changed the unit after the scan/);
+  assert.deepEqual([stored(state, "ci-2").rack, stored(state, "ci-2").name, stored(state, "ci-2").model], ["Rack-01", "Switch 02 (spare)", "QM8790"]);
+  assert.equal(state.requests.filter(r => r.startsWith("PUT")).length, 0);
 });
 
 test("a repeat scan of a unit already on the floor only fills missing fields, and its Undo clears just those", async t => {
@@ -246,7 +336,7 @@ test("Undo of a fill does nothing when a filled field was edited meanwhile", asy
   const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
   state.data["Rack-01"][0].model = "Changed";
   state.version++;
-  await assert.rejects(undoScannedUnit(result), /changed after the scan/);
+  await assert.rejects(undoScannedUnit(result), /changed the unit after the scan/);
   assert.equal(stored(state, "ci-2").rack, "Rack-01");
   assert.equal(stored(state, "ci-2").model, "Changed");
 });

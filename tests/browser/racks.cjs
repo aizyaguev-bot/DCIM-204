@@ -1,8 +1,9 @@
 // DCIM Racks view on the isolated fixture (tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1):
 // RACK-1 stale equipment panel after a 409, RACK-2 U validation, RACK-3 equipment reload, RACK-4 phone width,
-// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, SCAN-1..10 Scan barcode (add units to a
+// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, SCAN-1..12 Scan barcode (add units to a
 // server's floor with a USB scanner or a stubbed camera; serial, part number, model and MAC saved as the unit's own
-// fields, shown and edited in its panels). Every change it makes is undone.
+// fields, shown and edited in its panels; Undo keeps a unit someone else changed; a label that contradicts its unit is
+// refused). Every change it makes is undone.
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
@@ -282,6 +283,18 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     assert.deepEqual([found[0].rack,found[0].u,found[0].shelf_position],['Rack-03',1,'R']);
     passed.push('SCAN-4 a known serial (any case) moves that unit to the floor; Undo puts it back with its position');
 
+    // SCAN-11: Undo never removes or moves back a unit that someone else changed after the scan (here: renamed).
+    const H=`SNH${run}`;
+    await wedge(H);
+    await toast.filter({hasText:`Added ${H} to OPT22`}).waitFor();
+    await putItems(d=>{const i=d['Rack-02'].find(x=>x.serial_number===H||x.barcode===H);i.name=`Renamed ${run}`;});
+    await log.filter({hasText:`Added ${H}`}).getByRole('button',{name:'Undo'}).click();
+    await log.filter({hasText:`Added ${H}`}).getByText('Someone else changed the unit after the scan, so the scan was not undone and the unit was left as it is.').waitFor();
+    found=await withCode(H);
+    assert.deepEqual([found.length,found[0].name,found[0].rack,found[0].u],[1,`Renamed ${run}`,'Rack-02',floor],'the renamed unit is kept where it is');
+    assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode');
+    passed.push('SCAN-11 Undo of a scan-added unit that someone renamed meanwhile keeps the unit and says why');
+
     // SCAN-9: a label with serial, part number, model and MAC: all four are saved as the unit's own fields (MAC cleaned).
     const F=`SNF${run}`;
     await wedge(`SN: ${F}; PN: MQM8790-HS2F; Model: QM8790; MAC: ${MAC1.toLowerCase().replace(/:/g,'-')}`);
@@ -321,8 +334,18 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     assert.equal(await log.first().locator('.scan-unit-matches li').count(),2);
     await wedge('MQM8790-HS2F');
     await dialog.getByRole('alert').filter({hasText:'only names the product'}).waitFor();
+    // SCAN-12: a label whose MAC finds unit Q but whose serial is not Q's is refused, and Q is listed and left as it is.
+    const Q=`SNQ${run}`,MACQ=macOf('12');
+    const unitQ={id:`ci-q-${run}`,name:`Unit Q ${run}`,type:'switch',serial_number:Q,mac:MACQ,u:1,shelf_position:'L'};
+    await putItems(d=>{d['Rack-03']=[...(d['Rack-03']||[]),{...unitQ}];});
+    await wedge(`SN: OTHER${run}; MAC: ${MACQ.toLowerCase()}`);
+    await dialog.getByRole('alert').filter({hasText:`This label's serial number (OTHER${run}) does not match Unit Q ${run}'s (${Q}). Nothing was changed.`}).waitFor();
+    assert.equal(await log.first().locator('.scan-unit-matches li').count(),1);
+    found=await withCode(Q);
+    assert.deepEqual([found.length,found[0].rack,found[0].u,found[0].shelf_position,found[0].mac,found[0].serial_number],[1,'Rack-03',1,'L',MACQ,Q]);
     assert.equal(writes.length,before,'Refused scans write nothing');
     passed.push('SCAN-5 location label, ambiguous code (both listed) and part-number-only code are refused, nothing written');
+    passed.push('SCAN-12 a label whose MAC matches a unit but whose serial number differs is refused with both values; the unit is listed and unchanged');
 
     // Escape closes only the scan dialog; focus goes back to its button in the server dialog.
     await op.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
@@ -408,7 +431,10 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     const cam=await operator.c.newPage();cam.on('pageerror',e=>errors.push(e.message));
     await cam.addInitScript(()=>{
      window.BarcodeDetector=class{static async getSupportedFormats(){return['code_128','qr_code'];}async detect(){const v=window.__cameraCode;return v?[{rawValue:v,format:'code_128'}]:[];}};
-     if(navigator.mediaDevices)navigator.mediaDevices.getUserMedia=async()=>{const c=document.createElement('canvas');c.width=64;c.height=48;c.getContext('2d').fillRect(0,0,64,48);return c.captureStream(5);};
+     // window.__holdCamera: the camera opens only when the test calls window.__openCamera() (a slow permission prompt).
+     window.__streams=[];
+     const open=()=>{const c=document.createElement('canvas');c.width=64;c.height=48;c.getContext('2d').fillRect(0,0,64,48);const s=c.captureStream(5);window.__streams.push(s);return s;};
+     if(navigator.mediaDevices)navigator.mediaDevices.getUserMedia=()=>window.__holdCamera?new Promise(resolve=>{window.__openCamera=()=>resolve(open());}):Promise.resolve(open());
     });
     await cam.goto(origin+'/?tab=racks');
     await cam.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').click();
@@ -425,8 +451,21 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     await cam.keyboard.press('Escape');await camDialog.locator('video').waitFor({state:'detached'});
     assert.equal(await camDialog.count(),1,'The first Escape only stops the camera');
     await cam.keyboard.press('Escape');await camDialog.waitFor({state:'detached'});
+    assert.ok(await cam.evaluate(()=>window.__streams.every(s=>s.getTracks().every(t=>t.readyState==='ended'))),'the camera is off after Stop');
+    // Closed while the browser is still opening the camera: the camera it opens afterwards is turned off at once.
+    await cam.evaluate(()=>{window.__holdCamera=true;window.__openCamera=null;});
+    await cam.getByRole('dialog',{name:'OPT22'}).getByRole('button',{name:'Scan barcode'}).click();
+    await camDialog.getByRole('button',{name:'Use camera'}).click();
+    await cam.waitForFunction(()=>typeof window.__openCamera==='function');
+    await camDialog.getByRole('button',{name:'Close'}).click();await camDialog.waitFor({state:'detached'});
+    const opened=await cam.evaluate(()=>window.__streams.length);
+    await cam.evaluate(()=>window.__openCamera());
+    await cam.waitForFunction(n=>window.__streams.length===n+1,opened);
+    await cam.waitForTimeout(300);
+    assert.deepEqual(await cam.evaluate(()=>window.__streams.at(-1).getTracks().map(t=>t.readyState)),['ended'],'a camera that opens after the dialog closed is stopped');
+    assert.equal(await cam.locator('video').count(),0);
     await cam.close();
-    passed.push('SCAN-7 camera (stubbed BarcodeDetector): one save per code in view, Escape stops the camera, then closes');
+    passed.push('SCAN-7 camera (stubbed BarcodeDetector): one save per code in view, Escape stops the camera, then closes; a camera that finishes opening after the dialog closed is turned off');
 
     // SCAN-8: Viewers see no Scan barcode anywhere.
     const viewer=await session('viewer');

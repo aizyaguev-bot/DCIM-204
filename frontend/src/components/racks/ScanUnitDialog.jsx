@@ -66,8 +66,10 @@ function CameraScanner({ onCode, onStop }) {
         const formats = CAMERA_FORMATS.filter(f => supported.includes(f));
         if (!formats.length) throw Object.assign(new Error(), { name: "NoFormats" });
         const detector = new window.BarcodeDetector({ formats });
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-        if (stopped) return;
+        const opened = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        // Closed while the browser was still opening the camera: the cleanup below found no stream, so turn it off here.
+        if (stopped) { opened.getTracks().forEach(t => t.stop()); return; }
+        stream = opened;
         const video = videoRef.current;
         video.srcObject = stream;
         await video.play().catch(() => {});

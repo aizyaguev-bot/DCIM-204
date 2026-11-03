@@ -1,9 +1,11 @@
 // One-step "scan a unit onto a server's floor": look the scanned code up, then move the unit that already has it, or
 // register a new one there. The server refuses a second unit with the same barcode or serial (409), so a repeated or
 // concurrent scan can never add a second row; that 409 (or a stale revision) is retried once, and the retry finds the
-// unit and moves or confirms it. Undo is guarded: it only reverts what this scan did, never a later change.
+// unit and moves or confirms it. Undo is guarded: it only reverts what this scan did, and only while the unit's whole
+// record is still exactly what the scan saved; any later change (by anyone) is kept and Undo says so.
 // The serial number, part number, model and MAC the barcode carries are saved as the unit's own fields: on a new unit
-// all of them, on a known unit only those it does not have yet (a stored value is never overwritten).
+// all of them, on a known unit only those it does not have yet (a stored value is never overwritten). A label whose
+// serial number or MAC address contradicts the unit it found is refused, like a code that matches two units.
 import { MAIN_STORAGE, loadInventory, updateInventory, loadRackItems, saveRackItems, UNIT_DETAIL_FIELDS, UNIT_DETAIL_LIMITS, normalizeMac, detailText } from "./inventory.js";
 import { RACK_FLOORS } from "../components/racks/rackView.js";
 
@@ -57,15 +59,43 @@ async function fillMissing(item, parsed, revision) {
   }
 }
 
+export const LOOKUP_ATTEMPTS = 3;
+
+// Each key (code, raw text, serial, MAC) is one GET. The matches are only combined when every GET answered from the same
+// inventory revision, and that revision is the one the following save sends as If-Match; if another session wrote in
+// between, the whole lookup is done again (at most LOOKUP_ATTEMPTS times).
 async function lookUp(parsed) {
   const keys = [...new Map([parsed.code, parsed.raw, parsed.serial, parsed.mac].filter(Boolean).map(k => [k.toLowerCase(), k])).values()];
-  const found = new Map();
-  let snapshot = null;
-  for (const key of keys) {
-    snapshot = await loadInventory(key);
-    for (const match of snapshot.data.matches) found.set(match.id, match);
+  for (let attempt = 0; attempt < LOOKUP_ATTEMPTS; attempt++) {
+    const found = new Map();
+    const revisions = new Set();
+    let snapshot = null;
+    for (const key of keys) {
+      snapshot = await loadInventory(key);
+      revisions.add(snapshot.revision);
+      if (revisions.size > 1) break;
+      for (const match of snapshot.data.matches) found.set(match.id, match);
+    }
+    if (revisions.size === 1) return { matches: [...found.values()], revision: snapshot.revision, racks: snapshot.data.racks || [] };
   }
-  return { matches: [...found.values()], revision: snapshot.revision, racks: snapshot.data.racks || [] };
+  throw failure("The inventory kept changing in another session while this code was looked up, so nothing was changed. Scan the unit again.");
+}
+
+const sameText = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+
+// The label's serial number or MAC address against the unit it found: a value on both that differs means the label
+// belongs to another unit (or the record is wrong). Returns a refusal Error, or null.
+export function identityConflict(item, parsed) {
+  const name = item.name || item.id;
+  const serial = String(parsed?.serial || "").trim(), stored = detailText(item, "serial_number").trim();
+  if (serial && stored && !sameText(serial, stored)) {
+    return failure(`This label's serial number (${serial}) does not match ${name}'s (${stored}). Nothing was changed. Check the label, or correct the unit's serial number first.`, { matches: [item], conflict: "serial_number" });
+  }
+  const mac = normalizeMac(parsed?.mac || ""), storedMac = detailText(item, "mac").trim();
+  if (mac && storedMac && mac !== (normalizeMac(storedMac) || storedMac.toUpperCase())) {
+    return failure(`This label's MAC address (${mac}) does not match ${name}'s (${storedMac}). Nothing was changed. Check the label, or correct the unit's MAC address first.`, { matches: [item], conflict: "mac" });
+  }
+  return null;
 }
 
 async function placeOnce(parsed, target) {
@@ -76,6 +106,8 @@ async function placeOnce(parsed, target) {
   }
   if (matches.length === 1) {
     const item = matches[0];
+    const conflict = identityConflict(item, parsed);
+    if (conflict) throw conflict;
     const before = placeOf(item);
     if (samePlace(before, target)) return { action: "confirmed", before, after: target, ...await fillMissing(item, parsed, revision) };
     const saved = await updateInventory(`/${encodeURIComponent(item.id)}/location`, target, revision);
@@ -93,7 +125,7 @@ export async function placeScannedUnit(parsed, target) {
     return await placeOnce(parsed, place);
   } catch (error) {
     // Another session wrote first (stale revision), or registered this code a moment ago: look again, once.
-    if (error.status !== 409 || error.ambiguous) throw error;
+    if (error.status !== 409 || error.ambiguous || error.conflict) throw error;
     return placeOnce(parsed, place);
   }
 }
@@ -107,7 +139,26 @@ export function canUndo(result) {
     || (result?.action === "confirmed" && filledFields(result).length > 0);
 }
 
-const CHANGED = "The unit changed after the scan, so the scan was not undone. Open the unit to edit it.";
+const CHANGED = "Someone else changed the unit after the scan, so the scan was not undone and the unit was left as it is. Open the unit to review it.";
+
+// A record as JSON with its keys in a fixed order, without "rack" (the list it is in, compared as its place).
+function recordText(record) {
+  const order = value => (Array.isArray(value) ? value.map(order)
+    : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key => [key, order(value[key])])) : value);
+  const { rack: _rack, ...rest } = record || {};
+  return JSON.stringify(order(rest));
+}
+
+// True while the unit is exactly what this scan saved: the same place and every field (name, type, notes, barcode,
+// serial number, part number, model, MAC, history ...) unchanged.
+export function untouchedSinceScan(current, rack, result) {
+  return !!current && samePlace(placeOf({ ...current, rack }), result.after) && recordText(current) === recordText(result.item);
+}
+
+function findIn(items, id) {
+  const rack = Object.keys(items).find(r => items[r].some(i => i.id === id));
+  return rack ? { rack, item: items[rack].find(i => i.id === id) } : null;
+}
 
 // Resolves to the saved equipment list when it removed a created unit (DCIM keeps it as its new revision), else null.
 export async function undoScannedUnit(result) {
@@ -115,12 +166,11 @@ export async function undoScannedUnit(result) {
   const id = result.item.id;
   if (result.action === "created") {
     const items = await loadRackItems();
-    const rack = Object.keys(items).find(r => items[r].some(i => i.id === id));
-    if (!rack) throw failure("The unit was already removed. Nothing was undone.");
-    const item = items[rack].find(i => i.id === id);
+    const found = findIn(items, id);
+    if (!found) throw failure("The unit was already removed. Nothing was undone.");
+    const { rack, item } = found;
     const history = item.tracking_history || [];
-    const untouched = samePlace(placeOf({ ...item, rack }), result.after) && history.length === 1 && history[0].action === "registered"
-      && (item.barcode || "") === (result.item.barcode || "") && UNIT_DETAIL_FIELDS.every(f => detailText(item, f) === detailText(result.item, f));
+    const untouched = untouchedSinceScan(item, rack, result) && history.length === 1 && history[0].action === "registered";
     if (!untouched) throw failure(CHANGED);
     return saveRackItems({ ...items, [rack]: items[rack].filter(i => i.id !== id) }, items, { alert: false });
   }
@@ -128,10 +178,10 @@ export async function undoScannedUnit(result) {
   if (filled.length) {
     // One save puts the unit back where it was and removes exactly the fields this scan added, or changes nothing.
     const items = await loadRackItems();
-    const rack = Object.keys(items).find(r => items[r].some(i => i.id === id));
-    if (!rack) throw failure("The unit no longer exists. Nothing was undone.");
-    const item = items[rack].find(i => i.id === id);
-    if (!samePlace(placeOf({ ...item, rack }), result.after) || filled.some(f => item[f] !== result.filled[f])) throw failure(CHANGED);
+    const found = findIn(items, id);
+    if (!found) throw failure("The unit no longer exists. Nothing was undone.");
+    const { rack, item } = found;
+    if (!untouchedSinceScan(item, rack, result) || filled.some(f => item[f] !== result.filled[f])) throw failure(CHANGED);
     const restored = { ...item, u: result.before.u, shelf_position: result.before.position || "" };
     for (const field of filled) delete restored[field];
     const next = { ...items };
@@ -145,7 +195,7 @@ export async function undoScannedUnit(result) {
   const { data, revision } = await loadInventory(id);
   const current = data.matches.find(m => m.id === id);
   if (!current) throw failure("The unit no longer exists. Nothing was undone.");
-  if (!samePlace(placeOf(current), result.after)) throw failure(CHANGED);
+  if (!untouchedSinceScan(current, current.rack, result)) throw failure(CHANGED);
   await updateInventory(`/${encodeURIComponent(id)}/location`, result.before, revision);
   return null;
 }
