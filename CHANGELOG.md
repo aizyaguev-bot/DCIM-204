@@ -2,6 +2,18 @@
 
 ---
 
+## v2.46.3 — 2026-11-03 — Scanning a product: the code is its serial number, the name is the product
+
+### Changed
+- **Scanning a unit fills the Serial number with the scanned code**, and the unit's Name
+  is the product, not the code: the model on the label, or the product named by the part
+  number (for example "ConnectX-7 NIC", "Spectrum SN2700 switch", "Quantum-2 QM9700
+  switch"), or else the unit type. Rescanning a unit registered earlier fills its empty
+  serial number and keeps its name. A barcode that only names the product (a part number
+  or GTIN alone) is still refused, because many units share it.
+
+---
+
 ## v2.46.2 — 2026-11-03 — Every storage rack has 16 shelves
 
 ### Fixed
