@@ -8,6 +8,7 @@ try {
 } catch (_) {}
 
 const buildDate = new Date().toISOString().slice(0, 10);
+const backendUrl = process.env.DCIM_BACKEND_URL || "http://localhost:8000";
 
 export default defineConfig({
   define: {
@@ -17,7 +18,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://localhost:8000", changeOrigin: true },
+      "/api": { target: backendUrl, changeOrigin: false },
+      "/twin": { target: backendUrl, changeOrigin: false },
     },
   },
 });

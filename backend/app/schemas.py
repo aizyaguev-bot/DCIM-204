@@ -1,5 +1,7 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from typing import Optional
+
+from .inventory_store import revision
 
 class DeviceBase(BaseModel):
     name: str
@@ -21,20 +23,35 @@ class DeviceOut(DeviceBase):
 
     model_config = {"from_attributes": True}
 
+    @computed_field
+    @property
+    def labels_revision(self) -> str:
+        """Optional If-Match value for PATCH /api/devices/{id}/labels."""
+        return revision(self.labels)
+
 class OutletState(BaseModel):
     number: int
     label: str
     state: str          # "on" | "off" | "unknown"
-    watts: float = 0.0
-    current: float = 0.0
-    voltage: float = 0.0
+    watts: float | None = None
+    current: float | None = None
+    voltage: float | None = None
+
+class InletReading(BaseModel):
+    number: int
+    voltage: float | None = None
+    current: float | None = None
+    watts: float | None = None
+
 
 class PduStatus(BaseModel):
     device_id: str
     reachable: bool
-    inlet_voltage: float = 0.0
-    total_watts: float = 0.0
+    inlet_voltage: float | None = None
+    total_watts: float | None = None
+    watts_complete: bool = False
     outlets: list[OutletState] = []
+    inlet_readings: list[InletReading] = []
     error: Optional[str] = None
     temperature: Optional[float] = None
     humidity: Optional[float] = None

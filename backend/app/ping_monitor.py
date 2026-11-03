@@ -68,9 +68,14 @@ def iso(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat() if value is not None else None
 
 
+# Placeholder outlet labels ("Empty", "KVM Power", "--") are not servers. A local copy of DcimView.jsx NON_SERVER_LABEL,
+# lab-twin/app.js NON_SERVER_LABEL and routers/devices._NON_SERVER_LABEL, byte for byte (not imported from routers).
+_NON_SERVER_LABEL = re.compile(r"^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$", re.I)
+
+
 def server_identity(name):
     name = str(name or "").strip()
-    if not name or re.fullmatch(r"(?:outlet|port)\s*\d+", name, re.I):
+    if not name or re.fullmatch(r"(?:outlet|port)\s*\d+", name, re.I) or _NON_SERVER_LABEL.fullmatch(name):
         return None
     # Multiple power feeds and descriptive suffixes refer to the same OPT host.
     match = re.fullmatch(r"(optn?\d+)(?:\s*\([^)]*\))?", name, re.I)
@@ -82,8 +87,8 @@ def server_identity(name):
     return canonical.casefold(), canonical, host
 
 
-async def discover_targets(db):
-    """Import server labels and computer inventory; never use a PDU/KVM IP as a server IP."""
+async def inventory_sources(db):
+    """Read current server identities without writing targets or probing hardware."""
     from .routers import pdus, kvms
     devices = (await db.execute(select(Device).order_by(Device.id))).scalars().all()
     found = {}
@@ -115,6 +120,12 @@ async def discover_targets(db):
                     except ValueError:
                         host = ""
                 found[key] = (name, host, rack)
+    return found
+
+
+async def discover_targets(db):
+    """Import current inventory while preserving addresses, pause and history."""
+    found = await inventory_sources(db)
     existing = {t.source_key: t for t in (await db.execute(select(PingTarget))).scalars()}
     for key, (name, host, rack) in found.items():
         source_key = "server:" + key
@@ -128,6 +139,7 @@ async def discover_targets(db):
         elif existing[source_key].source == "inventory":
             # Preserve explicit host overrides, pause settings and historical identity.
             existing[source_key].rack = rack
+            existing[source_key].name = name
     await db.commit()
 
 
@@ -238,6 +250,8 @@ async def record_result(db, target_id, revision, host, result, checked_at):
     # Local/DNS errors do not invent an outage or a recovery.
     target.checked_at, target.status = checked_at, result.status
     target.rtt_ms, target.detail = result.rtt_ms, result.detail
+    from .alerts import observe_network
+    await observe_network(db, target, result, checked_at)
 
 
 async def ensure_state(session_factory=AsyncSessionLocal):

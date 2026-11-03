@@ -5,6 +5,10 @@ Seed KVM port labels from the known port assignments captured 2026-05-14.
 Run on the VM:
     cd /opt/lab-manager/backend
     python scripts/seed_kvm_labels.py
+
+Each label PATCH also queues that port's name for the device itself. Seed with DEVICE_NAME_SYNC=manual in .env
+(restart the service, seed, review on each device's Device names panel, then set it back), so a bulk seed never
+writes names to the hardware unreviewed.
 """
 import os
 import sys
