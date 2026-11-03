@@ -2,6 +2,27 @@
 
 ---
 
+## v2.46.0 — 2026-11-03 — Scanned units keep serial, part number, model and MAC; cooling on floors 1-4
+
+### Added
+- **Scanning a unit keeps its details.** The serial number, part number, model and MAC
+  address read from a barcode are now saved as separate fields of the unit and shown in
+  the unit's panel (Operator and up can edit them; Viewers see them read-only). Scanning
+  a unit that is already registered only fills the details it does not have yet, and
+  Undo removes exactly those. A serial number or MAC address (in any spelling) that
+  already belongs to another unit is refused, and the panel says which field is taken.
+
+### Changed
+- **Cooling units sit on floors 1-4**, like servers and units: the cooling dialog offers
+  Floor 1-4 (with what is on each floor) instead of shelves 1-42, and a cooling unit can
+  only be dragged onto a floor. A cooling unit saved earlier on a U outside floors 1-4
+  stays where it is until you choose a floor, and the dialog says so.
+- **Lab entrance screen:** a long alarm title, rack name or maintenance reason first gets
+  a slightly smaller font (never below the readable minimum) before it is shortened
+  with "…", so names such as "gpu-node-114-bmc: network reachability" show in full.
+
+---
+
 ## v2.45.2 — 2026-11-01 — Lab entrance screen readable on a 24-inch monitor
 
 ### Changed
