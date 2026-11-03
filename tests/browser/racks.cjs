@@ -397,6 +397,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await wedge(D);
     await dialog.getByRole('alert').filter({hasText:'This barcode matches 2 units, so nothing was changed.'}).waitFor();
     assert.equal(await log.first().locator('.scan-unit-matches li').count(),2);
+    assert.deepEqual(await log.first().locator('.scan-unit-matches li').allTextContents(),
+      [`Dup one (SN ${D}) · Rack-04 · floor 1 · ci-d1-${run}`,`Dup two · Rack-05 · floor 2 · ci-d2-${run}`],'Each match reads "Name (SN serial) · place · id"');
     await wedge('MQM8790-HS2F');
     await dialog.getByRole('alert').filter({hasText:'only names the product'}).waitFor();
     // SCAN-12: a label whose MAC finds unit Q but whose serial is not Q's is refused, and Q is listed and left as it is.

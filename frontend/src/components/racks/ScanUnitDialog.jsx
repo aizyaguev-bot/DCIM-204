@@ -252,7 +252,7 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
         {log.map(entry => <li key={entry.key} data-action={entry.result?.action || "error"} data-undo={entry.undo || undefined}>
           {entry.result ? <span className="scan-unit-text">{resultText(entry.result, entry.label)}</span>
             : <span className="scan-unit-text scan-unit-error">{entry.code ? <><bdi className="racks-mono">{entry.code}</bdi>: </> : null}{entry.error}</span>}
-          {entry.matches && <ul className="scan-unit-matches">{entry.matches.map(m => <li key={m.id}>{unitText(m)} ·<bdi>{placeText({ rack: m.rack, u: m.u })}</bdi> · <span className="racks-mono">{m.id}</span></li>)}</ul>}
+          {entry.matches && <ul className="scan-unit-matches">{entry.matches.map(m => <li key={m.id}>{unitText(m)} · <bdi>{placeText({ rack: m.rack, u: m.u })}</bdi> · <span className="racks-mono">{m.id}</span></li>)}</ul>}
           {entry.undo === "ready" && <button type="button" className="racks-btn racks-btn-sm" onClick={() => { inputRef.current?.focus(); undo(entry); }}>Undo</button>}
           {entry.undo === "busy" && <span className="racks-muted">Undoing…</span>}
           {entry.undo === "done" && <span className="racks-muted">Undone</span>}
