@@ -5,6 +5,7 @@ import {
   isServerLabel, buildServers, pduLoad, buildRacks, environment, kpis, openAlerts, attentionItems, consolesInUse,
   recentChanges, gridLayout, rowsThatFit, pageOf, relativeAge, formatKw, formatRange, connectionState, pruneStatuses,
   changeTime, clockTime, longDate, rackGrid, RACK_CARD_EM, ROW_EM, LIST_GAP_EM, fillRows, pinnedPage, labStatus, sourceAfter, maintenanceEntries, outletRuns, partsText, STALE_MS, TICKER_MAX, RATED_AMPS,
+  mergeServerFeeds, withTimeout, REQUEST_TIMEOUT_MS,
 } from "../labDisplay.js";
 
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
@@ -36,6 +37,97 @@ test("buildServers: live outlets win over saved labels, overrides move a server 
   // An unreachable PDU still lists its saved servers (no reading), a reachable one only what it reports.
   const moved = buildServers([pdu(1)], { pdu1: { ...online(1), outlets: [{ number: 1, label: "OPT99", state: "on" }] } });
   assert.deepEqual(moved.map(s => s.name), ["OPT12", "OPT99"]);
+});
+
+test("mergeServerFeeds: one server on two feeds is on when any feed is on, watts add up, unknown only when no feed reads", () => {
+  const feed = (pduId, outlet, state, watts, extra = {}) => ({ id: "opt9", name: "OPT9", rack: "Rack-01", pduId, pduName: pduId.toUpperCase(), outlet, state, watts, ...extra });
+  // on + off reads as on, and names the feed that is on (never the first PDU's id with the second's state).
+  const onOff = mergeServerFeeds([feed("pdu1", 3, "off", 0), feed("pdu2", 5, "on", 140)]);
+  assert.deepEqual([onOff.state, onOff.watts, onOff.pduId, onOff.pduName, onOff.outlet, onOff.rack, onOff.name], ["on", 140, "pdu2", "PDU2", 5, "Rack-01", "OPT9"]);
+  assert.deepEqual(Object.keys(onOff).sort(), ["id", "name", "outlet", "pduId", "pduName", "rack", "state", "watts"], "no extra fields");
+  const offOn = mergeServerFeeds([feed("pdu1", 3, "on", 120), feed("pdu2", 5, "off", 0)]);
+  assert.deepEqual([offOn.state, offOn.watts, offOn.pduId, offOn.outlet], ["on", 120, "pdu1", 3]);
+  // Both on: the watts add up, the first feed is shown.
+  const both = mergeServerFeeds([feed("pdu1", 3, "on", 120), feed("pdu2", 5, "on", 130.5)]);
+  assert.deepEqual([both.state, both.watts, both.pduId], ["on", 250.5, "pdu1"]);
+  // An unreachable first PDU (saved label, unknown) never hides the live second one.
+  const unknownOff = mergeServerFeeds([feed("pdu1", 3, "unknown", null), feed("pdu2", 5, "off", 2)]);
+  assert.deepEqual([unknownOff.state, unknownOff.watts, unknownOff.pduId, unknownOff.outlet], ["off", 2, "pdu2", 5]);
+  const unknown = mergeServerFeeds([feed("pdu1", 3, "unknown", null), feed("pdu2", 5, "unknown", null)]);
+  assert.deepEqual([unknown.state, unknown.watts, unknown.pduId, unknown.outlet], ["unknown", null, "pdu1", 3]);
+  // DcimView's feeds carry the PDU's address: it follows the feed that is shown.
+  const withIp = mergeServerFeeds([feed("pdu1", 3, "off", 0, { pduIp: "192.0.2.1" }), feed("pdu2", 5, "on", 9, { pduIp: "192.0.2.2" })]);
+  assert.equal(withIp.pduIp, "192.0.2.2");
+  assert.equal(mergeServerFeeds([feed("pdu1", 1, "on", 5)]).watts, 5);
+  assert.equal(mergeServerFeeds([]), null);
+});
+
+test("buildServers: a server on two PDUs counts as one server, on when either feed is on", () => {
+  const p1 = pdu(1, { labels: { 1: "OPT11", 2: "OPT99" } });
+  const p2 = pdu(2, { labels: { 1: "OPT21", 2: "OPT99" } });
+  const live = (n, states, watts = [100, 100]) => ({ ...online(n), outlets: [
+    { number: 1, label: `OPT${n}1`, state: states[0], watts: watts[0] }, { number: 2, label: "OPT99", state: states[1], watts: watts[1] }] });
+  const find = list => list.find(s => s.name === "OPT99");
+  // First feed off, second on: on (the old rule took the second feed's state with the first feed's PDU).
+  let servers = buildServers([p1, p2], { pdu1: live(1, ["on", "off"], [100, 0]), pdu2: live(2, ["on", "on"], [100, 150]) });
+  assert.equal(servers.filter(s => s.name === "OPT99").length, 1);
+  assert.deepEqual([find(servers).state, find(servers).watts, find(servers).pduId, find(servers).outlet, find(servers).rack], ["on", 150, "pdu2", 2, "Rack-01"]);
+  // First feed on, second off: still on (the old rule read off).
+  servers = buildServers([p1, p2], { pdu1: live(1, ["on", "on"], [100, 120]), pdu2: live(2, ["on", "off"], [100, 0]) });
+  assert.deepEqual([find(servers).state, find(servers).watts, find(servers).pduId], ["on", 120, "pdu1"]);
+  // First PDU unreachable: the live second feed decides, and the KPI counts read it.
+  const statuses = { pdu1: offline(1), pdu2: live(2, ["on", "on"]) };
+  servers = buildServers([p1, p2], statuses);
+  assert.deepEqual([find(servers).state, find(servers).pduId], ["on", "pdu2"]);
+  const k = kpis({ devices: [p1, p2], pduStatuses: statuses, servers });
+  assert.deepEqual([k.servers.on, k.servers.noReading, k.servers.total], [2, 1, 3]);
+  // Both unreachable: unknown, named by the first feed.
+  servers = buildServers([p1, p2], { pdu1: offline(1), pdu2: offline(2) });
+  assert.deepEqual([find(servers).state, find(servers).watts, find(servers).pduId], ["unknown", null, "pdu1"]);
+});
+
+test("DcimView's servers use the same two-feed rule (a second feed never overwrites the first one's state)", () => {
+  const dcim = read("../pages/DcimView.jsx");
+  assert.match(dcim, /import \{ mergeServerFeeds \} from "\.\.\/labDisplay\.js";/);
+  const block = dcim.slice(dcim.indexOf("const servers = useMemo("), dcim.indexOf("const rackStats = useMemo("));
+  assert.match(block, /\[\.\.\.feeds\.values\(\)\]\.map\(mergeServerFeeds\)/);
+  assert.doesNotMatch(block, /e\.state\s*=\s*o\.state|map\.has\(key\)/);
+});
+
+test("withTimeout: a hung request is aborted after the limit and when the page stops; a quick one is untouched", async () => {
+  const hung = signals => signal => { signals.push(signal); return new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))); };
+  const signals = [];
+  await assert.rejects(withTimeout(hung(signals), { ms: 20 }), /The request timed out/);
+  assert.equal(signals[0].aborted, true, "the fetch is aborted, not left open");
+  // The page goes away: every request in flight is aborted at once.
+  const stop = new AbortController();
+  const pending = [withTimeout(hung(signals), { ms: 10_000, stop: stop.signal }), withTimeout(hung(signals), { ms: 10_000, stop: stop.signal })];
+  stop.abort();
+  for (const p of pending) await assert.rejects(p);
+  assert.deepEqual(signals.slice(1).map(s => s.aborted), [true, true]);
+  // Already stopped: the request is aborted before it can start anything.
+  const late = [];
+  await assert.rejects(withTimeout(hung(late), { ms: 10_000, stop: stop.signal }));
+  assert.equal(late[0].aborted, true);
+  // A quick answer resolves and its signal stays as it was (no abort after the fact).
+  const quick = [];
+  assert.equal(await withTimeout(signal => { quick.push(signal); return Promise.resolve(42); }, { ms: 50 }), 42);
+  await new Promise(r => setTimeout(r, 80));
+  assert.equal(quick[0].aborted, false);
+  // A request that ignores its signal still settles at the limit; a request that fails passes its error through.
+  await assert.rejects(withTimeout(() => new Promise(() => {}), { ms: 20 }), /timed out/);
+  await assert.rejects(withTimeout(() => Promise.reject(new Error("HTTP 500")), { ms: 50 }), /HTTP 500/);
+  await assert.rejects(withTimeout(() => { throw new Error("sync"); }, { ms: 50 }), /sync/);
+  assert.ok(REQUEST_TIMEOUT_MS > 0 && REQUEST_TIMEOUT_MS < 15_000);
+});
+
+test("the display threads an AbortSignal into every request it makes, and aborts them when it goes away", () => {
+  const page = read("../pages/LabDisplay.jsx");
+  assert.doesNotMatch(page, /Promise\.race/);
+  for (const call of ["api.getDevices({ signal })", "api.getPduStatus(p.id, { signal })", "api.getKvmStatus(k.id, { signal })", "api.maintenanceList({ signal })",
+    'getJson("/api/monitoring", signal)', 'getJson("/api/rack-overrides", signal)']) assert.ok(page.includes(call), call);
+  assert.match(page, /fetch\(path, \{ cache: "no-store", signal \}\)/);
+  assert.match(page, /stop\.abort\(\);/);
 });
 
 test("pduLoad: measured current over the 16 A rating, an estimate from complete watts, unreachable is an alarm", () => {

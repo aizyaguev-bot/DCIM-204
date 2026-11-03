@@ -7,7 +7,8 @@
 // growth, page rotation with alarms pinned, a network loss (last data kept, Reconnecting, NOT LIVE banner, greyed
 // panels) and the recovery, one failing source ("Live · partial"), the role warning, the TV sign-in, the narrow-screen
 // notice and the header link for both roles, long free text (Attention titles, a maintenance reason, a rack name) drawn
-// smaller to fit before it is cut (Hebrew keeps its first words). Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
+// smaller to fit before it is cut (Hebrew keeps its first words), a long alarm title whole beside a WARNING row, a line
+// measured again when a neighbour appears or goes (MAINT badge, the next maintenance entry). Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
 // to GET responses in the browser only; the fixture is never written.
 // Run: DCIM_TEST_ACCOUNTS=1 python tests/browser/preview-server.py 9311, then
 // DCIM_PREVIEW_URL=http://127.0.0.1:9311 node tests/browser/lab-display.cjs (screenshots: DCIM_QA_SHOTS, default C:/t/lb-shots).
@@ -22,6 +23,9 @@ const PASSWORD = 'test-password-123';
 const LONG_TITLES = ['gpu-node-114-bmc: network reachability', 'Inlet current above 15 A on PDU 3'];
 const LONG_REASON = 'Rewiring PSU feeds on the left side';
 const LONG_RACK = 'Rack-05-Training';
+// A rack name that fits its card at 36 px, and beside a MAINT badge only when drawn smaller (148 px at 32 px, 156 px of
+// room at 1920 x 1080). LONG_RACK (262 px at 32 px) cannot fit beside the badge at any allowed size.
+const FIT_RACK = 'Rack-04B';
 const HEBREW_REASON = 'החלפת כבלי החשמל בספקי הכוח של השרתים בצד השמאלי של הארון לפני העברת כל הציוד לחדר החדש בקומה השנייה';
 const HEBREW_TITLE = 'התראה ראשונה: ספק כוח 2 בשרת gpu-node-114 לא מגיב לבדיקות החום והמתח כבר יותר משעה שלמה';
 const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, name: `QA rack ${i}`, kind: 'rack', model: 'Compute', ip: '0.0.0.0', rack: `Rack-${String(i + 20).padStart(2, '0')}`, labels: {}, enabled: true, port_count: 0, notes: '' }));
@@ -37,11 +41,14 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
     assert.equal((await (await probe.request.get(origin + '/api/version')).json()).version, 'LOCAL PREVIEW - TEST DATA', 'Refuse any real lab environment');
     await probe.close();
 
-    async function open(role, viewport, { extraRacks = false, clock = false, longText = false, reason = null, title = null } = {}) {
+    // rackNames: racks renamed in the device list ({ 'Rack-04': 'Rack-04B' }); attention: replaces the Ping Monitor targets
+    // (all answering) and the open alerts with these titles; maintenance(t) (state.maintenance, changeable later): replaces
+    // the PDUs in maintenance.
+    async function open(role, viewport, { extraRacks = false, clock = false, longText = false, reason = null, title = null, rackNames = null, attention = null, maintenance = null } = {}) {
       const context = await browser.newContext({ viewport });
       const login = await context.request.post(origin + '/api/auth/login', { data: { username: role, password: PASSWORD } });
       assert.equal(login.status(), 200, `${role} signs in`);
-      const state = { offline: false, devicesGets: 0, failMaintenance: false };
+      const state = { offline: false, devicesGets: 0, failMaintenance: false, maintenance };
       await context.route('**/*', async route => {
         const request = route.request();
         if (!request.url().startsWith(origin + '/')) return route.abort();
@@ -54,6 +61,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
           state.devicesGets++;
           if (extraRacks) return patch(list => [...list, ...EXTRA_RACKS]);
           if (longText) return patch(list => list.map(d => (d.rack === 'Rack-05' ? { ...d, rack: LONG_RACK } : d)));
+          if (rackNames) return patch(list => list.map(d => (rackNames[d.rack] ? { ...d, rack: rackNames[d.rack] } : d)));
         }
         if (url.pathname === '/api/pdus/pdu2/status') return patch(j => Object.assign(j, { temperature: 27.5, humidity: 48, leak_detected: false }));
         if (url.pathname === '/api/pdus/pdu3/status') return patch(j => Object.assign(j, { temperature: 22.1, humidity: 41, leak_detected: false }));
@@ -63,11 +71,16 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
           j.pdus = { pdu3: { device_id: 'pdu3', started_at: t - 1500, started_by: 'admin', reason: reason || (longText ? LONG_REASON : 'Rewiring PSU feeds'), outlets_off: [1, 2], failed: [] } };
           j.log = [{ at: t - 1500, device_id: 'pdu3', action: 'shutdown', by: 'admin', reason: 'Rewiring', ok: 2, failed: 0 },
                    { at: t - 1600, device_id: 'pdu3', action: 'denied', by: 'viewer', reason: '', ok: 0, failed: 0 }];
+          if (state.maintenance) j.pdus = state.maintenance(t);
         });
         if (url.pathname === '/api/monitoring') return patch(j => {
           const alert = (id, title, ago) => ({ id, subject: `[DCIM alert] ${title}`, created_at: new Date(Date.now() - ago).toISOString(), sent_at: null, attempts: 0, error: null });
           j.email_alerts.recent = [alert('qa-alert', 'QA inlet current above 15 A', 600000), ...(longText ? LONG_TITLES.map((t, i) => alert(`qa-long-${i}`, t, 700000 + i * 1000)) : []),
             ...(title ? [alert('qa-title', title, 650000)] : [])];
+          if (attention) {
+            j.targets = (j.targets || []).map(t => ({ ...t, status: 'up' }));
+            j.email_alerts.recent = attention.map((t, i) => alert(`qa-attn-${i}`, t, 700000 + i * 1000));
+          }
         });
         return route.continue();
       });
@@ -335,13 +348,13 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       // The first title does not fit at 40 px: it was drawn smaller, not cut.
       assert.ok(m.titles[0].px < 39.5, `title 1 drawn smaller to fit: ${m.titles[0].px}px`);
       assert.ok(m.short.px >= 39.95 && m.shortRack.px >= 35.95, `short text keeps its size: ${JSON.stringify([m.short, m.shortRack])}`);
-      // One tag column for every row (as wide as the widest tag shown, never wider than 14.2em): all titles start at one x.
+      // One tag column for every row (as wide as the widest tag shown, never wider than 13.4em): all titles start at one x.
       const column = await page.evaluate(() => {
         const base = parseFloat(getComputedStyle(document.querySelector('.lab-display')).fontSize);
         const tags = [...document.querySelectorAll('.ld-attn-tag')].map(e => e.getBoundingClientRect().right);
         const starts = [...document.querySelectorAll('.ld-attn-text, .ld-attn-more-text')].map(e => Math.round(e.getBoundingClientRect().left));
         const first = document.querySelector('.ld-attn').getBoundingClientRect().left;
-        return { starts: [...new Set(starts)], tagsEnd: Math.max(...tags), width: starts[0] - first, limit: 14.2 * base + 0.4 * base + 0.8 * base + 1 };
+        return { starts: [...new Set(starts)], tagsEnd: Math.max(...tags), width: starts[0] - first, limit: 13.4 * base + 0.4 * base + 0.6 * base + 1 };
       });
       assert.ok(column.starts.length === 1 && column.tagsEnd < column.starts[0] && column.width <= column.limit, `one tag column: ${JSON.stringify(column)}`);
       await textSizes(page, 'viewer 1920 long text', 1, { attentionMin: 32 });
@@ -363,6 +376,104 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       const again = await measure();
       assert.deepEqual([again.reason, again.rack, again.shortRack], [m.reason, m.rack, m.shortRack], 'the same sizes after a refresh');
       checks.push(`viewer 1920 long text: titles ${m.titles.map(t => `${t.px}px`).join(', ')}, reason ${m.reason.px}px, rack name ${m.rack.px}px, all whole (short title ${m.short.px}px); ${lines} text boxes, none cut off or overlapping; a refresh changes no size`);
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── Alarms and a warning on the same Attention page at 1920 x 1080: the shared tag column is as wide as "! WARNING",
+    //    and a long alarm title beside it still fits whole (drawn smaller, never under 32 px), clear of its tag ──
+    {
+      const { context, page } = await open('viewer', { width: 1920, height: 1080 }, { attention: LONG_TITLES });
+      const rows = await page.evaluate(() => [...document.querySelectorAll('.ld-attn')].map(li => {
+        const strong = li.querySelector('strong'), tag = li.querySelector('.ld-attn-tag'), text = li.querySelector('.ld-attn-text');
+        return { level: li.dataset.level, tag: tag.innerText, title: strong?.innerText, px: strong && parseFloat(getComputedStyle(strong).fontSize),
+          whole: !!strong && strong.scrollWidth <= strong.clientWidth && !/…/.test(strong.innerText),
+          tagPx: parseFloat(getComputedStyle(tag).fontSize), tagRight: Math.round(tag.getBoundingClientRect().right), textLeft: text && Math.round(text.getBoundingClientRect().left) };
+      }));
+      assert.ok(rows.some(r => r.level === 'warn' && r.tag === 'WARNING') && rows.some(r => r.level === 'alarm'), `alarms and a WARNING on one page: ${JSON.stringify(rows)}`);
+      for (const t of LONG_TITLES) {
+        const row = rows.find(r => r.title === t);
+        assert.ok(row && row.whole && row.px >= 31.95 && row.px <= 40.05, `"${t}" fits whole beside WARNING: ${JSON.stringify(row)}`);
+      }
+      assert.ok(rows.find(r => r.title === LONG_TITLES[0]).px < 39.5, 'the long title was drawn smaller to fit, not cut');
+      for (const r of rows) assert.ok(r.tagPx >= 35.95 && r.tagRight < r.textLeft, `${r.level} tag: >= 36 px and clear of its title: ${JSON.stringify(r)}`);
+      assert.equal(new Set(rows.map(r => r.textLeft)).size, 1, 'one tag column');
+      await textSizes(page, 'viewer 1920 alarms + warning', 1, { attentionMin: 32 });
+      const lines = await orderly(page, 'viewer 1920 alarms + warning');
+      await page.screenshot({ path: path.join(shots, 'viewer-1920x1080-alarms-and-warning.png') });
+      const long = rows.find(r => r.title === LONG_TITLES[0]);
+      checks.push(`viewer 1920 alarms + warning: "${LONG_TITLES[0]}" whole at ${long.px}px beside a WARNING row (tags ${rows[0].tagPx}px); ${lines} text boxes, none cut off or overlapping`);
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── Something new beside a fitted line at 1920 x 1080: a MAINT badge beside a rack name, the next maintenance entry
+    //    beside its reason. The line is measured again: smaller (never under 32 px) while the neighbour is there, back
+    //    to its size when it has gone; nothing is set again while nothing changes ──
+    {
+      const entry = (id, by, t) => ({ device_id: id, started_at: t - 600, started_by: by, reason: 'Rewiring PSU feeds', outlets_off: [1, 2], failed: [] });
+      const { context, page, state } = await open('viewer', { width: 1920, height: 1080 },
+        { rackNames: { 'Rack-04': FIT_RACK, 'Rack-05': LONG_RACK }, maintenance: t => ({ pdu3: entry('pdu3', 'admin', t) }) });
+      const fitted = () => page.evaluate(racks => {
+        const info = e => e && { text: e.innerText, px: parseFloat(getComputedStyle(e).fontSize), whole: e.scrollWidth <= e.clientWidth && !/…/.test(e.innerText) };
+        const h3 = name => document.querySelector(`[data-rack="${name}"] h3`);
+        return { rack: info(h3(racks[0])), long: info(h3(racks[1])), badges: racks.map(r => !!document.querySelector(`[data-rack="${r}"] .ld-badge`)),
+          why: info(document.querySelector('.ld-maint-why')), where: document.querySelector('.ld-maint-where')?.innerText || '', page: document.querySelector('.ld-maint-count')?.dataset.page || '' };
+      }, [FIT_RACK, LONG_RACK]);
+      const badges = want => page.waitForFunction(([racks, w]) => racks.every((r, i) => !!document.querySelector(`[data-rack="${r}"] .ld-badge`) === w[i]), [[FIT_RACK, LONG_RACK], want], { timeout: 25000 });
+      const first = await fitted();
+      assert.deepEqual(first.badges, [false, false]);
+      assert.ok(first.rack.whole && first.rack.px >= 35.95, `${FIT_RACK} fits at full size: ${JSON.stringify(first.rack)}`);
+      assert.ok(first.long.whole && first.long.px >= 31.95 && first.long.px < 35.95, `${LONG_RACK} fits, drawn smaller: ${JSON.stringify(first.long)}`);
+      assert.ok(first.why.whole && first.why.px >= 35.95, `the reason fits at full size: ${JSON.stringify(first.why)}`);
+
+      // MAINT appears beside FIT_RACK, and the band turns between two entries: Rack-03 (short) and FIT_RACK (longer).
+      state.maintenance = t => ({ pdu3: entry('pdu3', 'admin', t), pdu4: entry('pdu4', 'administrator', t) });
+      await badges([true, false]);
+      await page.waitForTimeout(300);
+      const withBadge = await fitted();
+      assert.ok(withBadge.rack.whole && withBadge.rack.px >= 31.95 && withBadge.rack.px < first.rack.px - 0.4,
+        `${FIT_RACK} beside MAINT: measured again, smaller and whole: ${JSON.stringify([first.rack, withBadge.rack])}`);
+      await orderly(page, 'viewer 1920 MAINT beside a fitted rack name');
+      const pages = [];
+      for (let i = 0; i < 3; i++) {
+        const now = await fitted();
+        assert.ok(/^\d\/2$/.test(now.page), `two maintenance entries take turns: ${JSON.stringify(now)}`);
+        assert.ok(now.why.whole && now.why.px >= 31.95 && now.why.px <= 36.05, `page ${now.page}: the reason fits beside ${now.where}: ${JSON.stringify(now.why)}`);
+        pages.push(now);
+        if (i < 2) await page.waitForFunction(f => document.querySelector('.ld-maint-count')?.dataset.page !== f, now.page, { timeout: 12000 });
+        await page.waitForTimeout(200);
+      }
+      const short = pages.find(p => p.where.startsWith('Rack-03')), longer = pages.find(p => p.where.startsWith(FIT_RACK));
+      assert.ok(short && longer, `both entries shown: ${JSON.stringify(pages.map(p => p.where))}`);
+      assert.ok(longer.why.px < short.why.px - 0.4, `beside the longer entry the reason is drawn smaller: ${JSON.stringify(pages.map(p => [p.page, p.why.px]))}`);
+      assert.equal(pages[2].why.px, pages[0].why.px, 'back on the first entry, the reason is back at its size');
+      assert.ok(short.why.px >= 35.95, `beside the short entry the reason is at full size again: ${short.why.px}px`);
+
+      // MAINT moves to LONG_RACK: FIT_RACK grows back to full size; LONG_RACK is measured again down to the 32 px floor
+      // (it cannot fit beside the badge at any allowed size) and only then cut at its end.
+      state.maintenance = t => ({ pdu3: entry('pdu3', 'admin', t), pdu5: entry('pdu5', 'admin', t) });
+      await badges([false, true]);
+      await page.waitForTimeout(300);
+      const moved = await fitted();
+      assert.ok(moved.rack.whole && moved.rack.px >= 35.95, `${FIT_RACK} without MAINT is back at full size: ${JSON.stringify(moved.rack)}`);
+      assert.ok(!moved.long.whole && moved.long.px >= 31.95 && moved.long.px <= 32.05, `${LONG_RACK} beside MAINT: at the floor, then cut: ${JSON.stringify(moved.long)}`);
+
+      // The badges go: LONG_RACK is back at its size, whole; then a refresh that changes nothing sets no font size.
+      state.maintenance = t => ({ pdu3: entry('pdu3', 'admin', t) });
+      await badges([false, false]);
+      await page.waitForTimeout(300);
+      const back = await fitted();
+      assert.deepEqual([back.rack, back.long, back.why], [first.rack, first.long, first.why], 'every line is back at its first size');
+      await page.evaluate(() => {
+        window.__qaFit2 = 0;
+        const observer = new MutationObserver(list => { window.__qaFit2 += list.length; });
+        document.querySelectorAll('.ld-maint-why, .ld-rack h3').forEach(e => observer.observe(e, { attributes: true, attributeFilter: ['style'] }));
+      });
+      const gets0 = state.devicesGets;
+      for (let i = 0; i < 60 && state.devicesGets < gets0 + 1; i++) await page.waitForTimeout(500);
+      await page.waitForTimeout(1500);
+      assert.equal(await page.evaluate(() => window.__qaFit2), 0, 'a refresh that changes nothing sets no font size');
+      await page.screenshot({ path: path.join(shots, 'viewer-1920x1080-fit-again.png') });
+      checks.push(`viewer 1920 fit again: ${FIT_RACK} ${first.rack.px}px -> ${withBadge.rack.px}px beside MAINT (whole) -> ${moved.rack.px}px when it goes; reason ${short.why.px}px / ${longer.why.px}px on the two maintenance pages, both whole; ${LONG_RACK} ${first.long.px}px -> ${moved.long.px}px beside MAINT (cut at the floor) -> ${back.long.px}px`);
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 

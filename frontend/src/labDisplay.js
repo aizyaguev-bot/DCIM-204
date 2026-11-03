@@ -53,10 +53,30 @@ const typed = text => ({ text: String(text), user: true });
 export const partsText = parts => asArray(parts).map(p => p?.text ?? "").join("");
 const rackPrefix = rack => (rack ? [typed(rack), own(" · ")] : []);
 
+// One server fed by more than one outlet with the same label (a server's two PSUs on two PDUs, or two outlets of one
+// PDU): it is on when any feed is on, off when a feed is off and none is on, and unknown only when no feed reports on
+// or off; its watts add up over the feeds that report them (null when none does). The PDU and outlet it names are
+// those of the first feed whose state is the server's state (the first feed when unknown), so "Outlet 3 of PDU 05 is
+// on" is always true and an unreachable first PDU never hides a live second one. Name and rack: the first feed's.
+// DcimView's `servers` uses the same rule.
+const FEED_FIELDS = ["pduId", "pduName", "pduIp", "outlet"];
+export function mergeServerFeeds(feeds) {
+  const list = asArray(feeds).filter(Boolean);
+  if (!list.length) return null;
+  const state = list.some(f => f.state === "on") ? "on" : list.some(f => f.state === "off") ? "off" : list[0].state ?? "unknown";
+  const shown = list.find(f => f.state === state) || list[0];
+  const watts = list.filter(f => finite(f.watts));
+  const merged = { ...list[0], state, watts: watts.length ? watts.reduce((sum, f) => sum + f.watts, 0) : null };
+  for (const field of FEED_FIELDS) if (field in shown) merged[field] = shown[field];
+  return merged;
+}
+
 // Servers as the Racks page lists them (DcimView `servers`): every PDU outlet whose label names a server. A reachable
-// PDU's live outlets win over saved labels; a moved server (rack overrides) belongs to its new rack.
+// PDU's live outlets win over saved labels; a moved server (rack overrides) belongs to its new rack; a server on more
+// than one outlet is one server (mergeServerFeeds).
 export function buildServers(pdus, pduStatuses = {}, rackOverrides = {}) {
-  const map = new Map();
+  const feeds = new Map();
+  const add = (key, feed) => { const list = feeds.get(key); if (list) list.push(feed); else feeds.set(key, [feed]); };
   const overrides = asObject(rackOverrides);
   for (const pdu of pdus || []) {
     const status = pduStatuses[pdu.id];
@@ -66,17 +86,15 @@ export function buildServers(pdus, pduStatuses = {}, rackOverrides = {}) {
     for (const [num, label] of Object.entries(asObject(pdu.labels))) {
       if (liveByN.has(num) || !isServerLabel(label)) continue;
       const key = String(label).trim().toLowerCase();
-      if (map.has(key)) continue;
-      map.set(key, { id: key, name: String(label).trim(), rack: rackOf(key), pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: "unknown", watts: null });
+      add(key, { id: key, name: String(label).trim(), rack: rackOf(key), pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: "unknown", watts: null });
     }
     for (const o of live) {
       if (!isServerLabel(o.label)) continue;
       const key = String(o.label).trim().toLowerCase();
-      if (map.has(key)) { const e = map.get(key); e.state = o.state; e.watts = o.watts ?? null; continue; }
-      map.set(key, { id: key, name: String(o.label).trim(), rack: rackOf(key), pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts ?? null });
+      add(key, { id: key, name: String(o.label).trim(), rack: rackOf(key), pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts ?? null });
     }
   }
-  return [...map.values()].sort((a, b) => naturalCompare(a.name, b.name));
+  return [...feeds.values()].map(mergeServerFeeds).sort((a, b) => naturalCompare(a.name, b.name));
 }
 
 // One PDU's draw and estimated load, the Racks page rules: measured inlet current when every inlet reports it, else
@@ -475,6 +493,29 @@ export function sourceAfter(previous, result, now, limit = STALE_MS) {
   const lastOk = previous?.lastOk ?? 0;
   if (lastOk && now - lastOk <= limit) return { ...previous, firstTry: first };
   return { state: "unknown", value: null, lastOk, since: lastOk || first, firstTry: first };
+}
+
+// One request with a time limit: `request(signal)` gets an AbortSignal for its fetch, which is aborted after `ms` (the
+// promise then fails with "The request timed out") or as soon as `stop` aborts (the page went away). The fetch itself
+// ends, so a server that hangs never keeps the browser's few connections per site busy across cycles. The promise
+// settles after `ms` even when the request ignores its signal.
+export function withTimeout(request, { ms = REQUEST_TIMEOUT_MS, stop = null } = {}) {
+  const controller = new AbortController();
+  let timer = null, onStop = null;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => { reject(new Error("The request timed out")); controller.abort(); }, ms);
+    onStop = () => { reject(stop.reason ?? new Error("The request was stopped")); controller.abort(); };
+    if (stop?.aborted) onStop();
+    else stop?.addEventListener?.("abort", onStop, { once: true });
+  });
+  let pending;
+  try { pending = Promise.resolve(request(controller.signal)); } catch (error) { pending = Promise.reject(error); }
+  // The loser of the race may reject later (an aborted fetch): never an unhandled rejection.
+  pending.catch(() => {});
+  return Promise.race([pending, limit]).finally(() => {
+    clearTimeout(timer);
+    stop?.removeEventListener?.("abort", onStop);
+  });
 }
 
 // ── text ──

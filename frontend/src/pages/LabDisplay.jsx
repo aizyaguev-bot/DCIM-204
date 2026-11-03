@@ -14,7 +14,7 @@ import {
   LIST_GAP_EM, STRIP_ITEM_EM,
   buildServers, buildRacks, environment, kpis, attentionItems, consolesInUse, recentChanges, maintenanceEntries,
   rackGrid, fillRows, pageOf, pinnedPage, labStatus, sourceAfter, relativeAge, formatKw, formatRange,
-  clockTime, longDate, changeTime, connectionState, pruneStatuses,
+  clockTime, longDate, changeTime, connectionState, pruneStatuses, withTimeout, partsText,
 } from "../labDisplay";
 
 const LAB_NAME = "Lab 204";
@@ -26,14 +26,8 @@ const SHIFT_PX = 4;
 // Narrower than this, or portrait: a notice instead of the display (it is laid out for a landscape TV).
 const NARROW_QUERY = "(max-width: 899px), (orientation: portrait)";
 
-function withTimeout(promise, ms = REQUEST_TIMEOUT_MS) {
-  let timer;
-  const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("The request timed out")), ms); });
-  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
-}
-
-async function getJson(path) {
-  const response = await fetch(path, { cache: "no-store" });
+async function getJson(path, signal) {
+  const response = await fetch(path, { cache: "no-store", signal });
   if (!response.ok) {
     const error = new Error(`HTTP ${response.status}`);
     error.status = response.status;
@@ -48,11 +42,15 @@ const asObject = value => (value && typeof value === "object" && !Array.isArray(
 // The data cycle: one at a time (a slow server never stacks requests), every REFRESH_MS after the last one finished,
 // at once when the network comes back or the tab becomes visible, paused while the tab is hidden. Each extra source
 // (maintenance, Ping Monitor, incidents, rack overrides) keeps its last good copy for STALE_MS after its last success
-// and is then "unknown" (sources[name].state), never an old copy shown as current.
+// and is then "unknown" (sources[name].state), never an old copy shown as current. Every request is aborted when it
+// takes longer than REQUEST_TIMEOUT_MS and when the page goes away (withTimeout), so a hung server never piles up
+// open connections.
 function useLabFeed() {
   const [feed, setFeed] = useState({ data: EMPTY, sources: {}, loaded: false, state: "connecting", lastSuccess: 0, error: "" });
   useEffect(() => {
     let alive = true, busy = false, timer = null, cycle = 0;
+    const stop = new AbortController();
+    const timed = request => withTimeout(request, { ms: REQUEST_TIMEOUT_MS, stop: stop.signal });
     let data = EMPTY;
     let sources = {};
     const okAt = new Map();   // device id -> ms of its last good status (only devices that still exist)
@@ -64,19 +62,19 @@ function useLabFeed() {
       busy = true;
       const n = cycle++;
       try {
-        const list = await withTimeout(api.getDevices());
+        const list = await timed(signal => api.getDevices({ signal }));
         if (!alive) return;
         const devices = Array.isArray(list) ? list : [];
         const pdus = devices.filter(d => d.kind === "pdu");
         const kvms = devices.filter(d => d.kind === "kvm");
         const readOverrides = n % OVERRIDES_EVERY === 0 || !sources.overrides;
         const [pduRes, kvmRes, maintenance, monitoring, incidents, overrides] = await Promise.all([
-          Promise.allSettled(pdus.map(p => withTimeout(api.getPduStatus(p.id)))),
-          Promise.allSettled(kvms.map(k => withTimeout(api.getKvmStatus(k.id)))),
-          settle(withTimeout(api.maintenanceList())),
-          settle(withTimeout(getJson("/api/monitoring"))),
-          settle(withTimeout(getJson(`/api/monitoring/incidents?limit=${INCIDENT_LIMIT}`))),
-          readOverrides ? settle(withTimeout(getJson("/api/rack-overrides"))) : Promise.resolve(null),
+          Promise.allSettled(pdus.map(p => timed(signal => api.getPduStatus(p.id, { signal })))),
+          Promise.allSettled(kvms.map(k => timed(signal => api.getKvmStatus(k.id, { signal })))),
+          settle(timed(signal => api.maintenanceList({ signal }))),
+          settle(timed(signal => getJson("/api/monitoring", signal))),
+          settle(timed(signal => getJson(`/api/monitoring/incidents?limit=${INCIDENT_LIMIT}`, signal))),
+          readOverrides ? settle(timed(signal => getJson("/api/rack-overrides", signal))) : Promise.resolve(null),
         ]);
         if (!alive) return;
         const now = Date.now();
@@ -130,6 +128,7 @@ function useLabFeed() {
     return () => {
       alive = false;
       clearTimeout(timer);
+      stop.abort();
       window.removeEventListener("online", runNow);
       document.removeEventListener("visibilitychange", onVisible);
     };
@@ -419,9 +418,12 @@ function useFitWidth(key) {
 // Free text too long for its line (an Attention title, a maintenance reason, a rack name) is drawn smaller, step by
 // step, down to FIT_MIN_EM of the screen's base size (2em: 32 px at 1920 x 1080, the smallest text on the screen); only
 // what still does not fit then ends in "…" (CSS), at the text's own end: the line takes the text's direction (dir="auto"
-// on the line itself, or textDir when the text sits in <bdi> parts), so Hebrew keeps its first words. It is measured before paint,
-// once per text and per change of the line's width (a refresh that changes nothing changes nothing on screen), and
-// never wraps.
+// on the line itself, or textDir when the text sits in <bdi> parts), so Hebrew keeps its first words. It is measured
+// before paint, once per `key` (the text, and what shares its line: the MAINT badge beside a rack name, the maintenance
+// entry beside a reason), and again whenever the element's own width or its line's width changes: a neighbour that
+// appears or grows narrows it (smaller again), one that goes away widens it (back up towards the normal size). A
+// refresh that changes nothing changes nothing on screen, and a fit never measures again because of its own size
+// change (the widths are taken after the fit), so it never loops. It never wraps.
 const FIT_MIN_EM = 2;
 const FIT_STEP_PX = 0.5;
 function useShrinkToFit(key, minEm = FIT_MIN_EM) {
@@ -430,11 +432,9 @@ function useShrinkToFit(key, minEm = FIT_MIN_EM) {
     const el = ref.current;
     const box = el?.parentElement;
     if (!el || !box) return undefined;
-    let width = -1;
+    let widths = "";
     let alive = true;
-    const fit = force => {
-      if (!alive || (!force && box.clientWidth === width)) return;
-      width = box.clientWidth;
+    const shrink = () => {
       el.style.fontSize = "";
       if (el.scrollWidth <= el.clientWidth) return;
       const base = parseFloat(getComputedStyle(el.closest(".lab-display") || el).fontSize) || 16;
@@ -449,9 +449,17 @@ function useShrinkToFit(key, minEm = FIT_MIN_EM) {
         el.style.fontSize = `${px}px`;
       }
     };
+    const now = () => `${box.clientWidth}|${el.clientWidth}`;
+    // Both widths are taken after the fit: the fit's own change of size is not a reason to fit again.
+    const fit = force => {
+      if (!alive || (!force && now() === widths)) return;
+      shrink();
+      widths = now();
+    };
     fit(true);
     const observer = new ResizeObserver(() => fit(false));
     observer.observe(box);
+    observer.observe(el);
     // A web font that arrives late changes the text's width, not the line's.
     document.fonts?.ready?.then(() => fit(true));
     return () => { alive = false; observer.disconnect(); };
@@ -471,10 +479,10 @@ function textDir(text) {
   return "auto";
 }
 
-// One line of free text that shrinks to fit (useShrinkToFit); `text` is what it says (the measure runs again when it
-// changes), children what it shows (by default the text).
-function FitText({ as: Tag = "span", text, className, dir, children }) {
-  const ref = useShrinkToFit(text);
+// One line of free text that shrinks to fit (useShrinkToFit); `text` is what it says, children what it shows (by
+// default the text); the measure runs again when the text or `fitKey` (what shares its line) changes.
+function FitText({ as: Tag = "span", text, fitKey = "", className, dir, children }) {
+  const ref = useShrinkToFit(`${text}|${fitKey}`);
   return <Tag ref={ref} className={className} dir={dir}>{children ?? text}</Tag>;
 }
 
@@ -547,7 +555,7 @@ function MaintenanceBand({ entries, source, rotation }) {
       <strong className="ld-maint-label">MAINTENANCE</strong>
       <span className="ld-maint-text">
         <span className="ld-maint-where"><Parts parts={entry.head || entry.parts} /></span>
-        {entry.head && entry.reason && <><span className="ld-maint-sep" aria-hidden="true">·</span><FitText as="bdi" dir="auto" className="ld-maint-why" text={entry.reason} /></>}
+        {entry.head && entry.reason && <><span className="ld-maint-sep" aria-hidden="true">·</span><FitText as="bdi" dir="auto" className="ld-maint-why" text={entry.reason} fitKey={`${entry.key}|${partsText(entry.head)}`} /></>}
       </span>
       {pages > 1 && <span className="ld-maint-count" data-page={`${page + 1}/${pages}`}>{page + 1} of {pages}</span>}
     </div>
@@ -593,6 +601,7 @@ function RacksPanel({ racks, rotation }) {
               // No reading for any server: never a 0 that reads as "all off".
               const unknown = !r.storage && r.total > 0 && r.noReading >= r.total;
               const counted = !r.storage && r.total > 0;
+              const badge = !layout.compact && r.maintenancePdus.length > 0;
               const servers = !counted ? !layout.compact && <p className="ld-rack-servers">{r.storage ? "Storage" : "No servers"}</p>
                 : unknown ? <p className="ld-rack-servers" data-unknown="true"><strong>—</strong><span> / {r.total}</span></p>
                 : <p className="ld-rack-servers"><strong>{r.on}</strong><span> / {r.total}{layout.compact ? "" : " on"}</span></p>;
@@ -601,8 +610,8 @@ function RacksPanel({ racks, rotation }) {
                   {/* Line 1: the name (the whole line, or beside MAINT; a compact card adds on / total). Line 2: servers
                       on / total and the rack's power on one baseline. Line 3: its state. */}
                   <div className="ld-rack-head">
-                    <FitText as="h3" dir="auto" text={r.rack} />
-                    {!layout.compact && r.maintenancePdus.length > 0 && <span className="ld-badge" data-level="maint">Maint</span>}
+                    <FitText as="h3" dir="auto" text={r.rack} fitKey={`${badge}|${layout.compact ? `${r.on}/${r.total}/${unknown}` : ""}`} />
+                    {badge && <span className="ld-badge" data-level="maint">Maint</span>}
                     {layout.compact && servers}
                   </div>
                   {!layout.compact && <div className="ld-rack-line">

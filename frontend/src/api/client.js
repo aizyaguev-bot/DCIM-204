@@ -1,10 +1,13 @@
 const BASE = "";  // Vite proxy forwards /api → http://localhost:8000
 
-async function req(method, path, body, headers) {
+// signal: an optional AbortSignal for the fetch (only callers that pass one get it; the lab display aborts requests
+// that hang).
+async function req(method, path, body, headers, signal) {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...headers },
     body: body ? JSON.stringify(body) : undefined,
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -24,7 +27,7 @@ async function req(method, path, body, headers) {
 
 export const api = {
   // Devices
-  getDevices: ()              => req("GET",    "/api/devices/"),
+  getDevices: (opts)          => req("GET",    "/api/devices/", null, null, opts?.signal),
   createDevice: (d)           => req("POST",   "/api/devices/", d),
   updateDevice: (id, d)       => req("PUT",    `/api/devices/${id}`, d),
   // revision: labels_revision of the device the label map was built from; a stale one gets 409.
@@ -55,14 +58,14 @@ export const api = {
   moveServer:   (body)         => req("POST",   "/api/devices/move-server", body),
 
   // PDU
-  getPduStatus: (id)          => req("GET",    `/api/pdus/${id}/status`),
+  getPduStatus: (id, opts)    => req("GET",    `/api/pdus/${id}/status`, null, null, opts?.signal),
   outletPower: (id, n, action)=> req("POST",   `/api/pdus/${id}/outlets/${n}/power`, { action }),
-  maintenanceList: ()         => req("GET",    "/api/pdus/maintenance"),
+  maintenanceList: (opts)     => req("GET",    "/api/pdus/maintenance", null, null, opts?.signal),
   maintenanceShutdown: (id, password, reason) => req("POST", `/api/pdus/${encodeURIComponent(id)}/maintenance/shutdown`, { password, reason }),
   maintenanceRestore:  (id, password)         => req("POST", `/api/pdus/${encodeURIComponent(id)}/maintenance/restore`, { password }),
 
   // KVM
-  getKvmStatus: (id)          => req("GET",    `/api/kvms/${id}/status`),
+  getKvmStatus: (id, opts)    => req("GET",    `/api/kvms/${id}/status`, null, null, opts?.signal),
   getViewerUrl: (id, port)    => req("GET",    `/api/kvms/${id}/ports/${port}/viewer`),
   markKvmFree: (id)           => req("POST",   `/api/kvms/${id}/mark-free`),
 };
