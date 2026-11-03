@@ -8,6 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { MAIN_STORAGE } from "../api/inventory.js";
+import { STORAGE_SHELVES } from "../components/racks/floors.js";
 import { normalizeDraft, PRIORITIES } from "../api/assistant.js";
 
 // Evaluate the source between two markers of a product file and return its exported helpers by name.
@@ -33,8 +34,8 @@ function knownBug(name, reason, fn) {
   });
 }
 
-const { isDefaultOutletLabel, buildRackRows } =
-  loadHelpers("../pages/DcimView.jsx", "export function isDefaultOutletLabel(", "// ─── primitives", { MAIN_STORAGE });
+const { isDefaultOutletLabel, buildRackRows, storageShelfOptions } =
+  loadHelpers("../pages/DcimView.jsx", "export function isDefaultOutletLabel(", "// ─── primitives", { MAIN_STORAGE, STORAGE_SHELVES });
 const { connectionRacks, filterConnections } =
   loadHelpers("../pages/ConnectionsView.jsx", "export function connectionRacks(", "\nfunction ConnectionList");
 const { formatMaintenanceTime, maintenanceStateFor } =
@@ -84,13 +85,25 @@ test("equipment without a usable U is listed once, in a whole-rack row after the
   assert.equal(rows.filter(r => r.u === 0).length, 1);
 });
 
-test("main storage has no U shelves: its equipment is one whole-unit row and an empty store has no rows", () => {
+test("main storage has shelves 1-16 (always drawn) and a whole-unit row for its u 0 equipment", () => {
   const stored = [{ id: "x", name: "Spare PSU", u: 0 }, { id: "y", name: "Cables", u: 0 }];
   const { rows } = buildRackRows([], MAIN_STORAGE, {}, {}, { [MAIN_STORAGE]: stored });
-  assert.deepEqual(rows, [{ u: 0, items: [{ kind: "custom", data: stored[0] }, { kind: "custom", data: stored[1] }], auto: false }]);
-  assert.deepEqual(buildRackRows([], MAIN_STORAGE, {}, {}, {}).rows, []);
+  assert.deepEqual(rows.map(r => r.u), [...range(1, 16), 0]);
+  assert.deepEqual(rows.at(-1), { u: 0, items: [{ kind: "custom", data: stored[0] }, { kind: "custom", data: stored[1] }], auto: false });
+  assert.ok(rows.slice(0, 16).every(r => r.items.length === 0));
+  assert.deepEqual(buildRackRows([], MAIN_STORAGE, {}, {}, {}).rows.map(r => r.u), range(1, 16));
   // Same equipment in a normal rack still gets the 8 numbered shelves.
   assert.equal(buildRackRows([], "Rack-01", {}, {}, { "Rack-01": stored }).rows.length, 9);
+});
+
+test("storageShelfOptions: the whole unit, shelves 1-16, and a saved place outside them kept as its own choice", () => {
+  const options = storageShelfOptions("0");
+  assert.deepEqual(options.map(o => o.value), ["0", ...range(1, 16).map(String)]);
+  assert.equal(options[0].label, "Whole storage unit (no shelf)");
+  assert.equal(options[7].label, "Shelf 7");
+  assert.equal(storageShelfOptions("7").length, 17);
+  assert.deepEqual(storageShelfOptions("20").at(-1), { value: "20", label: "Shelf 20 · saved, not one of shelves 1–16" });
+  assert.equal(storageShelfOptions("x").at(-1).label, '"x" · saved, not one of shelves 1–16');
 });
 
 test("auto-placed servers fill the free U around explicit rack_slots, lowest first", () => {

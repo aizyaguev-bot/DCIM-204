@@ -7,7 +7,7 @@
 // all of them, on a known unit only those it does not have yet (a stored value is never overwritten). A label whose
 // serial number or MAC address contradicts the unit it found is refused, like a code that matches two units.
 import { MAIN_STORAGE, loadInventory, updateInventory, loadRackItems, saveRackItems, UNIT_DETAIL_FIELDS, UNIT_DETAIL_LIMITS, normalizeMac, detailText } from "./inventory.js";
-import { RACK_FLOORS } from "../components/racks/rackView.js";
+import { floorsFor, rackHasFloors } from "../components/racks/floors.js";
 
 export function placeOf(item) {
   return { rack: item.rack, u: item.u, position: item.shelf_position || "" };
@@ -17,15 +17,17 @@ export function samePlace(a, b) {
   return !!a && !!b && a.rack === b.rack && a.u === b.u && (a.position || "") === (b.position || "");
 }
 
-// "floor 2", "rack level", "U7"; Main storage is one place.
-export function floorText(u) {
+// "floor 2", "rack level", "U7" in a rack (no rack given: a rack); "shelf 7" or "whole storage" in Main storage.
+export function floorText(u, rack = null) {
+  if (!rackHasFloors(rack)) return Number.isInteger(u) && u > 0 ? `shelf ${u}` : "whole storage";
   if (!Number.isInteger(u) || u === 0) return "rack level";
-  return u <= RACK_FLOORS ? `floor ${u}` : `U${u}`;
+  return u <= floorsFor(rack) ? `floor ${u}` : `U${u}`;
 }
 
+// "OPT12 · floor 2", "Rack-01 · rack level"; Main storage: "Main storage · shelf 7", or "Main storage" (the whole unit).
 export function placeText(place, label = "") {
   if (!place?.rack) return "no rack";
-  if (place.rack === MAIN_STORAGE) return "Main storage";
+  if (place.rack === MAIN_STORAGE) return Number.isInteger(place.u) && place.u > 0 ? `Main storage · ${floorText(place.u, place.rack)}` : "Main storage";
   return `${label || place.rack} · ${floorText(place.u)}`;
 }
 

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { serverVisualState, rackSummary, withCoolingRows, compactRows, buildSearchIndex, searchIndex, matchesFilter, floorOptions,
-  rackFloors, RACK_FLOORS } from "../components/racks/rackView.js";
+  rackFloors, RACK_FLOORS, STORAGE_SHELVES, floorsFor } from "../components/racks/rackView.js";
 
 const server = (name, state = "on", pduId = "pdu4") => ({ id: name.toLowerCase(), name, state, pduId, pduName: `PDU ${pduId.slice(3)}`, outlet: 1, watts: 100 });
 const row = (u, names = [], kind = "server") => ({ u, items: names.map(name => ({ kind, data: { id: name.toLowerCase(), name } })), auto: false });
@@ -60,6 +60,16 @@ test("compactRows: empty runs fold, single empty rows stay, cooling shelves are 
   assert.deepEqual(cooled.map(x => x.kind === "gap" ? `${x.from}-${x.to}` : x.row.u), [1, 2, 3, 4, 5, 6, "7-8"]);
   // Edit mode: every shelf, even with a search active
   assert.deepEqual(compactRows(rows, { editMode: true, keep: () => false }).map(x => x.kind), Array(8).fill("row"));
+});
+
+test("floorsFor: 4 floors in a rack, 16 shelves in Main storage; rackFloors draws that many", () => {
+  assert.deepEqual([floorsFor("Rack-01"), floorsFor(null), floorsFor("Storage-Main"), STORAGE_SHELVES], [4, 4, 16, 16]);
+  const rows = [row(3, ["OPT3", "NIC"]), row(16, ["Spare"]), row(17), row(20, ["Old"]), row(0, ["Box"], "custom")];
+  const { floors, other, level } = rackFloors(rows, new Set(), floorsFor("Storage-Main"));
+  assert.deepEqual(floors.map(r => r.u), Array.from({ length: 16 }, (_, i) => i + 1));
+  assert.deepEqual(floors.filter(r => r.items.length).map(r => r.u), [3, 16]);
+  assert.deepEqual(other.map(r => r.u), [20], "old data above shelf 16 is kept; an empty U17 is dropped");
+  assert.deepEqual(level.map(r => r.u), [0]);
 });
 
 test("rackFloors: always floors 1-4, other shelves only when they hold something, rack level last", () => {
@@ -133,10 +143,10 @@ test("floorOptions: the rack's floors 1-RACK_FLOORS only, rack level first, name
   assert.equal(options[2].label, "Floor 2 · OPT42, Switch 04 +2");
   assert.equal(options[3].label, "Floor 3 · Cooling");
   assert.equal(options[4].label, "Floor 4 · empty");
-  // Main storage has numbered shelves, not floors
+  // Main storage has shelves 1-16, not floors
   const storage = floorOptions(rows, {}, "Storage-Main");
-  assert.equal(storage.length, 43);
+  assert.equal(storage.length, STORAGE_SHELVES + 1);
   assert.deepEqual(storage[0], { value: "", label: "Not on a shelf (rack level)" });
   assert.equal(storage[7].label, "Shelf 7 · OPT47");
-  assert.equal(storage[42].label, "Shelf 42 · empty");
+  assert.equal(storage[16].label, "Shelf 16 · empty");
 });

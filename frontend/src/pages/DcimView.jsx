@@ -12,6 +12,7 @@ import { findServer } from "../api/ssh";
 import { serverIdentity } from "../api/locations";
 import { deviceState } from "../api/client";
 import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, rackFloors, RACK_FLOORS, buildSearchIndex, searchIndex, matchesFilter, floorOptions } from "../components/racks/rackView.js";
+import { STORAGE_SHELVES, floorsFor, placesWord, rackHasFloors, validFloor } from "../components/racks/floors.js";
 import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, validPlace, shelfLabel, placeWord, sameDocument } from "../components/racks/chillers.js";
 import { BLOCK, serverPowerGroup, planServerPower, sameTargets, serverDisplayName } from "../components/racks/serverPower.js";
 import ServerPowerControl, { PowerActionButtons } from "../components/racks/ServerPowerControl.jsx";
@@ -126,6 +127,16 @@ export function parseUSlot(text) {
 }
 function genId() { return `ci-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`; }
 
+// Main storage's place choices for equipment: the whole unit (0) or one of its shelves 1-STORAGE_SHELVES. A saved value
+// outside them (old data) is offered as its own choice, so opening the panel never changes it.
+export function storageShelfOptions(current = "0") {
+  const options = [{ value: "0", label: "Whole storage unit (no shelf)" }];
+  for (let u = 1; u <= STORAGE_SHELVES; u++) options.push({ value: String(u), label: `Shelf ${u}` });
+  const value = String(current ?? "0");
+  if (!options.some(o => o.value === value)) options.push({ value, label: `${/^\d+$/.test(value) ? `Shelf ${value}` : `"${value}"`} · saved, not one of shelves 1–${STORAGE_SHELVES}` });
+  return options;
+}
+
 export function buildRackRows(servers, rackName, rackOrder, rackSlots, customItems) {
   const order  = rackOrder[rackName] || [];
   const slots  = rackSlots[rackName] || {};
@@ -174,8 +185,10 @@ export function buildRackRows(servers, rackName, rackOrder, rackSlots, customIte
   };
   const rows = [];
   if (rackName === MAIN_STORAGE) {
-    // Main storage has no empty shelves to draw: its occupied shelves in order, then the whole-unit equipment.
-    [...groups.keys()].filter(u => u > 0).sort((a, b) => a - b).forEach(u => rows.push(row(u)));
+    // Main storage is a unit of STORAGE_SHELVES shelves: every shelf (an empty one too), then any occupied shelf above
+    // them (old data, listed under "Other" by the card), then the whole-unit equipment.
+    for (let u = 1; u <= STORAGE_SHELVES; u++) rows.push(row(u));
+    [...groups.keys()].filter(u => u > STORAGE_SHELVES).sort((a, b) => a - b).forEach(u => rows.push(row(u)));
   } else {
     const maxU   = Math.max(0, ...[...groups.keys()].filter(u => Number.isInteger(u) && u >= 1));
     const totalU = Math.max(maxU + 2, 8);
@@ -429,51 +442,62 @@ function RackCoolingChip({ unit, variant }) {
     highlighted={!!matchKeys?.has(`c:${unit.id}`)} dragHandle={coolingDraggable ? drag : null}/>;
 }
 
-// The label on the left of a shelf: a rack's floors are 1-4 (1 at the top), a shelf above them "U5"…; Main storage
-// keeps its numbered shelves ("01", "Shelf 1").
+// The label on the left of a shelf: a rack's floors are 1-4 (1 at the top), a shelf above them "U5"…; Main storage's
+// shelves are 1-16 ("Shelf 7"), a shelf above them (old data) keeps its number.
 function shelfIndex(u, floors, auto) {
-  if (!u) return { text: "—", title: "Rack level (no shelf)" };
+  if (!u) return { text: "—", title: floors ? "Rack level (no shelf)" : "Whole storage unit (no shelf)" };
   const autoTitle = `Auto-placed — no saved U for this OPT; it is shown on the next free ${floors ? "floor" : "shelf"} (${u}). Set its U in Edit mode to keep it here.`;
-  if (!floors) return { text: String(u).padStart(2, "0"), title: auto ? autoTitle : `Shelf ${u}` };
+  if (!floors) return { text: String(u), title: auto ? autoTitle : u > STORAGE_SHELVES ? `Shelf ${u}: not one of the ${STORAGE_SHELVES} storage shelves (check its saved U)` : `Shelf ${u}` };
   if (u > RACK_FLOORS) return { text: `U${u}`, title: auto ? autoTitle : `U${u}: not one of the rack's ${RACK_FLOORS} floors (check its saved U)` };
   return { text: String(u), title: auto ? autoTitle : `Floor ${u}${u === 1 ? " (top)" : u === RACK_FLOORS ? " (bottom)" : ""}` };
 }
 
 // One floor (shelf): its number once on the left, the server line(s) in the middle (several servers = stacked lines)
 // and, beside them on the right, the floor's other units: equipment (switch, UPS, …) and cooling units as compact
-// cards, top-aligned. An empty floor is one compact dashed "Free" slot.
+// cards, top-aligned. An empty floor is one compact dashed "Free" slot. A Main storage shelf (floors false) is one
+// simple list of everything on it (servers, equipment and cooling units, one per line), never servers | units.
 function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, sortable = false, floors = true }) {
   const { coolingByRack, coolingDrop } = useContext(RackViewContext);
   const { scanUnit } = useContext(ServerActionsContext);
   const cooling = u > 0 ? coolingByRack?.[rack]?.placed?.[u] || [] : [];
-  // Only a place the cooling dialog offers takes a cooling drop: floors 1-RACK_FLOORS (Main storage: its shelves), never
-  // a row on the card's "Other" line (old data above the floors).
+  // Only a place the cooling dialog offers takes a cooling drop: floors 1-RACK_FLOORS (Main storage: shelves
+  // 1-STORAGE_SHELVES), never a row on the card's "Other" line (old data above them).
   const { setNodeRef, isOver } = useDroppable({ id: `shelf:${rack}:${u}`, disabled: !coolingDrop || !validPlace(u, rack) });
   const servers = items.filter(i => i.kind === "server");
   const equipment = items.filter(i => i.kind === "custom");
   const index = shelfIndex(u, floors, auto);
-  // "+" under the floor number: add a unit on this floor, beside its server (scan, type or pick its barcode/serial).
-  const names = servers.map(({ data }) => data.name).join(", ");
-  const addHere = scanUnit && floors && u > 0 && u <= RACK_FLOORS
+  // "+" under the floor number: add a unit on this floor, beside its server (scan, type or pick its barcode/serial);
+  // on a Main storage shelf: add a unit to this shelf.
+  const names = floors ? servers.map(({ data }) => data.name).join(", ") : "";
+  const word = floors ? "floor" : "shelf";
+  const addText = `Add a unit ${floors ? "on" : "to"} ${word} ${u}${names ? ` beside ${names}` : ""}`;
+  const addHere = scanUnit && validFloor(u, rack)
     ? <button type="button" className="floor-add" data-floor-add={u} onClick={() => scanUnit({ rack, u, label: names, fixed: true })}
-        aria-label={`Add a unit on floor ${u}${names ? ` beside ${names}` : ""}`} title={`Add a unit on floor ${u}${names ? ` beside ${names}` : ""} (scan its barcode)`}>+</button>
+        aria-label={addText} title={`${addText} (scan its barcode)`}>+</button>
     : null;
   const indexCell = <span className="shelf-index" title={index.title}><span>{index.text}</span>{addHere}</span>;
   if (!items.length && !cooling.length) return <div ref={setNodeRef} data-u-slot={u} data-over={isOver ? "" : undefined} className="shelf-empty">{indexCell}<span className="shelf-empty-line">Free</span></div>;
   const Row = sortable ? SortableServerRow : ServerCell;
-  const units = equipment.length > 0 || cooling.length > 0;
+  const serverRows = servers.map(({data}) => <Row key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]} onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)}/>);
+  const unitCards = [
+    ...equipment.map(({data}) => <EquipCell key={data.id} item={data} onSelect={onSelectCustom} onRename={v => onRenameCustom?.(data, v)}/>),
+    ...cooling.map(unit => <RackCoolingChip key={unit.id} unit={unit} variant="shelf"/>),
+  ];
+  if (!floors) return <div ref={setNodeRef} data-u-slot={u} data-auto={auto ? "" : undefined} data-shelf-list="" data-over={isOver ? "" : undefined} className="shelf-row">
+    {indexCell}
+    <div className="shelf-content"><div className="shelf-list" role="list" aria-label={u ? `Shelf ${u}` : "Whole storage unit"}>
+      {[...serverRows, ...unitCards].map(el => <div key={el.key} role="listitem" className="shelf-list-item">{el}</div>)}
+    </div></div>
+  </div>;
+  const units = unitCards.length > 0;
   return <div ref={setNodeRef} data-u-slot={u} data-auto={auto ? "" : undefined} data-cooling-only={!items.length ? "" : undefined} data-units={units ? "" : undefined}
     data-over={isOver ? "" : undefined} className="shelf-row">
     {indexCell}
     <div className="shelf-content">
       <div className="floor-servers">
-        {servers.length ? servers.map(({data}) => <Row key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]} onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)}/>)
-          : <span className="floor-no-server">{u ? "No server" : "Rack level"}</span>}
+        {servers.length ? serverRows : <span className="floor-no-server">{u ? "No server" : "Rack level"}</span>}
       </div>
-      {units && <div className="floor-units">
-        {equipment.map(({data}) => <EquipCell key={data.id} item={data} onSelect={onSelectCustom} onRename={v => onRenameCustom?.(data, v)}/>)}
-        {cooling.map(unit => <RackCoolingChip key={unit.id} unit={unit} variant="shelf"/>)}
-      </div>}
+      {units && <div className="floor-units">{unitCards}</div>}
     </div>
   </div>;
 }
@@ -549,8 +573,8 @@ const slug = text => String(text).toLowerCase().replace(/[^a-z0-9]+/g, "-").repl
 
 // ─── RACK DIAGRAM ─────────────────────────────────────────────────────────────
 // One rack card: header (name opens the detail), figures, load bar, its four floors (plus an "Other" line for anything
-// on a U above floor 4, and the rack level) and the rack's cooling units that are not on a floor. Main storage keeps
-// its occupied shelves. In the rack detail (detail) the header is plain text.
+// on a U above floor 4, and the rack level) and the rack's cooling units that are not on a floor. Main storage draws
+// its 16 shelves the same way (each shelf one list). In the rack detail (detail) the header is plain text.
 function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, fixed = false, external = false, externalActiveId = null, detail = false, collapsed = false, onToggleCollapse = null }) {
   const {canAdmin} = useAccounts();
   const editMode = useContext(EditContext);
@@ -564,15 +588,16 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   const coolingUs = useMemo(() => Object.keys(cooling?.placed || {}).map(Number), [cooling]);
   const rows = useMemo(() => withCoolingRows(built.rows, coolingUs), [built.rows, coolingUs]);
   const keep = view.rowKeep;
-  const floors = r.rack !== MAIN_STORAGE;
-  // Floors 1-4 always (an empty floor is one "Free" slot, never folded); a search still folds the floors it hides.
+  const floors = rackHasFloors(r.rack);
+  const count = floorsFor(r.rack);
+  // Floors 1-4 (Main storage: shelves 1-16) always (an empty one is one "Free" slot, never folded); a search still
+  // folds the floors it hides.
   const display = useMemo(() => {
     const opts = { editMode, coolingUs: new Set(coolingUs), keep: keep ? row => keep(r.rack, row) : null };
-    if (!floors) return compactRows(rows, opts);
-    const parts = rackFloors(rows, opts.coolingUs);
+    const parts = rackFloors(rows, opts.coolingUs, count);
     const other = compactRows(parts.other, { ...opts, showEmpty: true });
     return [...compactRows(parts.floors, { ...opts, showEmpty: true }), ...(other.length ? [{ kind: "other" }] : []), ...other, ...compactRows(parts.level, opts)];
-  }, [rows, floors, editMode, coolingUs, keep, r.rack]);
+  }, [rows, count, editMode, coolingUs, keep, r.rack]);
   const ids = built.sorted.map(s => s.id);
   const activeId = external ? externalActiveId : localActiveId;
   const summary = view.summaryFor ? view.summaryFor(r) : rackSummary(r, {});
@@ -586,9 +611,9 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   }
   const content = <SortableContext items={ids} strategy={verticalListSortingStrategy}>
     {display.map(entry => {
-      if (entry.kind === "other") return <p key="other" className="floors-other" role="note">Other · not on floors 1–{RACK_FLOORS}</p>;
+      if (entry.kind === "other") return <p key="other" className="floors-other" role="note">Other · not on {placesWord(r.rack)} 1–{count}</p>;
       if (entry.kind === "gap") {
-        const pad = n => (floors && n <= RACK_FLOORS ? String(n) : String(n).padStart(2, "0"));
+        const pad = n => (!floors || n <= count ? String(n) : String(n).padStart(2, "0"));
         const range = entry.from === entry.to ? pad(entry.from) : `${pad(entry.from)}–${pad(entry.to)}`;
         return <div key={`gap-${entry.from}`} className="shelf-gap" role="note" data-from={entry.from} data-to={entry.to} data-reason={entry.reason}>{range} · {entry.reason === "filtered" ? "hidden by filter" : "empty"}</div>;
       }
@@ -685,6 +710,13 @@ function AddOptModal({ rack, onClose, onSave }) {
   );
 }
 
+// Main storage's place select for equipment (storageShelfOptions).
+function StorageShelfSelect({ value, onChange, className, describedBy }) {
+  return <select value={value} onChange={e => onChange(e.target.value)} aria-label="Shelf" aria-describedby={describedBy} className={className}>
+    {storageShelfOptions(value).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+  </select>;
+}
+
 // ─── ADD EQUIPMENT MODAL ──────────────────────────────────────────────────────
 function AddEquipmentModal({ rackName, onClose, onSave, onScan = null }) {
   useEscClose(onClose);
@@ -729,13 +761,15 @@ function AddEquipmentModal({ rackName, onClose, onSave, onScan = null }) {
               {Object.entries(ITEM_TYPES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
             </select>
           </div>
-          <div><SL>{rackName === MAIN_STORAGE ? "Whole storage unit" : "U slot (0 = whole rack)"}</SL>
-            <input type="number" min="0" max="42" step="1" value={u} disabled={rackName === MAIN_STORAGE} onChange={e => setU(e.target.value)}
+          {rackName === MAIN_STORAGE ? <div><SL>Shelf</SL>
+            <StorageShelfSelect value={u} onChange={setU} className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50"/>
+          </div> : <div><SL>U slot (0 = whole rack)</SL>
+            <input type="number" min="0" max="42" step="1" value={u} onChange={e => setU(e.target.value)}
               onKeyDown={e => e.key === "Enter" && submit()}
               placeholder="e.g. 7" aria-label="U slot" aria-invalid={uError ? true : undefined} aria-describedby={uError ? "add-equipment-u-error" : undefined}
               className={`w-full bg-zinc-800 border rounded-lg px-3 py-2 text-sm focus:outline-none placeholder:text-zinc-700 ${uError ? "border-rose-700 focus:border-rose-500" : "border-zinc-700/50 focus:border-nv-400/50"}`}/>
             {uError && <div id="add-equipment-u-error" role="alert" className="mt-1 text-[11px] text-rose-400">{uError}</div>}
-          </div>
+          </div>}
           <div><SL>Notes (optional)</SL>
             <input value={notes} onChange={e => setNotes(e.target.value)}
               placeholder="e.g. 48-port 1G managed"
@@ -788,10 +822,10 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   }
 
   // Only the fields changed here are saved, so a barcode, shelf position or move saved meanwhile elsewhere is kept.
-  // An old U outside 0-42 that nobody touches is left as it is.
+  // An old U outside 0-42 (Main storage: outside its shelves) that nobody touches is left as it is.
   const storage = rackName === MAIN_STORAGE;
   const slot = parseUSlot(u);
-  const uChanged = !storage && u.trim() !== String(item.u ?? 0);
+  const uChanged = u.trim() !== String(item.u ?? 0);
   const uError = uChanged && slot === null ? U_SLOT_ERROR : "";
   const changes = {};
   if (name.trim() && name.trim() !== item.name) changes.name = name.trim();
@@ -837,7 +871,7 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
         <div className="px-5 py-4 border-b border-zinc-800/60 bg-zinc-900/60 flex items-start justify-between gap-3">
           <div>
             <div className="text-sm font-bold text-zinc-100">{item.name}</div>
-            <div className="text-[10px] text-zinc-600 mt-0.5">{(ITEM_TYPES[item.type]||ITEM_TYPES.other).label} · {rackName} · U{item.u}</div>
+            <div className="text-[10px] text-zinc-600 mt-0.5">{(ITEM_TYPES[item.type]||ITEM_TYPES.other).label} · {rackName} · {storage ? (item.u ? `Shelf ${item.u}` : "Whole storage unit") : `U${item.u}`}</div>
           </div>
           <CloseBtn onClose={onClose}/>
         </div>
@@ -856,13 +890,15 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
               {Object.entries(ITEM_TYPES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
             </select>
           </div>
-          <div><SL>{rackName === MAIN_STORAGE ? "Whole storage unit" : "U slot (0 = whole rack)"}</SL>
-            <input type="number" min="0" max="42" step="1" value={u} disabled={storage} onChange={e=>setU(e.target.value)}
+          {storage ? <div><SL>Shelf</SL>
+            <StorageShelfSelect value={u} onChange={setU} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
+          </div> : <div><SL>U slot (0 = whole rack)</SL>
+            <input type="number" min="0" max="42" step="1" value={u} onChange={e=>setU(e.target.value)}
               onKeyDown={e=>e.key==="Enter"&&submit()}
               aria-label="U slot" aria-invalid={uError ? true : undefined} aria-describedby={uError ? "edit-equipment-u-error" : undefined}
               className={`w-full bg-zinc-900 border rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none ${uError ? "border-rose-700 focus:border-rose-500" : "border-zinc-800 focus:border-nv-400/50"}`}/>
             {uError && <div id="edit-equipment-u-error" role="alert" className="mt-1 text-[11px] text-rose-400">{uError}</div>}
-          </div>
+          </div>}
           <div><SL>Notes</SL>
             <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 resize-none"/>
@@ -1033,6 +1069,9 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   async function saveName(){if(!name.trim())return;await attempt("name",async()=>{if(onRenameOpt&&name.trim()!==server.name){await onRenameOpt(server.name,name.trim());}else if(pdu&&onLabelChange){await onLabelChange(server.pduId,{...pdu.labels,[String(server.outlet)]:name.trim()});}});}
   async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await attempt("outlet",()=>onLabelChange(server.pduId,updated));}
   async function saveSlot(){const u=parseInt(uSlot,10);if(isNaN(u)||u<1)return;await attempt("slot",()=>onSlotSave(server.rack,server.id,u));}
+  // Main storage: a server is put on one of its shelves 1-STORAGE_SHELVES (a saved shelf above them stays until changed).
+  const storage = server.rack === MAIN_STORAGE;
+  async function saveShelf(value){setUSlot(value);const u=parseInt(value,10);if(isNaN(u)||u<1||u===curU)return;if(!await attempt("slot",()=>onSlotSave(server.rack,server.id,u)))setUSlot(curU!=null?String(curU):"");}
   async function saveSw(){const value=swName.trim()||swPort?{switch:swName.trim(),port:swPort?parseInt(swPort,10):null}:null;await attempt("sw",()=>onSwitchSave(server.id,value));}
   const [confirmRemove, setConfirmRemove] = useState(false);
   // Asked in the panel itself (never window.confirm); the second click removes.
@@ -1106,7 +1145,18 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
             <div className="mt-1 text-[11px] text-zinc-400">Press Enter to move the label to this outlet</div>
           </div>
 
-          <div><SL>Rack unit (U)</SL>
+          {storage ? <div><SL>Shelf</SL>
+            <div className="relative">
+              <select value={uSlot} onChange={e=>saveShelf(e.target.value)} aria-label="Shelf" disabled={doing==="slot"}
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50">
+                {uSlot===""&&<option value="">Auto (next free shelf)</option>}
+                {Array.from({length:STORAGE_SHELVES},(_,i)=>String(i+1)).map(v=><option key={v} value={v}>Shelf {v}</option>)}
+                {uSlot!==""&&!(Number(uSlot)>=1&&Number(uSlot)<=STORAGE_SHELVES)&&<option value={uSlot}>{`U${uSlot} · saved, not one of shelves 1–${STORAGE_SHELVES}`}</option>}
+              </select>
+              {saved==="slot"&&<span className="absolute right-8 top-1/2 -translate-y-1/2 text-[11px] text-emerald-400">{Icon.check}</span>}
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-400">{curU!=null?`Currently shelf ${curU}`:"Auto-assigned"}</div>
+          </div> : <div><SL>Rack unit (U)</SL>
             <div className="relative">
               <input type="number" min="1" max="42" value={uSlot} onChange={e=>setUSlot(e.target.value)}
                 onKeyDown={e=>e.key==="Enter"&&saveSlot()}
@@ -1116,7 +1166,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
               {saved==="slot"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-emerald-400">{Icon.check}</span>}
             </div>
             <div className="mt-1 text-[11px] text-zinc-400">{curU!=null?`Currently U${curU}`:"Auto-assigned"}</div>
-          </div>
+          </div>}
 
           <div><SL>Network switch</SL>
             <div className="space-y-2">
@@ -1203,9 +1253,12 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
     ...sorted.map(s => ({ kind: "server", u: serverShelf(uMap[s.id]), data: s })),
     ...equipment.map(item => ({ kind: "custom", u: equipmentU(item), data: item })),
   ].sort((a, b) => ((a.u || 999) - (b.u || 999)) || (a.kind === b.kind ? 0 : a.kind === "server" ? -1 : 1));
+  // Main storage names its places "Shelf 7" and "Whole storage"; a rack "U7" and "Rack level".
+  const storage = r.rack === MAIN_STORAGE;
+  const place = u => (u ? (storage ? `Shelf ${u}` : `U${u}`) : storage ? "Whole storage" : "Rack level");
   const uText = e => {
-    if (e.kind === "server") return e.u == null ? "Rack level" : `U${e.u}${slots[e.data.id] == null ? " (auto)" : ""}`;
-    return e.u ? `U${e.u}` : "Rack level";
+    if (e.kind === "server") return e.u == null ? place(0) : `${place(e.u)}${slots[e.data.id] == null ? " (auto)" : ""}`;
+    return place(e.u);
   };
   const pdus = r.pdus.filter(p => p.kind === "pdu");
   return (
@@ -1250,7 +1303,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
             <div className="racks-table-wrap">
               <table className="racks-table">
                 <caption className="sr-only">Everything in {r.rack}, by shelf</caption>
-                <thead><tr>{["U","Name","Type","State","W","Owner","Outlet","Switch","Notes","Actions"].map(h => <th key={h} scope="col" className={h === "W" || h === "Outlet" ? "num" : undefined}>{h}</th>)}</tr></thead>
+                <thead><tr>{["U","Name","Type","State","W","Owner","Outlet","Switch","Notes","Actions"].map(h => <th key={h} scope="col" className={h === "W" || h === "Outlet" ? "num" : undefined}>{h === "U" && storage ? "Shelf" : h}</th>)}</tr></thead>
                 <tbody>
                   {entries.map(e => {
                     if (e.kind === "server") {
@@ -2743,12 +2796,15 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       const { rackStats: stats, rackOrder: order, rackSlots: slots, customItems: items } = scanPlaceRef.current || {};
       const rs = stats?.find(x => x.rack === server.rack);
       const shelf = rs ? serverShelf(buildRackRows(rs.servers, rs.rack, order, slots, items).uMap[server.id]) : null;
-      // Main storage is one place without shelves for equipment (the inventory API refuses a U there).
-      const storage = server.rack === MAIN_STORAGE;
-      setScanTarget({ rack: server.rack, u: storage ? 0 : shelf ?? 0, position: "", label: server.name, chooseFloor: !storage && shelf == null });
+      // A server in Main storage: its units go on its shelf (1-STORAGE_SHELVES); without one, a shelf is chosen.
+      if (server.rack === MAIN_STORAGE) {
+        const onShelf = validFloor(shelf, MAIN_STORAGE);
+        setScanTarget({ rack: server.rack, u: onShelf ? shelf : 0, position: "", label: "", chooseFloor: !onShelf });
+      } else setScanTarget({ rack: server.rack, u: shelf ?? 0, position: "", label: server.name, chooseFloor: shelf == null });
     } else if (rack) {
-      setScanTarget({ rack, u: rack === MAIN_STORAGE ? 0 : Number.isInteger(u) ? u : 1, position: "", label,
-        chooseFloor: rack !== MAIN_STORAGE && !(fixed && Number.isInteger(u)) });
+      // Main storage starts on the whole unit unless a shelf was given; a rack on floor 1.
+      setScanTarget({ rack, u: Number.isInteger(u) ? u : rack === MAIN_STORAGE ? 0 : 1, position: "", label,
+        chooseFloor: !(fixed && Number.isInteger(u)) });
     }
   }, []);
   const scanItemsChanged = useCallback(async saved => {
@@ -2878,7 +2934,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   scanPlaceRef.current = { rackStats, rackOrder, rackSlots, customItems };
   const scanFloorChoices = useMemo(() => {
     if (!scanTarget?.chooseFloor) return null;
-    const list = Array.from({ length: RACK_FLOORS + 1 }, (_, n) => n);
+    const list = Array.from({ length: floorsFor(scanTarget.rack) + 1 }, (_, n) => n);
     return list.includes(scanTarget.u) ? list : [...list, scanTarget.u];
   }, [scanTarget]);
   // The open server's shelf, as its rack draws it ("U03" or "U03 (auto)").
@@ -2888,7 +2944,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     if (!rs) return "—";
     const u = serverShelf(buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems).uMap[selectedServer.id]);
     if (u == null) return "—";
-    return `${shelfLabel(u)}${(rackSlots[rs.rack] || {})[selectedServer.id] == null ? " (auto)" : ""}`;
+    return `${rs.rack === MAIN_STORAGE ? (u ? `Shelf ${u}` : "Whole storage") : shelfLabel(u)}${(rackSlots[rs.rack] || {})[selectedServer.id] == null ? " (auto)" : ""}`;
   }, [selectedServer, rackStats, rackOrder, rackSlots, customItems]);
   const selectedVisual = selectedServer ? visualFor(selectedServer) : null;
   const dialogUnit = coolingDialog?.mode === "create" ? { id: coolingDialog.newId, name: "", rack: coolingDialog.rack ?? racks.find(r => r !== MAIN_STORAGE) ?? null, u: null } : coolingDialog ? unitById(coolingDialog.unitId) : null;

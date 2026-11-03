@@ -105,11 +105,12 @@ test("describePlace and describeFloor: floors 1-4 as the rack card numbers them,
   assert.equal(describeFloor({ rack: "Rack-04", u: "x" }), 'Invalid floor "x"');
   assert.equal(describeFloor({ rack: "Storage-Main", u: 12 }), "Shelf 12");
   assert.equal(describeFloor({ rack: "Storage-Main", u: 99 }), 'Invalid shelf "99"');
+  assert.equal(describeFloor({ rack: "Storage-Main", u: 20 }), "Shelf 20 (not one of shelves 1–16)");
 });
 
-test("validPlace: a rack offers floors 1-4 only, Main storage shelves 1-42", () => {
+test("validPlace: a rack offers floors 1-4 only, Main storage shelves 1-16", () => {
   assert.deepEqual([0, 1, 4, 5, 17, 42, "2", 2.5, null].map(u => validPlace(u, "Rack-04")), [false, true, true, false, false, false, false, false, false]);
-  assert.deepEqual([1, 17, 42, 43].map(u => validPlace(u, "Storage-Main")), [true, true, true, false]);
+  assert.deepEqual([0, 1, 7, 16, 17, 42, 43, "3"].map(u => validPlace(u, "Storage-Main")), [false, true, true, true, false, false, false, false]);
   assert.equal(floorLabel(2, "Rack-01"), "Floor 2");
   assert.equal(floorLabel(5, "Rack-01"), "U5");
   assert.equal(placeWord("Rack-01"), "floor");

@@ -8,7 +8,7 @@ const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
 const PASSWORD='test-password-123';
-const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
+const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16-old';
 (async()=>{
  const browser=await chromium.launch({headless:true,channel:'msedge'});
  const errors=[],passed=[];let cleanup=null;
@@ -35,7 +35,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
   const moved=item=>(item.tracking_history||[]).filter(e=>e.action==='moved').length;
 
   // This suite's own equipment: removed first (a fresh record has no movement history), and again at the end.
-  const dropOwn=d=>{for(const rack of Object.keys(d))d[rack]=d[rack].filter(i=>i.id!==ITEM&&i.id!==SPARE);};
+  const dropOwn=d=>{for(const rack of Object.keys(d))d[rack]=d[rack].filter(i=>![ITEM,SPARE,NIC,OLD].includes(i.id)&&!String(i.serial_number||'').startsWith('SNST16'));};
   cleanup=()=>putItems(dropOwn);
   await putItems(dropOwn);
   await putItems(d=>{d['Rack-05']=[...(d['Rack-05']||[]),{id:ITEM,name:'B08 Switch',type:'switch',u:3,notes:'before'}];});
@@ -169,17 +169,30 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
   await putLayout('/api/rack-overrides',d=>{d.opt63='Storage-Main';d.opt72='Storage-Main';RACK01.forEach(id=>delete d[id]);});
   await putLayout('/api/rack-slots',d=>{d['Storage-Main']={...(d['Storage-Main']||{}),opt72:3};delete d['Storage-Main'].opt63;d['Rack-01']={opt13:7};});
   await putLayout('/api/rack-positions',d=>{delete d['Rack-01'];});
-  await putItems(d=>{d['Storage-Main']=[...(d['Storage-Main']||[]).filter(i=>i.id!==SPARE),{id:SPARE,name:'Spare',type:'other',u:0}];});
+  // Main storage: OPT72 and a NIC share shelf 3, Spare is the whole unit (u 0), an old item sits at u 20 (above shelf 16).
+  await putItems(d=>{d['Storage-Main']=[...(d['Storage-Main']||[]).filter(i=>![SPARE,NIC,OLD].includes(i.id)),{id:SPARE,name:'Spare',type:'other',u:0},
+   {id:NIC,name:'Shelf3 NIC',type:'other',u:3},{id:OLD,name:'Old U20',type:'other',u:20}];});
   try{
    await page.reload();
    const storage=card('Storage-Main');
    await storage.locator('.server-cell[data-server="OPT72"]').waitFor();
-   assert.deepEqual(await storage.locator('[data-u-slot]').evaluateAll(els=>els.map(e=>e.dataset.uSlot)),['1','3','0']);
-   assert.equal(await storage.locator('.shelf-empty').count(),0);
+   const sixteen=Array.from({length:16},(_,i)=>String(i+1));
+   assert.deepEqual(await storage.locator('[data-u-slot]').evaluateAll(els=>els.map(e=>e.dataset.uSlot)),[...sixteen,'20','0']);
+   assert.equal(await storage.locator('.shelf-empty').count(),14,'shelves 1-16 always drawn; the 14 empty ones are Free');
+   assert.deepEqual(await storage.locator('.shelf-empty').first().evaluate(e=>[e.dataset.uSlot,e.querySelector('.shelf-empty-line').textContent,!!e.querySelector('[data-floor-add]')]),['2','Free',true],'an empty shelf is Free with its +');
+   assert.deepEqual(await storage.locator('[data-u-slot] .shelf-index').evaluateAll(els=>els.slice(1,16).map(e=>e.title)),sixteen.slice(1).map(n=>`Shelf ${n}`));
    assert.equal(await storage.locator('[data-u-slot="3"] .server-cell[data-server="OPT72"]').count(),1);
    assert.equal(await storage.locator('[data-u-slot="1"] .server-cell[data-server="OPT63"]').count(),1);
    assert.equal(await storage.locator('[data-u-slot="0"] .equipment-cell[aria-label="View Spare"]').count(),1);
-   passed.push('LOC-3 Main storage draws OPT63 (U1), OPT72 (U3) and Spare, no empty shelves');
+   // one list per shelf: servers and units together, never the rack's server | units columns
+   assert.equal(await storage.locator('[data-units]').count(),0);
+   assert.equal(await storage.locator('.floor-servers, .floor-units').count(),0);
+   assert.deepEqual(await storage.locator('[data-u-slot="3"][data-shelf-list] .shelf-list > [role="listitem"]').evaluateAll(els=>els.map(e=>e.querySelector('.server-cell')?.dataset.server||e.querySelector('.equipment-cell')?.getAttribute('aria-label'))),['OPT72','View Shelf3 NIC']);
+   assert.equal(await storage.locator('[data-floor-add]').count(),16,'one + per shelf 1-16');
+   // old data above shelf 16 is not lost
+   assert.equal(await storage.locator('.floors-other').innerText(),'Other · not on shelves 1–16');
+   assert.equal(await storage.locator('[data-u-slot="20"] .equipment-cell[aria-label="View Old U20"]').count(),1);
+   passed.push('LOC-3 Main storage draws shelves 1-16 (empty ones Free), one list per shelf (OPT72 + NIC on shelf 3), Spare as the whole unit, old u20 under Other');
    assert.equal(await storage.locator('.shelf-row[data-auto]').count(),1);
    assert.equal(await storage.locator('[data-u-slot="1"][data-auto]').count(),1);
    const autoIndex=storage.locator('[data-u-slot="1"] .shelf-index');
@@ -202,7 +215,36 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
    await putLayout('/api/rack-overrides',d=>{['opt63','opt72',...RACK01].forEach(id=>restore(d,id,kept.overrides[id]));});
    await putLayout('/api/rack-positions',d=>{restore(d,'Rack-01',kept.order['Rack-01']);});
    await putLayout('/api/rack-slots',d=>{restore(d,'Storage-Main',kept.slots['Storage-Main']);restore(d,'Rack-01',kept.slots['Rack-01']);});
-   await putItems(d=>{d['Storage-Main']=(d['Storage-Main']||[]).filter(i=>i.id!==SPARE);});
+   await putItems(d=>{d['Storage-Main']=(d['Storage-Main']||[]).filter(i=>![SPARE,NIC,OLD].includes(i.id));});
+  }
+
+  // ── LOC-4: "+" on a Main storage shelf scans a unit onto that shelf (saved as u 7); the detail names shelves ──
+  {
+   const code=`SNST16${Date.now().toString(36).toUpperCase()}`;
+   try{
+    await page.reload();
+    const storage=card('Storage-Main');
+    await storage.locator('[data-u-slot="7"] [data-floor-add="7"]').click();
+    const dialog=page.getByRole('dialog',{name:'Scan unit barcode'});
+    await dialog.waitFor();
+    assert.match(await dialog.innerText(),/Units go to Main storage · shelf 7\./);
+    await page.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
+    await page.keyboard.type(code);await page.keyboard.press('Enter');
+    await page.locator('.toast-region .toast').filter({hasText:`Added ${code} to Main storage · shelf 7.`}).waitFor();
+    const saved=Object.entries((await items()).data).flatMap(([rack,list])=>list.map(i=>({...i,rack}))).filter(i=>i.serial_number===code||i.barcode===code);
+    assert.deepEqual(saved.map(i=>[i.rack,i.u]),[['Storage-Main',7]]);
+    await dialog.getByRole('button',{name:'Done'}).click();await dialog.waitFor({state:'detached'});
+    await storage.locator(`[data-u-slot="7"][data-shelf-list] .equipment-cell[aria-label="View ${code}"]`).waitFor();
+    // The storage detail: the same 16 shelves, its table says Shelf N
+    await storage.locator('.rack-card-name').click();await page.getByRole('button',{name:'All racks'}).waitFor();
+    assert.equal(await page.locator('.rack-detail [data-rack-id="Storage-Main"] [data-u-slot]').count(),16);
+    assert.equal(await page.locator('.racks-table thead th').first().textContent(),'Shelf');
+    assert.equal(await page.locator(`.racks-table tr[data-item-id] td`).filter({hasText:/^Shelf 7$/}).count(),1);
+    await page.getByRole('button',{name:'All racks'}).click();
+    passed.push('LOC-4 + on Main storage shelf 7 scans a unit onto it (saved u 7, shown in that shelf); the detail draws shelves 1-16 and names them Shelf N');
+   }finally{
+    await putItems(d=>{for(const rack of Object.keys(d))d[rack]=d[rack].filter(i=>i.serial_number!==code&&i.barcode!==code);});
+   }
   }
 
   // ── SCAN-1..8: "Scan barcode" adds units to a server's floor in one step (USB scanner = typed code + Enter) ──

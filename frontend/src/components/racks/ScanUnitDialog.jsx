@@ -104,6 +104,8 @@ function CameraScanner({ onCode, onStop }) {
   </div>;
 }
 
+const capital = text => text.charAt(0).toUpperCase() + text.slice(1);
+
 export default function ScanUnitDialog({ target, floorChoices = null, onClose, onItemsChanged, onToast }) {
   const panelRef = useRef(null);
   const inputRef = useRef(null);
@@ -207,6 +209,7 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
   }
 
   const where = placeText(place, target.label);
+  const storage = target.rack === MAIN_STORAGE;
   const latestError = log[0] && !log[0].result && log[0].error ? log[0] : null;
   return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
     <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={hintId} tabIndex={-1} className="racks-dialog racks-dialog-wide" data-dialog="scan-unit">
@@ -215,10 +218,10 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
         <span className="server-details-tools"><button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>×</button></span>
       </header>
       <p id={hintId} className="racks-dialog-note">Units go to <strong><bdi>{where}</bdi></strong>{target.label && target.rack !== MAIN_STORAGE ? <> in <bdi>{target.rack}</bdi></> : null}. Scan each unit's serial number barcode; a new unit is added and saved right away, a unit that is already in DCIM is moved here. Scan as many units as you need.</p>
-      {floorChoices && target.rack !== MAIN_STORAGE && <div className="racks-field">
-        <label htmlFor={`${titleId}-floor`}>Floor in <bdi>{target.rack}</bdi></label>
+      {floorChoices && <div className="racks-field">
+        <label htmlFor={`${titleId}-floor`}>{storage ? <>Shelf in Main storage</> : <>Floor in <bdi>{target.rack}</bdi></>}</label>
         <select id={`${titleId}-floor`} value={u} onChange={e => { setU(Number(e.target.value)); inputRef.current?.focus(); }}>
-          {floorChoices.map(n => <option key={n} value={n}>{n === 0 ? "Rack level (no floor)" : floorText(n).replace(/^f/, "F")}</option>)}
+          {floorChoices.map(n => <option key={n} value={n}>{n === 0 ? (storage ? "Whole storage (no shelf)" : "Rack level (no floor)") : capital(floorText(n, target.rack))}</option>)}
         </select>
       </div>}
       <form className="racks-field" onSubmit={submit}>

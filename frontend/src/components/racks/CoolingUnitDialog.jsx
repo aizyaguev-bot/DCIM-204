@@ -1,12 +1,12 @@
 import { useMemo, useRef, useState } from "react";
 import useDialogFocus from "./useDialogFocus.js";
-import { validShelf, validPlace, placeWord, describeFloor } from "./chillers.js";
-import { RACK_FLOORS } from "./floors.js";
+import { validShelf, validPlace, placeWord, describeFloor, floorLabel } from "./chillers.js";
+import { floorsFor, placesWord } from "./floors.js";
 
 // View, edit or add one cooling unit. Units are never deleted: "Take off floor" keeps the rack, "No rack" keeps the
 // unit unassigned. onSave({ name, rack, u }) and onTakeOffShelf() throw Error(message) for this dialog to show.
 // onRequestEdit (view mode, Operator and up): "Move…" / "Place…" turns Edit on and reopens this unit to be edited.
-// floorOptionsFor(rack): the rack's floors 1-RACK_FLOORS (Main storage: its shelves) as { value, label }.
+// floorOptionsFor(rack): the rack's floors 1-RACK_FLOORS (Main storage: its shelves 1-STORAGE_SHELVES) as { value, label }.
 // A unit saved on a place its rack does not offer (old data: U17, 99, "x") keeps that value unless a floor is chosen:
 // its rack offers it as its own choice, selected, with a hint, and choosing the rack again brings it back. A unit with
 // no rack has no floors, so its saved u gets no hint (and keeps none: updateChiller). A rename changes only the name.
@@ -40,7 +40,7 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
     if (!rack) return [{ value: "", label: "Not on a floor (rack level)" }];
     const list = floorOptionsFor(rack);
     if (!savedBad || rack !== initialRack) return list;
-    const label = validShelf(unit.u) ? `U${unit.u} · saved, not one of floors 1–${RACK_FLOORS}`
+    const label = validShelf(unit.u) ? `${floorLabel(unit.u, initialRack)} · saved, not one of ${placesWord(initialRack)} 1–${floorsFor(initialRack)}`
       : `"${String(unit.u)}" · saved, not a ${placeWord(initialRack)}`;
     return [...list, { value: savedValue, label }];
   }, [rack, floorOptionsFor, savedBad, savedValue, initialRack, unit]);
