@@ -247,7 +247,7 @@ async def test_whole_list_save_can_still_add_a_first_barcode(inventory_client):
     assert store.read_items()["Rack-01"][0]["barcode"] == "FIRST-1"
 
 
-@pytest.mark.parametrize("patch", [{"u": -1}, {"u": 43}, {"u": 1.2}, {"u": True}, {"rack": "Missing"}, {"position": "x" * 81}, {"rack": "Storage-Main", "u": 1}, {"rack": "Storage-Main", "u": 0, "position": "shelf"}])
+@pytest.mark.parametrize("patch", [{"u": -1}, {"u": 43}, {"u": 1.2}, {"u": True}, {"rack": "Missing"}, {"position": "x" * 81}, {"rack": "Storage-Main", "u": 17}, {"rack": "Storage-Main", "u": 42}, {"rack": "Storage-Main", "u": 0, "position": "shelf"}, {"rack": "Storage-Main", "u": 7, "position": "left"}])
 async def test_invalid_location_changes_nothing(inventory_client, patch):
     c = inventory_client
     before = store.ITEMS_FILE.read_bytes()
@@ -341,6 +341,37 @@ async def test_rack_and_main_storage_moves_preserve_identity_and_record_exact_sc
         saved = (await c.get("/api/rack-items")).json()
         assert sum(i["id"] == "ci-existing" for group in saved.values() for i in group) == 1
         assert saved[rack][0]["id"] == "ci-existing"
+
+
+@pytest.mark.parametrize("u", [0, 1, 7, 16])
+async def test_main_storage_takes_its_shelves_1_to_16(inventory_client, u):
+    c = inventory_client
+    result = await c.post("/api/inventory/ci-existing/location", json={"rack": "Storage-Main", "u": u, "position": ""}, headers=await headers(c))
+    assert result.status_code == 200, result.text
+    assert (result.json()["rack"], result.json()["u"]) == ("Storage-Main", u)
+    assert result.json()["tracking_history"][-1]["to"] == {"rack": "Storage-Main", "u": u, "position": ""}
+    assert [i["u"] for i in store.read_items()["Storage-Main"] if i["id"] == "ci-existing"] == [u]
+
+
+async def test_main_storage_refuses_a_shelf_above_16_with_a_clear_reason(inventory_client):
+    c = inventory_client
+    before = store.ITEMS_FILE.read_bytes()
+    moved = await c.post("/api/inventory/ci-existing/location", json={"rack": "Storage-Main", "u": 17}, headers=await headers(c))
+    added = await c.post("/api/inventory", json={"code": "SPARE-017", "name": "Spare", "rack": "Storage-Main", "u": 17}, headers=await headers(c))
+    for result in (moved, added):
+        assert result.status_code == 422
+        assert "Main storage has shelves 1-16" in str(result.json()["detail"])
+    assert store.ITEMS_FILE.read_bytes() == before
+    # A rack keeps its U slots 0-42.
+    rack = await c.post("/api/inventory/ci-existing/location", json={"rack": "Rack-01", "u": 42}, headers=await headers(c))
+    assert rack.status_code == 200
+
+
+async def test_register_on_a_main_storage_shelf(inventory_client):
+    c = inventory_client
+    result = await c.post("/api/inventory", json={"code": "SPARE-007", "name": "Spare NIC", "rack": "Storage-Main", "u": 7}, headers=await headers(c))
+    assert result.status_code == 201, result.text
+    assert [(i["barcode"], i["u"]) for i in store.read_items()["Storage-Main"]] == [("SPARE-007", 7)]
 
 
 async def test_register_directly_in_main_storage(inventory_client):

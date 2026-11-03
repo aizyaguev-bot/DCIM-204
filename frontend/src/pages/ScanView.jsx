@@ -2,6 +2,7 @@ import { cloneElement, useEffect, useId, useMemo, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import JsBarcode from "jsbarcode";
 import { loadInventory, updateInventory, labelCode, parseLocationCode, MAIN_STORAGE, UNIT_DETAILS, detailText } from "../api/inventory";
+import { STORAGE_SHELVES } from "../components/racks/floors.js";
 import { qrSvgPath } from "../qr";
 import {useAccounts} from "../accounts";
 
@@ -20,8 +21,9 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 // Firefox "NetworkError…", Safari "Load failed"). Other errors keep their own text so code bugs stay visible.
 const networkFailure = e => e instanceof TypeError && /fetch|network|load failed/i.test(e.message || "");
 const errorText = e => networkFailure(e) ? "Could not reach the server. Check the connection, then scan again." : e?.message || "Something went wrong. Scan again.";
-const validLocation = (value, racks) => value && racks.includes(value.rack) && Number.isInteger(value.u) && value.u >= 0 && value.u <= 42 && (value.rack !== MAIN_STORAGE || value.u === 0 && !value.position);
-function where(p) { return p ? p.rack === MAIN_STORAGE ? "Main storage · whole unit" : `${p.rack} · ${p.u ? `Shelf ${String(p.u).padStart(2, "0")}` : "Whole rack / no shelf"}${p.position ? ` · ${p.position}` : ""}` : "Not registered"; }
+// Main storage: the whole unit (0) or one of its shelves 1-STORAGE_SHELVES, without a position.
+const validLocation = (value, racks) => value && racks.includes(value.rack) && Number.isInteger(value.u) && value.u >= 0 && value.u <= 42 && (value.rack !== MAIN_STORAGE || value.u <= STORAGE_SHELVES && !value.position);
+function where(p) { return p ? p.rack === MAIN_STORAGE ? (p.u ? `Main storage · Shelf ${String(p.u).padStart(2, "0")}` : "Main storage · whole unit") : `${p.rack} · ${p.u ? `Shelf ${String(p.u).padStart(2, "0")}` : "Whole rack / no shelf"}${p.position ? ` · ${p.position}` : ""}` : "Not registered"; }
 function when(value) { return value ? new Date(value).toLocaleString() : "Not confirmed by scan yet"; }
 
 function Field({ label, children }) {
@@ -35,7 +37,7 @@ function LocationFields({ value, onChange, racks, disabled }) {
     <Field label="Rack / storage"><select aria-label="Destination rack" className={input} disabled={disabled} value={value.rack} onChange={e => onChange({ rack: e.target.value, u: 0, position: "" })}>
       <option value="">Choose location…</option>{racks.map(r => <option key={r} value={r}>{r === MAIN_STORAGE ? "Main storage" : r}</option>)}
     </select></Field>
-    <Field label={storage ? "Whole unit" : "Shelf / U (0 = whole rack)"}><input aria-label="Destination shelf" className={input} disabled={disabled || storage} type="number" min="0" max="42" value={value.u} onChange={e => onChange({ ...value, u: e.target.value === "" ? "" : Number(e.target.value) })}/></Field>
+    <Field label={storage ? `Shelf 1–${STORAGE_SHELVES} (0 = whole storage)` : "Shelf / U (0 = whole rack)"}><input aria-label="Destination shelf" className={input} disabled={disabled} type="number" min="0" max={storage ? STORAGE_SHELVES : 42} value={value.u} onChange={e => onChange({ ...value, u: e.target.value === "" ? "" : Number(e.target.value) })}/></Field>
     <Field label="Position on shelf"><input aria-label="Position on shelf" className={input} disabled={disabled || storage} maxLength={80} value={value.position} placeholder="e.g. left / front / slot A" onChange={e => onChange({ ...value, position: e.target.value })}/></Field>
   </div>;
 }

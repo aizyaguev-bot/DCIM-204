@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { MAIN_STORAGE } from "../api/inventory.js";
+import { STORAGE_SHELVES } from "../components/racks/floors.js";
 
 const dcimSource = readFileSync(new URL("../pages/DcimView.jsx", import.meta.url), "utf8");
 const start = dcimSource.indexOf("export function buildRackRows(");
@@ -15,7 +16,7 @@ const fnSource = dcimSource.slice(start, dcimSource.indexOf("\n}", end) + 2).rep
 const dcimRegex = /const NON_SERVER_LABEL = (\/.+\/[a-z]*);/.exec(dcimSource)?.[1];
 assert.ok(dcimRegex, "NON_SERVER_LABEL found in DcimView.jsx");
 const NON_SERVER_LABEL = new Function(`return ${dcimRegex};`)();
-const buildRackRows = new Function("MAIN_STORAGE", "NON_SERVER_LABEL", `${fnSource}; return buildRackRows;`)(MAIN_STORAGE, NON_SERVER_LABEL);
+const buildRackRows = new Function("MAIN_STORAGE", "NON_SERVER_LABEL", "STORAGE_SHELVES", `${fnSource}; return buildRackRows;`)(MAIN_STORAGE, NON_SERVER_LABEL, STORAGE_SHELVES);
 
 // isDefaultOutletLabel and isServerLabel: the two small exported helpers, evaluated the same way.
 function extract(name) {
@@ -76,15 +77,23 @@ test("the DCIM server list (and so every OPT count, the rack meta and the KPI ba
   assert.doesNotMatch(memo, /isDefaultOutletLabel/);
 });
 
-test("Storage-Main draws its occupied shelves in order, then the whole-unit equipment; no empty shelves", () => {
+test("Storage-Main draws its 16 shelves (empty ones too), servers and units on one shelf together, then the whole unit", () => {
+  assert.equal(STORAGE_SHELVES, 16);
   const servers = [server("opt63"), server("opt72")];
   const { rows } = buildRackRows(servers, MAIN_STORAGE, {}, { [MAIN_STORAGE]: { opt72: 3 } },
-    { [MAIN_STORAGE]: [{ id: "ci-spare", name: "Spare", type: "switch", u: 0 }] });
-  assert.deepEqual(used(rows), [[1, ["OPT63"]], [3, ["OPT72"]], [0, ["Spare"]]]);
-  assert.equal(rows.length, 3);
-  // a storage unit holding only equipment, or nothing, draws no shelf rows
-  assert.deepEqual(buildRackRows([], MAIN_STORAGE, {}, {}, { [MAIN_STORAGE]: [{ id: "a", name: "A", u: 0 }] }).rows.map(r => r.u), [0]);
-  assert.deepEqual(buildRackRows([], MAIN_STORAGE, {}, {}, {}).rows, []);
+    { [MAIN_STORAGE]: [{ id: "ci-spare", name: "Spare", type: "switch", u: 0 }, { id: "ci-nic", name: "NIC", type: "other", u: 3 }] });
+  assert.deepEqual(rows.map(r => r.u), [...Array.from({ length: 16 }, (_, i) => i + 1), 0]);
+  assert.deepEqual(used(rows), [[1, ["OPT63"]], [3, ["OPT72", "NIC"]], [0, ["Spare"]]]);
+  // an empty storage unit still has its 16 shelves; whole-unit equipment is the last row
+  assert.deepEqual(buildRackRows([], MAIN_STORAGE, {}, {}, {}).rows.map(r => r.u), Array.from({ length: 16 }, (_, i) => i + 1));
+  assert.deepEqual(buildRackRows([], MAIN_STORAGE, {}, {}, { [MAIN_STORAGE]: [{ id: "a", name: "A", u: 0 }] }).rows.map(r => r.u).slice(-2), [16, 0]);
+});
+
+test("Storage-Main keeps old data above shelf 16: listed after the shelves, never lost", () => {
+  const { rows } = buildRackRows([server("opt9")], MAIN_STORAGE, {}, { [MAIN_STORAGE]: { opt9: 30 } },
+    { [MAIN_STORAGE]: [{ id: "old", name: "Old", u: 20 }, { id: "top", name: "Top", u: 16 }] });
+  assert.deepEqual(rows.map(r => r.u), [...Array.from({ length: 16 }, (_, i) => i + 1), 20, 30]);
+  assert.deepEqual(used(rows), [[16, ["Top"]], [20, ["Old"]], [30, ["OPT9"]]]);
 });
 
 test("equipment with a U outside 0-42 or not a whole number is listed on row 0 and does not stretch the rack", () => {

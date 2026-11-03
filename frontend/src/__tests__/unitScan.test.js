@@ -157,7 +157,11 @@ test("place text names the server and its floor", () => {
   assert.equal(placeText({ rack: "Rack-01", u: 0 }), "Rack-01 · rack level");
   assert.equal(placeText({ rack: "Rack-01", u: 7 }), "Rack-01 · U7");
   assert.equal(placeText({ rack: "Storage-Main", u: 0 }, "x"), "Main storage");
+  assert.equal(placeText({ rack: "Storage-Main", u: 7 }, "x"), "Main storage · shelf 7");
   assert.equal(floorText(4), "floor 4");
+  assert.equal(floorText(7, "Storage-Main"), "shelf 7");
+  assert.equal(floorText(0, "Storage-Main"), "whole storage");
+  assert.equal(floorText(7, "Rack-01"), "U7");
 });
 
 const LABEL = "SN: MT2614X09999; PN: MQM8790-HS2F; Model: QM8790; MAC: b8-ce-f6-00-11-22";

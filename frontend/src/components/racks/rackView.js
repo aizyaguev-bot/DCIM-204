@@ -1,9 +1,9 @@
 // Racks page view model: row states, rack summaries, compacted shelves, search and filters. Pure (no DOM, no React).
 import { deviceState } from "../../api/client.js";
-import { validShelf, floorLabel, MAX_SHELF } from "./chillers.js";
-import { RACK_FLOORS, rackHasFloors } from "./floors.js";
+import { validShelf, floorLabel } from "./chillers.js";
+import { RACK_FLOORS, STORAGE_SHELVES, rackHasFloors, floorsFor } from "./floors.js";
 
-export { RACK_FLOORS };
+export { RACK_FLOORS, STORAGE_SHELVES, floorsFor };
 
 export const maintenanceFor = (maintenance, pduId) => maintenance?.pdus?.[String(pduId)] || null;
 
@@ -69,14 +69,15 @@ export function withCoolingRows(rows, coolingUs) {
   return [...merged, ...rows.filter(r => !(r.u > 0))];
 }
 
-// The shelves a rack card draws: always floors 1-4 (an empty floor stays a row), then "other": a shelf above floor 4
-// that holds something (old or hand-edited data; shown so nothing is hidden), then the rack level (u 0). Empty shelves
-// above floor 4 are dropped. coolingUs: the shelves that hold a cooling unit.
-export function rackFloors(rows, coolingUs = new Set()) {
+// The shelves a rack card draws: always floors 1-count (an empty floor stays a row), then "other": a shelf above the
+// last floor that holds something (old or hand-edited data; shown so nothing is hidden), then the rack level (u 0).
+// Empty shelves above the floors are dropped. coolingUs: the shelves that hold a cooling unit. count: floorsFor(rack),
+// 4 floors in a rack, 16 shelves in Main storage.
+export function rackFloors(rows, coolingUs = new Set(), count = RACK_FLOORS) {
   const byU = new Map((rows || []).map(r => [r.u, r]));
   const floors = [];
-  for (let u = 1; u <= RACK_FLOORS; u++) floors.push(byU.get(u) || { u, items: [], auto: false });
-  const other = (rows || []).filter(r => r.u > RACK_FLOORS && (r.items.length || coolingUs.has(r.u)));
+  for (let u = 1; u <= count; u++) floors.push(byU.get(u) || { u, items: [], auto: false });
+  const other = (rows || []).filter(r => r.u > count && (r.items.length || coolingUs.has(r.u)));
   const level = (rows || []).filter(r => !(r.u > 0));
   return { floors, other, level };
 }
@@ -159,10 +160,10 @@ export function matchesFilter(visual, filter) {
 }
 
 // Place choices for the cooling dialog in that rack: "not on a floor" first, then the rack's floors 1-RACK_FLOORS as
-// its card numbers them ("Floor 2 · OPT42, Switch 04 +2"); Main storage: its shelves 1-42.
+// its card numbers them ("Floor 2 · OPT42, Switch 04 +2"); Main storage: its shelves 1-STORAGE_SHELVES ("Shelf 7 · …").
 export function floorOptions(rows, coolingPlaced = {}, rack = null) {
   const floors = rackHasFloors(rack);
-  const max = floors ? RACK_FLOORS : MAX_SHELF;
+  const max = floorsFor(rack);
   const names = new Map();
   for (const row of rows || []) {
     if (!(row.u > 0)) continue;

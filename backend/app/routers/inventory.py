@@ -14,6 +14,7 @@ from .. import inventory_store as store
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 MAIN_STORAGE = "Storage-Main"
+STORAGE_SHELVES = 16   # Main storage is a storage unit of shelves 1-16 (u 0 = the whole unit)
 
 
 class Placement(BaseModel):
@@ -27,9 +28,11 @@ class Placement(BaseModel):
         return value.strip()
 
     @model_validator(mode="after")
-    def storage_is_one_unit(self):
-        if self.rack == MAIN_STORAGE and (self.u != 0 or self.position):
-            raise ValueError("Main storage is one location without individual shelves or positions")
+    def storage_shelves(self):
+        if self.rack == MAIN_STORAGE and self.u > STORAGE_SHELVES:
+            raise ValueError(f"Main storage has shelves 1-{STORAGE_SHELVES}; choose one of them or 0 for the whole storage unit")
+        if self.rack == MAIN_STORAGE and self.position:
+            raise ValueError("Main storage shelves have no positions; leave the position empty")
         return self
 
 

@@ -388,6 +388,13 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   .shelf-row[data-units] .shelf-content { grid-template-columns: minmax(0, 1fr) 96px; }
   .floor-units { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
 }
+/* Main storage: shelves 1-16, each shelf one simple list of everything on it (servers, equipment and cooling units, one
+   per line, full width); no server | units columns. */
+.shelf-list { container: servers / inline-size; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.shelf-list-item { min-width: 0; }
+.shelf-list-item > .equipment-cell { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; }
+.shelf-list-item > .equipment-cell .equipment-type { flex: 0 0 auto; }
+.shelf-list-item > .cooling-chip { width: 100%; max-width: 100%; min-height: 44px; }
 .floors-other { margin: 2px 0 6px; padding-left: 24px; font-size: 11px; font-weight: 600; letter-spacing: .03em; color: #a1a1aa; }
 .shelf-empty { height: 28px; margin: 0 0 6px; gap: 6px; }
 .shelf-empty .shelf-index { color: #a1a1aa; }
