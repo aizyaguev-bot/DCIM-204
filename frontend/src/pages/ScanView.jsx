@@ -1,7 +1,7 @@
 import { cloneElement, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import JsBarcode from "jsbarcode";
-import { loadInventory, updateInventory, labelCode, parseLocationCode, MAIN_STORAGE } from "../api/inventory";
+import { loadInventory, updateInventory, labelCode, parseLocationCode, MAIN_STORAGE, UNIT_DETAILS, detailText } from "../api/inventory";
 import { qrSvgPath } from "../qr";
 import {useAccounts} from "../accounts";
 
@@ -344,7 +344,7 @@ export default function ScanView() {
     {selected && <div className="grid lg:grid-cols-[1.3fr_1fr] gap-5">
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5 space-y-5">
         <div><div className="text-xs uppercase text-zinc-500 mb-1">Selected equipment</div><h2 className="text-xl font-semibold">{selected.name}</h2><div className="text-xs text-zinc-500 font-mono break-all mt-1">ID: {selected.id}</div></div>
-        <div className="grid sm:grid-cols-2 gap-3 text-sm"><div><span className="text-zinc-500">Barcode</span><div className="font-mono break-all">{selected.barcode || "Not linked"}</div></div><div><span className="text-zinc-500">Serial number</span><div className="font-mono break-all">{selected.serial_number || "Not recorded"}</div></div></div>
+        <div className="grid sm:grid-cols-2 gap-3 text-sm"><div><span className="text-zinc-500">Barcode</span><div className="font-mono break-all">{selected.barcode || "Not linked"}</div></div><div><span className="text-zinc-500">Serial number</span><div className="font-mono break-all" dir="auto">{selected.serial_number || "Not recorded"}</div></div>{UNIT_DETAILS.slice(1).filter(([field]) => detailText(selected, field)).map(([field, label]) => <div key={field}><span className="text-zinc-500">{label}</span><div className="font-mono break-all" dir="auto">{detailText(selected, field)}</div></div>)}</div>
         <div className="rounded-xl border border-zinc-700 bg-zinc-950 p-4"><div className="text-xs text-zinc-400">Current saved location</div><div className="text-lg font-medium mt-1">{where({ ...place(selected), u: selected.u })}</div><div className="text-xs text-zinc-500 mt-2">Last confirmed: {when(selected.last_seen_at)}</div></div>
         <form onSubmit={saveLocation} className="space-y-4"><h3 className="font-medium">Confirm or move equipment</h3><LocationFields value={destination} onChange={selectDestination} racks={racks} disabled={busy || !canOperate}/>
           {!!neighbors.length && <p className="text-xs text-amber-300">Also on this shelf: {neighbors.map(i => `${i.name}${i.shelf_position ? ` (${i.shelf_position})` : ""}`).join(", ")}. Check that the destination has space.</p>}

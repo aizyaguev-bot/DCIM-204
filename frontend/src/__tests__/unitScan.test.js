@@ -1,15 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseUnitBarcode } from "../api/scanParse.js";
-import { placeScannedUnit, undoScannedUnit, canUndo, placeText, floorText } from "../api/unitScan.js";
+import { placeScannedUnit, undoScannedUnit, canUndo, placeText, floorText, scanDetails } from "../api/unitScan.js";
 
 // A small stand-in for backend/app/routers/inventory.py and PUT /api/rack-items: revisions (If-Match), exact
-// case-insensitive matches on id / serial / barcode, and the 409 for a code that already belongs to another unit.
+// case-insensitive matches on id / serial / barcode / MAC, the 409 for a code that already belongs to another unit, and
+// POST /api/inventory/{id}/details (only_missing never overwrites a stored value).
 function fakeServer(t, initial) {
   const realFetch = globalThis.fetch, realWindow = globalThis.window;
   const state = { data: structuredClone(initial), version: 1, requests: [], before: null };
   const etag = () => `"v${state.version}"`;
-  const ids = item => [item.id, item.serial_number, item.barcode].filter(Boolean).map(v => String(v).toLowerCase());
+  const ids = item => [item.id, item.serial_number, item.barcode, item.mac].filter(Boolean).map(v => String(v).toLowerCase());
+  const DETAILS = ["serial_number", "part_number", "model", "mac"];
+  const detailsOf = body => Object.fromEntries(DETAILS.map(f => [f, f === "serial_number" ? body.serial ?? body.serial_number : body[f]]).filter(([, v]) => v));
   const all = () => Object.entries(state.data).flatMap(([rack, list]) => list.map(item => ({ ...item, rack })));
   const reply = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { ETag: etag() } });
   globalThis.window = { alert: () => { throw new Error("no alert expected"); } };
@@ -26,7 +29,7 @@ function fakeServer(t, initial) {
     }
     if (path === "/api/inventory" && method === "POST") {
       if (all().some(i => ids(i).includes(body.code.toLowerCase()))) return reply({ detail: "This barcode or serial number already belongs to another item." }, 409);
-      const item = { id: `ci-new${state.version}`, name: body.name, type: body.type, barcode: body.code, u: body.u, shelf_position: body.position, notes: "",
+      const item = { id: `ci-new${state.version}`, name: body.name, type: body.type, barcode: body.code, u: body.u, shelf_position: body.position, notes: "", ...detailsOf(body),
         tracking_history: [{ action: "registered", from: null, to: { rack: body.rack, u: body.u, position: body.position } }] };
       (state.data[body.rack] ||= []).push(item); state.version++;
       return reply({ ...item, rack: body.rack }, 201);
@@ -41,6 +44,20 @@ function fakeServer(t, initial) {
       item.tracking_history = [...(item.tracking_history || []), { action: "moved" }];
       (state.data[body.rack] ||= []).push(item); state.version++;
       return reply({ ...item, rack: body.rack });
+    }
+    const details = /^\/api\/inventory\/([^/]+)\/details$/.exec(path);
+    if (details && method === "POST") {
+      const id = decodeURIComponent(details[1]);
+      const rack = Object.keys(state.data).find(r => state.data[r].some(i => i.id === id));
+      const item = state.data[rack].find(i => i.id === id);
+      const wanted = Object.entries(detailsOf(body)).filter(([f]) => !body.only_missing || !item[f]);
+      if (wanted.some(([, v]) => all().some(i => i.id !== id && ids(i).includes(String(v).toLowerCase())))) return reply({ detail: "This MAC address already belongs to another item." }, 409);
+      if (wanted.length) {
+        Object.assign(item, Object.fromEntries(wanted));
+        item.tracking_history = [...(item.tracking_history || []), { action: "details updated" }];
+        state.version++;
+      }
+      return reply({ ...item, rack });
     }
     if (path === "/api/rack-items" && method === "GET") return reply(state.data);
     if (path === "/api/rack-items" && method === "PUT") { state.data = body; state.version++; return reply(state.data); }
@@ -141,4 +158,110 @@ test("place text names the server and its floor", () => {
   assert.equal(placeText({ rack: "Rack-01", u: 7 }), "Rack-01 · U7");
   assert.equal(placeText({ rack: "Storage-Main", u: 0 }, "x"), "Main storage");
   assert.equal(floorText(4), "floor 4");
+});
+
+const LABEL = "SN: MT2614X09999; PN: MQM8790-HS2F; Model: QM8790; MAC: b8-ce-f6-00-11-22";
+const stored = (state, id) => Object.entries(state.data).flatMap(([rack, list]) => list.map(i => ({ ...i, rack }))).find(i => i.id === id);
+
+test("the scanned serial, part number, model and MAC are sent as the unit's own fields", () => {
+  assert.deepEqual(scanDetails(parseUnitBarcode(LABEL)),
+    { serial_number: "MT2614X09999", part_number: "MQM8790-HS2F", model: "QM8790", mac: "B8:CE:F6:00:11:22" });
+  assert.deepEqual(scanDetails(parseUnitBarcode("(21)MT2614X01234(240)MQM8790-HS2F")), { serial_number: "MT2614X01234", part_number: "MQM8790-HS2F" });
+  assert.deepEqual(scanDetails(parseUnitBarcode("PLAIN-CODE")), {});
+  // A MAC the server would refuse is left out, so it can never fail the scan.
+  assert.deepEqual(scanDetails({ serial: "S1", mac: "not a mac" }), { serial_number: "S1" });
+});
+
+test("a new unit is created with all four fields in one request", async t => {
+  const state = fakeServer(t, { "Rack-01": [] });
+  const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+  assert.equal(result.action, "created");
+  assert.deepEqual(state.requests.filter(r => r.startsWith("POST")), ["POST /api/inventory"]);
+  const item = stored(state, result.item.id);
+  assert.deepEqual([item.barcode, item.serial_number, item.part_number, item.model, item.mac],
+    ["MT2614X09999", "MT2614X09999", "MQM8790-HS2F", "QM8790", "B8:CE:F6:00:11:22"]);
+  assert.deepEqual(result.filled, {});
+  // Undo removes it while the fields are as the scan saved them.
+  await undoScannedUnit(result);
+  assert.equal(stored(state, result.item.id), undefined);
+});
+
+test("Undo keeps a new unit whose fields were edited after the scan", async t => {
+  const state = fakeServer(t, { "Rack-01": [] });
+  const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+  state.data["Rack-01"][0].model = "Edited";
+  state.version++;
+  await assert.rejects(undoScannedUnit(result), /changed after the scan/);
+  assert.equal(stored(state, result.item.id).model, "Edited");
+});
+
+test("a known unit found by its MAC is moved and gets only the fields it lacks; Undo restores exactly the previous record", async t => {
+  const original = { id: "ci-7", name: "Switch 07", type: "switch", serial_number: "OLD-SERIAL", mac: "B8:CE:F6:00:11:22", u: 3, shelf_position: "L", notes: "keep" };
+  const state = fakeServer(t, { "Rack-01": [], "Rack-07": [structuredClone(original)] });
+  const result = await placeScannedUnit(parseUnitBarcode("MAC: b8:ce:f6:00:11:22; Model: QM8790; PN: MQM8790-HS2F"), shelf2);
+  assert.equal(result.action, "moved");
+  assert.equal(result.item.id, "ci-7");
+  assert.deepEqual(result.filled, { part_number: "MQM8790-HS2F", model: "QM8790" });
+  const item = stored(state, "ci-7");
+  assert.deepEqual([item.rack, item.u, item.serial_number, item.mac, item.part_number, item.model],
+    ["Rack-01", 2, "OLD-SERIAL", "B8:CE:F6:00:11:22", "MQM8790-HS2F", "QM8790"]);
+  assert.equal(state.requests.filter(r => r.startsWith("POST")).at(-1), "POST /api/inventory/ci-7/details");
+  assert.ok(canUndo(result));
+
+  const saved = await undoScannedUnit(result);
+  assert.ok(saved, "Undo saves the restored list in one request");
+  const back = stored(state, "ci-7");
+  delete back.tracking_history;
+  assert.deepEqual(back, { ...original, rack: "Rack-07" });
+  assert.equal(state.requests.filter(r => r === "PUT /api/rack-items").length, 1);
+});
+
+test("a stored serial is never overwritten by a different scanned one", async t => {
+  const state = fakeServer(t, { "Rack-01": [{ id: "ci-1", name: "Switch 01", barcode: "TAG-1", serial_number: "OLD", u: 1 }] });
+  // The unit is found by its barcode; the label's other serial is not written over the stored one.
+  const result = await placeScannedUnit({ ...parseUnitBarcode("TAG-1"), serial: "NEW", model: "QM8790" }, shelf2);
+  assert.equal(result.action, "moved");
+  assert.deepEqual(result.filled, { model: "QM8790" });
+  assert.equal(stored(state, "ci-1").serial_number, "OLD");
+});
+
+test("a repeat scan of a unit already on the floor only fills missing fields, and its Undo clears just those", async t => {
+  const state = fakeServer(t, { "Rack-01": [{ id: "ci-1", name: "Switch 01", serial_number: "MT2614X09999", u: 2, shelf_position: "" }] });
+  const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+  assert.equal(result.action, "confirmed");
+  assert.deepEqual(Object.keys(result.filled).sort(), ["mac", "model", "part_number"]);
+  assert.ok(canUndo(result));
+  const again = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+  assert.equal(again.action, "confirmed");
+  assert.deepEqual(again.filled, {});
+  assert.equal(canUndo(again), false, "nothing changed, nothing to undo");
+  assert.equal(state.requests.filter(r => r.startsWith("POST")).length, 1, "a unit that has every field gets no write");
+  await undoScannedUnit(result);
+  const item = stored(state, "ci-1");
+  assert.deepEqual([item.rack, item.u, item.serial_number, item.part_number, item.model, item.mac], ["Rack-01", 2, "MT2614X09999", undefined, undefined, undefined]);
+});
+
+test("Undo of a fill does nothing when a filled field was edited meanwhile", async t => {
+  const state = fakeServer(t, { "Rack-01": [], "Rack-02": [{ id: "ci-2", name: "Switch 02", serial_number: "MT2614X09999", u: 1 }] });
+  const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+  state.data["Rack-01"][0].model = "Changed";
+  state.version++;
+  await assert.rejects(undoScannedUnit(result), /changed after the scan/);
+  assert.equal(stored(state, "ci-2").rack, "Rack-01");
+  assert.equal(stored(state, "ci-2").model, "Changed");
+});
+
+test("a fill the server refuses keeps the move and reports why", async t => {
+  const state = fakeServer(t, { "Rack-01": [], "Rack-02": [{ id: "ci-2", name: "Switch 02", serial_number: "MT2614X09999", u: 1 }],
+    "Rack-03": [{ id: "ci-3", name: "Other", barcode: "OTHER", u: 1 }] });
+  // Another session gives that MAC to ci-3 just before the fill is saved.
+  state.before = async (method, path) => { if (path.endsWith("/details")) state.data["Rack-03"][0].mac = "B8:CE:F6:00:11:22"; };
+  const result = await placeScannedUnit(parseUnitBarcode(LABEL), shelf2);
+  assert.equal(result.action, "moved");
+  assert.deepEqual(result.filled, {});
+  assert.match(result.fillError, /MAC address already belongs/);
+  assert.deepEqual([stored(state, "ci-2").rack, stored(state, "ci-2").mac], ["Rack-01", undefined]);
+  assert.ok(canUndo(result));
+  await undoScannedUnit(result);
+  assert.equal(stored(state, "ci-2").rack, "Rack-02");
 });

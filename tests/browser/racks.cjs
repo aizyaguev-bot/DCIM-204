@@ -1,7 +1,8 @@
 // DCIM Racks view on the isolated fixture (tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1):
 // RACK-1 stale equipment panel after a 409, RACK-2 U validation, RACK-3 equipment reload, RACK-4 phone width,
-// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, SCAN-1..8 Scan barcode (add units to a
-// server's floor with a USB scanner or a stubbed camera). Every change it makes is undone.
+// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, SCAN-1..10 Scan barcode (add units to a
+// server's floor with a USB scanner or a stubbed camera; serial, part number, model and MAC saved as the unit's own
+// fields, shown and edited in its panels). Every change it makes is undone.
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
@@ -211,7 +212,11 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
    const all=async()=>Object.entries((await items()).data).flatMap(([rack,list])=>list.map(i=>({...i,rack})));
    const withCode=async code=>(await all()).filter(i=>[i.barcode,i.serial_number].some(v=>String(v||'').toLowerCase()===code.toLowerCase()));
    const writes=[];
-   const SCAN_WRITE=/^\/api\/(inventory|inventory\/[^/]+\/location|rack-items)$/;
+   const SCAN_WRITE=/^\/api\/(inventory|inventory\/[^/]+\/(location|details)|rack-items)$/;
+   // Unique MAC addresses for this run (locally administered: 02, 06, 0A …).
+   const macHex=Date.now().toString(16).slice(-10).padStart(10,'0').toUpperCase();
+   const macOf=first=>[first,...macHex.match(/../g)].join(':');
+   const MAC1=macOf('02'),MAC2=macOf('06'),MAC3=macOf('0A');
    try{
     const op=await operator.c.newPage();op.on('pageerror',e=>errors.push(e.message));
     op.on('request',r=>{const u=new URL(r.url());if(!['GET','HEAD','OPTIONS'].includes(r.method())&&u.pathname!=='/api/auth/login')writes.push(`${r.method()} ${u.pathname}`);});
@@ -277,6 +282,31 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     assert.deepEqual([found[0].rack,found[0].u,found[0].shelf_position],['Rack-03',1,'R']);
     passed.push('SCAN-4 a known serial (any case) moves that unit to the floor; Undo puts it back with its position');
 
+    // SCAN-9: a label with serial, part number, model and MAC: all four are saved as the unit's own fields (MAC cleaned).
+    const F=`SNF${run}`;
+    await wedge(`SN: ${F}; PN: MQM8790-HS2F; Model: QM8790; MAC: ${MAC1.toLowerCase().replace(/:/g,'-')}`);
+    await toast.filter({hasText:`Added QM8790 ${F} to OPT22 · floor ${floor}.`}).waitFor();
+    found=await withCode(F);
+    assert.deepEqual([found.length,found[0].serial_number,found[0].part_number,found[0].model,found[0].mac,found[0].type],[1,F,'MQM8790-HS2F','QM8790',MAC1,'switch']);
+    // A known unit (serial and part number only) scanned with a full label: moved here, only its missing fields are
+    // filled (its part number is kept), and Undo puts it back exactly as it was.
+    const G=`SNG${run}`;
+    await putItems(d=>{d['Rack-03']=[...(d['Rack-03']||[]),{id:`ci-fill-${run}`,name:`Fill ${run}`,type:'cable',serial_number:G,part_number:'KEEP-PN',u:1,shelf_position:'R'}];});
+    await wedge(`SN: ${G}; PN: OTHER-PN; Model: QM8790; MAC: ${MAC2}`);
+    await toast.filter({hasText:`Moved Fill ${run} to OPT22 · floor ${floor} (it was in Rack-03 · floor 1). Added its model and MAC address.`}).waitFor();
+    found=await withCode(G);
+    assert.deepEqual([found[0].rack,found[0].u,found[0].part_number,found[0].model,found[0].mac],['Rack-02',floor,'KEEP-PN','QM8790',MAC2]);
+    await log.filter({hasText:`Moved Fill ${run}`}).getByRole('button',{name:'Undo'}).click();
+    await toast.filter({hasText:`Undone: Fill ${run} is back in Rack-03 · floor 1, without the model and MAC address the scan added.`}).waitFor();
+    found=await withCode(G);
+    assert.deepEqual([found[0].rack,found[0].u,found[0].shelf_position,found[0].part_number,'model' in found[0],'mac' in found[0]],['Rack-03',1,'R','KEEP-PN',false,false]);
+    // The same unit scanned by its MAC alone is found (lookup matches the MAC field) once it has one.
+    await putItems(d=>{const i=d['Rack-03'].find(x=>x.id===`ci-fill-${run}`);i.mac=MAC3.toLowerCase();});
+    await wedge(MAC3.replace(/:/g,''));
+    await toast.filter({hasText:`Moved Fill ${run} to OPT22 · floor ${floor}`}).waitFor();
+    assert.equal((await withCode(G))[0].mac,MAC3,'a MAC saved through the DCIM edit endpoint is stored cleaned');
+    passed.push('SCAN-9 serial, part number, model and MAC saved as separate fields; a known unit gets only missing fields; Undo restores it; a MAC scan finds its unit');
+
     // SCAN-5: refusals are sentences and write nothing: a location label, a code on two units, a part number only.
     // The API refuses to create two units with one code, so the legacy duplicate is the lookup's answer, stubbed here.
     const D=`DUP${run}`;
@@ -320,6 +350,56 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     await op.keyboard.press('Escape');
     passed.push('SCAN-6 Edit mode: Scan barcode in + Equipment (floor 3 chosen), in the rack actions and in the server edit panel');
 
+    // SCAN-10: the unit's panels show the four fields: editable in Edit mode (Operator), read-only otherwise.
+    await op.getByRole('dialog',{name:'OPT22'}).waitFor({state:'detached'});
+    const equip=op.locator('div.fixed.inset-0.z-50.flex.justify-end');
+    await op.locator(`.equipment-cell[aria-label="View QM8790 ${F}"] .equipment-type`).first().click();
+    await equip.getByText('Save changes').waitFor();
+    const field=label=>equip.getByRole('textbox',{name:label,exact:true});
+    assert.deepEqual(await Promise.all(['Serial number','Part number','Model','MAC address'].map(l=>field(l).inputValue())),[F,'MQM8790-HS2F','QM8790',MAC1]);
+    // Save stays in view on a 1536x864 screen, below the scrolling fields.
+    await op.setViewportSize({width:1536,height:864});
+    const saveBox=await equip.getByRole('button',{name:'Save changes'}).boundingBox();
+    assert.ok(saveBox&&saveBox.y+saveBox.height<=864,`Save changes is in view at 1536x864 (y=${saveBox&&saveBox.y})`);
+    // A MAC or serial number of another unit is refused with that reason at the field, not as a change elsewhere.
+    const opDialogs=[];op.on('dialog',d=>{opDialogs.push(d.message());d.dismiss().catch(()=>{});});
+    for(const [label,value,reason] of [['MAC address',MAC3.toLowerCase().replace(/:/g,'-'),'This MAC address already belongs to another item.'],['Serial number',G.toLowerCase(),'This barcode or serial number already belongs to another item.']]){
+      const original=await field(label).inputValue();
+      await field(label).fill(value);
+      const refused=op.waitForResponse(r=>r.url().endsWith('/api/rack-items')&&r.request().method()==='PUT');
+      await equip.getByRole('button',{name:'Save changes'}).click();
+      assert.equal((await refused).status(),409);
+      await equip.getByRole('alert').filter({hasText:reason}).waitFor();
+      assert.equal(await equip.getByRole('button',{name:'Save changes'}).isDisabled(),true,'the taken value cannot be saved again');
+      assert.equal(await equip.getByRole('status').filter({hasText:'changed in another session'}).count(),0);
+      assert.equal(await field(label).getAttribute('aria-invalid'),'true');
+      await field(label).fill(original);
+      await equip.getByRole('alert').filter({hasText:reason}).waitFor({state:'detached'});
+    }
+    assert.deepEqual(opDialogs,[],'a taken value is shown in the panel, never as a browser alert');
+    await op.setViewportSize({width:1440,height:1000});
+    await field('MAC address').fill('12:34');
+    await equip.getByRole('alert').filter({hasText:'MAC address must be six pairs of hex digits'}).waitFor();
+    assert.equal(await equip.getByRole('button',{name:'Save changes'}).isDisabled(),true,'a bad MAC cannot be saved');
+    const MAC4=macOf('0E');
+    await field('MAC address').fill(MAC4.toLowerCase().replace(/:/g,'-'));
+    await field('Part number').fill('MQM8790-HS2R');
+    await field('Model').fill('');
+    await equip.getByRole('button',{name:'Save changes'}).click();
+    await equip.getByRole('button',{name:'Saved'}).waitFor();
+    found=await withCode(F);
+    assert.deepEqual([found[0].serial_number,found[0].part_number,'model' in found[0],found[0].mac],[F,'MQM8790-HS2R',false,MAC4]);
+    await op.keyboard.press('Escape');await equip.waitFor({state:'detached'});
+    await op.locator('button.edit-toggle').click();
+    await op.locator(`.equipment-cell[aria-label="View QM8790 ${F}"] .equipment-type`).first().click();
+    const shown=op.getByRole('dialog',{name:`QM8790 ${F}`});
+    await shown.waitFor();
+    const text=await shown.innerText();
+    for(const part of ['Serial number',F,'Part number','MQM8790-HS2R','MAC address',MAC4])assert.ok(text.includes(part),`details show ${part}`);
+    assert.equal(await shown.getByRole('textbox').count(),0,'the view is read-only outside Edit');
+    await op.keyboard.press('Escape');await shown.waitFor({state:'detached'});
+    passed.push('SCAN-10 the four fields are shown and edited in the equipment panel (Save in view at 1536x864, a taken MAC or serial shown at its field, bad MAC refused, MAC cleaned, blank clears) and shown read-only outside Edit');
+
     const unexpected=writes.filter(w=>!SCAN_WRITE.test(w.split(' ')[1]));
     assert.deepEqual(unexpected,[],'Scanning writes only inventory registrations, locations and the equipment list (Undo)');
     await op.close();
@@ -356,8 +436,15 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare';
     await vp.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').first().click();
     await vp.getByRole('dialog',{name:'OPT22'}).getByText('Viewer · read only').waitFor();
     assert.equal(await vp.getByRole('button',{name:'Scan barcode'}).count(),0);
+    await vp.keyboard.press('Escape');await vp.getByRole('dialog',{name:'OPT22'}).waitFor({state:'detached'});
+    await vp.locator(`.equipment-cell[aria-label="View QM8790 ${F}"] .equipment-type`).first().click();
+    const viewerUnit=vp.getByRole('dialog',{name:`QM8790 ${F}`});
+    await viewerUnit.waitFor();
+    assert.ok((await viewerUnit.innerText()).includes('MQM8790-HS2R'),'Viewer sees the part number');
+    assert.equal(await viewerUnit.getByRole('textbox').count(),0,'Viewer cannot edit the fields');
+    assert.equal(await vp.locator('button.edit-toggle').count(),0,'Viewer has no Edit mode');
     await viewer.c.close();
-    passed.push('SCAN-8 Viewer: no Scan barcode in the server dialog or the rack');
+    passed.push('SCAN-8 Viewer: no Scan barcode in the server dialog or the rack; unit details read-only');
    }finally{await putItems(dropScans);}
   }
 

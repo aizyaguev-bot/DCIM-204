@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import tempfile
 
 from fastapi import HTTPException
@@ -135,14 +136,110 @@ def location(rack, item):
     return {"rack": rack, "u": item.get("u"), "position": item.get("shelf_position", "")}
 
 
+# What a scanned unit label says about the unit, kept as separate fields of the item. `serial_number` is the stored
+# name of the serial (the API also accepts "serial"). A missing or blank value is simply absent from the item.
+DETAIL_FIELDS = ("serial_number", "part_number", "model", "mac")
+DETAIL_LIMITS = {"serial_number": 200, "part_number": 120, "model": 120, "mac": 40}
+DETAIL_LABELS = {"serial_number": "Serial number", "part_number": "Part number", "model": "Model", "mac": "MAC address"}
+MAC_INVALID = "MAC address must be six pairs of hex digits, like 00:1A:2B:3C:4D:5E."
+DUPLICATE_CODE = "This barcode or serial number already belongs to another item."
+DUPLICATE_MAC = "This MAC address already belongs to another item."
+_MAC_FORMS = (
+    re.compile(r"([0-9A-Fa-f]{2})([:-])([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})"),
+    re.compile(r"([0-9A-Fa-f]{12})"),
+    re.compile(r"([0-9A-Fa-f]{4})\.([0-9A-Fa-f]{4})\.([0-9A-Fa-f]{4})"),
+)
+
+
+def normalize_mac(value):
+    """'00-1a-2b-3c-4d-5e', '001A2B3C4D5E' or '001a.2b3c.4d5e' -> '00:1A:2B:3C:4D:5E'; anything else -> None."""
+    text = value.strip() if isinstance(value, str) else ""
+    for form in _MAC_FORMS:
+        match = form.fullmatch(text)
+        if match:
+            digits = "".join(g for g in match.groups() if g not in (":", "-")).upper()
+            return ":".join(digits[i:i + 2] for i in range(0, 12, 2))
+    return None
+
+
+def clean_detail(field, value):
+    """One detail value as it is stored: trimmed text, '' when blank (= absent). Raises ValueError with a sentence."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{DETAIL_LABELS[field]} must be text.")
+    value = value.strip()
+    if not value:
+        return ""
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(f"{DETAIL_LABELS[field]} cannot contain control characters.")
+    if field == "mac":
+        mac = normalize_mac(value)
+        if mac is None:
+            raise ValueError(MAC_INVALID)
+        return mac
+    if len(value) > DETAIL_LIMITS[field]:
+        raise ValueError(f"{DETAIL_LABELS[field]} can be at most {DETAIL_LIMITS[field]} characters.")
+    return value
+
+
+def mac_key(value):
+    """The lookup key of a MAC: its normalised form, so any separator style finds the unit."""
+    mac = normalize_mac(value)
+    if mac:
+        return mac.casefold()
+    return str(value or "").strip().casefold() if isinstance(value, str) else ""
+
+
 def identifiers(item):
-    return {str(item.get(key) or "").strip().casefold() for key in ("id", "serial_number", "barcode")} - {""}
+    """Every value that names exactly one unit, as text to search by: its id, serial, barcode and MAC."""
+    return ({str(item.get(key) or "").strip().casefold() for key in ("id", "serial_number", "barcode")} | {mac_key(item.get("mac"))}) - {""}
 
 
-def ensure_unique(data, code, exclude_id=None):
-    key = code.strip().casefold()
-    if key and any(key in identifiers(item) and item["id"] != exclude_id for items in data.values() for item in items):
-        raise HTTPException(409, "This barcode or serial number already belongs to another item.")
+def identity_key(value):
+    """The one comparable form of an identifier: anything that reads as a MAC in any spelling becomes its
+    normalised MAC, so 'B8CEF6001122', 'b8-ce-f6-00-11-22' and 'B8:CE:F6:00:11:22' are the same identifier."""
+    text = str(value or "").strip()
+    return (normalize_mac(text) or text).casefold()
+
+
+def identity_keys(item):
+    """The identity keys of a unit (id, serial, barcode, MAC). Lookup and the duplicate rule both use these."""
+    return {identity_key(item.get(key)) for key in ("id", "serial_number", "barcode", "mac")} - {""}
+
+
+def lookup_keys(code):
+    """A scanned or typed code as lookup keys, compared with `identity_keys` (00-1A-... finds 00:1A:... and 001A...)."""
+    return {identity_key(code)} - {""}
+
+
+def ensure_unique(data, code, exclude_id=None, detail=DUPLICATE_CODE):
+    """`code` must not be an identity of another unit, compared exactly as a lookup compares it."""
+    key = identity_key(code)
+    if key and any(key in identity_keys(item) and item["id"] != exclude_id for items in data.values() for item in items):
+        raise HTTPException(409, detail)
+
+
+def ensure_unique_details(data, item, exclude_id=None, fields=DETAIL_FIELDS):
+    """The serial and the MAC of `item` (for the `fields` given) must not name another unit."""
+    if "serial_number" in fields and item.get("serial_number"):
+        ensure_unique(data, str(item["serial_number"]), exclude_id)
+    if "mac" in fields and item.get("mac"):
+        ensure_unique(data, mac_key(item["mac"]), exclude_id, DUPLICATE_MAC)
+
+
+def apply_details(item, values):
+    """Set the cleaned `values` ({field: text}) on `item`; '' removes the field. Returns the fields that changed."""
+    changed = []
+    for field, value in values.items():
+        if value:
+            if item.get(field) != value:
+                item[field] = value
+                changed.append(field)
+        elif field in item:
+            del item[field]
+            changed.append(field)
+    return changed
 
 
 def record(item, action, before, after, note=""):
@@ -165,7 +262,8 @@ def _same_u(old, item):
 def replace_items(payload, expected):
     """Existing DCIM/Twin editors participate in version checks and movement history.
 
-    Refusal order: revision (428/409), then shape and U slot (422), then barcode/serial uniqueness (409).
+    Refusal order: revision (428/409), then shape, U slot and unit details (422), then barcode/serial/MAC
+    uniqueness (409).
     Nothing is written when any of them fails. A NaN or Infinity anywhere is 422 before the lock is taken."""
     reject_non_finite(payload)
     with locked_items() as current:
@@ -190,6 +288,18 @@ def replace_items(payload, expected):
                 # before any uniqueness check, so a new item cannot take that barcode in the same save.
                 if old is not None and old.get("barcode") and item.get("barcode") != old["barcode"]:
                     item["barcode"] = old["barcode"]
+                # Serial, part number, model and MAC: a new or changed value is cleaned (trimmed, MAC as 00:1A:...,
+                # blank = absent); an untouched legacy value is kept exactly as it is.
+                for field in DETAIL_FIELDS:
+                    if old is None or item.get(field) != old.get(field):
+                        try:
+                            value = clean_detail(field, item.get(field))
+                        except ValueError as exc:
+                            raise HTTPException(422, str(exc)) from exc
+                        if value:
+                            item[field] = value
+                        else:
+                            item.pop(field, None)
         for rack, items in incoming.items():
             for item in items:
                 old_rack, old = previous.get(item["id"], (None, {}))
@@ -200,6 +310,8 @@ def replace_items(payload, expected):
                 for field in ("barcode", "serial_number"):
                     if item.get(field) != old.get(field) and item.get(field):
                         ensure_unique(incoming, str(item[field]), item["id"])
+                if item.get("mac") != old.get("mac") and item.get("mac"):
+                    ensure_unique(incoming, mac_key(item["mac"]), item["id"], DUPLICATE_MAC)
                 if old and location(old_rack, old) != location(rack, item):
                     record(item, "moved", location(old_rack, old), location(rack, item), "Edited in DCIM or 3D Twin")
         write_items(incoming)

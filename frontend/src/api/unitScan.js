@@ -2,7 +2,9 @@
 // register a new one there. The server refuses a second unit with the same barcode or serial (409), so a repeated or
 // concurrent scan can never add a second row; that 409 (or a stale revision) is retried once, and the retry finds the
 // unit and moves or confirms it. Undo is guarded: it only reverts what this scan did, never a later change.
-import { MAIN_STORAGE, loadInventory, updateInventory, loadRackItems, saveRackItems } from "./inventory.js";
+// The serial number, part number, model and MAC the barcode carries are saved as the unit's own fields: on a new unit
+// all of them, on a known unit only those it does not have yet (a stored value is never overwritten).
+import { MAIN_STORAGE, loadInventory, updateInventory, loadRackItems, saveRackItems, UNIT_DETAIL_FIELDS, UNIT_DETAIL_LIMITS, normalizeMac, detailText } from "./inventory.js";
 import { RACK_FLOORS } from "../components/racks/rackView.js";
 
 export function placeOf(item) {
@@ -29,6 +31,32 @@ function failure(message, extra = {}) {
   return Object.assign(new Error(message), extra);
 }
 
+// The unit fields a parsed barcode carries, by stored name: { serial_number, part_number, model, mac }, only the
+// non-empty ones. A MAC the server would refuse (not six hex pairs) and an over-long value are left out, so they can
+// never make the scan itself fail.
+export function scanDetails(parsed) {
+  const values = { serial_number: parsed?.serial, part_number: parsed?.part_number, model: parsed?.model, mac: normalizeMac(parsed?.mac || "") };
+  return Object.fromEntries(Object.entries(values)
+    .map(([field, value]) => [field, String(value || "").trim()])
+    .filter(([field, value]) => value && Array.from(value).length <= UNIT_DETAIL_LIMITS[field]));
+}
+
+const missing = (item, field) => !detailText(item, field).trim();
+
+// A known unit: fill only the fields it does not have yet (the server checks again with only_missing). Resolves to
+// { item, filled: { field: value }, fillError? }; a refused fill never undoes the move, it is reported instead.
+async function fillMissing(item, parsed, revision) {
+  const wanted = Object.fromEntries(Object.entries(scanDetails(parsed)).filter(([field]) => missing(item, field)));
+  if (!Object.keys(wanted).length) return { item, filled: {} };
+  try {
+    const saved = await updateInventory(`/${encodeURIComponent(item.id)}/details`, { ...wanted, only_missing: true }, revision);
+    const filled = Object.fromEntries(UNIT_DETAIL_FIELDS.filter(f => missing(item, f) && !missing(saved.data, f)).map(f => [f, saved.data[f]]));
+    return { item: saved.data, filled };
+  } catch (error) {
+    return { item, filled: {}, fillError: error?.message || "The unit's details could not be saved." };
+  }
+}
+
 async function lookUp(parsed) {
   const keys = [...new Map([parsed.code, parsed.raw, parsed.serial, parsed.mac].filter(Boolean).map(k => [k.toLowerCase(), k])).values()];
   const found = new Map();
@@ -49,15 +77,16 @@ async function placeOnce(parsed, target) {
   if (matches.length === 1) {
     const item = matches[0];
     const before = placeOf(item);
-    if (samePlace(before, target)) return { action: "confirmed", item, before, after: target };
+    if (samePlace(before, target)) return { action: "confirmed", before, after: target, ...await fillMissing(item, parsed, revision) };
     const saved = await updateInventory(`/${encodeURIComponent(item.id)}/location`, target, revision);
-    return { action: "moved", item: saved.data, before, after: target };
+    return { action: "moved", before, after: target, ...await fillMissing(saved.data, parsed, saved.revision) };
   }
-  const saved = await updateInventory("", { code: parsed.code, name: parsed.name, type: parsed.type, ...target }, revision);
-  return { action: "created", item: saved.data, before: null, after: target };
+  const saved = await updateInventory("", { code: parsed.code, name: parsed.name, type: parsed.type, ...scanDetails(parsed), ...target }, revision);
+  return { action: "created", item: saved.data, before: null, after: target, filled: {} };
 }
 
-// target: { rack, u, position }. Resolves to { action: "created" | "moved" | "confirmed", item, before, after }.
+// target: { rack, u, position }. Resolves to { action: "created" | "moved" | "confirmed", item, before, after, filled,
+// fillError? }; filled: the fields this scan added to a known unit ({} for a new unit, which got them on create).
 export async function placeScannedUnit(parsed, target) {
   const place = { rack: target.rack, u: target.u, position: target.position || "" };
   try {
@@ -69,8 +98,13 @@ export async function placeScannedUnit(parsed, target) {
   }
 }
 
+export function filledFields(result) {
+  return Object.keys(result?.filled || {});
+}
+
 export function canUndo(result) {
-  return result?.action === "created" || (result?.action === "moved" && Number.isInteger(result.before?.u) && !!result.before.rack);
+  return result?.action === "created" || (result?.action === "moved" && Number.isInteger(result.before?.u) && !!result.before.rack)
+    || (result?.action === "confirmed" && filledFields(result).length > 0);
 }
 
 const CHANGED = "The unit changed after the scan, so the scan was not undone. Open the unit to edit it.";
@@ -86,9 +120,27 @@ export async function undoScannedUnit(result) {
     const item = items[rack].find(i => i.id === id);
     const history = item.tracking_history || [];
     const untouched = samePlace(placeOf({ ...item, rack }), result.after) && history.length === 1 && history[0].action === "registered"
-      && (item.barcode || "") === (result.item.barcode || "");
+      && (item.barcode || "") === (result.item.barcode || "") && UNIT_DETAIL_FIELDS.every(f => detailText(item, f) === detailText(result.item, f));
     if (!untouched) throw failure(CHANGED);
     return saveRackItems({ ...items, [rack]: items[rack].filter(i => i.id !== id) }, items, { alert: false });
+  }
+  const filled = filledFields(result);
+  if (filled.length) {
+    // One save puts the unit back where it was and removes exactly the fields this scan added, or changes nothing.
+    const items = await loadRackItems();
+    const rack = Object.keys(items).find(r => items[r].some(i => i.id === id));
+    if (!rack) throw failure("The unit no longer exists. Nothing was undone.");
+    const item = items[rack].find(i => i.id === id);
+    if (!samePlace(placeOf({ ...item, rack }), result.after) || filled.some(f => item[f] !== result.filled[f])) throw failure(CHANGED);
+    const restored = { ...item, u: result.before.u, shelf_position: result.before.position || "" };
+    for (const field of filled) delete restored[field];
+    const next = { ...items };
+    if (rack === result.before.rack) next[rack] = items[rack].map(i => (i.id === id ? restored : i));
+    else {
+      next[rack] = items[rack].filter(i => i.id !== id);
+      next[result.before.rack] = [...(items[result.before.rack] || []), restored];
+    }
+    return saveRackItems(next, items, { alert: false });
   }
   const { data, revision } = await loadInventory(id);
   const current = data.matches.find(m => m.id === id);
