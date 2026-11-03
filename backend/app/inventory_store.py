@@ -213,10 +213,28 @@ def lookup_keys(code):
     return {identity_key(code)} - {""}
 
 
-def ensure_unique(data, code, exclude_id=None, detail=DUPLICATE_CODE):
-    """`code` must not be an identity of another unit, compared exactly as a lookup compares it."""
+def identity_index(data):
+    """{identity key: ids of the units that have it} for every unit in `data`, each unit's keys normalised once.
+    A whole-list save builds this once and checks each changed unit against it instead of rescanning every unit."""
+    index = {}
+    for items in data.values():
+        for item in items:
+            for key in identity_keys(item):
+                index.setdefault(key, set()).add(item["id"])
+    return index
+
+
+def ensure_unique(data, code, exclude_id=None, detail=DUPLICATE_CODE, index=None):
+    """`code` must not be an identity of another unit, compared exactly as a lookup compares it.
+    `index` (from `identity_index(data)`) answers the same question without rescanning `data`."""
     key = identity_key(code)
-    if key and any(key in identity_keys(item) and item["id"] != exclude_id for items in data.values() for item in items):
+    if not key:
+        return
+    if index is not None:
+        taken = any(owner != exclude_id for owner in index.get(key, ()))
+    else:
+        taken = any(key in identity_keys(item) and item["id"] != exclude_id for items in data.values() for item in items)
+    if taken:
         raise HTTPException(409, detail)
 
 
@@ -300,6 +318,10 @@ def replace_items(payload, expected):
                             item[field] = value
                         else:
                             item.pop(field, None)
+        # Identity keys are final from here on (only tracking fields change below), so one index of the whole
+        # list serves every changed unit's check: O(n) instead of a rescan of every unit per changed value.
+        # Only changed values are checked, so a legacy collision does not block an unrelated edit.
+        index = None
         for rack, items in incoming.items():
             for item in items:
                 old_rack, old = previous.get(item["id"], (None, {}))
@@ -307,11 +329,14 @@ def replace_items(payload, expected):
                     item.pop(field, None)
                     if field in old:
                         item[field] = deepcopy(old[field])
-                for field in ("barcode", "serial_number"):
-                    if item.get(field) != old.get(field) and item.get(field):
-                        ensure_unique(incoming, str(item[field]), item["id"])
+                checks = [(str(item[field]), DUPLICATE_CODE) for field in ("barcode", "serial_number")
+                          if item.get(field) != old.get(field) and item.get(field)]
                 if item.get("mac") != old.get("mac") and item.get("mac"):
-                    ensure_unique(incoming, mac_key(item["mac"]), item["id"], DUPLICATE_MAC)
+                    checks.append((mac_key(item["mac"]), DUPLICATE_MAC))
+                for code, detail in checks:
+                    if index is None:
+                        index = identity_index(incoming)
+                    ensure_unique(incoming, code, item["id"], detail, index)
                 if old and location(old_rack, old) != location(rack, item):
                     record(item, "moved", location(old_rack, old), location(rack, item), "Edited in DCIM or 3D Twin")
         write_items(incoming)

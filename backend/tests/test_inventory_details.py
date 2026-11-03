@@ -183,6 +183,86 @@ async def test_items_stored_without_or_with_legacy_details_keep_loading_and_savi
     assert (await c.post("/api/inventory", json={**NEW, "mac": "AABBCCDDEEFF"}, headers=await headers(c))).status_code == 409
 
 
+def _many_units(count, prefix="U"):
+    """`count` new units that each carry a serial, a barcode and a MAC, spread over 20 racks (every value is new)."""
+    racks = {}
+    for n in range(count):
+        racks.setdefault(f"Bulk-{n % 20:02d}", []).append({
+            "id": f"{prefix}-{n}", "name": f"Server {n}", "type": "server", "u": n % 42,
+            "serial_number": f"SN-{prefix}-{n:05d}", "barcode": f"BC-{prefix}-{n:05d}", "mac": f"02-00-00-00-{n >> 8:02x}-{n & 255:02x}",
+        })
+    return racks
+
+
+async def test_whole_list_save_of_1000_new_units_checks_uniqueness_in_linear_time(inventory_client):
+    """Every changed serial, barcode and MAC is checked against one identity index of the save, not a rescan of
+    every unit per value: 1000 units took ~19 s with the rescan; well under a second with the index."""
+    import time
+    c = inventory_client
+    response = await c.get("/api/rack-items")
+    data = {**response.json(), **_many_units(1000)}
+    started = time.perf_counter()
+    saved = await c.put("/api/rack-items", json=data, headers={"If-Match": response.headers["etag"]})
+    elapsed = time.perf_counter() - started
+    assert saved.status_code == 200
+    assert sum(len(items) for items in store.read_items().values()) == 1001
+    assert elapsed < 6, f"saving 1000 units took {elapsed:.1f}s"
+
+    # The same large save still refuses one duplicate anywhere in it, in any spelling, and writes nothing.
+    for field, value, detail in (("serial_number", "bc-u-00007", store.DUPLICATE_CODE),
+                                 ("barcode", "020000000309", store.DUPLICATE_CODE),
+                                 ("mac", "02:00:00:00:00:2a", store.DUPLICATE_MAC)):
+        current = await c.get("/api/rack-items")
+        edit = current.json()
+        target = next(item for item in edit["Bulk-19"] if item["id"] == "U-999")
+        if field == "barcode":   # a stored barcode is never replaced by a whole-list save, so a new unit brings it
+            edit["Bulk-05"].append({"id": "NEW-1", "name": "New", "type": "server", "u": 1, field: value})
+        else:
+            target[field] = value
+        before = store.ITEMS_FILE.read_bytes()
+        refused = await c.put("/api/rack-items", json=edit, headers={"If-Match": current.headers["etag"]})
+        assert (refused.status_code, refused.json()["detail"]) == (409, detail), field
+        assert store.ITEMS_FILE.read_bytes() == before
+
+
+async def test_a_legacy_collision_does_not_block_an_unrelated_edit_but_blocks_a_new_copy(inventory_client):
+    c = inventory_client
+    legacy = json.loads(store.ITEMS_FILE.read_text())
+    # Two hand-edited records already share a MAC (in different spellings) and a serial.
+    legacy["Rack-02"] = [{"id": "old-a", "name": "A", "type": "other", "u": 2, "mac": "aa-bb-cc-dd-ee-01", "serial_number": "DUP"},
+                         {"id": "old-b", "name": "B", "type": "other", "u": 3, "mac": "AABBCCDDEE01", "serial_number": "dup"}]
+    store.ITEMS_FILE.write_text(json.dumps(legacy))
+    response = await c.get("/api/rack-items")
+    data = response.json()
+    data["Rack-02"][0]["notes"] = "Unrelated edit"
+    data["Rack-01"][0]["mac"] = "02:00:00:00:00:01"
+    saved = await c.put("/api/rack-items", json=data, headers={"If-Match": response.headers["etag"]})
+    assert saved.status_code == 200
+    # A third unit taking that legacy MAC or serial is still refused.
+    for change in ({"mac": "aa:bb:cc:dd:ee:01"}, {"serial_number": "Dup"}):
+        current = await c.get("/api/rack-items")
+        edit = current.json()
+        edit["Rack-01"][0].update(change)
+        refused = await c.put("/api/rack-items", json=edit, headers={"If-Match": current.headers["etag"]})
+        assert refused.status_code == 409, change
+
+
+def test_identity_index_answers_exactly_like_a_rescan():
+    data = {"R1": [{"id": "a", "serial_number": "S1", "mac": "00-1a-2b-3c-4d-5e"}, {"id": "b", "barcode": "001A2B3C4D5E"}],
+            "R2": [{"id": "c", "barcode": " Code-1 "}, {"id": "d"}]}
+    index = store.identity_index(data)
+    for code in ("S1", "s1", "00:1A:2B:3C:4D:5E", "001a.2b3c.4d5e", "code-1", "a", "d", "nothing", "", "  "):
+        for exclude in (None, "a", "b", "c", "d"):
+            outcomes = []
+            for idx in (None, index):
+                try:
+                    store.ensure_unique(data, code, exclude, index=idx)
+                    outcomes.append("ok")
+                except Exception as exc:
+                    outcomes.append(exc.status_code)
+            assert outcomes[0] == outcomes[1], (code, exclude, outcomes)
+
+
 def test_mac_normalisation():
     assert store.normalize_mac("b8:ce:f6:00:11:22") == "B8:CE:F6:00:11:22"
     assert store.normalize_mac(" B8-CE-F6-00-11-22 ") == "B8:CE:F6:00:11:22"

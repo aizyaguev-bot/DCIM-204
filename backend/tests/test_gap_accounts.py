@@ -120,9 +120,12 @@ ROUTE_ROLES = {
     # Own account: every signed-in role.
     "POST /api/auth/logout": "Viewer", "GET /api/me": "Viewer", "PUT /api/me": "Viewer", "PUT /api/me/password": "Viewer",
     "PUT /api/me/preferences": "Viewer",
+    # Ending one's own other sessions: every signed-in role (the handler only touches the caller's own sessions).
+    "POST /api/me/end-other-sessions": "Viewer",
     # User management.
     "GET /api/users": "Admin", "POST /api/users": "Admin", "PATCH /api/users/{user_id}": "Admin",
     "DELETE /api/users/{user_id}": "Admin", "POST /api/users/{user_id}/reset-password": "Admin",
+    "POST /api/users/{user_id}/end-sessions": "Admin",
     # Lab assistant: asking and deleting one's own conversation are the only Viewer writes.
     "GET /api/assistant/status": "Viewer", "POST /api/assistant/chat": "Viewer", "GET /api/assistant/conversations": "Viewer",
     "GET /api/assistant/conversations/{conversation_id}": "Viewer", "DELETE /api/assistant/conversations/{conversation_id}": "Viewer",
