@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { MAIN_STORAGE } from "../api/inventory.js";
-import { STORAGE_SHELVES } from "../components/racks/floors.js";
+import { STORAGE_SHELVES, rackHasFloors, setStorageRacks } from "../components/racks/floors.js";
 
 const dcimSource = readFileSync(new URL("../pages/DcimView.jsx", import.meta.url), "utf8");
 const start = dcimSource.indexOf("export function buildRackRows(");
@@ -16,7 +16,7 @@ const fnSource = dcimSource.slice(start, dcimSource.indexOf("\n}", end) + 2).rep
 const dcimRegex = /const NON_SERVER_LABEL = (\/.+\/[a-z]*);/.exec(dcimSource)?.[1];
 assert.ok(dcimRegex, "NON_SERVER_LABEL found in DcimView.jsx");
 const NON_SERVER_LABEL = new Function(`return ${dcimRegex};`)();
-const buildRackRows = new Function("MAIN_STORAGE", "NON_SERVER_LABEL", "STORAGE_SHELVES", `${fnSource}; return buildRackRows;`)(MAIN_STORAGE, NON_SERVER_LABEL, STORAGE_SHELVES);
+const buildRackRows = new Function("MAIN_STORAGE", "NON_SERVER_LABEL", "STORAGE_SHELVES", "rackHasFloors", `${fnSource}; return buildRackRows;`)(MAIN_STORAGE, NON_SERVER_LABEL, STORAGE_SHELVES, rackHasFloors);
 
 // isDefaultOutletLabel and isServerLabel: the two small exported helpers, evaluated the same way.
 function extract(name) {
@@ -146,4 +146,28 @@ test("the open rack can be owned by the App (C3): RacksView is controlled with o
   // saving a rack from the grid does not push a needless history entry
   assert.match(body, /if \(selectedRack\) setSelectedRack\(null\);/);
   assert.doesNotMatch(body, /onRefresh\?\.\(\); setSelectedRack\(null\)/);
+});
+
+test("a rack whose type is Storage is a 16-shelf storage unit like Storage-Main (shelves by type, not by name)", () => {
+  try {
+    setStorageRacks(["Storage shelf"]);
+    const { rows } = buildRackRows([], "Storage shelf", {}, {}, { "Storage shelf": [{ id: "s", name: "Spare switch", type: "switch", u: 0 }, { id: "n", name: "NIC", u: 5 }] });
+    assert.deepEqual(rows.map(r => r.u), [...Array.from({ length: 16 }, (_, i) => i + 1), 0]);
+    assert.deepEqual(used(rows), [[5, ["NIC"]], [0, ["Spare switch"]]]);
+  } finally { setStorageRacks([]); }
+  // the same name without the storage type is a compute rack again: at least 8 U, no 16 shelves
+  assert.deepEqual(buildRackRows([], "Storage shelf", {}, {}, {}).rows.map(r => r.u), Array.from({ length: 8 }, (_, i) => i + 1));
+});
+
+test("auto-placed OPTs in a storage rack fill shelves 1-16, then go to the whole-storage row, never to Other", () => {
+  const servers = Array.from({ length: 18 }, (_, i) => server(`opt${String(i + 1).padStart(2, "0")}`));
+  const { rows, uMap } = buildRackRows(servers, MAIN_STORAGE, {}, { [MAIN_STORAGE]: { opt01: 2 } }, {});
+  assert.deepEqual(rows.map(r => r.u), [...Array.from({ length: 16 }, (_, i) => i + 1), 0], "no row above shelf 16");
+  assert.equal(uMap.opt01, 2);
+  assert.equal(Object.values(uMap).filter(u => u === 0).length, 2, "the two OPTs that do not fit are on the whole-storage row");
+  assert.equal(rows.at(-1).auto, true, "the whole-storage row is marked auto-placed");
+  assert.equal(rows.at(-1).items.length, 2);
+  // a saved shelf above 16 is still old data, kept on its own row
+  const old = buildRackRows([server("opt9")], MAIN_STORAGE, {}, { [MAIN_STORAGE]: { opt9: 30 } }, {});
+  assert.deepEqual(old.rows.map(r => r.u).slice(-1), [30]);
 });

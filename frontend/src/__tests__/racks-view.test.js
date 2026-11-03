@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { serverVisualState, rackSummary, withCoolingRows, compactRows, buildSearchIndex, searchIndex, matchesFilter, floorOptions,
-  rackFloors, RACK_FLOORS, STORAGE_SHELVES, floorsFor } from "../components/racks/rackView.js";
+  rackFloors, RACK_FLOORS, STORAGE_SHELVES, floorsFor, FLOOR_UNIT_SLOTS, SHELF_SLOTS, slotOverflow, splitSlots, moreText, serverFacts } from "../components/racks/rackView.js";
+import { setStorageRacks, storageRackNames, isStorageRack, rackHasFloors, validFloor, placeWord, placesWord } from "../components/racks/floors.js";
+import { describeFloor, validPlace } from "../components/racks/chillers.js";
+import { floorText, placeText } from "../api/unitScan.js";
 
 const server = (name, state = "on", pduId = "pdu4") => ({ id: name.toLowerCase(), name, state, pduId, pduName: `PDU ${pduId.slice(3)}`, outlet: 1, watts: 100 });
 const row = (u, names = [], kind = "server") => ({ u, items: names.map(name => ({ kind, data: { id: name.toLowerCase(), name } })), auto: false });
@@ -149,4 +152,66 @@ test("floorOptions: the rack's floors 1-RACK_FLOORS only, rack level first, name
   assert.deepEqual(storage[0], { value: "", label: "Not on a shelf (rack level)" });
   assert.equal(storage[7].label, "Shelf 7 · OPT47");
   assert.equal(storage[16].label, "Shelf 16 · empty");
+});
+
+// ─── floor template (v2.47) ──────────────────────────────────────────────────────────────────────────────────────────
+test("slotOverflow / splitSlots: up to the slots shown; more than that, the last slot is the +N chip", () => {
+  assert.deepEqual([0, 1, 2].map(n => slotOverflow(n, 2)), [{ shown: 0, more: 0 }, { shown: 1, more: 0 }, { shown: 2, more: 0 }]);
+  assert.deepEqual(slotOverflow(3, 2), { shown: 1, more: 2 }, "3 units in 2 slots: 1 drawn, +2 units");
+  assert.deepEqual(slotOverflow(7, 3), { shown: 2, more: 5 });
+  assert.deepEqual(slotOverflow(5, 1), { shown: 0, more: 5 }, "a single slot is the +N chip itself");
+  assert.deepEqual([slotOverflow(-1, 2), slotOverflow("x", 2), slotOverflow(2, 0)], [{ shown: 0, more: 0 }, { shown: 0, more: 0 }, { shown: 0, more: 2 }]);
+  const list = ["a", "b", "c", "d"];
+  assert.deepEqual(splitSlots(list, 2), { shown: ["a"], rest: ["b", "c", "d"], more: 3 });
+  assert.deepEqual(splitSlots(list, 4), { shown: list, rest: [], more: 0 });
+  assert.deepEqual(splitSlots(null, 2), { shown: [], rest: [], more: 0 });
+  // every slot is drawn: shown + the +N chip + empty placeholders = the slot count, on every floor and shelf
+  for (const slots of [FLOOR_UNIT_SLOTS.card, FLOOR_UNIT_SLOTS.detail, SHELF_SLOTS.card, SHELF_SLOTS.detail]) {
+    for (let n = 0; n <= 9; n++) {
+      const { shown, more } = slotOverflow(n, slots);
+      const free = slots - shown - (more ? 1 : 0);
+      assert.ok(free >= 0 && shown + (more ? 1 : 0) + free === slots, `${n} items in ${slots} slots`);
+      assert.equal(shown + more, n, "nothing is lost behind +N");
+    }
+  }
+});
+
+test("moreText: +N chips name what they hold", () => {
+  assert.deepEqual([moreText(1, "server"), moreText(2, "server"), moreText(1, "unit"), moreText(3, "unit"), moreText(4)],
+    ["+1 server", "+2 servers", "+1 unit", "+3 units", "+4 more"]);
+});
+
+test("serverFacts: the second line of a server, in order, only what is known", () => {
+  const visual = { state: "unreachable", title: "No reading from PDU 07" };
+  const facts = serverFacts({ visual, owner: "Hardware team", kvm: { kvmName: "KVM 01", port: 3 }, sw: { switch: "SW-1", port: 12 },
+    feeds: [{ pduName: "PDU 01", outlet: 3, state: "on" }, { pduName: "PDU 02", outlet: 3, state: "off" }] });
+  assert.deepEqual(facts.map(f => f.key), ["reading", "owner", "kvm", "switch", "feeds"]);
+  assert.deepEqual(facts.map(f => f.text), ["No reading from PDU 07", "Hardware team", "KVM 01 · port 3", "SW-1:12", "PDU 01 · 3, PDU 02 · 3"]);
+  assert.equal(facts[4].title, "PDU 01 outlet 3 (on), PDU 02 outlet 3 (off)");
+  assert.deepEqual(serverFacts({ visual: { state: "on", title: "Outlet 1 is on" } }), [], "an ON server with nothing else known has no facts");
+  assert.deepEqual(serverFacts().map(f => f.key), []);
+  assert.deepEqual(serverFacts({ sw: { switch: "SW-2" } }).map(f => f.text), ["SW-2"]);
+});
+
+test("storage typing: every rack whose type is Storage has 16 shelves, by type and not by name", () => {
+  const stats = [{ rack: "Rack-01", rackType: "compute" }, { rack: "Storage shelf", rackType: "storage" }, { rack: "Storage-Main", rackType: "compute" }, { rack: "Cold room", rackType: "storage" }];
+  assert.deepEqual(storageRackNames(stats), ["Storage shelf", "Storage-Main", "Cold room"], "Main storage always; the others by their type");
+  try {
+    setStorageRacks(storageRackNames(stats));
+    assert.deepEqual(["Rack-01", "Storage shelf", "Cold room", "Storage-Main", null].map(floorsFor), [4, 16, 16, 16, 4]);
+    assert.deepEqual(["Rack-01", "Storage shelf"].map(isStorageRack), [false, true]);
+    assert.deepEqual([placeWord("Storage shelf"), placesWord("Storage shelf"), placeWord("Rack-01")], ["shelf", "shelves", "floor"]);
+    assert.deepEqual([1, 4, 5, 16, 17].map(u => validFloor(u, "Storage shelf")), [true, true, true, true, false]);
+    assert.deepEqual([4, 5].map(u => validPlace(u, "Storage shelf")), [true, true], "the cooling dialog offers shelves 1-16 there");
+    const options = floorOptions([], {}, "Storage shelf");
+    assert.equal(options.length, 17, "cooling dialog: not on a shelf + shelves 1-16");
+    assert.match(options[0].label, /Not on a shelf/);
+    assert.match(options[16].label, /^Shelf 16 · empty$/);
+    assert.equal(describeFloor({ rack: "Storage shelf", u: 12 }), "Shelf 12");
+    assert.deepEqual([floorText(7, "Storage shelf"), floorText(0, "Storage shelf"), placeText({ rack: "Storage shelf", u: 7 }, "OPT1")],
+      ["shelf 7", "whole storage", "Storage shelf · shelf 7"], "the scan dialog names its shelves");
+    // A rack whose type changed back to compute has floors again; Main storage always has shelves.
+    setStorageRacks(storageRackNames([{ rack: "Storage shelf", rackType: "compute" }]));
+    assert.deepEqual([floorsFor("Storage shelf"), rackHasFloors("Storage shelf"), floorsFor("Storage-Main")], [4, true, 16]);
+  } finally { setStorageRacks([]); }
 });

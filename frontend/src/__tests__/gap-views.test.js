@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { MAIN_STORAGE } from "../api/inventory.js";
-import { STORAGE_SHELVES } from "../components/racks/floors.js";
+import { STORAGE_SHELVES, rackHasFloors } from "../components/racks/floors.js";
 import { normalizeDraft, PRIORITIES } from "../api/assistant.js";
 
 // Evaluate the source between two markers of a product file and return its exported helpers by name.
@@ -35,7 +35,7 @@ function knownBug(name, reason, fn) {
 }
 
 const { isDefaultOutletLabel, buildRackRows, storageShelfOptions } =
-  loadHelpers("../pages/DcimView.jsx", "export function isDefaultOutletLabel(", "// ─── primitives", { MAIN_STORAGE, STORAGE_SHELVES });
+  loadHelpers("../pages/DcimView.jsx", "export function isDefaultOutletLabel(", "// ─── primitives", { MAIN_STORAGE, STORAGE_SHELVES, rackHasFloors });
 const { connectionRacks, filterConnections } =
   loadHelpers("../pages/ConnectionsView.jsx", "export function connectionRacks(", "\nfunction ConnectionList");
 const { formatMaintenanceTime, maintenanceStateFor } =
