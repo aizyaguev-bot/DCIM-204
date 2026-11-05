@@ -833,7 +833,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await vp.keyboard.press('Escape');await viewerUnit.waitFor({state:'detached'});
     // SCAN-13 in the unit panel: the scanned NIC reads as its product, with its serial and part number in their fields.
     const NIC_ID=(await withCode('MT2245X01234'))[0].id;
-    await vp.locator(`.equipment-cell[data-item-id="${NIC_ID}"][aria-label="View ConnectX-7 NIC"] .equipment-type`).first().click();
+    await vp.locator(`.equipment-cell[data-item-id="${NIC_ID}"][aria-label="View ConnectX-7 NIC"] .slot-field[data-field="part_number"]`).first().click();
     const nicUnit=vp.getByRole('dialog',{name:'ConnectX-7 NIC',exact:true});
     await nicUnit.waitFor();
     const nicText=await nicUnit.innerText();
