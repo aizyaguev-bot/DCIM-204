@@ -72,7 +72,8 @@ test("isServerLabel: real names are servers; default outlet names and non-comput
 test("the DCIM server list (and so every OPT count, the rack meta and the KPI bar) uses isServerLabel", () => {
   const at = dcimSource.indexOf("const servers = useMemo(");
   assert.ok(at >= 0);
-  const memo = dcimSource.slice(at, dcimSource.indexOf("},[pdus,pduStatuses,rackOverrides]);", at));
+  const memo = dcimSource.slice(at, dcimSource.indexOf("},[pdus,pduStatuses,rackOverrides,removedHidden]);", at));
+  assert.match(memo, /withoutRemoved\(\[\.\.\.feeds\.values\(\)\]\.map\(mergeServerFeeds\), removedHidden\)/, "removed servers are left out");
   assert.equal(memo.match(/if\(!isServerLabel\(/g)?.length, 2, "stored and live labels are both filtered");
   assert.doesNotMatch(memo, /isDefaultOutletLabel/);
 });

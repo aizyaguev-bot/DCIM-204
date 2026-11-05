@@ -21,6 +21,9 @@ import CoolingUnitDialog from "../components/racks/CoolingUnitDialog.jsx";
 import { CoolingChip, CoolingStrip, CoolingPanel } from "../components/racks/CoolingUnits.jsx";
 import { RackKpis, RacksToolbar, filterEmptyText } from "../components/racks/RacksToolbar.jsx";
 import ServerDetailsDialog from "../components/racks/ServerDetailsDialog.jsx";
+import RemoveServerDialog from "../components/racks/RemoveServerDialog.jsx";
+import { useRemovedServers } from "../removedServers.jsx";
+import { withoutRemoved, restoreServer } from "../api/removedServers.js";
 import UndoToast from "../components/racks/UndoToast.jsx";
 import ScanUnitDialog from "../components/racks/ScanUnitDialog.jsx";
 import useDialogFocus from "../components/racks/useDialogFocus.js";
@@ -1043,7 +1046,9 @@ function MoveOptSection({ server, pdu, pdus, rackDevices, onRackOverrideChange, 
 }
 
 // ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, optOwners, ownersLoaded, onOwnerChange, onRackOverrideChange, onScanUnit = null, onClose, onLabelChange, onRenameOpt, onSlotSave, onSwitchSave, powerGroup, powerPending, onRequestPower }) {
+// onRemoveFromLab (Admin only): "Remove from lab" (RemoveServerDialog) hides the server everywhere and keeps its PDU label,
+// unlike "Remove from DCIM", which clears the label on the PDU.
+function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, optOwners, ownersLoaded, onOwnerChange, onRackOverrideChange, onScanUnit = null, onClose, onLabelChange, onRenameOpt, onSlotSave, onSwitchSave, powerGroup, powerPending, onRequestPower, onRemoveFromLab = null }) {
   const panelRef = useRef(null);
   useDialogFocus(panelRef, { onEscape: onClose });
   const pdu   = pdus.find(p => p.id === server.pduId);
@@ -1215,6 +1220,11 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
           </div> : <button type="button" onClick={()=>setConfirmRemove(true)} className="w-full py-2 text-xs font-medium text-rose-400 hover:text-rose-300 border border-rose-900/40 hover:border-rose-800/60 rounded-lg transition">
             Remove from DCIM
           </button>}
+          {onRemoveFromLab && !confirmRemove && <button type="button" data-action="open-remove-server" onClick={onRemoveFromLab}
+            className="mt-2 w-full py-2 text-xs font-bold text-white bg-rose-900 hover:bg-rose-800 border border-rose-800 rounded-lg transition">
+            Remove from lab (Admin)
+          </button>}
+          {onRemoveFromLab && !confirmRemove && <p className="mt-1 text-[11px] text-zinc-500">Hides a server that is no longer in the lab from every page. The PDU label stays.</p>}
         </div>
       </div>
     </div>
@@ -2327,6 +2337,7 @@ function ReadOnlyAsset({ item, owner, onClose, sshName }) {
 export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, onOpenConsole, section: controlledSection, editMode = false, onSummary, maintenance, onSwitchFeeds, onRequestEdit, rack, onRackChange}) {
   const {canOperate, canAdmin, preferences} = useAccounts();
   const {revision: engineerRevision} = useEngineers();
+  const {hidden: removedHidden, refresh: refreshRemoved} = useRemovedServers();
   const [localSection, setSection] = useState("racks");
   const section = controlledSection || localSection;
   const [rackOrder,         setRackOrder]         = useState({});
@@ -2440,6 +2451,26 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [toast, setToast] = useState(null);
   const showToast = useCallback((text, tone = "ok", onUndo = null) => setToast({ id: `${Date.now()}-${Math.random()}`, text, tone, onUndo }), []);
   const dismissToast = useCallback(id => setToast(t => (t?.id === id ? null : t)), []);
+
+  // ── remove a server from the lab (Admin): RemoveServerDialog, then a toast whose Undo restores it ──
+  const [removeTarget, setRemoveTarget] = useState(null);   // the server's name
+  const afterRemovedChange = useCallback(() => { refreshRemoved().catch(() => {}); reloadLayouts(false, true); }, [refreshRemoved, reloadLayouts]);
+  const undoRemove = useCallback(async (key, name) => {
+    try {
+      await restoreServer(key);
+      afterRemovedChange();
+      showToast(<><bdi>{name}</bdi> is back in the lab. Its rack position, switch port and owner were not restored.</>);
+    } catch (e) {
+      showToast(<><bdi>{name}</bdi> was not restored: {e.message}</>, "error");
+    }
+  }, [afterRemovedChange, showToast]);
+  const serverRemoved = useCallback(result => {
+    const { key, name } = result.removed;
+    setRemoveTarget(null);
+    setSelectedServerId(null);
+    afterRemovedChange();
+    showToast(<><bdi>{name}</bdi> was removed from the lab.</>, "ok", () => undoRemove(key, name));
+  }, [afterRemovedChange, showToast, undoRemove]);
 
   // ── cooling units: never deleted; every edit is checked (assertKeepsUnits) and saved against the latest document ──
   const chillersRef = useRef(chillers);
@@ -2562,8 +2593,9 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         add(key,{id:key,name:o.label.trim(),rack:rackOverrides[key]||pdu.rack||"—",pduId:pdu.id,pduName:pdu.name,pduIp:pdu.ip,outlet:o.number,state:o.state,watts:o.watts??null});
       });
     });
-    return [...feeds.values()].map(mergeServerFeeds).sort((a,b)=>a.name.localeCompare(b.name));
-  },[pdus,pduStatuses,rackOverrides]);
+    // Servers an Admin removed from the lab are left out here, before the rack rows number the U slots.
+    return withoutRemoved([...feeds.values()].map(mergeServerFeeds), removedHidden).sort((a,b)=>a.name.localeCompare(b.name));
+  },[pdus,pduStatuses,rackOverrides,removedHidden]);
 
   const rackStats = useMemo(()=>racks.map(rn=>{
     const rPdus=rackDevices.filter(p=>p.rack===rn);
@@ -2999,7 +3031,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onRequestPower={powerEnabled ? (action, el, opts) => requestPower(selectedServer, action, el, opts) : null}
           onClose={()=>setSelectedServerId(null)}
           onScanUnit={canOperate ? () => openScanUnit({ server: selectedServer }) : null}
-          consoleButton={canOperate && onOpenConsole && kvmByServer.get(serverIdentity(selectedServer.name)) ? <KvmButton server={selectedServer}/> : null} sshSlot={<SshSlot server={selectedServer} size="md"/>}/>
+          consoleButton={canOperate && onOpenConsole && kvmByServer.get(serverIdentity(selectedServer.name)) ? <KvmButton server={selectedServer}/> : null} sshSlot={<SshSlot server={selectedServer} size="md"/>}
+          onRemove={canAdmin ? () => setRemoveTarget(selectedServer.name) : null}/>
       </Portal>}
       {selectedServer&&editMode&&(
         <Portal>
@@ -3011,9 +3044,13 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
             onLabelChange={handleLabelChange} onRenameOpt={handleRenameOpt}
             onSlotSave={handleSlotSave} onSwitchSave={handleSwitchSave}
             powerGroup={powerFor(selectedServer)} powerPending={powerPending(selectedServer)}
-            onRequestPower={powerEnabled ? (action, el, opts) => requestPower(selectedServer, action, el, opts) : null}/>
+            onRequestPower={powerEnabled ? (action, el, opts) => requestPower(selectedServer, action, el, opts) : null}
+            onRemoveFromLab={canAdmin ? () => setRemoveTarget(selectedServer.name) : null}/>
         </Portal>
       )}
+      {removeTarget && canAdmin && <Portal>
+        <RemoveServerDialog key={removeTarget} serverName={removeTarget} onRemoved={serverRemoved} onClose={() => setRemoveTarget(null)}/>
+      </Portal>}
 
       {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={optOwners[`item:${selectedCustom.id}`]} sshName={["computer","server"].includes(selectedCustom.type)?selectedCustom.name:null} onClose={()=>selectCustom(null)}/></Portal>}
       {selectedCustom&&selectedCustomRack&&editMode&&(

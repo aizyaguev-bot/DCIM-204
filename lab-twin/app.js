@@ -598,17 +598,21 @@
     if (live.connected) {
       const pdus = live.devices.filter(x => x.kind === 'pdu');
       const kvms = live.devices.filter(x => x.kind === 'kvm');
-      // 1) OPT servers exactly like DcimView.servers
+      // 1) OPT servers exactly like DcimView.servers. A server an Admin removed from the lab (Lab Manager → Admin →
+      // Removed servers) is left out before the U assignment, as DcimView does: its `hidden` identity keys
+      // (pingKey, compared exactly) come from GET /api/removed-servers.
+      const removedKeys = new Set(Array.isArray(live.removed?.hidden) ? live.removed.hidden : []);
+      const isRemoved = label => removedKeys.has(pingKey(label));
       const servers = new Map();
       pdus.forEach(pdu => {
         const stored = pdu.labels || {}; const liveOut = live.pdu[pdu.id]?.reachable ? live.pdu[pdu.id].outlets || [] : []; const liveByN = Object.fromEntries(liveOut.map(o => [String(o.number), o]));
         Object.entries(stored).forEach(([num, label]) => {
-          if (!isServerLabel(label)) return; const key = optKey(label); if (servers.has(key)) return;
+          if (!isServerLabel(label) || isRemoved(label)) return; const key = optKey(label); if (servers.has(key)) return;
           const lo = liveByN[num];
           servers.set(key, { key, name: label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: lo?.state ?? 'unknown', watts: lo?.watts ?? null });
         });
         liveOut.forEach(o => {
-          if (!isServerLabel(o.label)) return; const key = optKey(o.label);
+          if (!isServerLabel(o.label) || isRemoved(o.label)) return; const key = optKey(o.label);
           if (servers.has(key)) { const e = servers.get(key); e.state = o.state; e.watts = o.watts ?? null; return; }
           servers.set(key, { key, name: o.label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts ?? null });
         });
@@ -639,6 +643,7 @@
         it.unmappedRack = !!s.rack && !sid;
         items = items.filter(x => x !== jsonOpts.get(s.key)); items.push(it);
       });
+      items = items.filter(i => !(i.type === 'opt' && !seen.has(i.dcim?.optKey || optKey(i.name)) && removedKeys.has(pingKey(i.name))));   // removed from the lab
       items.filter(i => i.type === 'opt' && !seen.has(i.dcim?.optKey || optKey(i.name))).forEach(i => { i.live = { inDcim: false }; i.liveWarning = LIVE_WARN.notInDcim; });
       // 2) PDU / KVM devices
       items.forEach(i => {
@@ -1743,6 +1748,7 @@
     devices: '/api/devices/', rackSlots: '/api/rack-slots', rackOrder: '/api/rack-positions',
     sw: '/api/switch-assignments', owners: '/api/opt-owners', rackItems: '/api/rack-items',
     chillers: '/api/chillers', rackOverrides: '/api/rack-overrides', engineers: '/api/engineers', maintenance: '/api/pdus/maintenance',
+    removed: '/api/removed-servers',   // servers an Admin removed from the lab: hidden like in Lab Manager
   };
   // A PDU in maintenance mode refuses power on / cycle until it is restored in Lab Manager.
   const inMaintenance = pduId => !!(S.live.connected && pduId && S.live.maintenance?.pdus?.[pduId]);

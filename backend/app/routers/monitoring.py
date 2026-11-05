@@ -73,6 +73,8 @@ def target_view(target, tz, *, name_override="", inventory_name=None):
         "id": target.id, "name": name_override or inventory_name or target.name, "host": target.host, "rack": target.rack,
         "inventory_name": inventory_name or target.name, "name_synced": not bool(name_override),
         "source": target.source, "enabled": target.enabled, "revision": target.revision,
+        # The server identity this monitor belongs to (pages hide the monitors of servers removed from the lab).
+        "server_key": target.source_key.removeprefix("server:") if target.source_key.startswith("server:") else None,
         "status": status, "last_result": target.status, "checked_at": iso(target.checked_at),
         "last_up_at": iso(target.last_up_at), "rtt_ms": target.rtt_ms, "detail": target.detail,
     }

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
+import { useRemovedServers } from "../removedServers.jsx";
+import { withoutRemoved } from "../api/removedServers.js";
 import ExportCsvButton from "../components/ExportCsvButton";
 import SshButton from "../components/SshButton";
 import {
@@ -14,7 +16,14 @@ const input = "bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-sm te
 // Server-centric view: where each server sits (rack, slot, PDU outlets, KVM port) and a guarded Move flow.
 export default function LocationsView({ devices, onChanged }) {
   const { canOperate } = useAccounts();
-  const [data, setData] = useState(null);
+  const [loaded, setData] = useState(null);
+  // Servers an Admin removed from the lab are not listed (their ports still count as taken).
+  const { hidden: removedHidden } = useRemovedServers();
+  const data = useMemo(() => {
+    if (!loaded) return loaded;
+    const servers = withoutRemoved(loaded.servers, removedHidden, s => s.key);
+    return servers === loaded.servers ? loaded : { ...loaded, servers };
+  }, [loaded, removedHidden]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [search, setSearch] = useState("");

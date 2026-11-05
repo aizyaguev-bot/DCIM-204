@@ -632,6 +632,13 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .power-confirm[data-action="on"] { border-color: #76b900; background: #76b900; color: #000; }
 .power-confirm[data-action="on"]:hover:not(:disabled) { background: #88ce0c; color: #000; }
 .power-confirm[data-action="cycle"] { border-color: #756122; background: #2a1c08; color: #f0c060; }
+/* Remove a server from the lab (Admin): the dangerous-action colours of Power off. */
+.racks-btn-danger { border-color: #7a1e1e; background: #7a1e1e; color: #fff; }
+.racks-btn-danger:hover:not(:disabled) { background: #9b2424; color: #fff; }
+.racks-btn-danger:disabled { opacity: .5; cursor: not-allowed; }
+.remove-server-list { margin: 0; padding-left: 18px; list-style: disc; font-size: 13px; color: #ddd; }
+.remove-server-list li + li { margin-top: 4px; }
+.remove-server-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid #2a2a2a; }
 .server-details-header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .server-details-header .server-led { width: 10px; height: 10px; }
 .server-details-header .racks-dialog-title { flex: 1 1 auto; min-width: 0; }

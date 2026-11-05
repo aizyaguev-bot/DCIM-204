@@ -22,6 +22,8 @@ probe_kvm*.py
 backend/rack_positions.json
 backend/rack_slots.json
 backend/switch_assignments.json
+backend/removed_servers.json
+backend/removed_servers.lock
 backend/rack_items.json
 backend/rack_items.lock
 backend/.rack-items-*.tmp

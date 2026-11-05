@@ -829,6 +829,9 @@ def _dcim_units(devices, labels, layouts):
     """rack -> {DCIM id: (U, automatic)} for the servers the DCIM rack view draws, in its order. Pure: `labels` are
     the labels the pages show (saved, else reported by the device), `layouts` the four layout files."""
     overrides = layouts["rack_overrides.json"]
+    # A server an Admin removed from the lab (routers/removed_servers.py) is not drawn by the pages, so it takes no U.
+    from .removed_servers import hidden_for_labels
+    hidden = hidden_for_labels({d.id: labels.get(d.id) or {} for d in devices})
     shown = {}  # DCIM id -> (name, rack); the first PDU (in device-list order) that carries a label wins
     for dev in sorted((d for d in devices if d.kind == "pdu"), key=lambda d: (d.rack or "", d.name or "")):
         for label in (labels.get(dev.id) or {}).values():
@@ -840,7 +843,7 @@ def _dcim_units(devices, labels, layouts):
                 shown[key] = (label.strip(), override if isinstance(override, str) and override else dev.rack or None)
     by_rack = {}
     for key, (name, rack) in sorted(shown.items(), key=lambda item: _locale_key(item[1][0])):
-        if rack is not None and not _NON_SERVER_LABEL.fullmatch(name):
+        if rack is not None and not _NON_SERVER_LABEL.fullmatch(name) and _key_of(name) not in hidden:
             by_rack.setdefault(rack, []).append((key, name))
     units = {}
     for rack, entries in by_rack.items():

@@ -126,6 +126,10 @@ async def inventory_sources(db):
 async def discover_targets(db):
     """Import current inventory while preserving addresses, pause and history."""
     found = await inventory_sources(db)
+    # A server an Admin removed from the lab gets no new monitor (its existing one was paused, not deleted).
+    from .routers.removed_servers import hidden_keys
+    for key in await hidden_keys(db):
+        found.pop(key, None)
     existing = {t.source_key: t for t in (await db.execute(select(PingTarget))).scalars()}
     for key, (name, host, rack) in found.items():
         source_key = "server:" + key

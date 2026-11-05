@@ -8,8 +8,9 @@ const FEED_STATE = s => (s === "on" ? "ON" : s === "off" ? "OFF" : "Unknown");
 // A server's details in view mode: place, owner, switch, power (whole server and per feed) and console.
 // Changing the shelf, outlet, switch or owner stays in Edit mode (ServerEditPanel). onScanUnit (Operator and up) opens
 // "Scan barcode": units scanned there are added to this server's floor.
-export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, watts, group, pending, waiting, onRequestPower, onClose, consoleButton, sshSlot, onScanUnit = null }) {
-  const { canOperate } = useAccounts();
+// onRemove (Admin only) opens "Remove from lab" (RemoveServerDialog).
+export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, watts, group, pending, waiting, onRequestPower, onClose, consoleButton, sshSlot, onScanUnit = null, onRemove = null }) {
+  const { canOperate, canAdmin } = useAccounts();
   const panelRef = useRef(null);
   const closeRef = useRef(null);
   useDialogFocus(panelRef, { initialRef: closeRef, onEscape: onClose });
@@ -58,6 +59,10 @@ export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, 
       {!canOperate && <p className="racks-dialog-note">Viewer · read only</p>}
       {canOperate && consoleButton && <><h3 className="racks-dialog-subtitle">Console</h3><div>{consoleButton}</div></>}
       <p className="racks-dialog-note">Turn on Edit to change this server's shelf, outlet, switch or owner.</p>
+      {canAdmin && onRemove && <div className="remove-server-entry">
+        <button type="button" className="racks-btn racks-btn-danger" data-action="open-remove-server" onClick={onRemove}>Remove from lab</button>
+        <span className="racks-muted">Admin · for a server that is no longer in the lab. Nothing is changed on the PDU.</span>
+      </div>}
     </section>
   </div>;
 }

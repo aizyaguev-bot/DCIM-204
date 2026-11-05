@@ -3,6 +3,7 @@
 import { deviceState } from "./api/client.js";
 import { rackSummary, serverVisualState } from "./components/racks/rackView.js";
 import { MAIN_STORAGE } from "./api/inventory.js";
+import { withoutRemoved } from "./api/removedServers.js";
 
 export const REFRESH_MS = 15_000;        // one data cycle, like the rest of the site
 export const STALE_MS = 60_000;          // older data than this: the page is "NOT LIVE" (banner, greyed panels)
@@ -253,11 +254,12 @@ const KIND_ORDER = ["leak", "temperature", "alert", "pdu", "load", "ping", "kvm"
 // alerts, sensors past a threshold. Maintenance has its own band (maintenanceEntries). Each entry: {key, severity,
 // kind, rack, titleParts, parts} plus title / detail as plain text. monitoringUnknownSince (ms): Ping Monitor data
 // could not be read since then, so its ping and alert items are left out and one warning says so.
-export function attentionItems({ devices = [], pduStatuses = {}, kvmStatuses = {}, monitoring = null, env = null, now = Date.now(), monitoringUnknownSince = null }) {
+// removedHidden: identity keys of servers an Admin removed from the lab (api/removedServers.js); they are not counted.
+export function attentionItems({ devices = [], pduStatuses = {}, kvmStatuses = {}, monitoring = null, env = null, now = Date.now(), monitoringUnknownSince = null, removedHidden = null }) {
   const items = [];
   const add = (key, severity, kind, rack, titleParts, parts = []) =>
     items.push({ key, severity, kind, rack: rack || "", titleParts, parts, title: partsText(titleParts), detail: partsText(parts) });
-  const servers = buildServers(devices.filter(d => d.kind === "pdu"), pduStatuses);
+  const servers = withoutRemoved(buildServers(devices.filter(d => d.kind === "pdu"), pduStatuses), removedHidden);
   for (const d of devices) {
     if (d.kind !== "pdu" && d.kind !== "kvm") continue;
     const status = d.kind === "pdu" ? pduStatuses[d.id] : kvmStatuses[d.id];

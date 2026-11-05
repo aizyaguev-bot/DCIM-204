@@ -8,6 +8,8 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
+import { useRemovedServers } from "../removedServers.jsx";
+import { withoutRemoved, withoutRemovedMonitoring } from "../api/removedServers.js";
 import nvidiaLogo from "../assets/nvidia-logo.svg";
 import {
   REFRESH_MS, STALE_MS, STALE_ALARM_MS, ROTATE_MS, REQUEST_TIMEOUT_MS, OVERRIDES_EVERY, INCIDENT_LIMIT, ROW_EM,
@@ -283,14 +285,17 @@ function DisplayScreen() {
   useScreenSetup(rootRef);
   const stale = useStale(feed.lastSuccess);
   const shift = useBurnInShift();
+  const { hidden: removedHidden } = useRemovedServers();
 
   const view = useMemo(() => {
-    const { data, sources } = feed;
+    const { sources } = feed;
+    // Servers an Admin removed from the lab are not shown, counted or pinged (their monitors are paused).
+    const data = { ...feed.data, monitoring: withoutRemovedMonitoring(feed.data.monitoring, removedHidden) };
     const pdus = data.devices.filter(d => d.kind === "pdu");
-    const servers = buildServers(pdus, data.pduStatuses, data.rackOverrides);
+    const servers = withoutRemoved(buildServers(pdus, data.pduStatuses, data.rackOverrides), removedHidden);
     const env = environment(pdus, data.pduStatuses);
     const monitoringUnknownSince = sources.monitoring?.state === "unknown" ? sources.monitoring.since : null;
-    const attention = attentionItems({ ...data, env, now: feed.lastSuccess || Date.now(), monitoringUnknownSince });
+    const attention = attentionItems({ ...data, env, now: feed.lastSuccess || Date.now(), monitoringUnknownSince, removedHidden });
     return {
       env,
       attention,
@@ -301,7 +306,7 @@ function DisplayScreen() {
       changes: recentChanges(data),
       maintenance: maintenanceEntries(data),
     };
-  }, [feed.data, feed.sources, feed.lastSuccess]);
+  }, [feed.data, feed.sources, feed.lastSuccess, removedHidden]);
   const partial = Object.values(feed.sources).some(source => source?.state === "unknown");
 
   return (

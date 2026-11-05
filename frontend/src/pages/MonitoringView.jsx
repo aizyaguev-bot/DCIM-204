@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import {useAccounts} from "../accounts";
+import { useRemovedServers } from "../removedServers.jsx";
+import { withoutRemovedTargets } from "../api/removedServers.js";
 
 const input = "w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:border-nv-400";
 const button = "rounded-lg border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800 disabled:opacity-40";
@@ -246,6 +248,7 @@ function ServerHistory({ target, timezone, onSaved, onClose, panelRef }) {
 
 export default function MonitoringView() {
   const {canOperate,preferences} = useAccounts();
+  const { hidden: removedHidden } = useRemovedServers();
   const [data, setData] = useState(null);
   const [incidents, setIncidents] = useState([]);
   const [error, setError] = useState("");
@@ -310,7 +313,8 @@ export default function MonitoringView() {
     catch (e) { setError(e.message); }
     finally { setBusy(false); }
   }
-  const targets = data?.targets || [];
+  // Servers an Admin removed from the lab are not listed (their monitors are paused, history kept).
+  const targets = withoutRemovedTargets(data?.targets || [], removedHidden);
   const timezone = data?.timezone || "Asia/Jerusalem";
   const selected = targets.find(t => t.id === selectedId);
   const attention = t => ["error", "stale", "unconfigured", "pending"].includes(t.status) || ["pdu", "kvm"].some(kind => !t[kind]?.length || t[kind].some(link => !["on", "active", "idle"].includes(link.status)));

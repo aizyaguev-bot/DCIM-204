@@ -27,9 +27,10 @@ import { pxeApi, errorText as pxeErrorText } from "./api/pxe";
 import AssistantPanel from "./components/assistant/AssistantPanel";
 import useAssistantUseful from "./components/assistant/useAssistantUseful";
 import SshAdmin from "./pages/SshAdmin";
+import RemovedServersView from "./pages/RemovedServersView";
 // The terminal page (and xterm) loads only when an SSH tab is opened.
 const SshTerminal = lazy(() => import("./pages/SshTerminal"));
-const ADMIN_SECTIONS = ["devices", "users", "engineers", "mapping", "locations", "connections", "assistant", "ssh", "help"];
+const ADMIN_SECTIONS = ["devices", "users", "engineers", "removed", "mapping", "locations", "connections", "assistant", "ssh", "help"];
 // ?tab=admin&section=<id> opens that Admin sub-page directly (the SSH terminal page links to Admin -> SSH this way).
 function linkedAdminSection(search) {
   const section = new URLSearchParams(search).get("section");
@@ -521,7 +522,7 @@ function LabManagerApp() {
         onAccount={() => goTo("account")} onUsers={() => navigateAdmin("users")} remoteInstall={pxeConfig?.enabled === true} />
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
       {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
-      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canOperate?[["ssh","SSH"]]:[]),...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
+      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"],["removed","Removed servers"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canOperate?[["ssh","SSH"]]:[]),...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
       {view.kind === "dashboard" && pageInfo && <div className="page-intro"><h1>{pageInfo[0]}</h1><p>{pageInfo[1]} {updatedText}</p></div>}
       {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
       {view.kind === "dashboard" && ["racks", "inventory", "power", "changelog"].includes(mainTab) && (
@@ -557,6 +558,7 @@ function LabManagerApp() {
       {view.kind === "dashboard" && mainTab === "account" && <AccountSettings />}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "users" && canAdmin && <UsersView />}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "engineers" && canAdmin && <EngineersView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "removed" && canAdmin && <RemovedServersView />}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "connections" && <ConnectionsView />}
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "assistant" && <AssistantKeyView />}
       {view.kind === "dashboard" && mainTab === "monitoring" && <MonitoringView />}
