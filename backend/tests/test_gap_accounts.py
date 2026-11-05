@@ -148,6 +148,8 @@ ROUTE_ROLES = {
     "GET /api/devices/connections": "Operator", "GET /api/devices/connections.csv": "Operator",
     "GET /api/inventory": "Viewer", "POST /api/inventory": "Operator", "POST /api/inventory/{item_id}/barcode": "Operator",
     "POST /api/inventory/{item_id}/location": "Operator", "POST /api/inventory/{item_id}/details": "Operator",
+    # Serial numbers: the export is a read for every role; applying looked-up details (also as a dry run) is Operator.
+    "GET /api/inventory/serials": "Viewer", "GET /api/inventory/serials.csv": "Viewer", "POST /api/inventory/serial-details": "Operator",
     # KVM: status is a read; every console route (and its proxy, any method) needs an Operator.
     "GET /api/kvms/{device_id}/status": "Viewer", "GET /api/kvms/{device_id}/autologin": "Operator",
     "GET /api/kvms/{device_id}/console-url": "Operator", "GET /api/kvms/{device_id}/ports/{port_number}/viewer": "Operator",
