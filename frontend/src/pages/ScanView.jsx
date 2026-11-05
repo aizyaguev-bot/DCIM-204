@@ -309,15 +309,25 @@ export default function ScanView() {
     });
   }
 
-  // After details were imported in the Serial numbers panel: the list and the revision of the next save are current.
-  // A selected unit shows its new name; nothing else on the page changes.
+  // After details were imported in the Serial numbers panel: like Refresh, the list and the revision of the next save
+  // become current, so a selected unit is chosen again from the new list. Its destination is reset to where it is now
+  // (unless a destination label was scanned), so a save never moves back a unit another session moved meanwhile.
+  // The page state is read through a ref: this runs after the import's request, from an older render.
+  const latest = useRef({});
+  latest.current = { selected, destination, destinationChosen };
   async function refreshQuietly() {
     if (inFlight.current) return;
     try {
       const result = await loadInventory();
-      if (!mounted.current) return;
+      // A scan that started meanwhile loads the inventory itself.
+      if (!mounted.current || inFlight.current) return;
+      const { selected: shown, destination: target, destinationChosen: chosen } = latest.current;
       setSnapshot(result); setEditRevision(result.revision);
-      setSelected(current => current && (result.data.items.find(i => i.id === current.id) || current));
+      if (!shown) return;
+      const current = result.data.items.find(i => i.id === shown.id);
+      if (current) choose(current, result.revision, chosen ? target : null);
+      else setSelected(null);
+      setMessage("Inventory refreshed after the import. Review the current location before saving.");
     } catch { /* the next scan or Refresh loads it again */ }
   }
 

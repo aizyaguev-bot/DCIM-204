@@ -28,6 +28,9 @@ GENERIC_NAMES = {name.casefold() for name in (
     "Equipment", "patchpanel", "New unit", "New item", "Unknown")}
 DUPLICATE_ROW = "This serial number is listed more than once in the request; none of its rows were applied."
 AMBIGUOUS = "More than one unit has this serial number or barcode. Resolve the duplicate in DCIM first."
+NAME_KEPT = "The unit already has its own name, so it was kept; overwrite=true replaces it."
+# Types that say nothing about the product: mark_switch turns only these into "switch" (a PDU, cable or KVM stays one).
+GENERIC_TYPES = {"", "other"}
 
 
 class SerialDetail(BaseModel):
@@ -68,6 +71,9 @@ class SerialDetailsRequest(BaseModel):
     items: list[SerialDetail] = Field(min_length=1, max_length=MAX_ROWS)
     dry_run: bool = False
     overwrite: bool = False   # True: the looked-up name and model replace a unit's real (non-generic) name and model too
+    # True: a matched unit whose type is still generic ("other" or empty) becomes a switch, because the serial numbers
+    # were looked up as Switch. A unit with a real type (PDU, cable, KVM...) keeps it; only a row's own type changes it.
+    mark_switch: bool = False
 
 
 def generic_name(item):
@@ -82,17 +88,19 @@ def generic_name(item):
 
 
 def is_switch(value):
-    return bool(value) and re.search(r"\bswitch(es)?\b", value, re.IGNORECASE) is not None
+    """True for a type that names a switch ("switch", "Ethernet Switch", "Switch system"), not "non-switch" or "switchgear"."""
+    return bool(value) and re.search(r"(?<![\w-])switch(es)?(?![\w-])", value, re.IGNORECASE) is not None
 
 
 def match_index(data):
-    """{identity key: [(rack, item)]}: each unit under its serial number, or under its barcode when it has no serial."""
+    """{identity key: [(rack, item)]}: each unit under its serial number and under its barcode, compared the way a scan
+    compares codes, so a unit is found by either one (a code that names two units is ambiguous)."""
     index = {}
     for rack, items in data.items():
         for item in items:
-            code = item.get("serial_number") or item.get("barcode")
-            key = store.identity_key(code) if isinstance(code, (str, int)) else ""
-            if key:
+            keys = {store.identity_key(item.get(field)) for field in ("serial_number", "barcode")
+                    if isinstance(item.get(field), (str, int))} - {""}
+            for key in keys:
                 index.setdefault(key, []).append((rack, item))
     return index
 
@@ -103,7 +111,7 @@ def unit_view(rack, item):
             "barcode": item.get("barcode", ""), "part_number": item.get("part_number", ""), "model": item.get("model", "")}
 
 
-def planned_changes(item, row, overwrite):
+def planned_changes(item, row, overwrite, mark_switch=False):
     """{field: (before, after)} that `row` makes to `item`; nothing for a value the row does not carry."""
     changes = {}
     if row.part_number and item.get("part_number") != row.part_number:
@@ -112,9 +120,10 @@ def planned_changes(item, row, overwrite):
         changes["model"] = (item.get("model", ""), row.model)
     if row.name and item.get("name") != row.name and (overwrite or generic_name(item)):
         changes["name"] = (item.get("name", ""), row.name)
-    if is_switch(row.type) and item.get("type") != "switch":
+    generic_type = str(item.get("type") or "").strip() in GENERIC_TYPES
+    if (is_switch(row.type) or (mark_switch and not row.type and generic_type)) and item.get("type") != "switch":
         changes["type"] = (item.get("type", ""), "switch")
-    # Found by its barcode: that code is its serial number, so it is recorded as one.
+    # A unit without a serial number was found by its barcode: that code is its serial number, so it is recorded as one.
     if not item.get("serial_number"):
         changes["serial_number"] = ("", row.serial)
     return changes
@@ -125,8 +134,8 @@ LABELS = {**store.DETAIL_LABELS, "name": "Name", "type": "Type"}
 
 @router.post("/serial-details")
 async def apply_serial_details(body: SerialDetailsRequest, response: Response, if_match: str | None = Header(default=None)):
-    """Apply details looked up by serial number. Every row is matched by serial number (or by barcode when a unit has
-    no serial), compared the way a scan compares codes. All rows are applied together or none: a stale If-Match is 409
+    """Apply details looked up by serial number. Every row is matched by a unit's serial number or barcode, compared
+    the way a scan compares codes. All rows are applied together or none: a stale If-Match is 409
     and nothing is written. dry_run=true returns the same report and writes nothing (If-Match is then optional)."""
     with store.locked_items() as data:
         if if_match or not body.dry_run:
@@ -146,7 +155,7 @@ async def apply_serial_details(body: SerialDetailsRequest, response: Response, i
                 entry.update(status="ambiguous", detail=AMBIGUOUS, units=[unit_view(rack, item) for rack, item in found])
             else:
                 rack, item = found[0]
-                changes = planned_changes(item, row, body.overwrite)
+                changes = planned_changes(item, row, body.overwrite, body.mark_switch)
                 entry["unit"] = unit_view(rack, item)
                 if changes:
                     entry.update(status="updated", changes={field: {"before": before, "after": after} for field, (before, after) in changes.items()})
@@ -154,7 +163,7 @@ async def apply_serial_details(body: SerialDetailsRequest, response: Response, i
                 else:
                     entry["status"] = "unchanged"
                 if row.name and "name" not in changes and item.get("name") != row.name:
-                    entry["name_kept"] = "The unit already has its own name; send overwrite=true to replace it."
+                    entry["name_kept"] = NAME_KEPT
             report.append(entry)
         if plans and not body.dry_run:
             # Work on a copy so a refused value leaves the stored list exactly as it was.
@@ -172,7 +181,7 @@ async def apply_serial_details(body: SerialDetailsRequest, response: Response, i
             data = updated
         set_headers(response, data)
     counts = {status: sum(entry["status"] == status for entry in report) for status in ("updated", "unchanged", "not_found", "ambiguous")}
-    return {"dry_run": body.dry_run, "overwrite": body.overwrite, "counts": counts, "results": report}
+    return {"dry_run": body.dry_run, "overwrite": body.overwrite, "mark_switch": body.mark_switch, "counts": counts, "results": report}
 
 
 def export_rows(data):

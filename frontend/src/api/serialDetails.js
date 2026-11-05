@@ -2,10 +2,11 @@
 // covers it: a CSV/TSV file, or rows pasted from Excel or a web table, with a header row whose columns are recognised
 // by name (SN / Serial / Serial Number, P/N / Part Number / PN / OPN / מק"ט, Name / Description / Product, Model, Type).
 // The server matches each row to a unit by serial number (or barcode) and reports what would change (dry run) before
-// anything is applied. Lookups on the SN analysis page are done as "switch", so rows without a type count as switches
-// when the operator leaves "Mark as switches" on.
+// anything is applied. Lookups on the SN analysis page are done as "switch", so with "Mark as switches" on (mark_switch)
+// a matched unit whose type is still generic (Other) becomes a switch; a PDU, cable or KVM keeps its type.
 
 export const LOOKUP_AS = "switch";
+const HEADER_SEARCH = 5;   // a copied web table may start with a title line or two above its header row
 export const MAX_ROWS = 5000;
 const SERIAL_MAX = 200, PART_MAX = 120, MODEL_MAX = 120, NAME_MAX = 160, TYPE_MAX = 60;
 
@@ -68,13 +69,17 @@ export function splitRows(text, delimiter) {
   return rows.filter(r => r.some(value => value.trim() !== ""));
 }
 
-// Tab when the first line has one (Excel, a web table, a .tsv), else ";" when it has more of them than ",", else ",".
+// Tab when one of the first lines has one (Excel, a web table, a .tsv; a title line above the header has none), else
+// ";" when they have more of them than ",", else ",".
 export function detectDelimiter(text) {
-  const first = String(text ?? "").replace(/^﻿/, "").split(/\r?\n/).find(line => line.trim()) || "";
-  if (first.includes("\t")) return "\t";
-  const count = ch => first.split(ch).length - 1;
+  const lines = String(text ?? "").replace(/^﻿/, "").split(/\r?\n/).filter(line => line.trim()).slice(0, HEADER_SEARCH);
+  if (lines.some(line => line.includes("\t"))) return "\t";
+  const head = lines.join("\n");
+  const count = ch => head.split(ch).length - 1;
   return count(";") > count(",") ? ";" : ",";
 }
+
+const DELIMITERS = ["\t", ";", ","];
 
 // A CSV cell exported with a leading apostrophe (the formula guard of the DCIM exports) reads as its value again.
 function cellValue(value) {
@@ -83,17 +88,27 @@ function cellValue(value) {
 }
 
 const DETAIL_COLUMNS = ["part_number", "name", "model", "type"];
-const HEADER_SEARCH = 5;   // a copied web table may start with a title line or two above its header row
+
+// The index of the header row (a serial column and a details column) among the first rows, or -1.
+function findHeader(table) {
+  return table.slice(0, HEADER_SEARCH).findIndex(cells => {
+    const found = detectColumns(cells);
+    return "serial" in found && DETAIL_COLUMNS.some(field => field in found);
+  });
+}
 
 // Text of a file or a paste -> { rows: [{line, serial, name, part_number, model, type}], columns, problems: [{line, reason}],
 // error }. error (a sentence) means nothing can be imported; problems are single rows that were left out.
 export function parseDetails(text) {
-  const table = splitRows(text, detectDelimiter(text));
+  // The likely delimiter first; when its split has no header row, the first other delimiter whose split has one.
+  const preferred = detectDelimiter(text);
+  let table = splitRows(text, preferred), headerAt = findHeader(table);
+  for (const delimiter of DELIMITERS) {
+    if (headerAt >= 0 || delimiter === preferred) continue;
+    const other = splitRows(text, delimiter), at = findHeader(other);
+    if (at >= 0) { table = other; headerAt = at; }
+  }
   if (!table.length) return { rows: [], columns: {}, problems: [], error: "Paste rows or choose a file first." };
-  const headerAt = table.slice(0, HEADER_SEARCH).findIndex(cells => {
-    const found = detectColumns(cells);
-    return "serial" in found && DETAIL_COLUMNS.some(field => field in found);
-  });
   if (headerAt < 0) {
     const columns = detectColumns(table[0]);
     return { rows: [], columns, problems: [], error: "serial" in columns
@@ -136,13 +151,12 @@ export function parseDetails(text) {
   return { rows, columns, problems, error: "" };
 }
 
-// Rows -> the request items. markSwitch: rows without a type are switches (they were looked up as "switch").
-export function requestItems(rows, { markSwitch = true, source = "" } = {}) {
+// Rows -> the request items: only the values a row carries. Marking units as switches is the request's mark_switch
+// option (the server applies it only to units of a generic type), never a type added to every row.
+export function requestItems(rows, { source = "" } = {}) {
   return rows.map(row => {
     const item = { serial: row.serial };
-    for (const field of ["name", "part_number", "model"]) if (row[field]) item[field] = row[field];
-    const type = row.type || (markSwitch ? LOOKUP_AS : "");
-    if (type) item.type = type;
+    for (const field of ["name", "part_number", "model", "type"]) if (row[field]) item[field] = row[field];
     if (source) item.source = source;
     return item;
   });
@@ -180,18 +194,23 @@ export async function downloadSerialsCsv() {
   return response.blob();
 }
 
+// The request body: items plus the options {overwrite, markSwitch}.
+export function requestBody(items, { overwrite = false, markSwitch = false } = {}, dryRun = true) {
+  return { items, overwrite: Boolean(overwrite), mark_switch: Boolean(markSwitch), dry_run: dryRun };
+}
+
 // dry run: the report of what would change, and the revision it describes (apply sends it back as If-Match).
-export async function previewDetails(items, overwrite) {
+export async function previewDetails(items, options) {
   return parse(await fetch("/api/inventory/serial-details", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items, overwrite, dry_run: true }),
+    body: JSON.stringify(requestBody(items, options, true)),
   }));
 }
 
-export async function applyDetails(items, overwrite, revision) {
+export async function applyDetails(items, options, revision) {
   if (!revision) throw new Error("Preview the changes before applying them.");
   return parse(await fetch("/api/inventory/serial-details", {
     method: "POST", headers: { "Content-Type": "application/json", "If-Match": revision },
-    body: JSON.stringify({ items, overwrite, dry_run: false }),
+    body: JSON.stringify(requestBody(items, options, false)),
   }));
 }

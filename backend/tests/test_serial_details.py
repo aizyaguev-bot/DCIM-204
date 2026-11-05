@@ -228,3 +228,48 @@ async def test_only_switch_types_change_the_type(client):
     results = response.json()["results"]
     assert results[0]["status"] == "unchanged" and unit("u-generic")["type"] == "other"
     assert results[1]["changes"] == {"type": {"before": "other", "after": "switch"}}
+
+
+async def test_mark_switch_changes_only_units_of_a_generic_type(client):
+    c = client
+    data = store.read_items()
+    data["Rack-02"].append({"id": "u-pdu", "name": "PDU A", "type": "pdu", "serial_number": "PDU-SN-1", "u": 30})
+    store.write_items(data)
+    rows = [{"serial": "MT2614X00001", "part_number": "MSN2700-CS2F"}, {"serial": "PDU-SN-1", "part_number": "PX3-5190"},
+            {"serial": "-CABLE-9", "part_number": "MCP1600-C001"}, {"serial": "MT2614X00003", "part_number": "P4", "type": "Cable"}]
+    preview = await c.post(URL, json={"items": rows, "mark_switch": True, "dry_run": True})
+    assert preview.status_code == 200 and preview.json()["mark_switch"] is True
+    results = by_serial(preview.json())
+    assert results["MT2614X00001"]["changes"]["type"] == {"before": "other", "after": "switch"}
+    # A PDU or a cable keeps its type; a row's own non-switch type is not overridden by mark_switch.
+    assert "type" not in results["PDU-SN-1"]["changes"] and "type" not in results["-CABLE-9"]["changes"]
+    assert "type" not in results["MT2614X00003"]["changes"]
+    applied = await c.post(URL, headers={"If-Match": preview.headers["etag"]}, json={"items": rows, "mark_switch": True})
+    assert applied.status_code == 200
+    assert [unit(i)["type"] for i in ("u-generic", "u-pdu", "u-cable", "u-code-name")] == ["switch", "pdu", "cable", "other"]
+    # Without mark_switch a row without a type never changes the type.
+    unit_rows = [{"serial": "000777", "part_number": "X1"}]
+    plain = await c.post(URL, json={"items": unit_rows, "dry_run": True})
+    assert "type" not in plain.json()["results"][0]["changes"]
+
+
+async def test_a_unit_is_found_by_its_barcode_even_when_it_has_a_serial(client):
+    c = client
+    data = store.read_items()
+    data["Rack-01"].append({"id": "u-both", "name": "Unit", "type": "other", "serial_number": "S3", "barcode": "BC3", "u": 9})
+    store.write_items(data)
+    response = await c.post(URL, headers=await headers(c), json={"items": [{"serial": "bc3", "part_number": "PN-3"}]})
+    entry = response.json()["results"][0]
+    assert entry["status"] == "updated" and entry["unit"]["id"] == "u-both"
+    # Its serial number stays; only the part number changes.
+    assert entry["changes"] == {"part_number": {"before": "", "after": "PN-3"}}
+    assert (unit("u-both")["serial_number"], unit("u-both")["part_number"]) == ("S3", "PN-3")
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("switch", True), ("Switches", True), ("Ethernet Switch", True), ("Switch system", True), ("InfiniBand switch (managed)", True),
+    ("non-switch thing", False), ("switchgear", False), ("switch-like", False), ("Cable", False), ("", False), (None, False),
+])
+def test_is_switch(value, expected):
+    from app.routers.serial_details import is_switch
+    assert is_switch(value) is expected

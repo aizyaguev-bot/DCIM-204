@@ -10,6 +10,7 @@ const primary = "rounded-lg px-4 py-2.5 text-sm font-semibold bg-nv-400 text-zin
 const secondary = "rounded-lg px-4 py-2.5 text-sm border border-zinc-700 text-zinc-200 hover:bg-zinc-800 disabled:opacity-40";
 const SOURCE = "webpe SN analysis";
 const READ_ONLY = "Importing details requires the Operator or Admin role.";
+const OVERWRITE_LABEL = "Also replace names and models set by hand";
 const STATUS_TEXT = { updated: "Will change", unchanged: "No change", not_found: "Not found", ambiguous: "Ambiguous" };
 const STATUS_DONE = { updated: "Updated", unchanged: "No change", not_found: "Not found", ambiguous: "Ambiguous" };
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -23,13 +24,16 @@ function summary(counts, applied) {
   return parts.join(" · ");
 }
 
+// The server's name_kept note names its API option; here it names the checkbox that does the same.
+const NAME_KEPT = `Name kept: the unit already has its own name. Turn on "${OVERWRITE_LABEL}" to replace it.`;
+
 function ChangeList({ entry }) {
-  if (entry.status !== "updated") return <span className="text-zinc-400">{entry.detail || entry.name_kept || "Already up to date"}</span>;
+  if (entry.status !== "updated") return <span className="text-zinc-400">{entry.detail || (entry.name_kept ? NAME_KEPT : "Already up to date")}</span>;
   return <ul className="space-y-0.5">
-    {Object.entries(entry.changes).map(([field, { before, after }]) => <li key={field}>
+    {Object.entries(entry.changes).map(([field, { before, after }]) => <li key={field} className="break-words">
       <span className="text-zinc-400">{CHANGE_LABELS[field] || field}:</span> <span className="line-through text-zinc-500">{before || "empty"}</span> → <span className="text-zinc-100">{after}</span>
     </li>)}
-    {entry.name_kept && <li className="text-xs text-zinc-500">Name kept: {entry.name_kept}</li>}
+    {entry.name_kept && <li className="text-xs text-zinc-500">{NAME_KEPT}</li>}
   </ul>;
 }
 
@@ -100,11 +104,12 @@ export default function SerialNumbersPanel({ onChanged }) {
     const current = parseDetails(text);
     setParsed(current); setPreview(null); setResult(null); setError("");
     if (current.error) return;
-    const items = requestItems(current.rows, { markSwitch: options.markSwitch ?? markSwitch, source: SOURCE });
+    const items = requestItems(current.rows, { source: SOURCE });
+    const settings = { markSwitch: options.markSwitch ?? markSwitch, overwrite: options.overwrite ?? overwrite };
     setBusy(true);
     try {
-      const { data, revision } = await previewDetails(items, options.overwrite ?? overwrite);
-      if (mounted.current) setPreview({ data, revision, items });
+      const { data, revision } = await previewDetails(items, settings);
+      if (mounted.current) setPreview({ data, revision, items, settings });
     } catch (e) { if (mounted.current) setError(failure(e)); }
     finally { if (mounted.current) setBusy(false); }
   }
@@ -117,7 +122,7 @@ export default function SerialNumbersPanel({ onChanged }) {
   async function apply() {
     setBusy(true); setError("");
     try {
-      const { data } = await applyDetails(preview.items, preview.data.overwrite, preview.revision);
+      const { data } = await applyDetails(preview.items, preview.settings, preview.revision);
       if (!mounted.current) return;
       setResult(data); setPreview(null);
       await refresh();
@@ -145,13 +150,13 @@ export default function SerialNumbersPanel({ onChanged }) {
     <div className="grid lg:grid-cols-[240px_1fr] gap-4">
       <label className="block space-y-1.5"><span className="block text-xs text-zinc-400">One serial number per line</span>
         <textarea id={listId} aria-label="Serial number list" readOnly rows={8} value={serialsText(items)} className={`${input} font-mono text-xs`}/></label>
-      <div className="max-h-56 overflow-auto rounded-lg border border-zinc-800">
+      <div className="min-w-0 max-h-56 overflow-auto rounded-lg border border-zinc-800">
         <table aria-label="Units with serial numbers" className="w-full text-xs">
           <thead className="text-zinc-400 bg-zinc-900 sticky top-0"><tr><th className="text-left p-2">Serial number</th><th className="text-left p-2">Name</th><th className="text-left p-2">Type</th><th className="text-left p-2">Part number</th><th className="text-left p-2">Place</th></tr></thead>
           <tbody>{items.map((item, n) => <tr key={`${item.serial}-${item.barcode}-${n}`} className="border-t border-zinc-800">
-            <td className="p-2 font-mono break-all" dir="auto">{item.serial || <span className="text-zinc-500">{item.barcode} (barcode)</span>}</td>
-            <td className="p-2" dir="auto">{item.name}</td><td className="p-2">{item.type}</td>
-            <td className="p-2 font-mono" dir="auto">{item.part_number}</td><td className="p-2">{item.place}</td></tr>)}</tbody>
+            <td className="p-2 font-mono whitespace-nowrap" dir="auto">{item.serial || <span className="text-zinc-500">{item.barcode} (barcode)</span>}</td>
+            <td className="p-2 min-w-[8rem]" dir="auto">{item.name}</td><td className="p-2 whitespace-nowrap">{item.type}</td>
+            <td className="p-2 font-mono whitespace-nowrap" dir="auto">{item.part_number}</td><td className="p-2 whitespace-nowrap">{item.place}</td></tr>)}</tbody>
         </table>
         {list && !items.length && <p className="p-3 text-sm text-zinc-500">No unit has a serial number or barcode yet.</p>}
       </div>
@@ -168,8 +173,8 @@ export default function SerialNumbersPanel({ onChanged }) {
         <textarea aria-label="Paste details" rows={6} value={text} disabled={busy} spellCheck={false} placeholder={"SN\tP/N\tDescription\nMT2614X00001\tMQM9700-NS2F\tQuantum-2 QM9700 switch"}
           onChange={e => { edited(e.target.value); setFileName(""); }} className={`${input} font-mono text-xs`}/>
         <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-          <label className="flex items-center gap-2"><input type="checkbox" className="accent-nv-400" checked={markSwitch} disabled={busy} onChange={option(setMarkSwitch, "markSwitch")}/>Mark as switches (rows without a type; looked up as Switch)</label>
-          <label className="flex items-center gap-2"><input type="checkbox" className="accent-nv-400" checked={overwrite} disabled={busy} onChange={option(setOverwrite, "overwrite")}/>Also replace names and models set by hand</label>
+          <label className="flex items-center gap-2"><input type="checkbox" className="accent-nv-400" checked={markSwitch} disabled={busy} onChange={option(setMarkSwitch, "markSwitch")}/>Mark units of type Other as switches (looked up as Switch; a PDU, cable or KVM keeps its type)</label>
+          <label className="flex items-center gap-2"><input type="checkbox" className="accent-nv-400" checked={overwrite} disabled={busy} onChange={option(setOverwrite, "overwrite")}/>{OVERWRITE_LABEL}</label>
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" className={secondary} disabled={busy || !text.trim()} onClick={() => runPreview()}>{busy && !preview ? "Checking…" : "Preview changes"}</button>
@@ -185,10 +190,10 @@ export default function SerialNumbersPanel({ onChanged }) {
           <table aria-label={result ? "Import result" : "Import preview"} className="w-full text-xs">
             <thead className="text-zinc-400 bg-zinc-900 sticky top-0"><tr><th className="text-left p-2">Serial number</th><th className="text-left p-2">Unit</th><th className="text-left p-2">Status</th><th className="text-left p-2">Changes</th></tr></thead>
             <tbody>{report.results.map((entry, n) => <tr key={`${entry.serial}-${n}`} className="border-t border-zinc-800 align-top">
-              <td className="p-2 font-mono break-all" dir="auto">{entry.serial}</td>
-              <td className="p-2" dir="auto">{entry.unit ? <>{entry.unit.name}<div className="text-zinc-500">{placeOf(entry.unit)}</div></> : entry.units ? entry.units.map(u => `${u.name} (${placeOf(u)})`).join("; ") : "—"}</td>
+              <td className="p-2 font-mono whitespace-nowrap" dir="auto">{entry.serial}</td>
+              <td className="p-2 min-w-[8rem]" dir="auto">{entry.unit ? <>{entry.unit.name}<div className="text-zinc-500 whitespace-nowrap">{placeOf(entry.unit)}</div></> : entry.units ? entry.units.map(u => `${u.name} (${placeOf(u)})`).join("; ") : "—"}</td>
               <td className="p-2 whitespace-nowrap">{(result ? STATUS_DONE : STATUS_TEXT)[entry.status]}</td>
-              <td className="p-2"><ChangeList entry={entry}/></td></tr>)}</tbody>
+              <td className="p-2 min-w-[12rem]"><ChangeList entry={entry}/></td></tr>)}</tbody>
           </table>
         </div>
       </div>}

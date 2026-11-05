@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectColumns, detectDelimiter, headerKey, parseDetails, requestItems, serialsText, splitRows } from "../api/serialDetails.js";
+import { detectColumns, detectDelimiter, headerKey, parseDetails, requestBody, requestItems, serialsText, splitRows } from "../api/serialDetails.js";
 
 test("column names are recognised in any common spelling, Hebrew included", () => {
   assert.deepEqual(detectColumns(["SN", "P/N", "Description", "Type"]), { serial: 0, part_number: 1, name: 2, type: 3 });
@@ -73,14 +73,29 @@ test("a table without a serial or a details column explains what it needs", () =
   assert.match(parseDetails("SN,P/N\nA,\n").error, /No row has both/);
 });
 
-test("request items: rows without a type are switches when marked so, names are cut to 160 characters", () => {
+test("request items carry only the row's own values; marking as switches is a request option", () => {
   const rows = parseDetails(`SN\tName\tType\nMT1\t${"N".repeat(200)}\t\nMT2\tCable thing\tCable\n`).rows;
   assert.equal(rows[0].name.length, 160);
   assert.deepEqual(requestItems(rows, { source: "webpe SN analysis" }), [
-    { serial: "MT1", name: "N".repeat(160), type: "switch", source: "webpe SN analysis" },
+    { serial: "MT1", name: "N".repeat(160), source: "webpe SN analysis" },
     { serial: "MT2", name: "Cable thing", type: "Cable", source: "webpe SN analysis" },
   ]);
-  assert.deepEqual(requestItems(rows, { markSwitch: false }).map(item => item.type), [undefined, "Cable"]);
+  // Even with "Mark as switches" on, no row gets type "switch": the server applies mark_switch to generic units only.
+  assert.deepEqual(requestItems(rows, { markSwitch: true }).map(item => item.type), [undefined, "Cable"]);
+  assert.deepEqual(requestBody([{ serial: "MT1" }], { markSwitch: true }), { items: [{ serial: "MT1" }], overwrite: false, mark_switch: true, dry_run: true });
+  assert.deepEqual(requestBody([], { overwrite: true }, false), { items: [], overwrite: true, mark_switch: false, dry_run: false });
+});
+
+test("a pasted web table with a title line above its tab-separated header is read", () => {
+  const pasted = "SN analysis results\nSN\tP/N\tDescription\nMT1\tMSN2700\tSpectrum switch";
+  assert.equal(detectDelimiter(pasted), "\t");
+  const parsed = parseDetails(pasted);
+  assert.equal(parsed.error, "");
+  assert.deepEqual(parsed.rows, [{ line: 3, serial: "MT1", part_number: "MSN2700", model: "", type: "", name: "Spectrum switch" }]);
+  // A title with a comma above a semicolon table: the split that finds a header row wins.
+  const semi = parseDetails("Results, 5 Nov\nSN;P/N\nMT2;PN-2\n");
+  assert.equal(semi.error, "");
+  assert.deepEqual(semi.rows.map(r => [r.serial, r.part_number]), [["MT2", "PN-2"]]);
 });
 
 test("serials text has one code per line, a barcode when there is no serial", () => {

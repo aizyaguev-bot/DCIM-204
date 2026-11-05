@@ -12,8 +12,9 @@ offers that tool. Everything here also works by hand today from **Scan & Track >
 3. For each `serial` (or `barcode` when `serial` is empty): open SN analysis on webpe, **choose "Switch"** as the
    product kind (`lookup_as` is `"switch"` on every row: the lab's serials are mostly switches), enter the SN and read
    the product name / description and the P/N.
-4. `POST /api/inventory/serial-details` with `"dry_run": true` - DCIM reports what would change per SN, writes nothing.
-5. Show (or log) that report, then send the same items with `"dry_run": false` and `If-Match` = the `ETag` of the
+4. `POST /api/inventory/serial-details` with `"dry_run": true` and `"mark_switch": true` - DCIM reports what would
+   change per SN, writes nothing.
+5. Show (or log) that report, then send the same items and options with `"dry_run": false` and `If-Match` = the `ETag` of the
    dry-run answer. All rows are applied together, or none.
 
 ## Signing in
@@ -55,15 +56,21 @@ not run it as a formula).
 Request:
 
 ```json
-{"dry_run": true, "overwrite": false,
+{"dry_run": true, "overwrite": false, "mark_switch": true,
  "items": [{"serial": "MT2614X00001", "name": "Spectrum SN2700 switch", "part_number": "MSN2700-CS2F",
-            "type": "switch", "model": "SN2700", "source": "webpe SN analysis"}]}
+            "model": "SN2700", "source": "webpe SN analysis"}]}
 ```
 
 - `serial` is required (1-200 characters); every other field is optional. Leave a field out when webpe did not show
   it - an empty value never clears anything.
-- `type`: send `"switch"` for a unit found as a switch. Any value containing the word "switch" sets the unit's type to
-  switch; other values are ignored.
+- `mark_switch` (request option, default false): the serial numbers were looked up as "Switch", so a matched unit
+  whose DCIM type is still generic (`other` or empty) becomes a switch. A unit with a real type (PDU, cable, KVM,
+  computer...) keeps it. This is the normal way to mark switches; send it as `true` together with the dry run and
+  the apply.
+- `type` (per row, optional): send it only when the SN analysis result itself names the product kind. A value with
+  the word "switch" ("Switch", "Ethernet Switch", "Switch system"; not "non-switch" or "switchgear") sets the unit's
+  type to switch whatever its current type; other values are ignored. Do not add `"switch"` to every row - use
+  `mark_switch` instead.
 - `name` is the product name / description (cut to 160 characters). `part_number` and `model` up to 120 characters.
 - `source` (up to 80 characters) is written into the unit's history note; default "webpe SN analysis".
 - At most 5000 items per request. A row with control characters or a too-long serial / P/N refuses the whole request
@@ -71,22 +78,22 @@ Request:
 
 What DCIM does per row:
 
-- Matches the unit by serial number, or by barcode for a unit with no serial number, compared like a scan (case,
-  surrounding spaces and MAC spelling do not matter).
+- Matches the unit by its serial number or its barcode, compared like a scan (case, surrounding spaces and MAC
+  spelling do not matter). A code that names two units is `ambiguous`.
 - `part_number`: set when the unit has none or a different one (the old value is in the report).
 - `name`: set only when the unit's current name is generic - empty, a type label such as "Unit" or "Switch", or the
   unit's own serial, barcode or part number. A name somebody typed is kept (the row says `name_kept`) unless
   `overwrite: true`.
 - `model`: set when the unit has none (or always with `overwrite: true`).
-- `type`: set to `switch` as described above.
-- A unit matched by its barcode also gets that code as its serial number.
+- `type`: set to `switch` as described above (`mark_switch` or the row's own `type`).
+- A unit without a serial number, matched by its barcode, also gets that code as its serial number.
 - Each changed unit gets a history entry "details updated", note "Details from webpe SN analysis: Part number, Name, ...".
   Its place, notes and every other field stay as they are.
 
 Response (the same for a dry run, which writes nothing):
 
 ```json
-{"dry_run": true, "overwrite": false,
+{"dry_run": true, "overwrite": false, "mark_switch": true,
  "counts": {"updated": 1, "unchanged": 0, "not_found": 0, "ambiguous": 0},
  "results": [{"serial": "MT2614X00001", "status": "updated",
               "unit": {"id": "...", "rack": "Rack-02", "u": 30, "position": "", "name": "Unit", "type": "other",
