@@ -257,7 +257,7 @@ test("a plain code makes a unit whose serial number is that code and whose name 
   const result = await placeScannedUnit(parseUnitBarcode("TESTSN12345"), shelf2);
   assert.equal(result.action, "created");
   const item = stored(state, result.item.id);
-  assert.deepEqual([item.barcode, item.serial_number, item.name, item.type], ["TESTSN12345", "TESTSN12345", "Unit", "other"]);
+  assert.deepEqual([item.barcode, item.serial_number, item.name, item.type], ["TESTSN12345", "TESTSN12345", "Switch", "switch"], "a unit scanned by its serial number alone is saved as a switch");
   const again = await placeScannedUnit(parseUnitBarcode("testsn12345"), shelf2);
   assert.deepEqual([again.action, again.item.id, again.filled], ["confirmed", item.id, {}], "the same code (any case) finds it again, no second row");
   assert.equal(count(state, "TESTSN12345"), 1);

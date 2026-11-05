@@ -94,7 +94,7 @@ const isInventory = url => url.pathname === '/api/inventory' || url.pathname.sta
     if (latency) await page.unroute(isInventory, delay);
     const saved = registered(s);
     assert.deepEqual(saved.map(b => b.code), codes, `${label}: exactly the two scans are saved, in order`);
-    for (const body of saved) assert.deepEqual([body.name, body.rack, body.u], [body.code, rack, u], `${label}: saved at the scanned label`);
+    for (const body of saved) assert.deepEqual([body.name, body.type, body.rack, body.u], [body.code, 'switch', rack, u], `${label}: saved at the scanned label, as a switch (a serial number alone is most likely one)`);
     const added = await newBarcodes(s, before);
     assert.deepEqual([...added].sort(), [...codes].sort(), `${label}: no extra, cut or merged item`);
     for (const code of added) for (const scanned of codes)

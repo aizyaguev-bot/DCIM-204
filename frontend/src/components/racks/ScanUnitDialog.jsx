@@ -226,7 +226,7 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
         <h2 id={titleId} className="racks-dialog-title">Scan unit barcode</h2>
         <span className="server-details-tools"><button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>×</button></span>
       </header>
-      <p id={hintId} className="racks-dialog-note">Units go to <strong><bdi>{where}</bdi></strong>{target.label && target.rack !== MAIN_STORAGE ? <> in <bdi>{target.rack}</bdi></> : null}. Scan each unit's serial number barcode; a new unit is added and saved right away, a unit that is already in DCIM is moved here. Scan as many units as you need.</p>
+      <p id={hintId} className="racks-dialog-note">Units go to <strong><bdi>{where}</bdi></strong>{target.label && target.rack !== MAIN_STORAGE ? <> in <bdi>{target.rack}</bdi></> : null}. Scan each unit's serial number barcode; a new unit is added and saved right away, a unit that is already in DCIM is moved here. A new unit whose barcode gives only its serial number is saved as a switch; change its type in DCIM if it is something else. Scan as many units as you need.</p>
       {floorChoices && <div className="racks-field">
         <label htmlFor={`${titleId}-floor`}>{storage ? <>Shelf in Main storage</> : <>Floor in <bdi>{target.rack}</bdi></>}</label>
         <select id={`${titleId}-floor`} value={u} onChange={e => { setU(Number(e.target.value)); inputRef.current?.focus(); }}>

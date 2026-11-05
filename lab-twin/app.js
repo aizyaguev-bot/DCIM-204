@@ -765,7 +765,8 @@
     } else if (dpu && kind === 'other') { kind = 'dpu'; typeText = 'BlueField' + (dpu[1] ? '-' + dpu[1] : ''); }
     else if (nic && kind === 'other') { kind = 'nic'; typeText = 'ConnectX-' + nic[1]; }
     else if (kind === 'other' && /\b(spectrum|quantum|switch)\b/i.test(text)) kind = 'switch';
-    else if (kind === 'other' && clean(it?.serial_number)) { kind = 'switch'; likely = true; }
+    // the serial may be stored only as the unit's barcode (Scan & Track registers the scanned code that way)
+    else if (kind === 'other' && (clean(it?.serial_number) || clean(it?.barcode))) { kind = 'switch'; likely = true; }
     if (kind === 'switch' && !typeText) typeText = model || pn;
     if (kind === 'nic' && !typeText) typeText = model || pn;
     return { kind, tag: UNIT_TAG[kind] || 'DEV', typeText, likely, name };
@@ -879,9 +880,13 @@
           html: `<div class="sc-l"><span class="sc-k k-${info.kind}"${info.likely ? ' title="Marked as a switch: it has a serial number and no other type"' : ''}>${info.tag}</span><bdi>${esc(main)}</bdi>${extra ? `<span class="sc-x">· <bdi>${esc(extra)}</bdi></span>` : ''}</div>` };
       });
       rec.cardEmpty = !srv.length && !uni.length;
+      const before = rec.cardFull;
       rec.cardFull = `<div class="sc-h">${esc(head)}</div>${srv.map(x => x.html).join('')}${uni.map(x => x.html).join('')}${rec.cardEmpty ? '<div class="sc-l sc-free">Free</div>' : ''}`;
       rec.cardCompact = `<span class="sc-u">S${u}</span>${srv.map(x => `${pill(x.p)}<bdi class="sc-n">${esc(x.name)}</bdi>`).join(' ')} ${uni.map(x => `<span class="sc-k k-${x.kind}">${x.tag}</span><bdi>${esc(x.main)}</bdi>`).join(' ')}`;
       rec.cardText = [head, ...srv.map(x => `${POWER[x.p].t} ${x.name} ${x.host || 'no IP'}${x.maint ? ' MAINT' : ''}`), ...uni.map(x => `${x.tag} ${x.main}${x.extra ? ' · ' + x.extra : ''}`), rec.cardEmpty ? 'Free' : ''].filter(Boolean).join('\n');
+      // new content: its full size is measured again the next time it is shown full (the line count estimates it until then)
+      rec.cardLines = 1 + Math.max(1, srv.length + uni.length);
+      if (rec.cardFull !== before) { rec.cardFullW = rec.cardFullH = null; rec.cardDemoted = null; }
       rec.label.dataset.lod = ''; rec.label.title = rec.cardText;
     }
   }
@@ -2925,8 +2930,10 @@
     const selRack = S.selected ? rackRecOf(S.recs.get(S.selected))?.id : null;
     const cands = [];
     // Shelf cards first (level of detail): the full card up close, one compact line at middle distance, nothing far away
-    // or from behind the rack. The selected rack keeps them a little longer. Centred on the shelf front; a card that
-    // would cover another label is hidden rather than moved off its shelf.
+    // or from behind the rack. The selected rack keeps them a little longer. Centred on the shelf front. Full cards
+    // that would not fit between their neighbours on screen turn compact for the whole rack (one rack never mixes the
+    // two), and a full card that still covers another label falls back to its compact line before it is ever hidden.
+    const cards = [];
     for (const rec of S.recs.values()) {
       if (rec.cat !== 'shelf' || !rec.label) continue;
       const el = rec.label; rec.cardShown = false;
@@ -2938,16 +2945,47 @@
         tmpV.copy(rec.cardAnchor); dist = tmpV.distanceTo(camPos);
         const facing = camPos.clone().sub(rec.cardAnchor).normalize().dot(rec.front);
         lod = facing < -0.2 ? null : dist <= 3.4 * k ? 'full' : dist <= 6.5 * k ? 'compact' : null;
+        // demoted after covering another label: compact until the camera comes 0.3 m closer than where that happened
+        if (lod === 'full' && rec.cardDemoted != null) { if (dist > rec.cardDemoted - 0.3) lod = 'compact'; else rec.cardDemoted = null; }
         if (lod === 'compact' && rec.cardEmpty && !sel) lod = null;
       }
       if (lod) { tmpV.project(camera); if (tmpV.z > 1 || tmpV.x < -1.05 || tmpV.x > 1.05 || tmpV.y < -1.05 || tmpV.y > 1.05) lod = null; }
-      if (!lod) { el.style.display = 'none'; continue; }
-      if (el.dataset.lod !== lod) { el.innerHTML = lod === 'full' ? rec.cardFull : rec.cardCompact; el.dataset.lod = lod; el.classList.toggle('compact', lod === 'compact'); }
-      const x = (tmpV.x + 1) / 2 * r.width, y = (1 - tmpV.y) / 2 * r.height;
+      if (!lod) { el.style.display = 'none'; rec.cardDemoted = null; continue; }
+      cards.push({ rec, el, sel, k, dist, lod, x: (tmpV.x + 1) / 2 * r.width, y: (1 - tmpV.y) / 2 * r.height });
+    }
+    // Stacked full cards of one rack: each pair of neighbours on screen must fit side by side or one above the other
+    // (sizes from the last time the card was shown full, else from its line count). The margin is larger to go back
+    // to full than to leave it, so a camera resting near the limit does not flicker between the two.
+    const fullH = c => c.rec.cardFullH || 8 + 14.5 * (c.rec.cardLines || 2), fullW = c => c.rec.cardFullW || 220;
+    const byRack = new Map();
+    for (const c of cards) { if (!byRack.has(c.rec.setup)) byRack.set(c.rec.setup, []); byRack.get(c.rec.setup).push(c); }
+    for (const [setup, all] of byRack) {
+      const su = S.recs.get(setup); const margin = su?.cardsCompact ? 10 : 2;
+      const list = all.filter(c => c.lod === 'full'); if (!list.length) continue;
+      // one rack never mixes full cards and compact lines
+      if (list.length < all.length) { all.forEach(c => { c.lod = 'compact'; }); continue; }
+      list.sort((a, b) => a.y - b.y);
+      let fits = true;
+      for (let i = 1; i < list.length && fits; i++) {
+        const a = list[i - 1], b = list[i];
+        const apartY = b.y - a.y >= (fullH(a) + fullH(b)) / 2 + margin, apartX = Math.abs(b.x - a.x) >= (fullW(a) + fullW(b)) / 2 + margin;
+        fits = apartY || apartX;
+      }
+      if (su) su.cardsCompact = !fits;
+      if (!fits) list.forEach(c => { c.lod = 'compact'; });
+    }
+    const showCard = (c, lod) => {
+      const el = c.el;
+      if (el.dataset.lod !== lod) { el.innerHTML = lod === 'full' ? c.rec.cardFull : c.rec.cardCompact; el.dataset.lod = lod; el.classList.toggle('compact', lod === 'compact'); }
+      c.lod = lod;
+    };
+    for (const c of cards) {
+      const { rec, el, sel, k, dist, x, y } = c;
+      showCard(c, c.lod);
       el.style.display = ''; el.style.left = x + 'px'; el.style.top = y + 'px';
-      el.style.opacity = lod === 'compact' ? Math.max(0.35, Math.min(1, (6.5 * k - dist) / k)) : 1; el.style.zIndex = Math.max(1, Math.round(90 - dist * 3));
+      el.style.opacity = c.lod === 'compact' ? Math.max(0.35, Math.min(1, (6.5 * k - dist) / k)) : 1; el.style.zIndex = Math.max(1, Math.round(90 - dist * 3));
       rec.cardShown = true;
-      cands.push({ el, x, y, dist, pri: sel ? 0 : 6, mid: true, fixed: true });
+      cands.push({ el, x, y, dist, pri: sel ? 0 : 6, mid: true, fixed: true, card: c });
     }
     for (const rec of S.recs.values()) {
       const el = rec.label; if (!el || rec.cat === 'shelf') continue;
@@ -2976,14 +3014,21 @@
     }
     // one layout read for every shown label and card, then the overlap pass
     telems.forEach(t => { t.h = t.el.offsetHeight; });
-    cands.forEach(c => { c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; });
+    cands.forEach(c => { c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; if (c.card?.lod === 'full') { c.card.rec.cardFullW = c.w; c.card.rec.cardFullH = c.h; } });
     // a telemetry card cut by the top of the 3D view is hidden rather than half shown
     telems.forEach(t => { t.el.style.visibility = t.y - t.h < 0 ? 'hidden' : ''; });
     cands.sort((a, b) => a.pri - b.pri || a.dist - b.dist);
     const placed = [];
     const clash = (l, t, w, h) => placed.some(p => Math.min(l + w, p.l + p.w) - Math.max(l, p.l) > 2 && Math.min(t + h, p.t + p.h) - Math.max(t, p.t) > 2);
     for (const c of cands) {
-      const l = c.x - c.w / 2, t0 = c.mid ? c.y - c.h / 2 : c.y - c.h; let k = 0;
+      let l = c.x - c.w / 2, t0 = c.mid ? c.y - c.h / 2 : c.y - c.h; let k = 0;
+      // a full shelf card that covers another label shows its compact line instead (measured again), and stays compact
+      // until the camera comes closer
+      if (c.card?.lod === 'full' && clash(l, t0, c.w, c.h)) {
+        showCard(c.card, 'compact'); c.card.rec.cardDemoted = c.dist;
+        c.el.style.opacity = Math.max(0.35, Math.min(1, (6.5 * c.card.k - c.dist) / c.card.k));
+        c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; l = c.x - c.w / 2; t0 = c.y - c.h / 2;
+      }
       while (k <= 3 && clash(l, t0 - k * (c.h + 2), c.w, c.h)) { k++; if (c.fixed) { k = 4; break; } }
       if (k > 3 && c.pri > 1) { c.el.style.visibility = 'hidden'; continue; }   // selection and issues are never hidden
       if (k > 3) k = 0;

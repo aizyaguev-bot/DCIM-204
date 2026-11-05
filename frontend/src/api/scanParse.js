@@ -188,7 +188,12 @@ export function parseUnitBarcode(raw) {
     result.serial_from_code = true;
   }
 
-  result.type = typeForPart(result.part_number) || typeForPart(result.model) || "other";
+  // A unit whose label gives its serial number but no other product (no part number or model that names one) is most
+  // likely a switch under test, by the lab owner's rule, so it is saved as a switch; its type can be changed in DCIM.
+  // A part number or model that names a NIC, DPU or any other known product keeps that product's type.
+  const named = typeForPart(result.part_number) || typeForPart(result.model);
+  const notSwitch = productForPart(result.part_number) || /\b(connect-?x|blue-?field|nic|dpu|hca|adapter)/i.test(result.model);
+  result.type = named || (result.serial && !notSwitch ? "switch" : "other");
   // The product, never the serial: two units of one product share a name; the serial tells them apart.
   const kind = /^MCX/i.test(result.part_number) ? "NIC" : TYPE_LABELS[result.type];
   result.name = clean(result.model || productForPart(result.part_number) || result.part_number || kind, NAME_MAX);

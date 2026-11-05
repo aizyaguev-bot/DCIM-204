@@ -6,8 +6,26 @@ test("a plain NVIDIA / Mellanox serial is the unit's code and serial", () => {
   const unit = parseUnitBarcode("  mt2604603m8u\r\n");
   assert.equal(unit.code, "MT2604603M8U");
   assert.equal(unit.serial, "MT2604603M8U");
-  assert.equal(unit.type, "other");
-  assert.equal(unit.name, "Unit", "the name is the product (here only its type), never the serial");
+  assert.equal(unit.type, "switch", "a serial number alone is most likely a switch (the lab owner's rule)");
+  assert.equal(unit.name, "Switch", "the name is the product (here only its type), never the serial");
+});
+
+test("a serial number marks a unit as a switch unless the label names another product", () => {
+  const cases = [
+    ["SN: MT2629X00QA1", "switch", "Switch"],
+    ["SN: S-9; PN: UNKNOWN-PN", "switch", "UNKNOWN-PN"],
+    ["SN: S-9; Model: BlueField-3", "other", "BlueField-3"],
+    ["SN: S-9; Model: ConnectX-7 adapter", "other", "ConnectX-7 adapter"],
+    ["SN: S-9; PN: MBF2H516A-CEEOT", "other", "BlueField DPU"],
+    ["SN: S-9; PN: MCX75310AAS-NEAT", "other", "ConnectX-7 NIC"],
+    ["SN: S-9; PN: MCP1600-C003", "cable", "DAC cable"],
+    ["(01)07290108410123(21)MT2614X01234", "switch", "Switch"],
+    ["00:1a:2b:3c:4d:5e", "other", "Unit"],
+  ];
+  for (const [raw, type, name] of cases) {
+    const unit = parseUnitBarcode(raw);
+    assert.deepEqual([unit.type, unit.name], [type, name], raw);
+  }
 });
 
 test("any other single code is kept as it is (the existing fixture codes still match) and is the unit's serial number", () => {
@@ -18,7 +36,8 @@ test("any other single code is kept as it is (the existing fixture codes still m
     assert.equal(unit.serial, code);
     assert.equal(unit.serial_from_code, true);
     assert.equal(unit.mac, "");
-    assert.equal(unit.name, "Unit");
+    assert.equal(unit.name, "Switch");
+    assert.equal(unit.type, "switch");
   }
   assert.equal(parseUnitBarcode("MT2604603M8U").serial_from_code, false, "a label's own serial is not a code taken as one");
 });

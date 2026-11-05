@@ -213,8 +213,12 @@
       if (!g.mode) {
         // decide once, after a little movement: both fingers pushed up / down together = tilt, anything else = map
         const ady = a.y - g.a0.y, bdy = b.y - g.b0.y, adx = a.x - g.a0.x, bdx = b.x - g.b0.x;
-        const moved = Math.max(Math.hypot(adx, ady), Math.hypot(bdx, bdy));
+        const ma = Math.hypot(adx, ady), mb = Math.hypot(bdx, bdy), moved = Math.max(ma, mb);
         if (moved < 10) return;
+        // Browsers send one pointermove per finger, so right after the first finger's event the other one has not
+        // reported its move yet: wait until both fingers moved, or one moved far enough that the other is clearly
+        // holding still (a one-finger-anchored pinch or twist), before deciding.
+        if (Math.min(ma, mb) < 4 && moved < 24) return;
         const together = Math.sign(ady) === Math.sign(bdy) && Math.min(Math.abs(ady), Math.abs(bdy)) > 6;
         const vertical = Math.abs(ady + bdy) > 2 * Math.abs(adx + bdx);
         const pinch = Math.abs(d - g.sd), twist = Math.abs(ang - g.sang) * d / 2;

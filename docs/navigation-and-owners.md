@@ -8,13 +8,20 @@ and a second camera clamp could abruptly change the camera position/distance.
 Equipment drag could start after camera movement, and gesture cancellation did
 not consistently stop document listeners or view tweens.
 
-The viewer now uses the bundled official OrbitControls matching Three.js r128.
-One controller handles rotation, screen pan and bounded zoom, with fixed Y up,
-moderate speed and light damping. Camera bounds translate the target and camera
-together, and a swept ray prevents navigation from crossing equipment surfaces.
-Pointer capture, outside release, cancellation and window blur clear input and
-residual deltas. UI layers sit above labels, and controls do not receive menu
-input. Hover and kiosk idle time cause no camera movement.
+The viewer now uses its own map-style controller (`lab-twin/map-controls.js`,
+`THREE.LabMapControls`, which replaced OrbitControls). Left drag or one finger
+pans across the floor and keeps the floor point under the pointer; right or
+middle drag (or Ctrl/Shift/Alt + drag) rotates and tilts around a target that
+stays on the floor; the wheel zooms towards the point under the pointer; pinch
+zooms, a two-finger twist rotates and two fingers pushed up or down together
+tilt. Tilt and distance are clamped, the camera never rolls, and a short glide
+follows a release (off with prefers-reduced-motion). Arrow keys pan, the compass
+turns north up. Camera bounds translate the target and camera together, and a
+swept ray prevents navigation from crossing equipment surfaces. Outside release,
+cancellation and window blur clear input and residual motion. UI layers sit
+above labels, and controls do not receive menu input. Hover and kiosk idle time
+cause no camera movement. See `lab-twin/CLAUDE.md` for why the old orbit view
+drifted.
 
 Canvas clicks select without moving the camera. Reset View, Fit Lab and Focus
 Selection provide explicit recovery. Editing starts disabled; moving equipment

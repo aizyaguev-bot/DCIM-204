@@ -230,11 +230,11 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.match(await dialog.innerText(),/Units go to Main storage · shelf 7\./);
     await page.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
     await page.keyboard.type(code);await page.keyboard.press('Enter');
-    await page.locator('.toast-region .toast').filter({hasText:`Added Unit (SN ${code}) to Main storage · shelf 7.`}).waitFor();
+    await page.locator('.toast-region .toast').filter({hasText:`Added Switch (SN ${code}) to Main storage · shelf 7.`}).waitFor();
     const saved=Object.entries((await items()).data).flatMap(([rack,list])=>list.map(i=>({...i,rack}))).filter(i=>i.serial_number===code||i.barcode===code);
-    assert.deepEqual(saved.map(i=>[i.rack,i.u,i.serial_number,i.name]),[['Storage-Main',7,code,'Unit']]);
+    assert.deepEqual(saved.map(i=>[i.rack,i.u,i.serial_number,i.name]),[['Storage-Main',7,code,'Switch']]);
     await dialog.getByRole('button',{name:'Done'}).click();await dialog.waitFor({state:'detached'});
-    await storage.locator(`[data-u-slot="7"][data-shelf-list] .equipment-cell[data-item-id="${saved[0].id}"][aria-label="View Unit"]`).waitFor();
+    await storage.locator(`[data-u-slot="7"][data-shelf-list] .equipment-cell[data-item-id="${saved[0].id}"][aria-label="View Switch"]`).waitFor();
     // The storage detail: the same 16 shelves, its table says Shelf N
     await storage.locator('.rack-card-name').click();await page.getByRole('button',{name:'All racks'}).waitFor();
     assert.equal(await page.locator('.rack-detail [data-rack-id="Storage-Main"] [data-u-slot]').count(),16);
@@ -302,14 +302,14 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     passed.push('SCAN-2 three wedge scans back to back (Enter / Tab), two repeats: no duplicate row, repeats change nothing');
 
     // SCAN-3: Undo in the list removes the unit this scan added; the toast's Undo does the same. Focus returns to the field.
-    await log.filter({hasText:`Added Unit (SN ${B})`}).getByRole('button',{name:'Undo'}).click();
-    await log.filter({hasText:`Added Unit (SN ${B})`}).getByText('Undone').waitFor();
+    await log.filter({hasText:`Added Switch (SN ${B})`}).getByRole('button',{name:'Undo'}).click();
+    await log.filter({hasText:`Added Switch (SN ${B})`}).getByText('Undone').waitFor();
     assert.equal((await withCode(B)).length,0);
     assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode');
     const C=`SNC${run}`;
     await wedge(C);
-    await toast.filter({hasText:`Added Unit (SN ${C}) to OPT22`}).getByRole('button',{name:'Undo'}).click();
-    await toast.filter({hasText:`Undone: Unit (SN ${C}) was removed.`}).waitFor();
+    await toast.filter({hasText:`Added Switch (SN ${C}) to OPT22`}).getByRole('button',{name:'Undo'}).click();
+    await toast.filter({hasText:`Undone: Switch (SN ${C}) was removed.`}).waitFor();
     assert.equal((await withCode(C)).length,0);
     await op.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
     passed.push('SCAN-3 Undo (list and toast) removes the unit the scan added; focus goes back to the scan field');
@@ -330,10 +330,10 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     // SCAN-11: Undo never removes or moves back a unit that someone else changed after the scan (here: renamed).
     const H=`SNH${run}`;
     await wedge(H);
-    await toast.filter({hasText:`Added Unit (SN ${H}) to OPT22`}).waitFor();
+    await toast.filter({hasText:`Added Switch (SN ${H}) to OPT22`}).waitFor();
     await putItems(d=>{const i=d['Rack-02'].find(x=>x.serial_number===H||x.barcode===H);i.name=`Renamed ${run}`;});
-    await log.filter({hasText:`Added Unit (SN ${H})`}).getByRole('button',{name:'Undo'}).click();
-    await log.filter({hasText:`Added Unit (SN ${H})`}).getByText('Someone else changed the unit after the scan, so the scan was not undone and the unit was left as it is.').waitFor();
+    await log.filter({hasText:`Added Switch (SN ${H})`}).getByRole('button',{name:'Undo'}).click();
+    await log.filter({hasText:`Added Switch (SN ${H})`}).getByText('Someone else changed the unit after the scan, so the scan was not undone and the unit was left as it is.').waitFor();
     found=await withCode(H);
     assert.deepEqual([found.length,found[0].name,found[0].rack,found[0].u],[1,`Renamed ${run}`,'Rack-02',floor],'the renamed unit is kept where it is');
     assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode');
@@ -366,9 +366,9 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
 
     // SCAN-13: the scanned code is the unit's Serial number and its Name is the product, never the code.
     await wedge('TESTSN12345');
-    await toast.filter({hasText:`Added Unit (SN TESTSN12345) to OPT22 · floor ${floor}.`}).waitFor();
+    await toast.filter({hasText:`Added Switch (SN TESTSN12345) to OPT22 · floor ${floor}.`}).waitFor();
     found=await withCode('TESTSN12345');
-    assert.deepEqual([found.length,found[0].serial_number,found[0].barcode,found[0].name,found[0].rack,found[0].u],[1,'TESTSN12345','TESTSN12345','Unit','Rack-02',floor]);
+    assert.deepEqual([found.length,found[0].serial_number,found[0].barcode,found[0].name,found[0].type,found[0].rack,found[0].u],[1,'TESTSN12345','TESTSN12345','Switch','switch','Rack-02',floor],'a serial number alone is saved as a switch');
     await wedge('SN: MT2245X01234; PN: MCX75310AAS-NEAT');
     await toast.filter({hasText:`Added ConnectX-7 NIC (SN MT2245X01234) to OPT22 · floor ${floor}.`}).waitFor();
     found=await withCode('MT2245X01234');
@@ -383,7 +383,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     // The same code again: found, nothing changed (no "another unit has this serial" refusal).
     await wedge(L.toLowerCase());
     await toast.filter({hasText:`Legacy ${run} (SN ${L}) is already on OPT22 · floor ${floor}. Nothing changed.`}).waitFor();
-    passed.push('SCAN-13 a plain code TESTSN12345 is saved as Serial number with Name "Unit"; an SN + PN label gives "ConnectX-7 NIC"; a known barcode-only unit gets its serial filled and keeps its name; scanning it again changes nothing');
+    passed.push('SCAN-13 a plain code TESTSN12345 is saved as Serial number with Name "Switch" and type switch; an SN + PN label gives "ConnectX-7 NIC"; a known barcode-only unit gets its serial filled and keeps its name; scanning it again changes nothing');
 
     // SCAN-5: refusals are sentences and write nothing: a location label, a code on two units, a part number only.
     // The API refuses to create two units with one code, so the legacy duplicate is the lookup's answer, stubbed here.
@@ -432,7 +432,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await op.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
     const E=`SNE${run}`;
     await wedge(`SN: ${E}`);
-    await toast.filter({hasText:`Added Unit (SN ${E}) to Rack-02 · floor 3.`}).waitFor();
+    await toast.filter({hasText:`Added Switch (SN ${E}) to Rack-02 · floor 3.`}).waitFor();
     found=await withCode(E);assert.deepEqual([found.length,found[0].rack,found[0].u],[1,'Rack-02',3]);
     await dialog.getByRole('button',{name:'Done'}).click();await dialog.waitFor({state:'detached'});
     await op.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').first().click();
@@ -512,7 +512,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await camDialog.locator('video').waitFor();
     const K=`SNK${run}`;
     await cam.evaluate(code=>{window.__cameraCode=code;},K);
-    await cam.locator('.toast-region .toast').filter({hasText:`Added Unit (SN ${K}) to OPT22 · floor ${floor}.`}).waitFor();
+    await cam.locator('.toast-region .toast').filter({hasText:`Added Switch (SN ${K}) to OPT22 · floor ${floor}.`}).waitFor();
     await cam.waitForTimeout(700);
     assert.equal((await withCode(K)).length,1,'The code held in view is saved once');
     assert.equal(await camDialog.locator('.scan-unit-log > li').count(),1,'The code held in view is read once');

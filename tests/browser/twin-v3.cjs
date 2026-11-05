@@ -402,7 +402,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
       const t = __twin, S = t.S; const ci = S.live.rackItems['Rack-01'].find(x => x.id === 'ci-1'); window.__savedModel = ci.model; ci.model = 'MSN2700-CS2F';
       t.computeModel(); const it = S.model.items.find(i => i.id === 'LIVE-opt12'); it.live.state = 'off'; t.buildItems({ refresh: true });
       const sh = S.recs.get(S.recs.get('LIVE-ci-1').shelf), opt = S.recs.get('LIVE-opt12');
-      const kinds = { sn: t.unitInfo({ type: 'equip-other', name: 'Unit A', serial_number: 'MT2629600G08' }), nic: t.unitInfo({ type: 'equip-other', name: 'NIC card', model: 'ConnectX-7 MCX75310' }), qm: t.unitInfo({ type: 'equip-switch', name: 'IB', part_number: 'MQM9700-NS2F' }), plain: t.unitInfo({ type: 'equip-other', name: 'Box' }) };
+      const kinds = { sn: t.unitInfo({ type: 'equip-other', name: 'Unit A', serial_number: 'MT2629600G08' }), nic: t.unitInfo({ type: 'equip-other', name: 'NIC card', model: 'ConnectX-7 MCX75310' }), qm: t.unitInfo({ type: 'equip-switch', name: 'IB', part_number: 'MQM9700-NS2F' }), plain: t.unitInfo({ type: 'equip-other', name: 'Box' }), bc: t.unitInfo({ type: 'equip-other', name: 'MT2629X00QA2', barcode: 'MT2629X00QA2' }) };
       return { sameShelf: sh.id === opt.shelf, text: sh.cardText, kinds, ev: getComputedStyle(sh.label).pointerEvents };
     });
     assert.ok(shelfCard.sameShelf, 'OPT12 and Switch 01 share a shelf in the fixture');
@@ -411,6 +411,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     assert.deepEqual([shelfCard.kinds.sn.kind, shelfCard.kinds.sn.tag, shelfCard.kinds.sn.likely], ['switch', 'SW', true], 'a unit entered with an SN is marked as a switch');
     assert.deepEqual([shelfCard.kinds.nic.tag, shelfCard.kinds.nic.typeText], ['NIC', 'ConnectX-7']); assert.deepEqual([shelfCard.kinds.qm.tag, shelfCard.kinds.qm.typeText], ['SW', 'Quantum-2 QM9700']);
     assert.deepEqual([shelfCard.kinds.plain.kind, shelfCard.kinds.plain.likely], ['other', false]);
+    assert.deepEqual([shelfCard.kinds.bc.kind, shelfCard.kinds.bc.tag], ['switch', 'SW'], 'a code registered by Scan & Track (stored as its barcode) is marked as a switch');
     assert.equal(shelfCard.ev, 'none', 'shelf cards never take pointer input');
     // level of detail: full card close to the rack, nothing from far away; cards never overlap each other
     await page.evaluate(() => __twin.select('SETUP-001', { fly: true })); await idle(page); await page.waitForTimeout(300);
@@ -420,6 +421,29 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     assert.ok(near.n >= 3, 'shelf cards shown at the rack: ' + near.n); assert.equal(near.bad, 0, 'shelf cards overlap');
     assert.ok(near.full.some(t => /OFF\s?OPT12\s?opt12/.test(t) && /SW\s?Spectrum SN2700/.test(t)), 'full card for Rack-01: ' + near.full.join(' / '));
     await shot(page, 'desktop-15-shelf-cards.png');
+    // a label on every shelf at every middle distance: in front of the selected Rack-01 from 2.5 to 7 m all four cards
+    // are shown (full, or compact for the whole rack when full cards would not fit), never hidden, never overlapping
+    const sweep = {};
+    for (const d of [2.5, 3.3, 3.8, 4.5, 5, 5.5, 6.5, 7]) {
+      await page.evaluate(d => { const t = __twin, S = t.S; S.tween = null; t.controls.cancel(); const sh = [...S.recs.values()].filter(r => r.cat === 'shelf' && r.setup === 'SETUP-001');
+        const c = new THREE.Vector3(); sh.forEach(r => c.add(r.cardAnchor)); c.divideScalar(sh.length); const p = c.clone().addScaledVector(sh[0].front, d); p.y = 1.6;
+        // a zero-length camera animation: placed exactly there (an animation frame skips the walk-through collision check)
+        S.tween = { ms: 0, t0: performance.now(), p0: p.clone(), p1: p.clone(), t0v: c.clone(), t1v: c.clone() }; window.__f0 = t.renderer.info.render.frame; }, d);
+      // software WebGL can take a few hundred ms per frame: wait for frames drawn from the new camera, not for a time
+      await page.waitForFunction(() => __twin.renderer.info.render.frame >= window.__f0 + 3, null, { timeout: 20000 });
+      sweep[d] = await page.evaluate(() => { const S = __twin.S; const els = [...S.recs.values()].filter(r => r.cat === 'shelf' && r.setup === 'SETUP-001').map(r => r.label);
+        const st = els.map(e => e.style.display === 'none' ? '-' : getComputedStyle(e).visibility === 'hidden' ? 'HIDDEN' : e.dataset.lod);
+        const shown = [...document.querySelectorAll('#labels .lbl.shelf-card')].filter(e => e.style.display !== 'none' && getComputedStyle(e).visibility !== 'hidden'); const r = shown.map(e => e.getBoundingClientRect()); let bad = 0;
+        for (let i = 0; i < r.length; i++) for (let j = i + 1; j < r.length; j++) if (Math.min(r[i].right, r[j].right) - Math.max(r[i].left, r[j].left) > 2 && Math.min(r[i].bottom, r[j].bottom) - Math.max(r[i].top, r[j].top) > 2) bad++;
+        return { st, bad, camd: Math.min(...[...S.recs.values()].filter(r => r.cat === 'shelf' && r.setup === 'SETUP-001').map(r => r.cardAnchor.distanceTo(__twin.camera.position))) }; });
+      if (d === 4.5) await shot(page, 'desktop-15b-shelf-cards-4_5m.png');
+    }
+    for (const [d, s] of Object.entries(sweep)) {
+      assert.ok(Math.abs(s.camd - d) < 0.3, `camera placed ${d} m in front of Rack-01: ${s.camd}`);
+      assert.ok(s.st.length === 4 && s.st.every(v => v === 'full' || v === 'compact'), `every Rack-01 shelf has a card at ${d} m: ${s.st}`);
+      assert.equal(new Set(s.st).size, 1, `one level of detail per rack at ${d} m: ${s.st}`); assert.equal(s.bad, 0, `shelf cards overlap at ${d} m`);
+    }
+    assert.ok(sweep['2.5'].st.every(v => v === 'full') && sweep['7'].st.every(v => v === 'compact'), 'full close up, compact farther: ' + JSON.stringify(sweep));
     await page.evaluate(() => { __twin.closeDetail(); }); await page.locator('#vTop').click(); await idle(page);
     const far = await page.evaluate(() => [...document.querySelectorAll('#labels .lbl.shelf-card')].filter(e => e.style.display !== 'none').length);
     assert.equal(far, 0, 'no shelf cards from the top view (far away)');
@@ -429,7 +453,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     // map navigation: left drag pans on the floor, right drag rotates, wheel zooms to the pointer; the camera stays above
     // the floor and the target on it; the compass turns north up
     await page.locator('#vOrbit').click(); await idle(page);
-    const settle = () => page.waitForFunction(() => !__twin.controls.moving && !__twin.S.tween, null, { timeout: 5000 });
+    const settle = () => page.waitForFunction(() => !__twin.controls.moving && !__twin.S.tween, null, { timeout: 20000 });
     const cam = () => page.evaluate(() => ({ p: __twin.camera.position.toArray(), t: __twin.controls.target.toArray(), polar: __twin.controls.getPolarAngle(), heading: document.querySelector('#vCompass').dataset.heading }));
     const vb = await page.locator('#c').boundingBox(); const mx = vb.x + vb.width * .55, my = vb.y + vb.height * .6;
     const c0 = await cam(); assert.ok(Math.abs(c0.t[1]) < 1e-6, 'overview target on the floor');
@@ -444,7 +468,27 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     assert.notDeepEqual(c1.p, c0.p, 'the sequence moved the camera');
     await page.locator('#vCompass').click(); await idle(page); assert.equal((await cam()).heading, '0', 'compass: north up');
     await page.locator('#vReset').click(); await idle(page);
-    pass('map navigation: pan / rotate / wheel / tilt sequence keeps the camera above the floor and the target on it, polar in [0.02, 1.5]; compass turns north up');
+    // touch, as browsers send it (one pointermove per finger): a quick two-finger push up tilts around a fixed target
+    // (it is not taken for a map pan), and a pinch with one finger held still zooms
+    const touch = await page.evaluate(() => {
+      const cv = document.getElementById('c'); const b = cv.getBoundingClientRect(); const cx = b.left + b.width / 2, cy = b.top + b.height * 0.5; const ctl = __twin.controls;
+      const ev = (type, id, x, y) => (type === 'pointerdown' ? cv : window).dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: 'touch', clientX: x, clientY: y, bubbles: true, isPrimary: id === 31, button: 0, buttons: type === 'pointerup' ? 0 : 1 }));
+      const p0 = ctl.getPolarAngle(), t0 = ctl.target.clone();
+      ev('pointerdown', 31, cx - 50, cy + 60); ev('pointerdown', 32, cx + 50, cy + 60);
+      for (let i = 1; i <= 8; i++) { ev('pointermove', 31, cx - 50, cy + 60 - i * 15); ev('pointermove', 32, cx + 50, cy + 60 - i * 15); }
+      ev('pointerup', 31, cx - 50, cy - 60); ev('pointerup', 32, cx + 50, cy - 60); ctl.cancel();
+      const tilt = { dPolar: ctl.getPolarAngle() - p0, moved: t0.distanceTo(ctl.target) };
+      const d0 = ctl.getDistance(), q0 = ctl.getPolarAngle();
+      ev('pointerdown', 33, cx - 40, cy); ev('pointerdown', 34, cx + 40, cy);
+      for (let i = 1; i <= 8; i++) ev('pointermove', 34, cx + 40 + i * 15, cy);
+      ev('pointerup', 33, cx - 40, cy); ev('pointerup', 34, cx + 160, cy); ctl.cancel();
+      return { tilt, pinch: { ratio: ctl.getDistance() / d0, dPolar: ctl.getPolarAngle() - q0 }, aboveFloor: __twin.camera.position.y > 0.15, onFloor: Math.abs(ctl.target.y) < 1e-6 };
+    });
+    assert.ok(Math.abs(touch.tilt.dPolar) > 0.1 && touch.tilt.moved < 0.05, 'fast two-finger push tilts, the target stays: ' + JSON.stringify(touch));
+    assert.ok(touch.pinch.ratio < 0.9 && Math.abs(touch.pinch.dPolar) < 0.01, 'a one-finger-anchored pinch zooms in without tilting: ' + JSON.stringify(touch));
+    assert.ok(touch.aboveFloor && touch.onFloor, 'touch keeps the camera above the floor and the target on it');
+    await page.locator('#vReset').click(); await idle(page);
+    pass('map navigation: pan / rotate / wheel / tilt sequence keeps the camera above the floor and the target on it, polar in [0.02, 1.5]; compass turns north up; a fast two-finger push tilts, a pinch zooms');
     await page.evaluate(() => { const t = __twin; t.computeModel(); t.buildItems({ refresh: true }); });
 
     // narrower windows: the header never passes the edge (1024 px, long issues badge); at 800 px the critical chip is in view
