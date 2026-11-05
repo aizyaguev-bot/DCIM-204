@@ -3,6 +3,8 @@
 // Handles a keyboard-wedge or camera scan of: a GS1 code ("(01)…(21)…", or raw with FNC1 group separators and an
 // optional "]C1" / "]d2" / "]Q3" symbology prefix), a QR "key: value" label (SN, P/N, Model, MAC …), a plain NVIDIA /
 // Mellanox serial (MT…), a MAC address, a known part number, or any other text (used as it is).
+// The code that identifies the unit is its serial number (a plain code too); the name is the product (model, the
+// product a known part number stands for, the part number, or the type), never the serial.
 
 export const UNIT_CODE_MAX = 200;
 const FIELD_MAX = 120;
@@ -21,6 +23,25 @@ const PART_TYPES = [
   [/^(PX\d?-|PX[234]\b|RARITAN\s+PX)/i, "pdu"],
   [/^(DKX|DLX|DKX3|KX\d|DOMINION)/i, "kvm"],
   [/^MCX/i, "other"],
+];
+
+// Known NVIDIA / Mellanox part-number prefixes to the product they stand for; the first match wins. Only families we are
+// sure of: MCX7… ConnectX-7, MCX6… ConnectX-6, MCX5… ConnectX-5 adapters; MBF… BlueField DPUs; MQM97… Quantum-2
+// QM9700/QM9790 and MQM87… Quantum QM8700/QM8790 InfiniBand switches; MSN2700… / MSN3700… the Spectrum SN2700 and
+// Spectrum-2 SN3700 Ethernet switches, MSN4… the Spectrum-3 SN4000 series; MCP… copper DAC cables; MFS… active optical
+// cables and MMA… optical transceivers. Any other part number is its own name.
+const PART_PRODUCTS = [
+  [/^MCX7/i, "ConnectX-7 NIC"],
+  [/^MCX6/i, "ConnectX-6 NIC"],
+  [/^MCX5/i, "ConnectX-5 NIC"],
+  [/^MBF/i, "BlueField DPU"],
+  [/^MQM97/i, "Quantum-2 QM9700 switch"],
+  [/^MQM87/i, "Quantum QM8700 switch"],
+  [/^MSN2700/i, "Spectrum SN2700 switch"],
+  [/^MSN3700/i, "Spectrum-2 SN3700 switch"],
+  [/^MSN4/i, "Spectrum-3 SN4000 switch"],
+  [/^MCP/i, "DAC cable"],
+  [/^(MFS|MMA)/i, "Optical cable/transceiver"],
 ];
 
 const KEYS = [
@@ -48,10 +69,20 @@ export function typeForPart(text) {
   return "";
 }
 
+// The product a part number stands for ("ConnectX-7 NIC"), or "" when it is not a known one.
+export function productForPart(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  for (const [pattern, product] of PART_PRODUCTS) if (pattern.test(value)) return product;
+  return "";
+}
+
+// "00:1A:…", "00-1a-…", "001A2B3C4D5E" or "001a.2b3c.4d5e" (the forms the server reads as a MAC) -> "00:1A:2B:3C:4D:5E".
 function macOf(text) {
   const value = String(text || "").trim();
   const match = /^([0-9A-F]{2})([:-]?)([0-9A-F]{2})\2([0-9A-F]{2})\2([0-9A-F]{2})\2([0-9A-F]{2})\2([0-9A-F]{2})$/i.exec(value);
-  return match ? [1, 3, 4, 5, 6, 7].map(i => match[i].toUpperCase()).join(":") : "";
+  if (match) return [1, 3, 4, 5, 6, 7].map(i => match[i].toUpperCase()).join(":");
+  return /^[0-9A-F]{4}\.[0-9A-F]{4}\.[0-9A-F]{4}$/i.test(value) ? value.replace(/\./g, "").toUpperCase().match(/../g).join(":") : "";
 }
 
 // "(01)…(21)…" written out, as on the human-readable line of a GS1 label.
@@ -113,7 +144,8 @@ export function parseUnitBarcode(raw) {
   if (!text) throw fail("Scan a barcode first.");
   if (/^(LOC|RACK|STORE):/i.test(text)) throw fail("This is a location label. Scan the barcode on the unit itself.");
 
-  const result = { code: "", raw: "", serial: "", part_number: "", model: "", mac: "", gtin: "", lot: "", type: "", name: "" };
+  // serial_from_code: the serial is the scanned code itself (a plain code), not a value the label calls a serial.
+  const result = { code: "", raw: "", serial: "", serial_from_code: false, part_number: "", model: "", mac: "", gtin: "", lot: "", type: "", name: "" };
   const fields = gs1Bracketed(text) || ((gs1 || text.includes(GS)) ? gs1Raw(text) : null);
   let readable = clean(text, Infinity);
   if (fields) {
@@ -149,13 +181,17 @@ export function parseUnitBarcode(raw) {
   result.code = result.serial || result.mac || readable;
   if (Array.from(result.code).length > UNIT_CODE_MAX) throw fail(`This barcode is too long (more than ${UNIT_CODE_MAX} characters). Scan the serial number barcode on the unit instead.`);
   if (Array.from(result.raw).length > UNIT_CODE_MAX) result.raw = result.code;
+  // A plain code (not a GS1 or key: value label, not a MAC) is the unit's own identifier: its serial number. The code
+  // stays as well, so the unit is still found by it and the server's barcode/serial duplicate rule still applies.
+  if (!fields && !result.serial && !result.mac) {
+    result.serial = result.code;
+    result.serial_from_code = true;
+  }
 
   result.type = typeForPart(result.part_number) || typeForPart(result.model) || "other";
+  // The product, never the serial: two units of one product share a name; the serial tells them apart.
   const kind = /^MCX/i.test(result.part_number) ? "NIC" : TYPE_LABELS[result.type];
-  const label = result.model || result.part_number;
-  const id = result.code;
-  const named = label && label.toLowerCase() !== id.toLowerCase() ? `${label} ${id}` : result.type !== "other" || kind === "NIC" ? `${kind} ${id}` : id;
-  result.name = clean(named, NAME_MAX);
+  result.name = clean(result.model || productForPart(result.part_number) || result.part_number || kind, NAME_MAX);
   return result;
 }
 

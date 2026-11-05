@@ -52,7 +52,7 @@ const missing = (item, field) => !detailText(item, field).trim();
 // A known unit: fill only the fields it does not have yet (the server checks again with only_missing). Resolves to
 // { item, filled: { field: value }, fillError? }; a refused fill never undoes the move, it is reported instead.
 async function fillMissing(item, parsed, revision) {
-  const wanted = Object.fromEntries(Object.entries(scanDetails(parsed)).filter(([field]) => missing(item, field)));
+  const wanted = Object.fromEntries(Object.entries(scanDetails(claimsFor(item, parsed))).filter(([field]) => missing(item, field)));
   if (!Object.keys(wanted).length) return { item, filled: {} };
   try {
     const saved = await updateInventory(`/${encodeURIComponent(item.id)}/details`, { ...wanted, only_missing: true }, revision);
@@ -89,9 +89,22 @@ async function lookUp(parsed) {
 const identityOf = value => { const text = String(value || "").trim(); return normalizeMac(text) || text.toLowerCase(); };
 const sameText = (a, b) => identityOf(a) === identityOf(b);
 
+// What the scan says about the unit it found. A plain code is taken as the unit's serial number (parseUnitBarcode
+// serial_from_code), but when the unit was found by that code as its barcode or its id, the code is that barcode or id:
+// it is a serial only for a unit that has no serial yet and was found by its barcode (it is filled in then); a unit that
+// already has another serial keeps it without a conflict, and an id is never taken as a serial.
+export function claimsFor(item, parsed) {
+  if (!parsed?.serial_from_code || !sameText(parsed.serial, parsed.code)) return parsed;
+  const byId = sameText(parsed.code, item?.id), byBarcode = sameText(parsed.code, detailText(item, "barcode"));
+  const stored = detailText(item, "serial_number").trim();
+  if (byId || (byBarcode && stored && !sameText(stored, parsed.serial))) return { ...parsed, serial: "", serial_from_code: false };
+  return parsed;
+}
+
 // The label's serial number or MAC address against the unit it found: a value on both that differs means the label
 // belongs to another unit (or the record is wrong). Returns a refusal Error, or null.
-export function identityConflict(item, parsed) {
+export function identityConflict(item, scanned) {
+  const parsed = claimsFor(item, scanned);
   const name = item.name || item.id;
   const serial = String(parsed?.serial || "").trim(), stored = detailText(item, "serial_number").trim();
   if (serial && stored && !sameText(serial, stored)) {
