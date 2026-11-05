@@ -12,7 +12,7 @@ import { findServer } from "../api/ssh";
 import { serverIdentity } from "../api/locations";
 import { deviceState } from "../api/client";
 import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, rackFloors, RACK_FLOORS, buildSearchIndex, searchIndex, matchesFilter, floorOptions,
-  FLOOR_UNIT_SLOTS, SHELF_SLOTS, splitSlots, moreText, serverFacts } from "../components/racks/rackView.js";
+  FLOOR_UNIT_SLOTS, SHELF_SLOTS, splitSlots, moreText, serverFacts, midSplit } from "../components/racks/rackView.js";
 import { STORAGE_SHELVES, floorsFor, placesWord, rackHasFloors, validFloor, setStorageRacks, storageRackNames } from "../components/racks/floors.js";
 import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, validPlace, shelfLabel, placeWord, floorLabel, sameDocument } from "../components/racks/chillers.js";
 import { BLOCK, serverPowerGroup, planServerPower, sameTargets, serverDisplayName } from "../components/racks/serverPower.js";
@@ -256,7 +256,7 @@ const EMPTY_H = 20;  // height of an empty U row
 let pendingOpen = null;
 
 // Inline-rename text span
-function InlineName({ value, onRename, onOpen, className }) {
+function InlineName({ value, onRename, onOpen, className, mid = false }) {
   const editMode = useContext(EditContext);
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(value);
@@ -287,8 +287,8 @@ function InlineName({ value, onRename, onOpen, className }) {
         if (onOpen) pendingOpen = setTimeout(onOpen, 250);
       }}
       title={editMode ? "Click to open · double-click to rename" : value} dir="auto"
-      className={`${className} cursor-text select-none`}>
-      {value}
+      className={`${className}${mid ? " mid-text" : ""} cursor-text select-none`}>
+      {mid ? <MidText text={value} keep={6}/> : value}
     </span>
   );
 }
@@ -379,7 +379,7 @@ function FloorMore({ kind, label, title, match = false, children }) {
   }, [open]);
   return <div ref={ref} className="floor-more" data-floor-more={kind} data-open={open ? "" : undefined}
     onKeyDown={e => { if (e.key === "Escape" && open) { e.stopPropagation(); setOpen(false); ref.current?.querySelector(".floor-more-toggle")?.focus(); } }}>
-    <button type="button" className="floor-more-toggle" aria-expanded={open} aria-controls={listId} title={title}
+    <button type="button" className="floor-more-toggle" aria-expanded={open} aria-controls={listId} title={title} aria-label={label === title ? undefined : title}
       data-match={match ? "" : undefined} onClick={e => { e.stopPropagation(); setOpen(o => !o); }}>{label}</button>
     <div id={listId} className="floor-more-list" role="group" aria-label={title} hidden={!open}>{children}</div>
   </div>;
@@ -453,12 +453,29 @@ function ServerCell({ server, sw, owner, onSelect, onRename, overlay = false, dr
   </div>;
 }
 
-// One labelled field of a unit slot ("P/N MQM8790-HS2F"): its label, then its value or "—"; the value ends in "…" when
-// it is too long, and its tooltip has it whole.
+// A value cut in the middle when it is too long for its place (rackView.js midSplit): the head ends in "…" and the
+// last characters always show, so values that differ only at the end ("…-1" / "…-2", "… name 1" / "… name 2") stay
+// apart. The parent is a .mid-text box (one line).
+function MidText({ text, keep = 5 }) {
+  const { head, tail } = midSplit(text, keep);
+  return <><span className="mid-head">{head}</span>{tail && <span className="mid-tail">{tail}</span>}</>;
+}
+
+// The serial number a unit slot, the detail table and the phone list show: the saved serial, else its barcode.
+const unitSerial = item => detailText(item, "serial_number") || detailText(item, "barcode");
+
+// The P/N and S/N cells of a row of the rack detail table (monospace, — when not recorded).
+function UnitIdCells({ item }) {
+  return <>{[["part_number", detailText(item, "part_number")], ["serial_number", unitSerial(item)]].map(([field, value]) =>
+    <td key={field} className="racks-mono racks-id" data-field={field}>{value ? <bdi dir="auto">{value}</bdi> : <span className="racks-dash">—</span>}</td>)}</>;
+}
+
+// One labelled field of a unit slot ("P/N MQM8790-HS2F"): its label, then its value or "—"; a value too long for its
+// place is cut in the middle (its end stays), and its tooltip has it whole.
 function SlotField({ field, label, value }) {
   const text = String(value ?? "").trim();
   return <span className="slot-field" data-field={field} title={text ? `${label}: ${text}` : `${label}: not recorded`}>
-    <span className="slot-label">{label}</span><span className="slot-value" dir="auto">{text || "—"}</span>
+    <span className="slot-label">{label}</span><span className="slot-value mid-text" dir="auto"><MidText text={text || "—"}/></span>
   </span>;
 }
 
@@ -472,42 +489,44 @@ function EmptySlot({ lines = 3 }) {
 }
 
 // One piece of equipment (switch, UPS, …) in a unit slot of the floor template (a floor's units row, a storage shelf, a
-// "+N units" list): a box of fixed size with its fields at fixed places. Line 1: type and name; line 2: P/N (part
-// number); line 3 (lines 3): S/N, model and MAC address, ending in "…" when too long. Every field has its tooltip and
-// the details have them all. Enter or Space opens it.
+// "+N" list): a box of fixed size with its fields at fixed places, the same places as an empty slot. Line 1: "Name" and
+// the name (a storage slot, two lines: the name alone, on the whole line); line 2: P/N (part number); line 3 (lines 3):
+// S/N, on the whole line. Too long: cut in the middle, the end stays. Its type is the colour of its inline-start edge
+// (and in its tooltip); model and MAC address are in its tooltip and its details. Enter or Space opens it.
 function EquipCell({ item, onSelect, onRename, lines = 3 }) {
   const meta = ITEM_TYPES[item.type] || ITEM_TYPES.other;
   const { matchKeys } = useContext(RackViewContext);
-  const serial = detailText(item, "serial_number") || item.barcode || "";
+  const serial = unitSerial(item);
   const tip = [`${meta.label}: ${item.name}`, detailText(item, "part_number") ? `P/N ${detailText(item, "part_number")}` : "", serial ? `SN ${serial}` : "",
     detailText(item, "model") ? `Model ${detailText(item, "model")}` : "", detailText(item, "mac") ? `MAC ${detailText(item, "mac")}` : "",
     item.shelf_position ? `Position ${item.shelf_position}` : ""].filter(Boolean).join(" · ");
-  return <div className="equipment-cell unit-slot" data-type={item.type} data-item-id={item.id} data-lines={lines} data-match={matchKeys?.has(`e:${item.id}`) ? "" : undefined}
+  return <div className="equipment-cell unit-slot" data-type={ITEM_TYPES[item.type] ? item.type : "other"} data-item-id={item.id} data-lines={lines} data-match={matchKeys?.has(`e:${item.id}`) ? "" : undefined}
     onClick={() => onSelect?.(item)} role="button" tabIndex={0} aria-label={`View ${item.name}`} title={tip}
     onKeyDown={e => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onSelect?.(item); } }}>
     <span className="slot-line slot-name">
-      <span className="equipment-type" title={meta.label}>{meta.short}</span>
-      <InlineName value={item.name} onRename={onRename} onOpen={() => onSelect?.(item)} className="equipment-name"/>
+      {lines > 2 && <span className="slot-label">Name</span>}
+      <InlineName value={item.name} onRename={onRename} onOpen={() => onSelect?.(item)} className="equipment-name" mid/>
     </span>
     <span className="slot-line"><SlotField field="part_number" label="P/N" value={detailText(item, "part_number")}/></span>
-    {lines > 2 && <span className="slot-line slot-more-fields">
-      <SlotField field="serial_number" label="S/N" value={serial}/>
-      {detailText(item, "model") && <SlotField field="model" label="Model" value={detailText(item, "model")}/>}
-      {detailText(item, "mac") && <SlotField field="mac" label="MAC" value={detailText(item, "mac")}/>}
-    </span>}
+    {lines > 2 && <span className="slot-line"><SlotField field="serial_number" label="S/N" value={serial}/></span>}
   </div>;
 }
 
 // A cooling unit on a floor or in a rack's strip; in Edit mode on the overview it can also be dragged (pointer only).
-// In a unit slot (variant "slot") it shows the same fixed lines as equipment: name, type and place.
+// In a unit slot (variant "slot") it shows the same fixed lines as equipment (Name, P/N, S/N; a storage slot: name and
+// P/N), its cooling colour on its inline-start edge.
 function RackCoolingChip({ unit, variant, lines = 3 }) {
   const editMode = useContext(EditContext);
   const { coolingDraggable, onOpenCooling, onPlaceCooling, matchKeys } = useContext(RackViewContext);
   const drag = useDraggable({ id: `cooling:${unit.id}`, disabled: !coolingDraggable, data: { unit } });
   const place = variant === "strip" && !editMode && onPlaceCooling;
   const extra = variant === "slot" ? <>
-    <span className="slot-line"><SlotField field="type" label="Type" value="Cooling unit"/></span>
-    {lines > 2 && <span className="slot-line"><SlotField field="place" label="Place" value={validShelf(unit.u) ? floorLabel(unit.u, unit.rack) : ""}/></span>}
+    <span className="slot-line slot-name">
+      {lines > 2 && <span className="slot-label">Name</span>}
+      <span dir="auto" className="cooling-name equipment-name mid-text"><MidText text={unit.name} keep={6}/></span>
+    </span>
+    <span className="slot-line"><SlotField field="part_number" label="P/N" value={detailText(unit, "part_number")}/></span>
+    {lines > 2 && <span className="slot-line"><SlotField field="serial_number" label="S/N" value={unitSerial(unit)}/></span>}
   </> : null;
   return <CoolingChip unit={unit} variant={variant} onOpen={place || onOpenCooling} actionLabel={place ? "Place…" : null}
     highlighted={!!matchKeys?.has(`c:${unit.id}`)} dragHandle={coolingDraggable ? drag : null} extra={extra} lines={lines}/>;
@@ -528,9 +547,9 @@ function shelfIndex(u, floors, auto) {
 // (with the "+" that scans a unit onto it) | the server zone: its server (a floor with more servers, old data, shows the
 // first and a "+1 server" chip), or "Free" | under it, the units row: a fixed number of unit slots (unitSlots), each a
 // box of fixed size with the unit's labelled fields (name, P/N, S/N · model · MAC); a slot with nothing in it keeps its
-// place and its labels. More units than slots: the last slot is "+N units", which opens the rest. A storage shelf
-// (floors false) is one row of `slots` unit slots for everything on it, servers and units alike ("+N more" last); never
-// servers | units.
+// place and its labels. More units than slots: every slot shows a unit and a small "+N" chip at the end of the last
+// slot's first line opens the rest. A storage shelf (floors false) is one row of `slots` unit slots for everything on
+// it, servers and units alike ("+N" on the last); never servers | units.
 function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, sortable = false, floors = true, slots = SHELF_SLOTS.card, unitSlots = FLOOR_UNIT_SLOTS.card }) {
   const { coolingByRack, coolingDrop, matchKeys } = useContext(RackViewContext);
   const { scanUnit } = useContext(ServerActionsContext);
@@ -566,16 +585,17 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
   if (!floors) {
     const all = [...servers.map(({ data }) => ({ key: `s:${data.id}`, el: () => serverRow(data, "chip") })), ...units];
     const { shown, rest, more } = splitSlots(all, slots);
-    const free = slots - shown.length - (more ? 1 : 0);
+    const free = slots - shown.length;
+    const last = shown.length - 1;
     return <div {...common} data-shelf-list="" className="floor-box shelf-line shelf-row">
       {indexCell}
       <div className="shelf-list" role="list" aria-label={u ? `Shelf ${u}${empty ? " (free)" : ""}` : "Whole storage unit"} style={{ "--slots": slots }}>
-        {shown.map(x => <div key={x.key} role="listitem" className="shelf-list-item">{x.el(2)}</div>)}
-        {more > 0 && <div role="listitem" className="shelf-list-item shelf-list-more">
-          <FloorMore kind="shelf" label={moreText(more)} title={`${more} more on ${where}`} match={hit(rest)}>
-            {rest.map(x => <div key={x.key} className="floor-more-item">{x.el(3)}</div>)}
-          </FloorMore>
-        </div>}
+        {shown.map((x, i) => <div key={x.key} role="listitem" className="shelf-list-item" data-more={more > 0 && i === last ? "" : undefined}>
+          {x.el(2)}
+          {more > 0 && i === last && <FloorMore kind="shelf" label={`+${more}`} title={`${more} more on ${where}`} match={hit(rest)}>
+            {rest.map(r => <div key={r.key} className="floor-more-item">{r.el(3)}</div>)}
+          </FloorMore>}
+        </div>)}
         {Array.from({ length: free }, (_, i) => <div key={`free-${i}`} className="shelf-list-item"><EmptySlot lines={2}/></div>)}
       </div>
     </div>;
@@ -586,7 +606,8 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
     {extra.map(({ data }) => <div key={data.id} className="floor-more-item">{serverRow(data, "floor")}</div>)}
   </FloorMore> : null;
   const { shown, rest, more } = splitSlots(units, unitSlots);
-  const free = unitSlots - shown.length - (more ? 1 : 0);
+  const free = unitSlots - shown.length;
+  const last = shown.length - 1;
   return <div {...common} className="floor-box shelf-row" data-cooling-only={!items.length && cooling.length ? "" : undefined}
     data-units={units.length ? "" : undefined}>
     {indexCell}
@@ -595,12 +616,12 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
         : <span className={empty ? "shelf-empty-line" : "floor-no-server"} title={u ? `No server on ${where}` : "Equipment for the whole rack, on no floor"}>{u ? "Free" : "Rack level"}</span>}
     </div>
     <div className="floor-units" role="list" aria-label={`Units on ${where}`} style={{ "--slots": unitSlots }}>
-      {shown.map(x => <div key={x.key} role="listitem" className="floor-unit">{x.el(3)}</div>)}
-      {more > 0 && <div role="listitem" className="floor-unit floor-unit-more">
-        <FloorMore kind="units" label={moreText(more, "unit")} title={`${more} more ${more === 1 ? "unit" : "units"} on ${where}`} match={hit(rest)}>
-          {rest.map(x => <div key={x.key} className="floor-more-item">{x.el(3)}</div>)}
-        </FloorMore>
-      </div>}
+      {shown.map((x, i) => <div key={x.key} role="listitem" className="floor-unit" data-more={more > 0 && i === last ? "" : undefined}>
+        {x.el(3)}
+        {more > 0 && i === last && <FloorMore kind="units" label={`+${more}`} title={`${more} more ${more === 1 ? "unit" : "units"} on ${where}`} match={hit(rest)}>
+          {rest.map(r => <div key={r.key} className="floor-more-item">{r.el(3)}</div>)}
+        </FloorMore>}
+      </div>)}
       {Array.from({ length: free }, (_, i) => <div key={`free-${i}`} className="floor-unit"><EmptySlot lines={3}/></div>)}
     </div>
   </div>;
@@ -736,7 +757,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   return <section data-rack-id={r.rack} data-status={summary.status} data-maintenance={summary.maintenancePdus.length ? "" : undefined}
     data-collapsed={collapsed ? "" : undefined} data-detail={detail ? "" : undefined} data-rack-type={floors ? "compute" : "storage"}
     aria-labelledby={titleId} ref={external ? setNodeRef : undefined}
-    className={`rack-card min-w-0 ${fixed ? "w-full lg:shrink-0 lg:max-w-[560px]" : "w-full"} ${editMode && isOver ? "ring-2 ring-nv-400/40" : ""}`}>
+    className={`rack-card min-w-0 ${fixed ? `w-full lg:shrink-0 lg:max-w-[560px]${detail ? " xl:max-w-[640px] 2xl:max-w-[760px]" : ""}` : "w-full"} ${editMode && isOver ? "ring-2 ring-nv-400/40" : ""}`}>
     <header className="rack-card-header">
       <h3 id={titleId} className="rack-card-title">{onHeaderClick
         ? <button type="button" className="rack-card-name" onClick={onHeaderClick} title={`Open ${r.rack} details`}><span dir="auto">{r.rack}</span><svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17 17 7M8 7h9v9"/></svg></button>
@@ -1423,7 +1444,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
             <div className="racks-table-wrap">
               <table className="racks-table">
                 <caption className="sr-only">Everything in {r.rack}, by shelf</caption>
-                <thead><tr>{["U","Name","Type","State","W","Owner","Outlet","Switch","Notes","Actions"].map(h => <th key={h} scope="col" className={h === "W" || h === "Outlet" ? "num" : undefined}>{h === "U" && storage ? "Shelf" : h}</th>)}</tr></thead>
+                <thead><tr>{["U","Name","P/N","S/N","Type","State","W","Owner","Outlet","Switch","Notes","Actions"].map(h => <th key={h} scope="col" className={h === "W" || h === "Outlet" ? "num" : undefined}>{h === "U" && storage ? "Shelf" : h}</th>)}</tr></thead>
                 <tbody>
                   {entries.map(e => {
                     if (e.kind === "server") {
@@ -1431,10 +1452,11 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                       return <tr key={`s:${s.id}`} data-server={s.name} data-state={visual.state} data-match={view.matchKeys?.has(`s:${s.id}`) ? "" : undefined}>
                         <td className={`racks-mono ${slots[s.id] == null ? "italic" : ""}`} title={slots[s.id] == null ? "Auto-placed — no saved U for this OPT" : undefined}>{uText(e)}</td>
                         <td><button type="button" className="server-open" aria-label={`View ${s.name}`} onClick={() => onSelect(s)}><span dir="auto" className="server-name">{s.name}</span></button></td>
+                        <UnitIdCells item={s}/>
                         <td>OPT</td>
                         <td><span className="server-state" data-state={visual.state} title={visual.title}>{visual.word}</span>{visual.maintenance && <> <span className="maint-badge">Maintenance</span></>}</td>
                         <td className="num racks-mono">{(visual.state === "on" || visual.state === "off") && Number.isFinite(s.watts) ? s.watts.toFixed(0) : <Dash/>}</td>
-                        <td dir="auto">{owner || <Dash/>}</td>
+                        <td>{owner ? <bdi dir="auto">{owner}</bdi> : <Dash/>}</td>
                         <td className="num racks-mono">{s.outlet != null ? `#${s.outlet}` : <Dash/>}</td>
                         <td dir="auto">{sw?.switch ? `${sw.switch}${sw.port ? `:${sw.port}` : ""}` : <Dash/>}</td>
                         <td><Dash/></td>
@@ -1445,15 +1467,16 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                     return <tr key={`e:${item.id}`} data-item-id={item.id} data-match={view.matchKeys?.has(`e:${item.id}`) ? "" : undefined}>
                       <td className="racks-mono">{uText(e)}</td>
                       <td><button type="button" className="server-open" aria-label={`View ${item.name}`} onClick={() => onSelectCustom(item)}><span dir="auto" className="server-name">{item.name}</span></button></td>
+                      <UnitIdCells item={item}/>
                       <td>{meta.label}</td>
                       <td><Dash/></td><td className="num"><Dash/></td>
-                      <td dir="auto">{owner || <Dash/>}</td>
+                      <td>{owner ? <bdi dir="auto">{owner}</bdi> : <Dash/>}</td>
                       <td className="num"><Dash/></td><td><Dash/></td>
                       <td dir="auto">{item.notes || <Dash/>}</td>
                       <td/>
                     </tr>;
                   })}
-                  {!entries.length && <tr><td colSpan={10} className="racks-muted">No equipment in this rack.</td></tr>}
+                  {!entries.length && <tr><td colSpan={12} className="racks-muted">No equipment in this rack.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -1477,6 +1500,11 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                 <div className="detail-item-head"><span className="detail-item-type">{meta.label}</span>
                   <button type="button" className="server-open" aria-label={`View ${item.name}`} onClick={() => onSelectCustom(item)}><span dir="auto" className="server-name">{item.name}</span></button></div>
                 <div className="detail-item-facts" dir="auto">{[uText(e), item.notes].filter(Boolean).join(" · ")}</div>
+                <div className="detail-item-ids">
+                  {[["part_number", "P/N", detailText(item, "part_number")], ["serial_number", "S/N", unitSerial(item)]].map(([field, label, value]) =>
+                    <span key={field} className="detail-item-id" data-field={field} title={`${label}: ${value || "not recorded"}`}>
+                      <span className="slot-label">{label}</span><span className="detail-item-id-value" dir="auto">{value || "—"}</span></span>)}
+                </div>
               </li>;
             })}
             {!entries.length && <li className="racks-muted">No equipment in this rack.</li>}

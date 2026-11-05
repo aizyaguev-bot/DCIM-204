@@ -1036,6 +1036,6 @@ test("Racks: an SSH button sits next to KVM in the rack diagram, the rack table 
   assert.match(cell, /<KvmButton server=\{server\} compact\/>\s*<SshSlot server=\{server\} size="sm"\/>/);
   assert.match(dcim, /<KvmButton server=\{s\} compact\/><SshSlot server=\{s\} size="sm"\/>/, "rack detail table");
   assert.match(dcim, /<KvmButton server=\{s\}\/><SshSlot server=\{s\} size="sm"\/>/, "phone list");
-  assert.match(dcim, /\["U","Name","Type","State","W","Owner","Outlet","Switch","Notes","Actions"\]/, "KVM and SSH share the Actions column");
+  assert.match(dcim, /\["U","Name","P\/N","S\/N","Type","State","W","Owner","Outlet","Switch","Notes","Actions"\]/, "KVM and SSH share the Actions column");
   assert.match(dcim, /sshSlot=\{<SshSlot server=\{selectedServer\} size="md"\/>\}/, "server details dialog");
 });

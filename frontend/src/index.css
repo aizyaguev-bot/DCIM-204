@@ -365,11 +365,12 @@ button:disabled { opacity: .5; cursor: not-allowed; }
    same size, filled or empty, in every card of the grid (so floors line up side by side) and, larger, in the rack
    detail. A floor box: its number (with the "+" that scans a unit onto it) | the server zone: one server in two lines
    (line 1: status stripe, name, state word, watts, then SSH and the power switch at a fixed place; line 2: a missing
-   reading, owner, KVM console port, SSH host, switch port and PDU feeds, ending in "…" when too long), or "Free" |
-   under it the units row: a fixed number of unit slots (2 on a card, 3 in the detail), each a box of fixed size with
-   the unit's labelled fields at fixed places (type and name; P/N; S/N, model, MAC), drawn with their labels when empty
-   too; the last slot is "+N units" when there are more, and opens the rest in a list over the floors below. Nothing in
-   a floor ever wraps. A storage rack (16 shelves) draws each shelf as one row of the same unit slots (name and P/N; a
+   reading, owner, KVM console port, SSH host, switch port and PDU feeds; the owner is cut first, the PDU feeds stay
+   whole), or "Free" | under it the units row: a fixed number of unit slots (2 on a card, 3 in the detail), each a box
+   of fixed size with the unit's labelled fields at fixed places (Name; P/N; S/N), its type the colour of its
+   inline-start edge, drawn with their labels when empty too; a value too long is cut in the middle (its end stays).
+   More units than slots: a small "+N" chip at the end of the last slot's first line opens the rest in a list over the
+   floors below. Nothing in a floor ever wraps. A storage rack (16 shelves) draws each shelf as one row of the same unit slots (name and P/N; a
    server: name, state and its details), the same height on every shelf. Status stripe: green on, grey off, amber when
    the feeds disagree, purple in maintenance, dashed grey when unknown or unreachable. Blue edge = the line in use. */
 .rack-shelves { container: shelves / inline-size; padding: 8px 8px 2px; border-color: #27272a; border-radius: 8px; background: #141518;
@@ -399,11 +400,17 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   gap: 4px; min-width: 0; min-height: 0; height: 100%; }
 .floor-unit { display: flex; min-width: 0; min-height: 0; }
 .floor-unit > * { flex: 1 1 auto; min-width: 0; }
-/* a storage shelf: number and "+" | one row of slots (two lines each) */
-.rack-shelves .floor-box.shelf-line { grid-template-columns: 44px minmax(0, 1fr); grid-template-rows: var(--f-slot2); grid-template-areas: "index list"; height: var(--f-slot2); margin-bottom: 6px; }
-.rack-shelves .floor-box.shelf-line > .shelf-index { flex-direction: row; align-items: center; justify-content: flex-start; padding-top: 0; }
+/* a storage shelf: number over "+" (a narrow column, so the slots get the width) | one row of slots (two lines each) */
+.rack-shelves .floor-box.shelf-line { grid-template-columns: var(--f-index) minmax(0, 1fr); grid-template-rows: var(--f-slot2); grid-template-areas: "index list"; height: var(--f-slot2); margin-bottom: 6px; }
+.rack-shelves .floor-box.shelf-line > .shelf-index { justify-content: center; gap: 2px; padding-top: 0; line-height: 1; }
+/* two-line slots: a little less padding and narrower gaps (a storage card's shelves also have less side padding), so
+   a name of about 15 characters ("Spare PSU 2000W") fits a storage card slot whole at 1280-1366 px */
+.shelf-list-item > .unit-slot, .shelf-list-item > .cooling-chip[data-variant="slot"] { padding-inline: 4px 3px; }
+.shelf-list-item > .equipment-cell.unit-slot { padding-inline-start: 4px; }
+.rack-shelves .floor-box.shelf-line { column-gap: 4px; }
+.rack-card[data-rack-type="storage"] .rack-shelves { padding-inline: 4px; }
 .rack-shelves .floor-box.shelf-line > .shelf-list { grid-area: list; }
-.shelf-list { display: grid; grid-template-columns: repeat(var(--slots, 3), minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); gap: 4px; min-width: 0; height: 100%; }
+.shelf-list { display: grid; grid-template-columns: repeat(var(--slots, 3), minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); gap: 3px; min-width: 0; height: 100%; }
 .shelf-list-item { display: flex; min-width: 0; min-height: 0; }
 .shelf-list-item > * { flex: 1 1 auto; min-width: 0; }
 .shelf-list-item > .unit-sortable > .server-cell { height: 100%; }
@@ -421,9 +428,14 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .unit-state { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-width: 0; white-space: nowrap; font-size: 11px; color: #a7a7a7; }
 /* A floor in maintenance shows the badge in place of the watts (the details still have them). */
 .unit-state .maint-badge ~ .server-watts { display: none; }
-.unit-facts { grid-area: facts; display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+/* One line of facts: the owner (and a missing-reading reason) is cut first ("…", at least 4 characters), the other facts
+   next, the PDU feeds never: the power feed is always whole at the line's end. */
+.unit-facts { grid-area: facts; display: flex; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap;
   font: var(--f-facts)/var(--f-row2) "JetBrains Mono", Consolas, monospace; color: #c4c4cc; }
-.unit-fact + .unit-fact::before { content: " · "; color: #a1a1aa; }
+.unit-fact { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.unit-fact[data-fact="owner"], .unit-fact[data-fact="reading"] { flex-shrink: 1000; min-width: 4ch; }
+.unit-fact[data-fact="feeds"] { flex-shrink: 0; }
+.unit-fact + .unit-fact::before { content: " · "; white-space: pre; color: #a1a1aa; }
 .unit-fact[data-fact="reading"] { color: #fca5a5; }
 .unit-fact[data-fact="owner"] { color: #e4e4e7; }
 .unit-fact[data-fact="kvm"] { color: #d8b4fe; }
@@ -441,15 +453,20 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .unit-actions:not(:has(.kvm-open)) { grid-template-columns: 38px 56px; grid-template-areas: "ssh power"; width: 98px; }
 .unit-actions[data-edit]:not(:has(.kvm-open)) { grid-template-columns: 38px; grid-template-areas: "ssh"; width: 38px; }
 /* The name comes first: the state word stays, the watts go when a narrow card has no room for them (details have them). */
-.unit-head > .server-open { flex-shrink: 0; max-width: 62%; }
-.unit-state { flex-shrink: 1; overflow: hidden; }
-@container shelves (max-width: 399px) { .rack-shelves .server-cell[data-variant="floor"] .server-watts { display: none; } }
+/* The name gives way first (down to 3 characters, "…"): state and watts keep their place; only a very narrow floor
+   (a phone) drops the watts (the details have them). */
+.unit-head > .server-open { flex: 0 1 auto; }
+.unit-state { flex: 0 0 auto; }
+@container shelves (max-width: 299px) { .rack-shelves .server-cell[data-variant="floor"] .server-watts { display: none; } }
 .unit-row .shelf-grip { flex: 0 0 20px; width: 20px; align-self: stretch; min-height: 0; margin-left: -4px; }
 .unit-row .server-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rack-shelves .server-cell .server-name { font-size: var(--f-name); line-height: 1.25; }
 .rack-shelves .server-cell.server-chip, .floor-more-list .server-cell.server-chip { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, var(--f-line));
   grid-template-areas: "head" "facts"; align-content: center; row-gap: 0; height: 100%; min-height: 0; padding: 3px 6px 3px 12px; }
 .server-chip .unit-facts { line-height: var(--f-line); font-size: 11px; }
+/* a server in a storage slot: its name stays whole first, the state word gives way */
+.server-chip .unit-head > .server-open { flex-shrink: 0; max-width: 70%; }
+.server-chip .unit-state { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .server-chip .server-name { font-size: 12px; }
 .server-chip > .server-led { top: 5px; bottom: 5px; }
 /* the drag overlay of a server (Edit mode) keeps its floor size */
@@ -482,30 +499,48 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .unit-slot { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: var(--f-line, 15px); align-content: center; min-width: 0; min-height: 0; height: 100%;
   padding: 3px 7px; border: 1px solid #3f3f46; border-radius: 8px; overflow: hidden; text-align: start; }
 .unit-slot-empty { border-style: dashed; background: transparent; }
-.slot-line { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 11px; line-height: var(--f-line, 15px); }
-.slot-field { display: inline-flex; align-items: baseline; gap: 4px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
-.slot-field + .slot-field { margin-left: 4px; }
+.slot-line { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 11px; line-height: var(--f-line, 15px); }
+/* One field per line: the value has the whole line after its label (never a label with no room for its value). */
+.slot-field { display: inline-flex; align-items: baseline; gap: 4px; flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .slot-label { flex: 0 0 auto; font-size: 11px; font-weight: 700; letter-spacing: .03em; color: #a1a1aa; }
-.slot-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "JetBrains Mono", Consolas, monospace; color: #e4e4e7; }
+/* three-line slots: Name, P/N and S/N labels are one width, so every value starts at the same place */
+[data-lines="3"] > .slot-line .slot-label { min-width: 2.9em; }
+.slot-value { min-width: 3ch; overflow: hidden; white-space: nowrap; font-family: "JetBrains Mono", Consolas, monospace; color: #e4e4e7; }
 .unit-slot-empty .slot-value { color: #a1a1aa; }
-.slot-more-fields .slot-field:last-child { flex: 1 1 auto; }
 .equipment-cell { min-width: 0; transition: border-color .15s ease, background-color .15s ease; }
 .equipment-cell, .equipment-cell[data-type="switch"], .equipment-cell[data-type="ups"] { border-color: #3f3f46; background: #232429; color: #fafafa; cursor: pointer; }
 .equipment-cell:hover, .equipment-cell[data-type]:hover { border-color: #5b5b66; background: #292a30; }
 .equipment-cell:focus-visible { outline: 2px solid #9fe040; outline-offset: 2px; border-color: #38bdf8; }
-.equipment-type { display: inline-flex; align-items: center; flex: 0 0 auto; height: 14px; max-width: 100%; padding: 0 4px; border: 1px solid #52525b; border-radius: 3px; background: #3f3f46; color: #e4e4e7;
-  font-size: 11px; font-weight: 700; letter-spacing: .03em; line-height: 1; text-transform: uppercase; white-space: nowrap; overflow: hidden; opacity: 1; }
-.equipment-cell[data-type="switch"] .equipment-type { border-color: #1f5163; background: #0c2a36; color: #7dd3fc; }
-.equipment-cell[data-type="ups"] .equipment-type { border-color: #26502a; background: #0f2a14; color: #86efac; }
+/* A unit's type is the colour of its slot's inline-start edge (the type is in its tooltip and details), so the name has
+   the whole line: switch blue, UPS green, PDU amber, KVM purple, computer indigo, other grey. */
+.equipment-cell.unit-slot { --type-c: #71717a; border-inline-start: 3px solid var(--type-c); padding-inline-start: 5px; }
+.equipment-cell.unit-slot:hover, .equipment-cell.unit-slot:focus-visible { border-inline-start-color: var(--type-c); }
+.equipment-cell[data-type="switch"] { --type-c: #38bdf8; }
+.equipment-cell[data-type="ups"] { --type-c: #22c55e; }
+.equipment-cell[data-type="pdu"] { --type-c: #f59e0b; }
+.equipment-cell[data-type="kvm"] { --type-c: #c084fc; }
+.equipment-cell[data-type="computer"] { --type-c: #818cf8; }
 .equipment-name { display: block; flex: 0 1 auto; min-width: 0; max-width: 100%; font-size: 12px; font-weight: 600; color: #fafafa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A value cut in the middle (MidText): the head ends in "…", the tail (its last characters) always shows. */
+.mid-text, .equipment-name.mid-text { display: inline-flex; min-width: 0; overflow: hidden; white-space: nowrap; }
+.mid-head { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.mid-tail { flex: 0 0 auto; white-space: pre; }
 .equipment-serial { display: block; font-size: 11px; color: #a7a7a7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* a cooling unit in a slot: the same lines (name; type; place) */
+/* a cooling unit in a slot: the same lines as a unit (Name; P/N; S/N), its cooling colour on its inline-start edge */
 .cooling-chip[data-variant="slot"] { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: var(--f-line, 15px); align-content: center; gap: 0;
-  max-width: none; width: 100%; height: 100%; min-height: 0; padding: 3px 7px; border-radius: 8px; text-align: start; }
-.cooling-chip[data-variant="slot"] .slot-name { color: #7dd3fc; font-size: 12px; font-weight: 600; }
+  max-width: none; width: 100%; height: 100%; min-height: 0; padding: 3px 7px 3px 5px; border-radius: 8px; border-inline-start: 3px solid #7dd3fc; text-align: start; }
+.cooling-chip[data-variant="slot"] .slot-name .cooling-name { color: #bae6fd; font-size: 12px; font-weight: 600; }
 /* the "+N" chip (a slot, or the "+1 server" chip at the end of a server's second line) and its list */
 .floor-more { position: relative; display: flex; min-width: 0; min-height: 0; }
-.floor-unit > .floor-more, .shelf-list-item > .floor-more { height: 100%; }
+/* The "+N" chip of a full floor or shelf: small, at the end of the last slot's first line (that line leaves it room),
+   so the last slot still shows its unit. */
+.floor-unit[data-more], .shelf-list-item[data-more] { position: relative; }
+.floor-unit[data-more] > .floor-more, .shelf-list-item[data-more] > .floor-more { position: absolute; top: 4px; inset-inline-end: 4px; z-index: 1;
+  height: var(--f-line, 15px); }
+.floor-unit[data-more] > .floor-more > .floor-more-toggle, .shelf-list-item[data-more] > .floor-more > .floor-more-toggle { min-width: 24px; max-width: 44px;
+  padding: 0 4px; border-radius: 4px; font-size: 11px; line-height: 1; }
+.floor-unit[data-more] > :is(.unit-slot, .cooling-chip) > .slot-name, .shelf-list-item[data-more] > :is(.unit-slot, .cooling-chip) > .slot-name,
+.shelf-list-item[data-more] > .server-cell > .unit-head, .shelf-list-item[data-more] > .unit-sortable > .server-cell > .unit-head { padding-inline-end: 30px; }
 .floor-more-toggle { flex: 1 1 auto; min-width: 0; padding: 0 8px; border: 1px solid #52525b; border-radius: 8px; background: #1d1e22; color: #e4e4e7;
   font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .server-cell > .floor-more > .floor-more-toggle { height: var(--f-row2, 16px); padding: 0 6px; border-radius: 4px; font-size: 11px; line-height: 1; }
@@ -678,13 +713,18 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .server-details-header .server-led { width: 10px; height: 10px; }
 .server-details-header .racks-dialog-title { flex: 1 1 auto; min-width: 0; }
 .server-details-tools { display: flex; align-items: center; gap: 6px; margin-left: auto; }
-.racks-table-wrap { width: 100%; overflow-x: auto; border: 1px solid #333; border-radius: 2px; background: #161616; }
+/* position: relative keeps absolutely placed bits (screen-reader text of a power switch) inside its scroll box */
+.racks-table-wrap { position: relative; width: 100%; overflow-x: auto; border: 1px solid #333; border-radius: 2px; background: #161616; }
 .racks-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .racks-table th { padding: 8px 10px; border-bottom: 1px solid #333; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-align: start; text-transform: uppercase; white-space: nowrap; color: #a7a7a7; }
 .racks-table td { padding: 6px 10px; border-top: 1px solid #2a2a2a; color: #ddd; vertical-align: middle; }
 .racks-table .num { text-align: end; }
 .racks-table tr[data-match] td { background: #1a2a0c; }
 .racks-table .server-name { font-size: 13px; }
+/* long names, part and serial numbers wrap inside their column (whole, never cut), so Owner, Outlet, Switch and the
+   KVM / SSH actions stay in view next to the rack */
+.racks-table td > .server-open > .server-name { max-width: 22rem; white-space: normal; overflow-wrap: break-word; }
+.racks-table td.racks-id > bdi { display: inline-block; max-width: 20ch; overflow-wrap: break-word; }
 
 /* rack detail */
 .rack-detail { display: flex; flex-direction: column; gap: 10px; }
@@ -713,6 +753,10 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .detail-item-head .server-name { font-size: 15px; }
 .detail-item-facts { font-size: 12px; color: #a7a7a7; }
 .detail-item-type { font-size: 11px; text-transform: uppercase; color: #7dd3fc; }
+/* a unit's identifiers on the phone list: labelled P/N and S/N, "—" when not recorded, "…" when too long */
+.detail-item-ids { display: flex; gap: 12px; min-width: 0; overflow: hidden; font-size: 12px; white-space: nowrap; }
+.detail-item-id { display: inline-flex; align-items: baseline; gap: 4px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.detail-item-id-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: "JetBrains Mono", Consolas, monospace; color: #e4e4e7; }
 
 /* toast and Edit banner */
 .toast-region { position: fixed; left: 50%; bottom: 16px; z-index: 70; width: min(480px, calc(100vw - 32px)); transform: translateX(-50%); pointer-events: none; }
