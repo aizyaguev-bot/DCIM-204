@@ -6,22 +6,24 @@ import { useAccounts } from "./accounts.jsx";
 // Pages filter with api/removedServers.js (withoutRemoved / isRemovedServer) against `hidden`. The list is read on
 // start and after each sign-in, every 60 s, when the tab becomes visible and after a remove / restore (refresh, or the
 // "dcim-removed-servers" window event). A failed read keeps the last list; before the first answer nothing is hidden.
-const Removed = createContext({ hidden: new Set(), data: null, refresh: async () => null, loaded: false });
+// etag: the ETag of the list held here; remove and restore send it as If-Match, so a change another session made since
+// this list was read is refused (409) instead of being overwritten unseen.
+const Removed = createContext({ hidden: new Set(), data: null, etag: null, refresh: async () => null, loaded: false });
 export const useRemovedServers = () => useContext(Removed);
 
 const POLL_MS = 60000;
 
 export function RemovedServersProvider({ children }) {
   const { user } = useAccounts();
-  const [state, setState] = useState({ data: null, hidden: new Set(), loaded: false });
+  const [state, setState] = useState({ data: null, hidden: new Set(), etag: null, loaded: false });
   const refresh = useCallback(async () => {
-    const { data } = await loadRemoved();
+    const { data, etag } = await loadRemoved();
     // An unchanged answer keeps the same state, so a poll re-renders nothing (the lab display must not redraw).
     setState(prev => {
-      if (prev.loaded && JSON.stringify(prev.data) === JSON.stringify(data)) return prev;
+      if (prev.loaded && prev.etag === etag && JSON.stringify(prev.data) === JSON.stringify(data)) return prev;
       const hidden = hiddenSet(data);
       const same = prev.hidden.size === hidden.size && [...hidden].every(k => prev.hidden.has(k));
-      return { data, hidden: same ? prev.hidden : hidden, loaded: true };
+      return { data, etag: etag || null, hidden: same ? prev.hidden : hidden, loaded: true };
     });
     return data;
   }, []);

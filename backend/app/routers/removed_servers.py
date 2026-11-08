@@ -22,6 +22,13 @@ What it pauses (and Restore resumes when it was running): its ping monitor. The 
 while the server is removed no monitor is created for it automatically.
 Never touched: equipment units (rack items) on its shelf stay in the rack, SSH settings, PDU/KVM labels, devices.
 
+Keys on the wire: a key can hold any character a label can ("optn44/45", "switch 1/2"), so restore takes it in the
+body (POST /api/removed-servers/restore {key}), never in the URL path, where a "/" would not match the route.
+Keys are str.casefold() of the name (server_identity). Pages lower-case names (JavaScript has no casefold), so GET
+also returns hidden_names: the lower-cased spellings of the hidden servers' names where they differ from the key
+("Straße" -> key "strasse", hidden name "straße"); a page hides a server whose lower-cased identity is in
+hidden or hidden_names, and so agrees with the backend's U numbering for any Unicode name.
+
 Concurrency: GET returns an ETag; remove and restore need it as If-Match (428 without, 409 when stale). A remove
 preview (dry_run) returns a plan_revision; applying with a plan_revision is refused (409) if anything changed since.
 The record and the layout files are written together or not at all (inventory_store.save_layouts, each file checked
@@ -110,17 +117,46 @@ def ports_by_key(port_labels: dict) -> dict:
     return ports
 
 
-async def current_ports(db) -> dict:
-    """identity key -> {"device_id:port"} for every PDU/KVM port whose saved label, or the name the device itself
-    reported (status cache only, never a device contact), names a server."""
-    ports = {}
+async def _port_scan(db):
+    """(identity key -> {"device_id:port"}, identity key -> {label}) for every PDU/KVM port whose saved label, or the
+    name the device itself reported (status cache only, never a device contact), names a server."""
+    ports, labels_by_key = {}, {}
     for dev in (await db.execute(select(Device))).scalars().all():
         if dev.kind not in devices._PORT_KINDS:
             continue
         for labels in (devices._saved_labels(dev)[0], devices._live_labels(dev)):
             for key, ids in ports_by_key({dev.id: labels}).items():
                 ports.setdefault(key, set()).update(ids)
-    return ports
+            for label in (labels or {}).values():
+                key = devices._key_of(label)
+                if key:
+                    labels_by_key.setdefault(key, set()).add(label)
+    return ports, labels_by_key
+
+
+async def current_ports(db) -> dict:
+    """identity key -> {"device_id:port"} (see _port_scan)."""
+    return (await _port_scan(db))[0]
+
+
+def _lower_identity(name):
+    """The identity a page computes for `name` (frontend serverIdentity: the name lower-cased, not casefolded)."""
+    found = devices._identity(name)
+    return found[1].lower() if found else None
+
+
+def hidden_names(records, labels_by_key) -> list:
+    """Lower-cased spellings of the hidden servers' names (the record's name and every label that carries the key now)
+    that differ from their key: what a page compares against besides `hidden` (see the module docstring)."""
+    names = set()
+    for record in records:
+        key = record["key"]
+        for name in [record.get("name"), *labels_by_key.get(key, ())]:
+            spelling = _lower_identity(name)
+            # Only spellings of this very key: a label is listed under the key it casefolds to, so never another server.
+            if spelling and spelling != key and devices._key_of(name) == key:
+                names.add(spelling)
+    return sorted(names)
 
 
 def is_hiding(record, ports_now) -> bool:
@@ -191,17 +227,19 @@ def _public(record, ports_now, admin):
 @router.get("")
 async def list_removed(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     """Every signed-in role (each page hides these servers): {servers: [{key, name, removed_at, ports, cleaned,
-    monitor_paused, active, new_ports[, removed_by, reason]}], hidden: [keys hidden now][, log]}. Who removed a
-    server, the reason and the log are Admin only. ETag = the revision to send as If-Match with remove / restore."""
+    monitor_paused, active, new_ports[, removed_by, reason]}], hidden: [keys hidden now], hidden_names: [lower-cased
+    spellings of those servers' names that differ from the key][, log]}. Who removed a server, the reason and the log
+    are Admin only. ETag = the revision to send as If-Match with remove / restore."""
     data = inventory_store.read_layout(store_path(), EMPTY)
     response.headers["ETag"] = inventory_store.revision(data)
     response.headers["Cache-Control"] = "no-store"
     store = read_store()
-    ports_now = await current_ports(db)
+    ports_now, labels_now = await _port_scan(db)
     admin = _is_admin(request)
     records = _records(store)
     servers = sorted((_public(r, ports_now, admin) for r in records), key=lambda r: -(r["removed_at"] or 0))
-    body = {"servers": servers, "hidden": sorted(r["key"] for r in servers if r["active"])}
+    active = [r for r in records if is_hiding(r, ports_now)]
+    body = {"servers": servers, "hidden": sorted(r["key"] for r in active), "hidden_names": hidden_names(active, labels_now)}
     if admin:
         body["log"] = [e for e in reversed(store.get("log") or []) if isinstance(e, dict)][:50]
     return body
@@ -417,11 +455,15 @@ async def remove_server(body: dict, request: Request, response: Response, db: As
             "layout_revisions": {n: r for n, r in revisions.items() if n != "removed_servers"}}
 
 
-@router.post("/{key}/restore")
-async def restore_server(key: str, request: Request, response: Response, db: AsyncSession = Depends(get_db),
+@router.post("/restore")
+async def restore_server(body: dict, request: Request, response: Response, db: AsyncSession = Depends(get_db),
                          if_match: str | None = Header(default=None)):
-    """Admin. If-Match = the ETag of GET /api/removed-servers. The server shows again from its PDU label; the cleaned
+    """Admin. Body {key}: the key exactly as GET /api/removed-servers lists it (in the body, not the URL: a key can
+    hold "/"). If-Match = the ETag of the GET the page shows. The server shows again from its PDU label; the cleaned
     rack position, switch and owner are not brought back. Its ping monitor resumes when it was running at removal."""
+    key = body.get("key")
+    if not isinstance(key, str) or not key or len(key) > 4 * MAX_NAME:   # casefold can lengthen a name ("ß" -> "ss")
+        raise HTTPException(400, "key is required (as the removed servers list gives it)")
     _require_if_match(if_match)
     store = read_store(strict=True)
     if if_match != _revision_on_disk():

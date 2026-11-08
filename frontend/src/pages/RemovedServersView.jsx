@@ -12,7 +12,7 @@ const portText = p => `${p.device_name || p.device_id} ${p.kind === "kvm" ? "por
 
 export default function RemovedServersView() {
   const { canAdmin } = useAccounts();
-  const { data, loaded, refresh } = useRemovedServers();
+  const { data, etag, loaded, refresh } = useRemovedServers();
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -23,7 +23,7 @@ export default function RemovedServersView() {
   async function restore(server) {
     setBusy(server.key); setError(""); setNotice("");
     try {
-      await restoreServer(server.key);
+      await restoreServer(server.key, etag);   // the ETag of the list shown here: a change made elsewhere since is a 409
       setNotice(`${server.name} is back in the lab. Its rack position, switch port and owner were not restored.`);
     } catch (e) {
       setError(`${server.name} was not restored: ${e.message}`);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import useDialogFocus from "./useDialogFocus.js";
 import { describeRemoval, previewRemoval, removeServer } from "../../api/removedServers.js";
+import { useRemovedServers } from "../../removedServers.jsx";
 
 const MAX_REASON = 300;
 
@@ -13,6 +14,7 @@ export default function RemoveServerDialog({ serverName, onRemoved, onClose }) {
   const [error, setError] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const { etag, refresh: refreshRemoved } = useRemovedServers();   // the list this page shows: its ETag is the If-Match
   const busyRef = useRef(false);
   const panelRef = useRef(null);
   const cancelRef = useRef(null);
@@ -29,13 +31,16 @@ export default function RemoveServerDialog({ serverName, onRemoved, onClose }) {
     if (busyRef.current || !plan) return;
     busyRef.current = true; setBusy(true); setError("");
     try {
-      const result = await removeServer(serverName, { reason: reason.trim(), planRevision: plan.plan_revision });
+      const result = await removeServer(serverName, { reason: reason.trim(), planRevision: plan.plan_revision, etag });
       busyRef.current = false;
       onRemoved(result, plan);
     } catch (e) {
       busyRef.current = false; setBusy(false);
       setError(e.message || "The server was not removed.");
-      if (e.status === 409) preview().then(() => setError(`${e.message} The list below is up to date now.`));
+      // The removed servers list or the layout changed since: read both again, then the next Remove uses them.
+      if (e.status === 409 || e.status === 428) {
+        Promise.all([refreshRemoved().catch(() => {}), preview()]).then(() => setError(`${e.message} The list below is up to date now.`));
+      }
     }
   }
 

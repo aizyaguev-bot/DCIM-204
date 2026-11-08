@@ -2455,9 +2455,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   // ── remove a server from the lab (Admin): RemoveServerDialog, then a toast whose Undo restores it ──
   const [removeTarget, setRemoveTarget] = useState(null);   // the server's name
   const afterRemovedChange = useCallback(() => { refreshRemoved().catch(() => {}); reloadLayouts(false, true); }, [refreshRemoved, reloadLayouts]);
-  const undoRemove = useCallback(async (key, name) => {
+  // Undo restores against the revision the removal returned: if another session changed the list since, it is a 409.
+  const undoRemove = useCallback(async (key, name, revision) => {
     try {
-      await restoreServer(key);
+      await restoreServer(key, revision);
       afterRemovedChange();
       showToast(<><bdi>{name}</bdi> is back in the lab. Its rack position, switch port and owner were not restored.</>);
     } catch (e) {
@@ -2469,7 +2470,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     setRemoveTarget(null);
     setSelectedServerId(null);
     afterRemovedChange();
-    showToast(<><bdi>{name}</bdi> was removed from the lab.</>, "ok", () => undoRemove(key, name));
+    showToast(<><bdi>{name}</bdi> was removed from the lab.</>, "ok", () => undoRemove(key, name, result.revision));
   }, [afterRemovedChange, showToast, undoRemove]);
 
   // ── cooling units: never deleted; every edit is checked (assertKeepsUnits) and saved against the latest document ──

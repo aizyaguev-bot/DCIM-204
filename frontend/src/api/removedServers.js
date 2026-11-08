@@ -2,17 +2,20 @@
 // node --test can import them; the shared state lives in ../removedServers.jsx.
 //
 // The one filter every page uses: a server is hidden when its server identity (serverIdentity: "OPTN44 (PSU2)" ->
-// "optn44") is in the `hidden` list GET /api/removed-servers returns. The identity is compared exactly, never as a
-// prefix or substring, so removing optn44 never hides optn4 or optn440. A renamed server has another identity and
+// "optn44") is in the `hidden` list GET /api/removed-servers returns, or in its `hidden_names`. The backend's keys
+// are Python str.casefold() ("Straße" -> "strasse") while serverIdentity only lower-cases ("straße"); hidden_names
+// lists those lower-cased spellings, so a page hides exactly what the backend hides, for any Unicode name. The
+// identity is compared exactly, never as a prefix or substring, so removing optn44 never hides optn4 or optn440. A renamed server has another identity and
 // shows. The server decides what is hidden: a removed name written on another PDU/KVM port later stops being hidden
 // there (see the key rule in the backend module), so pages never second-guess the list.
 import { serverIdentity } from "./locations.js";
 
 export const REMOVED_PATH = "/api/removed-servers";
 
-// GET body -> Set of hidden identity keys. Anything malformed hides nothing (fail open: servers stay visible).
+// GET body -> Set of hidden identity keys (hidden + hidden_names). Anything malformed hides nothing (fail open:
+// servers stay visible).
 export function hiddenSet(data) {
-  const list = Array.isArray(data?.hidden) ? data.hidden : [];
+  const list = [data?.hidden, data?.hidden_names].flatMap(v => (Array.isArray(v) ? v : []));
   return new Set(list.filter(k => typeof k === "string" && k).map(k => k.toLowerCase()));
 }
 
@@ -92,14 +95,16 @@ export async function previewRemoval(name) {
   return (await call("POST", REMOVED_PATH, { name, dry_run: true })).data;
 }
 
-// Applies the previewed plan; a 409 means the list or the layout changed since (preview again).
-export async function removeServer(name, { reason = "", planRevision } = {}) {
-  const { etag } = await loadRemoved();
+// Applies the previewed plan. etag: the ETag of the removed servers list the page shows (never a fresh read, so a
+// change made in another session meanwhile is refused with 409 instead of being overwritten unseen); a 409 means the
+// list or the layout changed since (reload the list, preview again); without an etag the server answers 428.
+export async function removeServer(name, { reason = "", planRevision, etag } = {}) {
   return (await call("POST", REMOVED_PATH, { name, reason, ...(planRevision ? { plan_revision: planRevision } : {}) },
     etag ? { "If-Match": etag } : {})).data;
 }
 
-export async function restoreServer(key) {
-  const { etag } = await loadRemoved();
-  return (await call("POST", `${REMOVED_PATH}/${encodeURIComponent(key)}/restore`, null, etag ? { "If-Match": etag } : {})).data;
+// key: exactly as the list gives it, sent in the body (a key can hold "/", which a URL path segment cannot carry).
+// etag: the ETag of the list the page shows (or the revision a removal just returned, for Undo).
+export async function restoreServer(key, etag) {
+  return (await call("POST", `${REMOVED_PATH}/restore`, { key }, etag ? { "If-Match": etag } : {})).data;
 }

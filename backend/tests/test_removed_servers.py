@@ -211,13 +211,13 @@ async def test_restore_brings_it_back_resumes_the_monitor_and_not_the_placement(
     async with signed_in(lab) as c:
         assert (await remove(c)).status_code == 200
         cleaned = layout(lab)
-        r = await c.post("/api/removed-servers/optn45/restore", headers={"If-Match": await etag(c)})
+        r = await c.post("/api/removed-servers/restore", json={"key": "optn45"}, headers={"If-Match": await etag(c)})
         assert r.status_code == 200, r.text
         assert r.json()["monitor_resumed"] is True and r.json()["name"] == "OPTN45"
         listing = (await c.get("/api/removed-servers")).json()
         assert listing["servers"] == [] and listing["hidden"] == []
         assert [e["action"] for e in listing["log"]] == ["restored", "removed"]
-        again = await c.post("/api/removed-servers/optn45/restore", headers={"If-Match": await etag(c)})
+        again = await c.post("/api/removed-servers/restore", json={"key": "optn45"}, headers={"If-Match": await etag(c)})
         assert again.status_code == 404
     targets, owners, _, _ = await db_state(lab)
     assert targets == [("t44", True, 0), ("t45", True, 2)]
@@ -230,7 +230,7 @@ async def test_a_monitor_paused_before_removal_stays_paused_after_restore(lab):
         await db.commit()
     async with signed_in(lab) as c:
         assert (await remove(c)).status_code == 200
-        r = await c.post("/api/removed-servers/optn45/restore", headers={"If-Match": await etag(c)})
+        r = await c.post("/api/removed-servers/restore", json={"key": "optn45"}, headers={"If-Match": await etag(c)})
     assert r.json()["monitor_resumed"] is False
     assert (await db_state(lab))[0] == [("t44", True, 0), ("t45", False, 0)]
 
@@ -245,7 +245,7 @@ async def test_operators_and_viewers_cannot_remove_or_restore_and_do_not_see_who
         for body in ({"name": "OPTN44", "dry_run": True}, {"name": "OPTN44"}):
             r = await c.post("/api/removed-servers", headers={"If-Match": tag}, json=body)
             assert r.status_code == 403
-        assert (await c.post("/api/removed-servers/optn45/restore", headers={"If-Match": tag})).status_code == 403
+        assert (await c.post("/api/removed-servers/restore", json={"key": "optn45"}, headers={"If-Match": tag})).status_code == 403
         listing = (await c.get("/api/removed-servers")).json()
     assert listing["hidden"] == ["optn45"] and "log" not in listing
     assert "removed_by" not in listing["servers"][0] and "reason" not in listing["servers"][0]
@@ -272,7 +272,7 @@ async def test_if_match_and_plan_revision_are_required_to_be_current(lab):
         files["rack_slots.json"] = (lab.folder / "rack_slots.json").read_bytes()
         r = await c.post("/api/removed-servers", json=body, headers={"If-Match": tag})
         assert r.status_code == 409 and "preview again" in r.json()["detail"]
-        assert (await c.post("/api/removed-servers/optn45/restore")).status_code == 428
+        assert (await c.post("/api/removed-servers/restore", json={"key": "optn45"})).status_code == 428
     assert snapshot(lab.folder) == files and await db_state(lab) == before
 
 
@@ -352,7 +352,7 @@ async def test_the_name_written_on_another_port_later_is_shown_again(lab):
         assert (await remove(c)).status_code == 200
         assert (await c.get("/api/removed-servers")).json()["hidden"] == ["optn45"]
         # The monitor the first removal paused still resumes on restore.
-        r = await c.post("/api/removed-servers/optn45/restore", headers={"If-Match": await etag(c)})
+        r = await c.post("/api/removed-servers/restore", json={"key": "optn45"}, headers={"If-Match": await etag(c)})
         assert r.json()["monitor_resumed"] is True
     assert ("t45", True, 2) in (await db_state(lab))[0]
 
@@ -366,6 +366,55 @@ async def test_no_monitor_is_created_for_a_removed_server(lab, monkeypatch):
         await ping_monitor.discover_targets(db)
         keys = {t.source_key for t in (await db.execute(select(PingTarget))).scalars()}
     assert "server:optn44" not in keys and "server:optn45" in keys and "server:web-1" in keys
+
+
+async def test_a_key_with_a_slash_is_removed_and_restored(lab):
+    # A label may hold "/" ("OPTN44/45"): restore takes the key in the body, so no URL routing gets in the way.
+    async with lab.factory() as db:
+        dev = await db.get(Device, "pdu-b")
+        dev.labels_json = json.dumps({**LABELS["pdu-b"], "5": "OPTN44/45"})
+        await db.commit()
+    async with signed_in(lab) as c:
+        assert (await remove(c, name="OPTN44/45")).status_code == 200
+        assert (await c.get("/api/removed-servers")).json()["hidden"] == ["optn44/45"]
+        r = await c.post("/api/removed-servers/restore", json={"key": "optn44/45"}, headers={"If-Match": await etag(c)})
+        assert r.status_code == 200, r.text
+        assert r.json()["key"] == "optn44/45"
+        assert (await c.get("/api/removed-servers")).json()["hidden"] == []
+        tag = await etag(c)
+        for body in ({}, {"key": ""}, {"key": 5}):
+            assert (await c.post("/api/removed-servers/restore", json=body, headers={"If-Match": tag})).status_code == 400
+
+
+async def test_a_restore_against_a_list_changed_since_it_was_shown_is_refused(lab):
+    # Admin A shows the list; admin B restores the server and removes it again: A's Restore carries the ETag A saw.
+    async with signed_in(lab) as a:
+        assert (await remove(a)).status_code == 200
+        shown = await etag(a)
+        async with signed_in(lab) as b:
+            assert (await b.post("/api/removed-servers/restore", json={"key": "optn45"},
+                                 headers={"If-Match": await etag(b)})).status_code == 200
+            assert (await remove(b, reason="again")).status_code == 200
+        files = snapshot(lab.folder)
+        r = await a.post("/api/removed-servers/restore", json={"key": "optn45"}, headers={"If-Match": shown})
+        assert r.status_code == 409 and "another session" in r.json()["detail"]
+    assert snapshot(lab.folder) == files
+
+
+async def test_hidden_names_give_pages_the_lower_case_spelling_of_a_casefolded_key(lab):
+    # Python casefolds ("STRASSE", "Straße" -> "strasse"); JavaScript only lower-cases ("straße"). The list names the
+    # lower-cased spellings so a page hides the same server the backend hides, and nothing else.
+    async with lab.factory() as db:
+        dev = await db.get(Device, "pdu-b")
+        dev.labels_json = json.dumps({**LABELS["pdu-b"], "5": "Straße", "6": "strasse-2"})
+        await db.commit()
+    async with signed_in(lab) as c:
+        assert (await remove(c, name="Straße")).status_code == 200
+        listing = (await c.get("/api/removed-servers")).json()
+    assert listing["hidden"] == ["strasse"] and listing["hidden_names"] == ["straße"]
+    async with signed_in(lab) as c:
+        assert (await remove(c)).status_code == 200   # an ASCII name adds no extra spelling
+        assert (await c.get("/api/removed-servers")).json()["hidden_names"] == ["straße"]
 
 
 async def test_an_unreadable_store_hides_nothing_and_is_never_overwritten(lab):

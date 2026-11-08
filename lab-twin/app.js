@@ -599,9 +599,10 @@
       const pdus = live.devices.filter(x => x.kind === 'pdu');
       const kvms = live.devices.filter(x => x.kind === 'kvm');
       // 1) OPT servers exactly like DcimView.servers. A server an Admin removed from the lab (Lab Manager → Admin →
-      // Removed servers) is left out before the U assignment, as DcimView does: its `hidden` identity keys
-      // (pingKey, compared exactly) come from GET /api/removed-servers.
-      const removedKeys = new Set(Array.isArray(live.removed?.hidden) ? live.removed.hidden : []);
+      // Removed servers) is left out before the U assignment, as DcimView does: its `hidden` identity keys and
+      // `hidden_names` (the lower-cased spellings of casefolded keys, "straße" for "strasse"; pingKey, compared
+      // exactly) come from GET /api/removed-servers.
+      const removedKeys = new Set([live.removed?.hidden, live.removed?.hidden_names].flatMap(v => (Array.isArray(v) ? v : [])).filter(k => typeof k === 'string'));
       const isRemoved = label => removedKeys.has(pingKey(label));
       const servers = new Map();
       pdus.forEach(pdu => {

@@ -141,7 +141,7 @@ ROUTE_ROLES = {
     "GET /api/opt-owners": "Viewer", "PUT /api/opt-owners": "Admin", "PUT /api/opt-owners/{asset_key:path}": "Operator",
     "GET /api/engineers": "Viewer", "POST /api/engineers": "Admin", "PUT /api/engineers/{engineer_id}": "Admin",
     # Removed servers: every page reads the list to hide them; removing and restoring a server are Admin only.
-    "GET /api/removed-servers": "Viewer", "POST /api/removed-servers": "Admin", "POST /api/removed-servers/{key}/restore": "Admin",
+    "GET /api/removed-servers": "Viewer", "POST /api/removed-servers": "Admin", "POST /api/removed-servers/restore": "Admin",
     # Devices: configuration is Admin, labels/moves are Operator, the connection export is Operator even to read.
     "GET /api/devices/": "Viewer", "POST /api/devices/": "Admin", "PUT /api/devices/{device_id}": "Admin",
     "DELETE /api/devices/{device_id}": "Admin", "PATCH /api/devices/{device_id}/labels": "Operator",

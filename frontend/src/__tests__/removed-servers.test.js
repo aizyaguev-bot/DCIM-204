@@ -13,6 +13,15 @@ test("hiddenSet reads the hidden keys and fails open on anything malformed", () 
   assert.equal(hiddenSet(null).size, 0);
   assert.equal(hiddenSet({ hidden: "optn45" }).size, 0);
   assert.deepEqual([...hiddenSet({ hidden: ["OPTN7", 3, "", null] })], ["optn7"]);
+  assert.deepEqual([...hiddenSet({ hidden: ["optn7"], hidden_names: "x" })], ["optn7"]);
+});
+
+test("hidden_names match a name the backend casefolds and the page only lower-cases", () => {
+  // Backend key "strasse" (casefold of "Straße"); serverIdentity("Straße") is "straße".
+  const set = hiddenSet({ hidden: ["strasse"], hidden_names: ["straße"] });
+  for (const name of ["Straße", "STRAßE", "straße"]) assert.equal(isRemovedServer(name, set), true, name);
+  for (const name of ["Strassen", "straß", "OPTN45"]) assert.equal(isRemovedServer(name, set), false, name);
+  assert.equal(isRemovedServer("Straße", hiddenSet({ hidden: ["strasse"] })), false);   // fails open without them
 });
 
 test("a removed server is matched by its exact identity, every feed included, never by prefix", () => {
@@ -80,7 +89,7 @@ test("describeRemoval lists what is cleaned and what stays", () => {
   assert.deepEqual(describeRemoval({ monitor: { enabled: false } }).cleaned, ["Its ping monitor stays paused; its history is kept"]);
 });
 
-test("remove and restore send the list's ETag as If-Match; errors carry the server's message", async () => {
+test("remove and restore send the ETag the page holds as If-Match (no fresh read); the key goes in the body", async () => {
   const calls = [];
   const original = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
@@ -90,13 +99,17 @@ test("remove and restore send the list's ETag as If-Match; errors carry the serv
     return new Response(JSON.stringify({ ok: true, removed: { key: "optn45", name: "OPTN45" } }), { status: 200 });
   };
   try {
-    const result = await removeServer("OPTN45 (PSU1)", { reason: "gone", planRevision: "plan-1" });
+    const result = await removeServer("OPTN45 (PSU1)", { reason: "gone", planRevision: "plan-1", etag: '"shown-1"' });
     assert.equal(result.removed.key, "optn45");
-    assert.deepEqual(calls[1], { url: "/api/removed-servers", method: "POST", headers: { "Content-Type": "application/json", "If-Match": '"rev-1"' },
+    assert.deepEqual(calls[0], { url: "/api/removed-servers", method: "POST", headers: { "Content-Type": "application/json", "If-Match": '"shown-1"' },
       body: { name: "OPTN45 (PSU1)", reason: "gone", plan_revision: "plan-1" } });
-    await assert.rejects(restoreServer("optn 45"), e => e.status === 404 && /not in the removed list/.test(e.message));
-    assert.equal(calls[3].url, "/api/removed-servers/optn%2045/restore");
-    assert.equal(calls[3].headers["If-Match"], '"rev-1"');
+    await assert.rejects(restoreServer("optn44/45", '"shown-2"'), e => e.status === 404 && /not in the removed list/.test(e.message));
+    assert.deepEqual(calls[1], { url: "/api/removed-servers/restore", method: "POST", headers: { "Content-Type": "application/json", "If-Match": '"shown-2"' },
+      body: { key: "optn44/45" } });
+    await removeServer("OPTN45", {});   // no ETag held: no If-Match (the server answers 428), never a fresh read
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2].headers["If-Match"], undefined);
+    assert.ok(!calls.some(c => c.method === "GET"));
   } finally {
     globalThis.fetch = original;
   }

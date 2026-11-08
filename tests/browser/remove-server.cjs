@@ -155,7 +155,7 @@ const SERVER = 'OPT11', KEY = 'opt11';
     // Restore through the API first so OPT11 is listed, then remove it from its Edit panel.
     {
       const g = await admin.c.request.get(origin + '/api/removed-servers');
-      const r = await admin.c.request.post(origin + `/api/removed-servers/${KEY}/restore`, { headers: { 'If-Match': g.headers()['etag'], 'X-DCIM-CSRF': admin.csrf } });
+      const r = await admin.c.request.post(origin + '/api/removed-servers/restore', { data: { key: KEY }, headers: { 'If-Match': g.headers()['etag'], 'X-DCIM-CSRF': admin.csrf } });
       assert.equal(r.status(), 200, await r.text());
       await p.evaluate(() => window.dispatchEvent(new Event('dcim-removed-servers')));
     }
@@ -188,13 +188,27 @@ const SERVER = 'OPT11', KEY = 'opt11';
     await row.getByText('admin', { exact: true }).waitFor();
     await row.getByText('Hidden', { exact: true }).waitFor();
     await p.locator('[data-list="removed-servers-log"]').getByText('removed', { exact: false }).first().waitFor();
+    // Another session removes OPT12 meanwhile: the list this page shows is out of date, so its Restore is refused (409,
+    // the page sends the ETag of the list it shows) and the list is read again; the next Restore goes through.
+    const apiWrite = async (path, data) => {
+      const g = await admin.c.request.get(origin + '/api/removed-servers');
+      const r = await admin.c.request.post(origin + path, { data, headers: { 'If-Match': g.headers()['etag'], 'X-DCIM-CSRF': admin.csrf } });
+      assert.equal(r.status(), 200, await r.text());
+    };
+    await apiWrite('/api/removed-servers', { name: 'OPT12' });
+    await row.getByRole('button', { name: `Restore ${SERVER}`, exact: true }).click();
+    await p.getByRole('alert').filter({ hasText: 'changed in another session' }).waitFor();
+    await p.locator('tr[data-removed-server="opt12"]').waitFor();
+    assert.deepEqual((await removed()).hidden, [KEY, 'opt12']);
     await row.getByRole('button', { name: `Restore ${SERVER}`, exact: true }).click();
     await p.getByRole('status').filter({ hasText: `${SERVER} is back in the lab.` }).waitFor();
     await row.waitFor({ state: 'detached' });
+    await apiWrite('/api/removed-servers/restore', { key: 'opt12' });
+    await p.evaluate(() => window.dispatchEvent(new Event('dcim-removed-servers')));
     await p.getByText('No server is removed from the lab.', { exact: true }).waitFor();
     assert.deepEqual((await removed()).hidden, []);
     await nav(p, 'Racks'); await view(p).waitFor();
-    checks.push('Admin → Removed servers shows who/why and Restore brings it back');
+    checks.push('Admin → Removed servers shows who/why, refuses a Restore on a list changed elsewhere, and Restore brings it back');
 
     // ── Operator and Viewer: no controls, 403 from the API ──
     for (const s of [operator, viewer]) {
@@ -210,7 +224,7 @@ const SERVER = 'OPT11', KEY = 'opt11';
       const headers = { 'If-Match': g.headers()['etag'], 'X-DCIM-CSRF': s.csrf };
       assert.equal((await s.c.request.post(origin + '/api/removed-servers', { data: { name: SERVER, dry_run: true }, headers })).status(), 403);
       assert.equal((await s.c.request.post(origin + '/api/removed-servers', { data: { name: SERVER }, headers })).status(), 403);
-      assert.equal((await s.c.request.post(origin + `/api/removed-servers/${KEY}/restore`, { headers })).status(), 403);
+      assert.equal((await s.c.request.post(origin + '/api/removed-servers/restore', { data: { key: KEY }, headers })).status(), 403);
     }
     assert.deepEqual((await removed()).hidden, []);
     checks.push('Operator and Viewer: no Remove from lab, no Removed servers page, 403 on remove / restore');
