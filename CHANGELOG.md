@@ -2,6 +2,29 @@
 
 ---
 
+## v2.46.4 — 2026-11-08 — One fixed template for every rack floor and shelf
+
+### Changed
+- **Every rack floor is one box of the same size**, filled or empty, in every rack card
+  and (larger) in the rack detail, so floors line up across a row of racks. Each floor
+  has fixed places: the floor number and "+", the server in two lines (name, state,
+  watts, then KVM / SSH / power, owner, KVM port, switch and PDU feeds), and a row of
+  unit slots with labelled **Name / P/N / S/N** fields that are drawn even when empty.
+  More units than slots show a "+N" chip that opens the rest; search reaches a unit
+  behind it.
+- **Storage racks:** each of the 16 shelves is one row of the same labelled slots. The
+  unit type is the colour of the slot's edge (switch blue, UPS green, other grey), so
+  the name has the whole line. Long names and part numbers are cut in the middle so
+  "... 1" and "... 2" stay apart.
+- **Rack detail:** wider shelves card with P/N and S/N columns; the phone list shows the
+  P/N and S/N of every unit.
+
+### Fixed
+- **Lab display:** the lab name in the top bar is drawn slightly smaller instead of being
+  cut with "…" when a long date and the role badge leave it less room.
+
+---
+
 ## v2.46.3 — 2026-11-03 — Scanning a product: the code is its serial number, the name is the product
 
 ### Changed
