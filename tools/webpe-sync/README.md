@@ -2,8 +2,8 @@
 
 The lab owner wants every serial number (SN) in the lab looked up on the internal **SN analysis** page of
 webpe.nvidia.com, so each unit gets its product name and part number (P/N) in DCIM. webpe needs NVIDIA SSO, so the
-lookup runs as a browser tool on the owner's laptop. **This folder holds no webpe code yet**; it describes what DCIM
-offers that tool. Everything here also works by hand today from **Scan & Track > Serial numbers** in the site.
+lookup runs as a browser tool on the owner's laptop. `sync.cjs` here is that tool (see "Sync tool" at the end); the rest describes what DCIM
+offers it. Everything here also works by hand today from **Scan & Track > Serial numbers** in the site.
 
 ## The flow
 
@@ -129,3 +129,20 @@ written: run the dry run again, review, apply. A dry run accepts `If-Match` too 
 - Keep webpe pages, cookies and the DCIM password out of this repository and out of logs.
 - Without the tool: export the list in Scan & Track > Serial numbers ("Copy serial numbers" gives one SN per line),
   look them up as Switch on webpe, copy the result table (SN, P/N, Description) and paste it into "Import details".
+
+## Sync tool (`sync.cjs`)
+
+Runs on the owner's laptop and uses the owner's own signed-in browser sessions; it reads no password and stores no
+cookie.
+
+1. Open a dedicated Edge window with remote debugging on the local machine only:
+   `msedge --user-data-dir=%LOCALAPPDATA%\webpe-profile --remote-debugging-port=9333 --remote-debugging-address=127.0.0.1`
+2. In that window sign in to webpe.nvidia.com (SN analysis page) and to DCIM (Operator or Admin), one tab each.
+3. `node tools/webpe-sync/sync.cjs` - dry run: lists, per unit with a serial number or barcode, what webpe returns
+   and what would change, and writes `sync-dry-run.csv` (in `SYNC_REPORT_DIR` or the current folder).
+4. `node tools/webpe-sync/sync.cjs --apply` - saves: P/N, model (product line), type switch when webpe describes a
+   switch, and the product name only where the unit's name is generic (its code, "Unit", "<type> <code>"). One
+   whole-list save with `If-Match`, so a change made meanwhile on the site stops it instead of being overwritten.
+   Report: `sync-applied.csv`. Run the dry run again afterwards: it should report 0 units to change.
+
+The DCIM address comes from `DCIM_URL` (or `vm_site` in the git-ignored `.team/ops/release.local.json`).

@@ -2,6 +2,25 @@
 
 ---
 
+## v2.46.5 — 2026-11-08 — Serial numbers: export every SN, import product name and P/N, mark switches
+
+### Added
+- **Scan & Track > Serial numbers:** export every unit that has a serial number or barcode
+  (JSON or CSV, switches first), then paste back the looked-up product name and part
+  number (for example from webpe SN analysis). A preview shows what would change per SN
+  (updated, unchanged, not found, ambiguous) before anything is saved; Apply saves all
+  rows together or none, with a history entry on each unit.
+- **Unidentified units become switches:** a unit with no type, or "Other" with a generic
+  name, is marked as a switch when its SN is looked up. A NIC or adapter (by its name or
+  MCX / BlueField part number), and any unit with its own type, keeps its type, and the
+  preview says why.
+- A product name replaces only a generic name (the code itself or "Unit"); a name someone
+  typed is kept.
+- `tools/webpe-sync/sync.cjs`: a laptop tool that looks every lab SN up on webpe and
+  saves name, P/N and model, using the owner's own signed-in browser sessions.
+
+---
+
 ## v2.46.4 — 2026-11-08 — One fixed template for every rack floor and shelf
 
 ### Changed
