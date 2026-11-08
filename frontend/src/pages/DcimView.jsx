@@ -2,6 +2,7 @@ import { sumKnown, reading } from "../power";
 import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
 import { loadRackItems, saveRackItems, MAIN_STORAGE, UNIT_DETAILS, unitDetailChanges, detailText, duplicateField } from "../api/inventory";
+import { GENERIC_UNIT_NAME, isGenericUnit, serialUnitType, unitTypeLabel } from "../api/scanParse.js";
 import { loadLayout, saveLayout } from "../api/layout";
 import { splitSections, sectionHeading, versionOf } from "../api/changelog";
 import { SectionBody, plain } from "../components/WhatsNew";
@@ -799,6 +800,9 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   const [notes,     setNotes]     = useState(draft?.notes ?? (item.notes || ""));
   // Serial number, part number, model and MAC address: separate fields, each saved only when edited here.
   const [details,   setDetails]   = useState(() => Object.fromEntries(UNIT_DETAILS.map(([field]) => [field, draft?.[field] ?? detailText(item, field)])));
+  // Chosen here by hand: then the serial number rule below never changes them.
+  const [typeTouched, setTypeTouched] = useState(draft?.type !== undefined);
+  const [nameTouched, setNameTouched] = useState(draft?.name !== undefined);
   const [busy,      setBusy]      = useState(false);
   const [saved,     setSaved]     = useState(false);
   const [moveRack,  setMoveRack]  = useState("");
@@ -827,9 +831,16 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   const slot = parseUSlot(u);
   const uChanged = u.trim() !== String(item.u ?? 0);
   const uError = uChanged && slot === null ? U_SLOT_ERROR : "";
+  // The lab owner's rule, as a scan applies it (serialUnitType): a serial number entered for a generic unit (type
+  // Other, named "Unit" or after its own code) that has none yet marks it as a switch, unless its part number or model
+  // names another product. A unit identified as something else, or a type chosen here, is never changed.
+  const autoSwitch = !typeTouched && isGenericUnit(item) && !detailText(item, "serial_number").trim() && details.serial_number.trim() !== ""
+    && serialUnitType({ part_number: details.part_number, model: details.model }) === "switch";
+  const shownType = autoSwitch ? "switch" : type;
+  const shownName = autoSwitch && !nameTouched && String(item.name || "").trim().toLowerCase() === GENERIC_UNIT_NAME.toLowerCase() ? unitTypeLabel("switch") : name;
   const changes = {};
-  if (name.trim() && name.trim() !== item.name) changes.name = name.trim();
-  if (type !== (item.type || "other")) changes.type = type;
+  if (shownName.trim() && shownName.trim() !== item.name) changes.name = shownName.trim();
+  if (shownType !== (item.type || "other")) changes.type = shownType;
   if (uChanged && slot !== null && slot !== (item.u ?? 0)) changes.u = slot;
   if (notes.trim() !== (item.notes || "")) changes.notes = notes.trim();
   const { changes: detailChanges, errors: detailErrors } = unitDetailChanges(item, details);
@@ -840,7 +851,7 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   const dirty = Object.keys(changes).length > 0;
 
   async function submit() {
-    if (busy || uError || detailError || !name.trim()) return;
+    if (busy || uError || detailError || !shownName.trim()) return;
     if (!dirty) { setUnchanged(true); return; }
     setBusy(true); setUnchanged(false);
     try { await onSave(item.id, changes); setSaved(true); setTimeout(()=>setSaved(false),2000); }
@@ -881,14 +892,16 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
           </div>}
           <div><SL>Owner / Engineer</SL><OwnerSelect owner={owner} disabled={!ownersLoaded} label={`Owner for ${item.name}`} onChange={id=>onOwnerChange(`item:${item.id}`,id)}/></div>
           <div><SL>Name</SL>
-            <input value={name} onChange={e=>setName(e.target.value)}
+            <input value={shownName} onChange={e=>{ setName(e.target.value); setNameTouched(true); }}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
           </div>
           <div><SL>Type</SL>
-            <select value={type} onChange={e=>setType(e.target.value)}
+            <select value={shownType} onChange={e=>{ setType(e.target.value); setTypeTouched(true); }}
+              aria-describedby={autoSwitch ? "edit-equipment-type-hint" : undefined}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50">
               {Object.entries(ITEM_TYPES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
             </select>
+            {autoSwitch && <div id="edit-equipment-type-hint" className="mt-1 text-[11px] text-cyan-300">Marked as a switch: a unit with a serial number and no other product is most likely a switch. Choose another type if it is not.</div>}
           </div>
           {storage ? <div><SL>Shelf</SL>
             <StorageShelfSelect value={u} onChange={setU} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
@@ -934,7 +947,7 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
         </div>
         {/* Save stays in view below the scrolling fields, so a short screen never hides it. */}
         <div className="px-5 py-4 border-t border-zinc-800/40 space-y-3">
-          <button onClick={submit} disabled={busy || !name.trim() || !!uError || detailError}
+          <button onClick={submit} disabled={busy || !shownName.trim() || !!uError || detailError}
             className={`w-full py-2 text-sm font-bold rounded-lg transition flex items-center justify-center gap-2
               ${saved?"bg-emerald-900/50 text-emerald-400 border border-emerald-800/50":"bg-nv-400 text-zinc-950 disabled:opacity-40"}`}>
             {busy?<Spinner/>:saved?Icon.check:null}{saved?"Saved":"Save changes"}

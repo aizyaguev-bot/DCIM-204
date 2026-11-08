@@ -45,8 +45,12 @@ The 3D twin checks: `twin-safety.cjs` (power / console safety, KVM leases, moves
 data, so use a fresh fixture per run), `twin-overlays.cjs` (read-only; overlays, outlet counts, search keys at
 1440 and 375 px; start its fixture with `ASSISTANT_SHOW_IN_DEMO=1`, which its assistant-launcher check needs) and `twin-v3.cjs` (read-only; the redesigned top bar, rack bar, Issues / Racks / Data quality
 panel, health colours and legend, injected maintenance / ping / offline states, rack front view, server drawer,
-power confirmation, Viewer, and the phone bottom sheet with 44 px targets at 390 × 844). All default to port
-8770; `twin-v3.cjs` saves screenshots to `DCIM_QA_SHOTS` (default `C:/t/tv3-after`).
+power confirmation, Viewer, and the phone bottom sheet with 44 px targets at 390 × 844) and `twin-shelves.cjs`
+(read-only; the app's floor model in 3D: 4 floors per rack, Rack-05's derived floor 4, a 16-shelf storage rack; the
+selected rack's shelf cards always shown with full detail and the same cards for the same camera; no card through
+another rack or from behind over the selected one; the server power legend). All default to port
+8770; `twin-v3.cjs` saves screenshots to `DCIM_QA_SHOTS` (default `C:/t/tv3-after`), `twin-shelves.cjs` too
+(default `C:/t/twin-shelves`).
 
 The KVM launch check covers a normal console tab, blocked/throwing popup APIs
 from both a device card and its details, per-port in-use cleanup, and explicit

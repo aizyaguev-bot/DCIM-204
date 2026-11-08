@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseUnitBarcode, typeForPart, productForPart, UNIT_CODE_MAX } from "../api/scanParse.js";
+import { parseUnitBarcode, typeForPart, productForPart, serialUnitType, isGenericUnit, UNIT_CODE_MAX } from "../api/scanParse.js";
 
 test("a plain NVIDIA / Mellanox serial is the unit's code and serial", () => {
   const unit = parseUnitBarcode("  mt2604603m8u\r\n");
@@ -147,4 +147,37 @@ test("names stay within 160 characters and keep Hebrew text", () => {
   assert.equal(unit.name, "ב".repeat(100));
   assert.ok(Array.from(parseUnitBarcode(`SN: S-1; PN: ${"P".repeat(200)}`).name).length <= 160);
   assert.equal(Array.from(parseUnitBarcode(`Model: ${"ב".repeat(150)}\nSN: MT2604603M8U`).model).length, 120);
+});
+
+test("the serial-number-means-switch rule does not catch servers, boards or other vendors' units", () => {
+  const typeOf = raw => parseUnitBarcode(raw).type;
+  // a model or description that names a server or compute node
+  for (const raw of ["SN: X1; Model: DGX H100", "SN: X1; Model: HGX B200", "SN: X1; Model: PowerEdge R760 server", "SN: X1; Model: ProLiant DL380",
+    "SN: X1; Model: Compute tray", "SN: X1; Description: GPU node 3", "(21)X1(240)DGX-A100"]) assert.equal(typeOf(raw), "other", raw);
+  // an NVIDIA board / GPU OPN, as a part number, in the model, or scanned on its own
+  for (const raw of ["SN: X1; PN: 900-9X766-003N-SQ0", "SN: X1; Model: 699-2G133-0200-100", "900-9X766-003N-SQ0"]) assert.equal(typeOf(raw), "other", raw);
+  // another vendor's unit is a switch only when its label says so
+  assert.equal(typeOf("SN: X1; Model: Cisco Nexus 9300"), "other");
+  assert.equal(typeOf("SN: X1; Model: Arista 7050"), "other");
+  assert.equal(typeOf("SN: X1; Model: Cisco Nexus 9300 switch"), "switch");
+  assert.equal(parseUnitBarcode("SN: X1; Model: DGX H100").name, "DGX H100", "the name is still the product");
+  assert.equal(parseUnitBarcode("SN: X1; Description: GPU node 3").name, "GPU node 3", "a description names the product when there is no model");
+  // still a switch: a serial alone, an NVIDIA switch model or part number, a serial that only looks like a word
+  for (const raw of ["MT2629X00QA1", "TESTSN12345", "SN: X1; Model: SN2700", "SN: X1; PN: MQM9700-NS2F", "SN: NODE-12", "SN: X1; Model: Spectrum-4 SN5600"]) assert.equal(typeOf(raw), "switch", raw);
+  // the shared rule itself
+  assert.equal(serialUnitType({}), "switch");
+  assert.equal(serialUnitType({ model: "DGX Station" }), "other");
+  assert.equal(serialUnitType({ part_number: "MCP1600-C003" }), "cable", "a known part type keeps its type");
+  assert.equal(serialUnitType({ part_number: "MCX75310AAS-NEAT" }), "other");
+  assert.equal(serialUnitType({ code: "900-9X766-003N-SQ0" }), "other");
+});
+
+test("a generic unit: type other, named Unit or after its own code", () => {
+  assert.equal(isGenericUnit({ type: "other", name: "Unit" }), true);
+  assert.equal(isGenericUnit({ name: "unit" }), true, "no type is other");
+  assert.equal(isGenericUnit({ type: "other", name: "MT2629X00QA2", barcode: "mt2629x00qa2" }), true, "named after its barcode");
+  assert.equal(isGenericUnit({ id: "ci-9", type: "other", name: "ci-9" }), true, "named after its id");
+  assert.equal(isGenericUnit({ type: "other", name: "UPS box" }), false, "a name that says what it is");
+  assert.equal(isGenericUnit({ type: "switch", name: "Unit" }), false, "identified as something else");
+  assert.equal(isGenericUnit({ type: "computer", name: "Unit" }), false);
 });

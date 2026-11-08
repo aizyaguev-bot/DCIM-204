@@ -383,7 +383,16 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     // The same code again: found, nothing changed (no "another unit has this serial" refusal).
     await wedge(L.toLowerCase());
     await toast.filter({hasText:`Legacy ${run} (SN ${L}) is already on OPT22 · floor ${floor}. Nothing changed.`}).waitFor();
-    passed.push('SCAN-13 a plain code TESTSN12345 is saved as Serial number with Name "Switch" and type switch; an SN + PN label gives "ConnectX-7 NIC"; a known barcode-only unit gets its serial filled and keeps its name; scanning it again changes nothing');
+    // A generic barcode-only unit (type Other, named "Unit" or after its code): the scan fills its serial number and marks
+    // it as a switch by the same rule ("Unit" becomes "Switch", a code name stays); a unit whose name says what it is does not.
+    const LG=`GENERIC${run}`,LC=`GCODE${run}`,LU=`GUPS${run}`;
+    await putItems(d=>{d['Rack-03']=[...(d['Rack-03']||[]),{id:`ci-generic-${run}`,name:'Unit',type:'other',barcode:LG,u:1,shelf_position:''},{id:`ci-gcode-${run}`,name:LC,type:'other',barcode:LC,u:1,shelf_position:''},{id:`ci-gups-${run}`,name:`UPS ${run}`,type:'other',barcode:LU,u:1,shelf_position:''}];});
+    for(const code of [LG,LC,LU]){await wedge(code);await toast.filter({hasText:code}).filter({hasText:`to OPT22 · floor ${floor} (it was in Rack-03 · floor 1). Added its serial number.`}).waitFor();}
+    const typed=async code=>{const [i]=await withCode(code);return [i.type,i.name,i.serial_number];};
+    assert.deepEqual(await typed(LG),['switch','Switch',LG],'a generic "Unit" whose serial a scan fills is marked as a switch');
+    assert.deepEqual(await typed(LC),['switch',LC,LC],'a unit named after its code is marked as a switch and keeps its name');
+    assert.deepEqual(await typed(LU),['other',`UPS ${run}`,LU],'a unit whose name says what it is keeps its type');
+    passed.push('SCAN-13 a plain code TESTSN12345 is saved as Serial number with Name "Switch" and type switch; an SN + PN label gives "ConnectX-7 NIC"; a known barcode-only unit gets its serial filled and keeps its name; scanning it again changes nothing; a generic barcode-only unit whose serial is filled is marked as a switch');
 
     // SCAN-5: refusals are sentences and write nothing: a location label, a code on two units, a part number only.
     // The API refuses to create two units with one code, so the legacy duplicate is the lookup's answer, stubbed here.
@@ -490,6 +499,29 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.equal(await shown.getByRole('textbox').count(),0,'the view is read-only outside Edit');
     await op.keyboard.press('Escape');await shown.waitFor({state:'detached'});
     passed.push('SCAN-10 the four fields are shown and edited in the equipment panel (Save in view at 1536x864, a taken MAC or serial shown at its field, bad MAC refused, MAC cleaned, blank clears) and shown read-only outside Edit');
+
+    // SCAN-14: a Serial number typed into the equipment panel of a generic unit (type Other, named "Unit") marks it as a
+    // switch, with a hint, by the scan's rule; a model that names a server, or a unit that says what it is, stays Other.
+    const PG=`PGEN${run}`,PS=`PSRV${run}`,PU=`PUPS${run}`;
+    // on OPT22's floor of Rack-02 (shown open throughout this suite)
+    await putItems(d=>{d['Rack-02']=[...(d['Rack-02']||[]),...[[PG,'Unit'],[PS,'Unit'],[PU,`UPS box ${run}`]].map(([code,name])=>({id:`ci-${code.toLowerCase()}`,name,type:'other',barcode:code,u:floor,shelf_position:''}))];});
+    await op.reload();await op.locator(`[data-rack-id="Rack-02"] .equipment-cell[data-item-id="ci-${PG.toLowerCase()}"]`).first().waitFor({state:'attached'});
+    if(await op.locator('button.edit-toggle').getAttribute('aria-pressed')!=='true')await op.locator('button.edit-toggle').click();
+    const typeSelect=equip.locator('select').filter({has:op.locator('option[value="patchpanel"]')});
+    for(const [code,model,want] of [[PG,'','switch'],[PS,'DGX H100','other'],[PU,'','other']]){
+      await op.locator(`.equipment-cell[data-item-id="ci-${code.toLowerCase()}"] .equipment-type`).first().click();
+      await equip.getByText('Save changes').waitFor();
+      assert.equal(await typeSelect.inputValue(),'other');
+      if(model)await field('Model').fill(model);
+      await field('Serial number').fill(`SN${code}`);
+      assert.equal(await typeSelect.inputValue(),want,`${code}: type after typing a serial number`);
+      assert.equal(await equip.getByText('Marked as a switch').count(),want==='switch'?1:0);
+      await equip.getByRole('button',{name:'Save changes'}).click();await equip.getByRole('button',{name:'Saved'}).waitFor();
+      const [i]=await withCode(`SN${code}`);
+      assert.deepEqual([i.type,i.name],[want,code===PG?'Switch':code===PS?'Unit':`UPS box ${run}`],`${code} saved`);
+      await op.keyboard.press('Escape');await equip.waitFor({state:'detached'});
+    }
+    passed.push('SCAN-14 typing a Serial number for a generic "Unit" in the equipment panel marks it as a switch named Switch (with a hint); a DGX model or a named UPS box stays Other');
 
     const unexpected=writes.filter(w=>!SCAN_WRITE.test(w.split(' ')[1]));
     assert.deepEqual(unexpected,[],'Scanning writes only inventory registrations, locations and the equipment list (Undo)');

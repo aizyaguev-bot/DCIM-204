@@ -299,6 +299,12 @@ body.show-power .lbl .lt:not(:empty) { display: flex; }
 .vp-legend .sw.sq { border-radius: 2px; }
 .vp-legend .sw.sel { border: 2px solid var(--h-sel); }
 .vp-legend .sw.dashed { border: 1.5px dashed var(--muted); }
+.vp-legend .sw.tower { width: 7px; height: 12px; border-radius: 1.5px; }   /* server body = power state */
+.vp-legend .sw.tower.unk { border: 0; }
+.vp-legend .lg-sep { width: 1px; height: 16px; background: var(--line-2); flex: 0 0 auto; }
+.vp-legend.lg-pshort .li.pw .li-t { display: none; }   /* narrow: "Power ON" → "ON" (the tower shape and tooltip say power) */
+.vp-legend.lg-pshort .li.pw::after { content: attr(data-short); }
+.vp-legend.lg-swatches .li.pw::after { content: none; }
 /* zoom / focus / fit / reset (bottom right) */
 .zoombar { position: absolute; right: 16px; bottom: 16px; z-index: 6; display: flex; gap: 6px; }
 .zoombar .zb { background: rgba(18,19,22,.95); }

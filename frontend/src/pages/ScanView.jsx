@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import JsBarcode from "jsbarcode";
 import { loadInventory, updateInventory, labelCode, parseLocationCode, MAIN_STORAGE, UNIT_DETAILS, detailText } from "../api/inventory";
 import { STORAGE_SHELVES } from "../components/racks/floors.js";
-import { parseUnitBarcode, typeForPart } from "../api/scanParse.js";
+import { parseUnitBarcode, serialUnitType, typeForPart } from "../api/scanParse.js";
 import { qrSvgPath } from "../qr";
 import {useAccounts} from "../accounts";
 
@@ -26,9 +26,9 @@ const errorText = e => networkFailure(e) ? "Could not reach the server. Check th
 const validLocation = (value, racks) => value && racks.includes(value.rack) && Number.isInteger(value.u) && value.u >= 0 && value.u <= 42 && (value.rack !== MAIN_STORAGE || value.u <= STORAGE_SHELVES && !value.position);
 function where(p) { return p ? p.rack === MAIN_STORAGE ? (p.u ? `Main storage · Shelf ${String(p.u).padStart(2, "0")}` : "Main storage · whole unit") : `${p.rack} · ${p.u ? `Shelf ${String(p.u).padStart(2, "0")}` : "Whole rack / no shelf"}${p.position ? ` · ${p.position}` : ""}` : "Not registered"; }
 // The type of automatically registered equipment: a scanned serial number is most likely a switch (the lab owner's
-// rule), unless the code names another product (a NIC, DPU or cable part number, a MAC address ...).
+// rule), unless the code names another product (a NIC, DPU or cable part number, a board OPN, a server, a MAC address ...).
 function autoType(code) {
-  try { return parseUnitBarcode(code).type; } catch { return typeForPart(code) || "switch"; }
+  try { return parseUnitBarcode(code).type; } catch { return typeForPart(code) || serialUnitType({ description: code, code }); }
 }
 function when(value) { return value ? new Date(value).toLocaleString() : "Not confirmed by scan yet"; }
 

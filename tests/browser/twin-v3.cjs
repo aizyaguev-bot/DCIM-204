@@ -120,7 +120,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     });
     assert.equal(health.r7, 'down'); assert.equal(health.label, 'Rack-07 · PDU offline'); assert.match(health.cls, /\bh-down\b/);
     assert.equal(health.legendTitle, 'Health');
-    assert.deepEqual(health.legend.map(l => l.t), ['Up', 'Down', 'Unknown', 'Maintenance', 'Selected']);
+    assert.deepEqual(health.legend.map(l => l.t), ['Up', 'Down', 'Unknown', 'Maintenance', 'Selected', 'Power ON', 'Power OFF', 'Power unknown'], 'health, then the server body power colours');
     assert.equal(health.legend[0].bg, 'rgb(74, 222, 128)'); assert.equal(health.legend[1].bg, 'rgb(248, 113, 113)'); assert.equal(health.legend[2].border, 'dashed'); assert.equal(health.legend[3].bg, 'rgb(192, 132, 252)');
     pass('health: Rack-07 down with label "Rack-07 · PDU offline" (h-down); legend Up / Down / Unknown (dashed) / Maintenance / Selected in the health colours');
 
@@ -292,7 +292,9 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     assert.ok(f1.shelves.every(s => s.same), 'every tile is an object on that shelf'); assert.ok(f1.shelves.every(s => s.free === s.wantFree), 'Free = empty slots');
     assert.ok(f1.shelves.every(s => s.rows === Math.ceil(s.cells / 2)), 'two places per row: ' + JSON.stringify(f1.shelves));
     assert.match(f1.head, /^Rack-01 \| ≥?\d+\.\d\d kW · \d+\/\d+ on$/); assert.equal(f1.crumb, 'Lab › Left rack row › Rack-01');
-    const f5 = await front('SETUP-005'); assert.deepEqual(f5.caps, ['SHELF 1 (TOP)', 'SHELF 2', 'SHELF 3 (BOTTOM)']);
+    // Rack-05 has 3 shelves in lab-data.json; the app's floor model gives it 4 (floor 4 derived below the known ones)
+    const f5 = await front('SETUP-005'); assert.deepEqual(f5.caps, ['SHELF 1 (TOP)', 'SHELF 2', 'SHELF 3', 'SHELF 4 (BOTTOM)']);
+    assert.ok(f5.shelves.every(s => s.same), 'Rack-05: every tile is an object on that shelf');
     await front('SETUP-001'); await page.locator('#rfNext').click(); assert.equal(await page.evaluate(() => __twin.S.front), 'SETUP-002');
     await page.keyboard.press(']'); assert.equal(await page.evaluate(() => __twin.S.front), 'SETUP-003');
     await page.keyboard.press('['); assert.equal(await page.evaluate(() => __twin.S.front), 'SETUP-002');
@@ -319,7 +321,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     await page.locator('#rackFront .rf-tile.sel').focus(); await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => __twin.S.selected), null, 'Escape closes the drawer first'); assert.equal(await page.evaluate(() => __twin.S.front), 'SETUP-001');
     await page.keyboard.press('Escape'); assert.equal(await page.evaluate(() => __twin.S.front), null, 'then returns to the overview');
-    pass('rack front: Rack-01 4 shelves SHELF 1 (TOP)…SHELF 4 (BOTTOM), Rack-05 3, two places per row, Free = empty places, Next / ] / [ , tile click keeps the camera, Next closes a foreign drawer, Rack-01 / Rack-06 fit above the legend, Escape twice');
+    pass('rack front: Rack-01 4 shelves SHELF 1 (TOP)…SHELF 4 (BOTTOM), Rack-05 4 (floor 4 from the floor model), two places per row, Free = empty places, Next / ] / [ , tile click keeps the camera, Next closes a foreign drawer, Rack-01 / Rack-06 fit above the legend, Escape twice');
 
     // rack framing (Rack-03 from the rack bar): whole rack and cap between the breadcrumb band and the legend band,
     // at least 1.2 × the rack height away; breadcrumb names the rack; no telemetry card cut at the top
@@ -422,7 +424,8 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     assert.ok(near.full.some(t => /OFF\s?OPT12\s?opt12/.test(t) && /SW\s?Spectrum SN2700/.test(t)), 'full card for Rack-01: ' + near.full.join(' / '));
     await shot(page, 'desktop-15-shelf-cards.png');
     // a label on every shelf at every middle distance: in front of the selected Rack-01 from 2.5 to 7 m all four cards
-    // are shown (full, or compact for the whole rack when full cards would not fit), never hidden, never overlapping
+    // are shown with full detail (full cards, or for the whole rack one-line cards that still carry power, name, IP and
+    // unit type when full cards would not fit), never hidden, never overlapping
     const sweep = {};
     for (const d of [2.5, 3.3, 3.8, 4.5, 5, 5.5, 6.5, 7]) {
       await page.evaluate(d => { const t = __twin, S = t.S; S.tween = null; t.controls.cancel(); const sh = [...S.recs.values()].filter(r => r.cat === 'shelf' && r.setup === 'SETUP-001');
@@ -440,10 +443,10 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     }
     for (const [d, s] of Object.entries(sweep)) {
       assert.ok(Math.abs(s.camd - d) < 0.3, `camera placed ${d} m in front of Rack-01: ${s.camd}`);
-      assert.ok(s.st.length === 4 && s.st.every(v => v === 'full' || v === 'compact'), `every Rack-01 shelf has a card at ${d} m: ${s.st}`);
+      assert.ok(s.st.length === 4 && s.st.every(v => v === 'full' || v === 'line'), `every Rack-01 shelf has a detailed card at ${d} m: ${s.st}`);
       assert.equal(new Set(s.st).size, 1, `one level of detail per rack at ${d} m: ${s.st}`); assert.equal(s.bad, 0, `shelf cards overlap at ${d} m`);
     }
-    assert.ok(sweep['2.5'].st.every(v => v === 'full') && sweep['7'].st.every(v => v === 'compact'), 'full close up, compact farther: ' + JSON.stringify(sweep));
+    assert.ok(sweep['2.5'].st.every(v => v === 'full') && sweep['7'].st.every(v => v === 'line'), 'full close up, one line farther: ' + JSON.stringify(sweep));
     await page.evaluate(() => { __twin.closeDetail(); }); await page.locator('#vTop').click(); await idle(page);
     const far = await page.evaluate(() => [...document.querySelectorAll('#labels .lbl.shelf-card')].filter(e => e.style.display !== 'none').length);
     assert.equal(far, 0, 'no shelf cards from the top view (far away)');

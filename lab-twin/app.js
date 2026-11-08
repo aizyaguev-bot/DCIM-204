@@ -313,7 +313,7 @@
   function localToWorld(group, x, y, z) { return group.localToWorld(new THREE.Vector3(x, y, z)); }
 
   function buildRack(su, shelvesDefs, tpl) {
-    const { width: w, depth: dd, height: h, shelfLevels, shelfThickness: st, profile: p } = tpl;
+    const { width: w, depth: dd, height: h, shelfThickness: st, profile: p } = tpl;
     const g = new THREE.Group(); g.position.set(su.pos[0], 0, su.pos[1]); g.rotation.y = THREE.MathUtils.degToRad(su.rot || 0); g.updateMatrixWorld(true);
     const status = effStatus(su); const col = STATUS_COLOR[status];
     const postMat = mat('#cdd0d5', { metal: .6, rough: .3, unique: true });
@@ -340,6 +340,8 @@
     down.position.set(0, (h + 0.05) / 2, 0); down.computeLineDistances(); down.visible = false; down.renderOrder = 3; down.userData.baseOpacity = 1; g.add(down); eds.push(down);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: su.id, cat: 'setup', def: su, group: g, meshes, edges: eds, status, conf: su.confidence, zone: su.zone, setup: su.id, anchor: localToWorld(g, 0, h + 0.12, 0), tpl, cap, envSolid: e, envDashed: ed, envDown: down });
+    // the rack as a box in its own frame (sight lines to shelf cards: sightBlocked, rackFootprint)
+    rec.localBox = new THREE.Box3(new THREE.Vector3(-dd / 2 + 0.02, 0.02, -w / 2 + 0.02), new THREE.Vector3(dd / 2 - 0.02, h - 0.02, w / 2 - 0.02)); rec.invWorld = g.matrixWorld.clone().invert();
     makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span><span class="ln" dir="auto">${esc(rackName(su))}</span><span class="ls"></span><span class="lt"></span>`);
     rec.label.title = `${su.id} · ${su.name}`;
     rec.labelTel = rec.label.querySelector('.lt');
@@ -359,7 +361,7 @@
 
     // shelves
     shelvesDefs.forEach(sh => {
-      const y = shelfLevels[sh.level - 1];
+      const y = sh.y;
       const m = box(dd - 2 * p - 0.02, st, w - 2 * p - 0.02, mat('#dfe2e6', { metal: .3, rough: .5, unique: true }), 0, y - st / 2, 0); g.add(m);
       const shStatus = effStatus(sh); const se = setEdgeOp(edges(m, STATUS_COLOR[shStatus]), .7); g.add(se);
       // power strip above the shelf (part of the rack PDU)
@@ -368,8 +370,9 @@
       const srec = reg({ id: sh.id, cat: 'shelf', def: sh, group: m, meshes: [m], edges: [se], status: shStatus, conf: sh.confidence, zone: sh.zone, setup: su.id, level: sh.level, strip, led, anchor: null, y });
       srec.anchor = () => localToWorld(g, dd / 2 - 0.05, y + 0.02, -w / 2 + 0.12);
       // drop-target volume (the space above the shelf) — only visible / pickable while moving an item
-      const nextLv = shelvesDefs.map(s => s.level).filter(l => l > sh.level).sort((a, b) => a - b)[0];
-      const nextY = nextLv ? shelfLevels[nextLv - 1] : h - p; const sh0 = y + 0.01, sh1 = nextY - st - 0.01;
+      const nextYs = shelvesDefs.filter(s => s.level > sh.level).map(s => s.y);
+      const nextY = nextYs.length ? Math.min(...nextYs) : h - p; const sh0 = y + 0.01, sh1 = nextY - st - 0.01;
+      srec.gap = nextY - st - y;   // free height above the shelf: equipment on it stays below the next shelf
       const slot = box(dd - 2 * p - 0.02, Math.max(0.1, sh1 - sh0), w - 2 * p - 0.02, mat('#22d3ee', { opacity: .22, unique: true, emissive: '#22d3ee', emissiveIntensity: .5, rough: 1 }), 0, (sh0 + sh1) / 2, 0);
       slot.material.depthWrite = false; slot.visible = false; slot.userData.id = sh.id; slot.userData.slot = true; g.add(slot); S.pickables.push(slot); srec.slot = slot;
       // shelf card: what is on this shelf (server · IP · power, units and their type). Filled by renderShelfCards(),
@@ -461,7 +464,7 @@
         else if (asSwitch) { w = 0.44; h = 0.066; d = 0.50; }                       // NVIDIA-style 1U switch under test (Lab Manager rack item of type switch)
         else if (it.type === 'kvm') { w = 0.44; d = 0.30; h = 0.045; }
         else { w = 0.40; d = 0.35; h = 0.05; }                                      // other rack equipment (UPS, SSD box …)
-        w = Math.min(w, slotW - 0.02);
+        w = Math.min(w, slotW - 0.02); if (sh.gap) h = Math.min(h, Math.max(0.03, sh.gap - 0.02));
         const body = makeBox(d, h, w, bodyCol); body.position.set(0.02, sh.y + h / 2, zc); g.add(body); meshes.push(body);
         if (isPC) {   // the whole tower in its power colour (exact legend colour: the renderer writes sRGB)
           const pc = linear(POWER[power].c); body.material.color.copy(pc); body.material.emissive.copy(pc); body.material.emissiveIntensity = 0.22;
@@ -590,6 +593,42 @@
   // ───────────────────────────────────────────────────────────── effective model (static JSON + overrides + live)
   function ov() { return {}; }                       // legacy — edits now mutate S.data directly
   function dcimRackOf(su) { return su.dcimRack; }
+  // Floor model, mirrored from the app (frontend/src/components/racks/floors.js): a rack has RACK_FLOORS floors
+  // (1 = top … 4 = bottom); Main storage and storage-type racks (the rack's first PDU / rack device has model "Storage",
+  // like DcimView's rackStats) have STORAGE_SHELVES shelves. lab-data.json keeps the shelves it knows (Rack-05 has 3);
+  // the missing ones are derived here and never written back, so every floor the app can place a server or unit on has
+  // a shelf, a mesh and a card in 3D. Derived ids are stable: SHELF-<setup>-L<level> (rack) / -S<shelf> (storage).
+  const RACK_FLOORS = 4, STORAGE_SHELVES = 16, MAIN_STORAGE = 'Storage-Main';
+  function isStorageRack(rack, live = S.live) {
+    if (!rack) return false; if (rack === MAIN_STORAGE) return true;
+    const devs = live?.connected ? live.devices || [] : [];
+    return devs.filter(x => (x.kind === 'pdu' || x.kind === 'rack') && x.rack === rack)[0]?.model === 'Storage';
+  }
+  function floorsFor(su, live = S.live) { return isStorageRack(dcimRackOf(su), live) ? STORAGE_SHELVES : RACK_FLOORS; }
+  function floorSignature(d = S.data) { return d.setups.map(su => su.id + ':' + floorsFor(su)).join('|'); }
+  // The shelves of a rack (lowest first), each with its height y: lab-data.json's shelves plus the derived ones.
+  function shelvesFor(su, d = S.data, live = S.live) {
+    const tpl = d.templates.rack; const lv = tpl.shelfLevels; const pitch = lv.length > 1 ? lv[1] - lv[0] : 0.3;
+    const topDown = (d.dcim?.uNumbering || 'top-down') === 'top-down';
+    const json = d.shelves.filter(sh => sh.setup === su.id);
+    const n = floorsFor(su, live);
+    const derived = (id, level, u, word) => ({ id, name: `${rackName(su)} — ${word} ${u} (from the app's floor model)`, category: 'shelf', setup: su.id, level, zone: su.zone, status: su.status || 'active', confidence: 'medium', photos: [], notes: `Not in lab-data.json: the app gives this rack ${n} ${word === 'floor' ? 'floors' : 'shelves'}.`, derived: true });
+    if (n === STORAGE_SHELVES) {
+      // a storage unit: evenly spaced shelves; the known shelves keep their numbers (U order), the rest are derived
+      const ordered = [...json].sort((a, b) => topDown ? b.level - a.level : a.level - b.level); const N = Math.max(n, ordered.length);
+      const lo = 0.14, hi = tpl.height - 0.2; const out = [];
+      for (let u = 1; u <= N; u++) { const level = topDown ? N - u + 1 : u; out.push({ ...(ordered[u - 1] || derived(`SHELF-${su.id}-S${u}`, level, u, 'shelf')), level, y: lo + (level - 1) * (hi - lo) / Math.max(1, N - 1) }); }
+      return out.sort((a, b) => a.level - b.level);
+    }
+    const yOf = l => lv[l - 1] ?? lv[0] + (l - 1) * pitch;
+    const out = json.map(sh => ({ ...sh, y: yOf(sh.level) }));
+    if (!out.length) for (let l = 1; l <= n; l++) out.push({ ...derived(`SHELF-${su.id}-L${l}`, l, topDown ? n - l + 1 : l, 'floor'), y: yOf(l) });
+    // floors the app has but lab-data.json does not: below the lowest shelf (with top-down numbering floors 1…k stay on
+    // the known shelves), else above the highest
+    const levels = out.map(sh => sh.level); let k = 0;
+    while (out.length < n) { k++; const l = topDown ? Math.min(...levels) - k : Math.max(...levels) + k; out.push({ ...derived(`SHELF-${su.id}-L${l}`, l, out.length + 1, 'floor'), y: yOf(l) }); }
+    return out.sort((a, b) => a.level - b.level);
+  }
   function effStatus(def) { return def.status || 'unknown'; }
   function isDefaultOutletLabel(label) { return !label || /^(outlet\s*\d+|port\s*\d+|\s*)$/i.test(label.trim()); }
   // A computer label: not a default "Outlet N" and not "empty" / "KVM Power" / a placeholder. Filtered BEFORE the U
@@ -603,10 +642,13 @@
   const cleanNotes = s => String(s || '').replace(LIVE_WARN_RE, '').trim();
 
   function computeModel() {
+    // a rack's floor model changed (live data says it is a storage rack, or no longer): rebuild the racks first
+    if (S.floorSig != null && floorSignature() !== S.floorSig) rebuildStatic();
     const d = S.data; const live = S.live; const uTopDown = (d.dcim?.uNumbering || 'top-down') === 'top-down';
     const setups = d.setups.map(s => ({ ...s, dcimRack: dcimRackOf(s) }));
     const setupByRack = {}; setups.forEach(s => { if (s.dcimRack) setupByRack[s.dcimRack] = s.id; });
-    const shelvesOf = sid => d.shelves.filter(sh => sh.setup === sid).sort((a, b) => a.level - b.level);
+    const shelvesBy = new Map(d.setups.map(su => [su.id, shelvesFor(su, d, live)]));
+    const shelvesOf = sid => shelvesBy.get(sid) || [];
     const shelfForU = (sid, u) => { const sh = shelvesOf(sid); const n = sh.length; if (!Number.isInteger(Number(u)) || u < 1 || u > n) return null; const idx = uTopDown ? n - Number(u) : Number(u) - 1; return sh[idx].id; };
 
     let items = d.items.map(it => ({ ...it, ...pickOv(it.id) }));
@@ -749,6 +791,10 @@
   // number and name: NVIDIA Spectrum SN#### / Quantum QM#### switches, ConnectX NICs, BlueField DPUs. A generic unit
   // that has a serial number is most likely a switch under test (the lab owner's rule), so it is marked as one.
   const SN_FAMILY = { 2: 'Spectrum', 3: 'Spectrum-2', 4: 'Spectrum-3', 5: 'Spectrum-4' }, QM_FAMILY = { 8: 'Quantum', 9: 'Quantum-2' };
+  // Not a switch by the serial-number rule (as frontend/src/api/scanParse.js serialUnitType): a server or compute node,
+  // an NVIDIA board / GPU OPN (900-9X766-…), a NIC / DPU / cable / PDU / KVM part, or another vendor's unit whose model
+  // or name does not say "switch".
+  const NOT_SWITCH = /\b(DGX|HGX|servers?|PowerEdge|ProLiant|compute|nodes?|nic|dpu|hca|adapter|gpu|Cisco|Arista|Juniper|Dell|HPE|HP|Hewlett|Aruba|Lenovo|Supermicro|Brocade|Extreme\s+Networks|Netgear|Ubiquiti|MikroTik|Huawei|Fortinet|Edgecore|Celestica|Quanta)\b|(^|[^0-9A-Z])(900|699)-[0-9A-Z]{5}-[0-9A-Z]{4}|\b(MCX|MBF|MCP|MFS|MMA|MC2|MMS|PX\d?-|DKX|DLX|KX\d)/i;
   function unitInfo(it) {
     const clean = v => String(v || '').trim();
     const model = clean(it?.model), pn = clean(it?.part_number), name = clean(it?.name);
@@ -766,7 +812,7 @@
     else if (nic && kind === 'other') { kind = 'nic'; typeText = 'ConnectX-' + nic[1]; }
     else if (kind === 'other' && /\b(spectrum|quantum|switch)\b/i.test(text)) kind = 'switch';
     // the serial may be stored only as the unit's barcode (Scan & Track registers the scanned code that way)
-    else if (kind === 'other' && (clean(it?.serial_number) || clean(it?.barcode))) { kind = 'switch'; likely = true; }
+    else if (kind === 'other' && (clean(it?.serial_number) || clean(it?.barcode)) && !NOT_SWITCH.test(text)) { kind = 'switch'; likely = true; }
     if (kind === 'switch' && !typeText) typeText = model || pn;
     if (kind === 'nic' && !typeText) typeText = model || pn;
     return { kind, tag: UNIT_TAG[kind] || 'DEV', typeText, likely, name };
@@ -883,10 +929,13 @@
       const before = rec.cardFull;
       rec.cardFull = `<div class="sc-h">${esc(head)}</div>${srv.map(x => x.html).join('')}${uni.map(x => x.html).join('')}${rec.cardEmpty ? '<div class="sc-l sc-free">Free</div>' : ''}`;
       rec.cardCompact = `<span class="sc-u">S${u}</span>${srv.map(x => `${pill(x.p)}<bdi class="sc-n">${esc(x.name)}</bdi>`).join(' ')} ${uni.map(x => `<span class="sc-k k-${x.kind}">${x.tag}</span><bdi>${esc(x.main)}</bdi>`).join(' ')}`;
+      // one line with the full card's detail (server power, name and IP, unit type): the selected rack when its full
+      // cards do not fit on screen
+      rec.cardLine = `<span class="sc-u">S${u}</span>${srv.map(x => `${pill(x.p)}<bdi class="sc-n">${esc(x.name)}</bdi>${x.host ? `<span class="sc-ip">${esc(x.host)}</span>` : '<span class="sc-ip none">no IP</span>'}${x.maint ? '<span class="sc-m">MAINT</span>' : ''}`).join(' ')} ${uni.map(x => `<span class="sc-k k-${x.kind}">${x.tag}</span><bdi>${esc(x.main)}</bdi>`).join(' ')}${rec.cardEmpty ? '<span class="sc-free">Free</span>' : ''}`;
       rec.cardText = [head, ...srv.map(x => `${POWER[x.p].t} ${x.name} ${x.host || 'no IP'}${x.maint ? ' MAINT' : ''}`), ...uni.map(x => `${x.tag} ${x.main}${x.extra ? ' · ' + x.extra : ''}`), rec.cardEmpty ? 'Free' : ''].filter(Boolean).join('\n');
       // new content: its full size is measured again the next time it is shown full (the line count estimates it until then)
       rec.cardLines = 1 + Math.max(1, srv.length + uni.length);
-      if (rec.cardFull !== before) { rec.cardFullW = rec.cardFullH = null; rec.cardDemoted = null; }
+      if (rec.cardFull !== before) rec.cardSize = null;   // measured again (ensureCardSizes)
       rec.label.dataset.lod = ''; rec.label.title = rec.cardText;
     }
   }
@@ -1757,15 +1806,20 @@
 
   function rebuildAll() {
     // setups/shelves colors follow overrides → rebuild static + items
+    rebuildStatic(); computeModel(); buildItems();
+  }
+  // the room, racks, shelves and storage again (the items follow with buildItems)
+  function rebuildStatic() {
     for (const [id, r] of [...S.recs]) { if (r.label) r.label.remove(); if (r.telem) r.telem.remove(); if (r.attnEl) r.attnEl.remove(); S.recs.delete(id); }
     S.labelHover = null;
-    S.pickables = []; disposeGroup(staticGroup); disposeGroup(wallsGroup); disposeGroup(zonesGroup); disposeGroup(itemsGroup);
-    buildStatic(); computeModel(); buildItems(); refreshLabelsStatic();
+    S.pickables = []; disposeGroup(staticGroup); disposeGroup(wallsGroup); disposeGroup(zonesGroup); disposeGroup(itemsGroup); S.itemGroups = [];
+    buildStatic(); refreshLabelsStatic();
   }
   function refreshLabelsStatic() { setLabelMode(S.labelMode, true); wallsGroup.visible = S.wallsVisible; zonesGroup.visible = S.zonesVisible; }
   function buildStatic() {
     const d = S.data; world.updateMatrixWorld(true); buildRoom(d);
-    d.setups.forEach(su => buildRack(su, d.shelves.filter(s => s.setup === su.id), d.templates.rack));
+    d.setups.forEach(su => buildRack(su, shelvesFor(su, d), d.templates.rack));
+    S.floorSig = floorSignature(d);
     d.storage.forEach(sd => { if (sd.template === 'trayRack') buildTrayRack(sd, d.templates.trayRack); else buildCabinet(sd); });
   }
 
@@ -2686,19 +2740,24 @@
   function renderLegend() {
     const lg = $('#legend'); if (!lg) return;
     const sw = (cls, style, label) => `<span class="li" title="${label}" aria-label="${label}"><span class="sw ${cls}"${style ? ` style="${style}"` : ''} aria-hidden="true"></span><span class="li-t" aria-hidden="true">${label}</span></span>`;
-    if (S.colorBy === 'health') lg.innerHTML = `<span class="lg-t">Health</span>${sw('dot', `background:${HEALTH.up.c}`, 'Up')}${sw('dot', `background:${HEALTH.down.c}`, 'Down')}${sw('dot unk', '', 'Unknown')}${sw('sq', `background:${HEALTH.maint.c}`, 'Maintenance')}${sw('sq sel', '', 'Selected')}`;
-    else lg.innerHTML = `<span class="lg-t">Lifecycle</span>${STATUSES.map(st => sw('dot', `background:${STATUS_COLOR[st]}`, STATUS_LABEL[st])).join('')}${sw('sq dashed', '', 'Low confidence')}${sw('sq sel', '', 'Selected')}`;
-    lg.title = S.colorBy === 'health' ? 'Dashed = health unknown (no live signal). Shelves stay neutral.' : 'Dashed outline = low placement confidence; faded = medium';
+    // server bodies show the PDU outlet's power (not ping health): their own group, with tower-shaped swatches
+    const tower = (p, label) => `<span class="li pw" data-short="${POWER[p].t}" title="Server body: ${POWER[p].title}" aria-label="Server body: ${label}"><span class="sw tower${p === 'unknown' ? ' unk' : ''}" style="background:${POWER[p].c}" aria-hidden="true"></span><span class="li-t" aria-hidden="true">${label}</span></span>`;
+    const power = `<span class="lg-sep" aria-hidden="true"></span><span class="lg-t">Server body = power</span>${tower('on', 'Power ON')}${tower('off', 'Power OFF')}${tower('unknown', 'Power unknown')}`;
+    if (S.colorBy === 'health') lg.innerHTML = `<span class="lg-t">Health</span>${sw('dot', `background:${HEALTH.up.c}`, 'Up')}${sw('dot', `background:${HEALTH.down.c}`, 'Down')}${sw('dot unk', '', 'Unknown')}${sw('sq', `background:${HEALTH.maint.c}`, 'Maintenance')}${sw('sq sel', '', 'Selected')}${power}`;
+    else lg.innerHTML = `<span class="lg-t">Lifecycle</span>${STATUSES.map(st => sw('dot', `background:${STATUS_COLOR[st]}`, STATUS_LABEL[st])).join('')}${sw('sq dashed', '', 'Low confidence')}${sw('sq sel', '', 'Selected')}${power}`;
+    lg.title = (S.colorBy === 'health' ? 'Health (outlines, LEDs, label dots): ping and PDU state. Dashed = health unknown (no live signal). Shelves stay neutral.' : 'Dashed outline = low placement confidence; faded = medium') +
+      ' Server body colour = PDU outlet power: green ON, red OFF, grey unknown (no reading), separate from ping health.';
     layoutLegend();
   }
-  // Keep the legend on one row beside the zoom bar: full → no title (gap 10 px) → swatches only, as the view narrows.
+  // Keep the legend on one row beside the zoom bar: full → no titles (gap 10 px) → power words shortened to ON / OFF / ?
+  // → swatches only, as the view narrows.
   function layoutLegend() {
     const lg = $('#legend'), vp = $('#viewport'); if (!lg || !vp || !lg.offsetParent) return;
     const zb = $('.zoombar'); const v = vp.getBoundingClientRect(); const z = zb ? zb.getBoundingClientRect() : null;
     const sameRow = z && z.width > 0 && Math.abs((z.top + z.bottom) / 2 - lg.getBoundingClientRect().top - 16) < 24;
     const room = (sameRow ? z.left - 12 : v.right - 16) - lg.getBoundingClientRect().left;
-    for (const mode of ['', 'lg-compact', 'lg-compact lg-swatches']) {
-      lg.classList.remove('lg-compact', 'lg-swatches'); if (mode) lg.classList.add(...mode.split(' '));
+    for (const mode of ['', 'lg-compact', 'lg-compact lg-pshort', 'lg-compact lg-pshort lg-swatches']) {
+      lg.classList.remove('lg-compact', 'lg-pshort', 'lg-swatches'); if (mode) lg.classList.add(...mode.split(' '));
       if (lg.scrollWidth <= room) break;
     }
   }
@@ -2929,63 +2988,69 @@
     const phone = phoneQuery.matches; const q = S.filters.q; const issue = S.issueIds || new Set();
     const selRack = S.selected ? rackRecOf(S.recs.get(S.selected))?.id : null;
     const cands = [];
-    // Shelf cards first (level of detail): the full card up close, one compact line at middle distance, nothing far away
-    // or from behind the rack. The selected rack keeps them a little longer. Centred on the shelf front. Full cards
-    // that would not fit between their neighbours on screen turn compact for the whole rack (one rack never mixes the
-    // two), and a full card that still covers another label falls back to its compact line before it is ever hidden.
-    const cards = [];
+    // Shelf cards. Deterministic: the same camera and data always give the same cards (nothing is carried over from
+    // earlier frames; card sizes are measured once per content, ensureCardSizes). Level of detail: the full card up
+    // close, one compact line at middle distance, nothing far away, from behind its rack, or when the sight line to it
+    // crosses another rack (sightBlocked). The selected rack claims label space first and is never hidden: its full
+    // cards, or when they cannot all fit on screen its one-line cards with the same detail (power, name, IP, unit
+    // type), are spread into one column in shelf order; no other rack shows more detail than it does. Every other rack
+    // shows all-full or all-compact cards, hides the ones that would cover another label and those drawn over the
+    // selected rack from behind it (the ones in front of it are faded).
+    ensureCardSizes();
+    const cards = []; let blockedSel = false;
     for (const rec of S.recs.values()) {
       if (rec.cat !== 'shelf' || !rec.label) continue;
-      const el = rec.label; rec.cardShown = false;
-      const sel = S.selected === rec.id; const su = S.recs.get(rec.setup); const k = rec.setup === selRack ? 1.5 : 1;
+      const el = rec.label; rec.cardShown = false; rec.cardWhy = '';
+      const sel = S.selected === rec.id; const su = S.recs.get(rec.setup); const selR = !!selRack && rec.setup === selRack; const k = selR ? 1.5 : 1;
       let show = S.labelMode !== 'none' && !S.front && (!rec.filtered || sel) && !(su?.filtered && !sel) && !!rec.cardFull;
-      if (show && phone) show = rec.setup === selRack;
+      if (show && phone) show = selR;
       let lod = null, dist = 0;
       if (show) {
-        tmpV.copy(rec.cardAnchor); dist = tmpV.distanceTo(camPos);
-        const facing = camPos.clone().sub(rec.cardAnchor).normalize().dot(rec.front);
+        dist = rec.cardAnchor.distanceTo(camPos);
+        const facing = tmpD.copy(camPos).sub(rec.cardAnchor).normalize().dot(rec.front);
         lod = facing < -0.2 ? null : dist <= 3.4 * k ? 'full' : dist <= 6.5 * k ? 'compact' : null;
-        // demoted after covering another label: compact until the camera comes 0.3 m closer than where that happened
-        if (lod === 'full' && rec.cardDemoted != null) { if (dist > rec.cardDemoted - 0.3) lod = 'compact'; else rec.cardDemoted = null; }
-        if (lod === 'compact' && rec.cardEmpty && !sel) lod = null;
+        if (!lod) rec.cardWhy = facing < -0.2 ? 'behind-rack' : 'far';
+        if (lod === 'compact' && rec.cardEmpty && !selR) { lod = null; rec.cardWhy = 'empty'; }
+        // behind another rack: hidden; the selected rack's own cards stay (faded) — they are what the user looks for
+        if (lod && sightBlocked(rec.cardAnchor, camPos, rec.setup)) { if (selR) blockedSel = true; else { lod = null; rec.cardWhy = 'occluded'; } }
       }
-      if (lod) { tmpV.project(camera); if (tmpV.z > 1 || tmpV.x < -1.05 || tmpV.x > 1.05 || tmpV.y < -1.05 || tmpV.y > 1.05) lod = null; }
-      if (!lod) { el.style.display = 'none'; rec.cardDemoted = null; continue; }
-      cards.push({ rec, el, sel, k, dist, lod, x: (tmpV.x + 1) / 2 * r.width, y: (1 - tmpV.y) / 2 * r.height });
+      if (lod) { tmpV.copy(rec.cardAnchor).project(camera); if (tmpV.z > 1 || tmpV.x < -1.05 || tmpV.x > 1.05 || tmpV.y < -1.05 || tmpV.y > 1.05) { lod = null; rec.cardWhy = 'off-screen'; } }
+      if (!lod) { el.style.display = 'none'; continue; }
+      cards.push({ rec, el, selR, k, dist, lod, x: (tmpV.x + 1) / 2 * r.width, y: (1 - tmpV.y) / 2 * r.height });
     }
-    // Stacked full cards of one rack: each pair of neighbours on screen must fit side by side or one above the other
-    // (sizes from the last time the card was shown full, else from its line count). The margin is larger to go back
-    // to full than to leave it, so a camera resting near the limit does not flicker between the two.
-    const fullH = c => c.rec.cardFullH || 8 + 14.5 * (c.rec.cardLines || 2), fullW = c => c.rec.cardFullW || 220;
     const byRack = new Map();
     for (const c of cards) { if (!byRack.has(c.rec.setup)) byRack.set(c.rec.setup, []); byRack.get(c.rec.setup).push(c); }
-    for (const [setup, all] of byRack) {
-      const su = S.recs.get(setup); const margin = su?.cardsCompact ? 10 : 2;
-      const list = all.filter(c => c.lod === 'full'); if (!list.length) continue;
-      // one rack never mixes full cards and compact lines
-      if (list.length < all.length) { all.forEach(c => { c.lod = 'compact'; }); continue; }
-      list.sort((a, b) => a.y - b.y);
-      let fits = true;
-      for (let i = 1; i < list.length && fits; i++) {
-        const a = list[i - 1], b = list[i];
-        const apartY = b.y - a.y >= (fullH(a) + fullH(b)) / 2 + margin, apartX = Math.abs(b.x - a.x) >= (fullW(a) + fullW(b)) / 2 + margin;
-        fits = apartY || apartX;
-      }
-      if (su) su.cardsCompact = !fits;
-      if (!fits) list.forEach(c => { c.lod = 'compact'; });
+    const meanDist = list => list.reduce((a, c) => a + c.dist, 0) / list.length;
+    // the selected rack: full cards when all fit on screen as one column, else one-line cards with the same detail
+    let cap = 'full';
+    const selCards = selRack ? byRack.get(selRack) || [] : [];
+    if (selCards.length) {
+      let lod = meanDist(selCards) <= 3.4 * 1.5 ? 'full' : 'line';
+      if (lod === 'full' && !spreadColumn(selCards, 'full', r.height)) lod = 'line';
+      if (lod === 'line') spreadColumn(selCards, 'line', r.height);
+      selCards.forEach(c => { c.lod = lod; });
+      cap = lod === 'full' ? 'full' : 'compact';
     }
+    // the other racks, nearest first: all full only when every card is close enough, the selected rack shows full cards
+    // too (or none is selected) and neighbouring full cards fit side by side or one above the other
+    const others = [...byRack].filter(([setup]) => setup !== selRack).map(([setup, list]) => ({ setup, list, d: meanDist(list) }))
+      .sort((a, b) => a.d - b.d || (a.setup < b.setup ? -1 : 1));
+    for (const g of others) {
+      g.lod = cap === 'full' && g.list.every(c => c.lod === 'full') && columnFits(g.list, 'full') ? 'full' : 'compact';
+      g.list.forEach(c => { c.lod = g.lod; });
+    }
+    for (const c of cards) c.rec.cardShown = true;
+    // the selected rack's screen footprint and distance: cards of other racks drawn over it from behind are hidden
+    const selFoot = selCards.length ? rackFootprint(S.recs.get(selRack), r) : null;
     const showCard = (c, lod) => {
       const el = c.el;
-      if (el.dataset.lod !== lod) { el.innerHTML = lod === 'full' ? c.rec.cardFull : c.rec.cardCompact; el.dataset.lod = lod; el.classList.toggle('compact', lod === 'compact'); }
+      if (el.dataset.lod !== lod) { el.innerHTML = cardHtml(c.rec, lod); el.dataset.lod = lod; el.classList.toggle('compact', lod !== 'full'); }
       c.lod = lod;
     };
-    for (const c of cards) {
-      const { rec, el, sel, k, dist, x, y } = c;
-      showCard(c, c.lod);
-      el.style.display = ''; el.style.left = x + 'px'; el.style.top = y + 'px';
-      el.style.opacity = c.lod === 'compact' ? Math.max(0.35, Math.min(1, (6.5 * k - dist) / k)) : 1; el.style.zIndex = Math.max(1, Math.round(90 - dist * 3));
-      rec.cardShown = true;
-      cands.push({ el, x, y, dist, pri: sel ? 0 : 6, mid: true, fixed: true, card: c });
+    for (const c of selCards) {
+      showCard(c, c.lod); const s = cardSize(c.rec, c.lod);
+      c.el.style.display = ''; c.el.style.visibility = ''; c.el.style.left = c.x + 'px'; c.el.style.top = c.cy + 'px'; c.el.style.opacity = blockedSel ? 0.75 : 1; c.el.style.zIndex = 95;
+      cands.push({ el: c.el, x: c.x, y: c.cy, w: s.w, h: s.h, dist: c.dist, pri: 0, mid: true, fixed: true, sized: true });
     }
     for (const rec of S.recs.values()) {
       const el = rec.label; if (!el || rec.cat === 'shelf') continue;
@@ -3012,29 +3077,132 @@
       const pri = sel ? 0 : issue.has(rec.id) ? 1 : hit ? 2 : rec.cat === 'setup' ? 3 : rec.cat === 'storage' ? 4 : 5;
       cands.push({ el, x, y, dist, pri, mid: rec.cat === 'zone' });
     }
-    // one layout read for every shown label and card, then the overlap pass
+    // one layout read for every shown label (shelf card sizes come from ensureCardSizes), then the overlap pass
     telems.forEach(t => { t.h = t.el.offsetHeight; });
-    cands.forEach(c => { c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; if (c.card?.lod === 'full') { c.card.rec.cardFullW = c.w; c.card.rec.cardFullH = c.h; } });
+    cands.forEach(c => { if (!c.sized) { c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; } });
     // a telemetry card cut by the top of the 3D view is hidden rather than half shown
     telems.forEach(t => { t.el.style.visibility = t.y - t.h < 0 ? 'hidden' : ''; });
     cands.sort((a, b) => a.pri - b.pri || a.dist - b.dist);
     const placed = [];
     const clash = (l, t, w, h) => placed.some(p => Math.min(l + w, p.l + p.w) - Math.max(l, p.l) > 2 && Math.min(t + h, p.t + p.h) - Math.max(t, p.t) > 2);
     for (const c of cands) {
-      let l = c.x - c.w / 2, t0 = c.mid ? c.y - c.h / 2 : c.y - c.h; let k = 0;
-      // a full shelf card that covers another label shows its compact line instead (measured again), and stays compact
-      // until the camera comes closer
-      if (c.card?.lod === 'full' && clash(l, t0, c.w, c.h)) {
-        showCard(c.card, 'compact'); c.card.rec.cardDemoted = c.dist;
-        c.el.style.opacity = Math.max(0.35, Math.min(1, (6.5 * c.card.k - c.dist) / c.card.k));
-        c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; l = c.x - c.w / 2; t0 = c.y - c.h / 2;
-      }
+      const l = c.x - c.w / 2, t0 = c.mid ? c.y - c.h / 2 : c.y - c.h; let k = 0;
       while (k <= 3 && clash(l, t0 - k * (c.h + 2), c.w, c.h)) { k++; if (c.fixed) { k = 4; break; } }
       if (k > 3 && c.pri > 1) { c.el.style.visibility = 'hidden'; continue; }   // selection and issues are never hidden
       if (k > 3) k = 0;
       placed.push({ l, t: t0 - k * (c.h + 2), w: c.w, h: c.h });
       c.el.style.visibility = ''; if (k) c.el.style.top = (c.y - k * (c.h + 2)) + 'px';
     }
+    // the other racks' cards last, nearest rack first: a full rack whose cards would cover a label turns compact as a
+    // whole; a compact line that still covers one is hidden, never moved
+    const rectOf = (c, lod) => { const s = cardSize(c.rec, lod); return { l: c.x - s.w / 2, t: c.y - s.h / 2, w: s.w, h: s.h }; };
+    // over the selected rack's outline on screen: 'behind' (farther, the card touches the outline) or 'front' (nearer,
+    // its centre is inside the outline)
+    const overFoot = (c, lod) => {
+      if (!selFoot) return ''; const b = rectOf(c, lod);
+      if (c.dist >= selFoot.dist) return convexOverlap([[b.l, b.t], [b.l + b.w, b.t], [b.l + b.w, b.t + b.h], [b.l, b.t + b.h]], selFoot.hull) ? 'behind' : '';
+      return convexOverlap([[c.x, c.y]], selFoot.hull) ? 'front' : '';
+    };
+    for (const g of others) {
+      if (g.lod === 'full' && g.list.some(c => { const b = rectOf(c, 'full'); return clash(b.l, b.t, b.w, b.h) || overFoot(c, 'full') === 'behind'; })) { g.lod = 'compact'; g.list.forEach(c => { c.lod = 'compact'; }); }
+      for (const c of g.list) {
+        const b = rectOf(c, g.lod); const over = overFoot(c, g.lod);
+        const why = g.lod === 'compact' && c.rec.cardEmpty ? 'empty' : over === 'behind' ? 'behind-selected' : clash(b.l, b.t, b.w, b.h) ? 'clash' : '';
+        if (why) { c.rec.cardWhy = why; c.el.style.display = 'none'; continue; }
+        showCard(c, g.lod);
+        c.el.style.display = ''; c.el.style.visibility = ''; c.el.style.left = c.x + 'px'; c.el.style.top = c.y + 'px';
+        // in front of the selected rack: faded, so the rack behind stays readable
+        c.el.style.opacity = over === 'front' ? 0.4 : g.lod === 'compact' ? Math.max(0.35, Math.min(1, (6.5 * c.k - c.dist) / c.k)) : 1;
+        c.el.style.zIndex = Math.max(1, Math.round(90 - c.dist * 3));
+        placed.push(b);
+      }
+    }
+  }
+  // Is the sight line from the camera to a point blocked by a rack (other than its own)? Each rack is a box in its own
+  // frame (posts, shelves and equipment fill it; a little smaller, so a line along its edge is not blocked).
+  const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), tmpD = new THREE.Vector3();
+  function sightBlocked(point, cam, ownSetup) {
+    for (const r of S.recs.values()) {
+      if (r.cat !== 'setup' || r.id === ownSetup || !r.invWorld) continue;
+      tmpA.copy(cam).applyMatrix4(r.invWorld); tmpB.copy(point).applyMatrix4(r.invWorld).sub(tmpA);
+      const s = slab(tmpA, tmpB, r.localBox); if (s && s[1] > 0 && s[0] < 1) return true;   // the segment, t in [0, 1]
+    }
+    return false;
+  }
+  // A rack's outline on screen (convex hull of its 8 box corners; null when a corner is behind the camera) and the
+  // camera's distance to its front centre.
+  function rackFootprint(su, rect) {
+    if (!su?.localBox) return null; const b = su.localBox; const pts = [];
+    for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+      tmpA.set(x, y, z).applyMatrix4(su.group.matrixWorld).project(camera); if (tmpA.z > 1) return null;
+      pts.push([(tmpA.x + 1) / 2 * rect.width, (1 - tmpA.y) / 2 * rect.height]);
+    }
+    tmpA.set(b.max.x, (b.min.y + b.max.y) / 2, 0).applyMatrix4(su.group.matrixWorld);
+    return { hull: convexHull(pts), dist: tmpA.distanceTo(camera.position) };
+  }
+  function convexHull(pts) {   // monotone chain, counter-clockwise in screen coordinates
+    const p = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]); const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const half = list => { const h = []; for (const q of list) { while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop(); h.push(q); } h.pop(); return h; };
+    return [...half(p), ...half([...p].reverse())];
+  }
+  // Do two convex polygons (a single point counts) overlap? Separating axis test on both polygons' edge normals.
+  function convexOverlap(a, b) {
+    for (const poly of [a, b]) for (let i = 0; i < poly.length && poly.length > 1; i++) {
+      const p = poly[i], q = poly[(i + 1) % poly.length]; const nx = q[1] - p[1], ny = p[0] - q[0];
+      const span = list => list.reduce((m, v) => { const d = v[0] * nx + v[1] * ny; return [Math.min(m[0], d), Math.max(m[1], d)]; }, [Infinity, -Infinity]);
+      const sa = span(a), sb = span(b); if (sa[1] <= sb[0] || sb[1] <= sa[0]) return false;
+    }
+    return true;
+  }
+  // The selected rack's cards in one column, in shelf order, none overlapping: each run of touching cards is centred on
+  // its shelves (least movement), then the column is kept inside the view. Sets c.cy (centre y). False when the column
+  // is taller than the view.
+  function spreadColumn(list, lod, viewH) {
+    const gap = 2, pad = 6; const items = [...list].sort((a, b) => a.y - b.y || b.rec.level - a.rec.level);
+    items.forEach(c => { c.s = cardSize(c.rec, lod); });
+    const total = items.reduce((a, c) => a + c.s.h, 0) + gap * (items.length - 1);
+    const runs = items.map(c => ({ items: [c], h: c.s.h, top: c.y - c.s.h / 2 }));
+    for (let merged = true; merged;) {
+      merged = false;
+      for (let i = 1; i < runs.length; i++) {
+        const a = runs[i - 1], b = runs[i]; if (a.top + a.h + gap <= b.top) continue;
+        const its = [...a.items, ...b.items]; let off = 0, sum = 0;
+        its.forEach(c => { sum += c.y - (off + c.s.h / 2); off += c.s.h + gap; });
+        runs.splice(i - 1, 2, { items: its, h: a.h + gap + b.h, top: sum / its.length }); merged = true; break;
+      }
+    }
+    const tops = []; runs.forEach(run => { let off = 0; run.items.forEach(c => { tops.push(run.top + off); off += c.s.h + gap; }); });
+    for (let i = 0; i < items.length; i++) tops[i] = Math.max(tops[i], i ? tops[i - 1] + items[i - 1].s.h + gap : pad);
+    for (let i = items.length - 1; i >= 0; i--) tops[i] = Math.min(tops[i], i < items.length - 1 ? tops[i + 1] - gap - items[i].s.h : viewH - pad - items[i].s.h);
+    if (tops[0] < pad) { const dy = pad - tops[0]; for (let i = 0; i < tops.length; i++) tops[i] += dy; }   // taller than the view: from the top
+    items.forEach((c, i) => { c.cy = tops[i] + c.s.h / 2; });
+    return total <= viewH - 2 * pad;
+  }
+  // Neighbouring cards of one rack (by screen height) fit side by side or one above the other, as they are anchored.
+  function columnFits(list, lod) {
+    const items = [...list].sort((a, b) => a.y - b.y);
+    for (let i = 1; i < items.length; i++) {
+      const a = items[i - 1], b = items[i], sa = cardSize(a.rec, lod), sb = cardSize(b.rec, lod);
+      if (b.y - a.y < (sa.h + sb.h) / 2 + 2 && Math.abs(b.x - a.x) < (sa.w + sb.w) / 2 + 2) return false;
+    }
+    return true;
+  }
+  const CARD_LODS = ['full', 'line', 'compact'];
+  function cardHtml(rec, lod) { return lod === 'full' ? rec.cardFull : lod === 'line' ? rec.cardLine : rec.cardCompact; }
+  // Card sizes per level of detail, measured off screen once per content (and again when the window or kiosk mode
+  // changes), so the layout never depends on what an earlier frame happened to show.
+  let cardSizeKey = '';
+  function cardSize(rec, lod) { return rec.cardSize?.[lod] || { w: 220, h: lod === 'full' ? 8 + 14.5 * (rec.cardLines || 2) : 16 }; }
+  function ensureCardSizes() {
+    if (!labelsLayer.offsetParent) return;   // hidden: nothing to measure (cardSize falls back to an estimate)
+    const key = `${innerWidth}x${innerHeight}${document.body.classList.contains('kiosk') ? 'k' : ''}`; const all = key !== cardSizeKey;
+    const need = []; for (const rec of S.recs.values()) if (rec.cat === 'shelf' && rec.cardFull && (all || !rec.cardSize)) need.push(rec);
+    cardSizeKey = key; if (!need.length) return;
+    const host = document.createElement('div'); host.style.cssText = 'position:absolute;left:0;top:0;visibility:hidden;pointer-events:none';
+    const els = need.map(rec => CARD_LODS.map(lod => { const e = document.createElement('div'); e.className = 'lbl shelf-card' + (lod === 'full' ? '' : ' compact'); e.innerHTML = cardHtml(rec, lod); host.appendChild(e); return e; }));
+    labelsLayer.appendChild(host);
+    need.forEach((rec, i) => { const s = {}; CARD_LODS.forEach((lod, j) => { s[lod] = { w: els[i][j].offsetWidth, h: els[i][j].offsetHeight }; }); rec.cardSize = s.full.w > 0 ? s : null; });
+    host.remove();
   }
 
   // ───────────────────────────────────────────────────────────── render loop
@@ -3111,7 +3279,7 @@
     return false;
   }
   function shelfToU(setupId, shelfId) {
-    const shelves = S.data.shelves.filter(sh => sh.setup === setupId).sort((a, b) => a.level - b.level); const n = shelves.length;
+    const shelves = recsOf(r => r.cat === 'shelf' && r.setup === setupId).sort((a, b) => a.level - b.level); const n = shelves.length;
     const uTopDown = (S.data.dcim?.uNumbering || 'top-down') === 'top-down';
     const idx = shelfId ? shelves.findIndex(s => s.id === shelfId) : 0;   // no shelf (bottom bay) → lowest shelf
     return uTopDown ? n - Math.max(0, idx) : Math.max(0, idx) + 1;
@@ -3303,7 +3471,7 @@
 
   function bigChips(cur) { return `<div class="chips-lg" role="group" aria-label="Lifecycle status">${STATUSES.map(st => `<button type="button" class="chip-lg ${cur === st ? 'on' : ''}" data-st="${st}" aria-pressed="${cur === st}" style="--c:${STATUS_COLOR[st]}"><span class="ic" aria-hidden="true"></span>${STATUS_LABEL[st]}</button>`).join('')}</div>`; }
   // A shelf as people say it: "Rack-01 › Shelf 1 (top)" (shelf 1 = top, like Lab Manager) — never SETUP / SHELF ids or the geometric L4.
-  function shelfName(id) { const sh = S.data.shelves.find(x => x.id === id); if (!sh) return id; return `${rackName(S.data.setups.find(x => x.id === sh.setup) || { id: sh.setup })} › ${shelfCaption(sh)}`; }
+  function shelfName(id) { const sh = S.recs.get(id)?.cat === 'shelf' ? S.recs.get(id).def : null; if (!sh) return id; return `${rackName(S.data.setups.find(x => x.id === sh.setup) || { id: sh.setup })} › ${shelfCaption(sh)}`; }
 
   function renderEditor(rec) {
     // The v3 drawer frame (same header, 12 px section headings), Kaizen-size controls; places are written like the
@@ -3577,7 +3745,7 @@
     }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings };
+  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
