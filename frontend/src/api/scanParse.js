@@ -81,12 +81,16 @@ export function productForPart(text) {
 // The lab owner's rule: a unit that has a serial number and nothing that names another product is most likely a switch
 // under test, so it is saved (or marked) as a switch. Not caught: a part number or model of a known type (a cable, PDU,
 // KVM ... keeps that type); a NIC, DPU or other known NVIDIA part (MCX…, MBF…, MCP…, ConnectX, BlueField, adapter);
-// an NVIDIA board or GPU OPN (900-9X766-…, 699-…); a model or description that names a server (DGX, HGX, server,
-// PowerEdge, ProLiant, compute, node); and another vendor's unit (Cisco, Arista, Dell …), which is a switch only when
-// its label says so. code: a plain scanned code taken as the serial (only checked for a board OPN). Returns the type: "switch", a known type, or "other".
-const SERVER_WORDS = /\b(DGX|HGX|servers?|PowerEdge|ProLiant|compute|nodes?)\b/i;
+// an NVIDIA board or GPU OPN (900-9X766-…, 699-…), also as the serial or code itself; a model or description that
+// names a server or another product (DGX, HGX, server, PowerEdge, ProLiant, ThinkSystem, compute, node, UPS, board,
+// superchip, an H100 / A100 / GB200 … GPU, an NVL72 system); and another vendor's unit (Cisco, Arista, Dell …), which is a switch only
+// when its label says so ("switch", "PowerSwitch") or names an NVIDIA switch model (an HPE-sold SN2010M).
+// code: the serial number or a plain scanned code (only checked for a board OPN).
+// Returns the type: "switch", a known type, or "other".
+const SERVER_WORDS = /\b(DGX|HGX|servers?|PowerEdge|ProLiant|ThinkSystem|ThinkAgile|compute|nodes?|workstation|UPS|boards?|superchip|Grace|Hopper|[AHBL]\d{2,3}S?|GB\d{3}|NVL\d+)\b/i;
 const BOARD_OPN = /(^|[^0-9A-Z])(900|699)-[0-9A-Z]{5}-[0-9A-Z]{4}/i;
-const OTHER_VENDORS = /\b(Cisco|Arista|Juniper|Dell|HPE|HP|Hewlett|Aruba|Lenovo|Supermicro|Brocade|Extreme\s+Networks|Netgear|Ubiquiti|MikroTik|Huawei|Fortinet|Edgecore|Celestica|Quanta)\b/i;
+const OTHER_VENDORS = /\b(Cisco|Arista|Juniper|Dell|HPE|HP|Hewlett|Aruba|Lenovo|Supermicro|Gigabyte|ASUS|ASRock|Inspur|Wiwynn|Foxconn|Brocade|Extreme\s+Networks|Netgear|Ubiquiti|MikroTik|Huawei|Fortinet|Edgecore|Celestica|Quanta)\b/i;
+const SWITCH_WORDS = /switch(es)?\b|\bM?(SN|QM)\d{4}[A-Z]{0,2}\b|\b(Spectrum|Quantum)\b/i;
 export function serialUnitType({ part_number = "", model = "", description = "", code = "" } = {}) {
   const named = typeForPart(part_number) || typeForPart(model);
   if (named) return named;
@@ -94,7 +98,7 @@ export function serialUnitType({ part_number = "", model = "", description = "",
   if (productForPart(part_number) || /\b(connect-?x|blue-?field|nic|dpu|hca|adapter|gpu)/i.test(words)) return "other";
   if (BOARD_OPN.test(part_number) || BOARD_OPN.test(words) || BOARD_OPN.test(code)) return "other";
   if (SERVER_WORDS.test(all)) return "other";
-  if (OTHER_VENDORS.test(all)) return /\bswitch(es)?\b/i.test(all) ? "switch" : "other";
+  if (OTHER_VENDORS.test(all)) return SWITCH_WORDS.test(all) ? "switch" : "other";
   return "switch";
 }
 

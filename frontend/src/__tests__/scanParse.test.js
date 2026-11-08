@@ -170,6 +170,20 @@ test("the serial-number-means-switch rule does not catch servers, boards or othe
   assert.equal(serialUnitType({ part_number: "MCP1600-C003" }), "cable", "a known part type keeps its type");
   assert.equal(serialUnitType({ part_number: "MCX75310AAS-NEAT" }), "other");
   assert.equal(serialUnitType({ code: "900-9X766-003N-SQ0" }), "other");
+  assert.equal(serialUnitType({ code: "900-9X766-003N-SQ0 TAG-1" }), "other", "the serial and the barcode together");
+});
+
+test("the serial-number rule: other products and other vendors' switch wording", () => {
+  const typeOf = raw => parseUnitBarcode(raw).type;
+  // a UPS, a GPU board or superchip, a Lenovo / Gigabyte / Cisco UCS server named without the word server, an NVL system
+  for (const raw of ["SN: X1; Model: UPS 3000VA", "SN: X1; Desc: H100 PCIe board", "SN: X1; Model: A100 80GB", "SN: X1; Model: L40S",
+    "SN: X1; Model: Grace Hopper superchip", "SN: X1; Model: ThinkSystem SR650", "SN: X1; Model: Gigabyte G593", "SN: X1; Model: Cisco UCS C240 M7",
+    "SN: X1; Model: GB200 NVL72", "SN: X1; Model: NVL72 rack", "SN: X1; Model: Supermicro SYS-421GE", "SN: X1; Model: Juniper QFX5120"]) assert.equal(typeOf(raw), "other", raw);
+  // another vendor's label that states a switch: "PowerSwitch", or an NVIDIA switch model it sells (HPE SN2010M)
+  for (const raw of ["SN: X1; Model: Dell PowerSwitch S5248F", "SN: X1; Model: HPE SN2010M", "SN: X1; Model: HP ProCurve 2920 switch",
+    "SN: X1; Model: Lenovo QM8700"]) assert.equal(typeOf(raw), "switch", raw);
+  // still switches: NVIDIA switch models and plain serials, also ones with digits that look like a GPU name
+  for (const raw of ["SN: X1; Model: QM9790 compute fabric switch", "SN: H100X99", "SN: A1234", "B200-SERIAL-7"]) assert.equal(typeOf(raw), "switch", raw);
 });
 
 test("a generic unit: type other, named Unit or after its own code", () => {

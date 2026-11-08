@@ -340,8 +340,9 @@
     down.position.set(0, (h + 0.05) / 2, 0); down.computeLineDistances(); down.visible = false; down.renderOrder = 3; down.userData.baseOpacity = 1; g.add(down); eds.push(down);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: su.id, cat: 'setup', def: su, group: g, meshes, edges: eds, status, conf: su.confidence, zone: su.zone, setup: su.id, anchor: localToWorld(g, 0, h + 0.12, 0), tpl, cap, envSolid: e, envDashed: ed, envDown: down });
-    // the rack as a box in its own frame (sight lines to shelf cards: sightBlocked, rackFootprint)
-    rec.localBox = new THREE.Box3(new THREE.Vector3(-dd / 2 + 0.02, 0.02, -w / 2 + 0.02), new THREE.Vector3(dd / 2 - 0.02, h - 0.02, w / 2 - 0.02)); rec.invWorld = g.matrixWorld.clone().invert();
+    // the rack as a box in its own frame (sight lines to shelf cards: sightBlocked, rackFootprint): its whole envelope,
+    // posts and top cap included, plus 1 cm, so a sight line that grazes a corner post is blocked too
+    rec.localBox = new THREE.Box3(new THREE.Vector3(-dd / 2 - 0.01, 0, -w / 2 - 0.01), new THREE.Vector3(dd / 2 + 0.01, h + 0.03, w / 2 + 0.01)); rec.invWorld = g.matrixWorld.clone().invert();
     makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span><span class="ln" dir="auto">${esc(rackName(su))}</span><span class="ls"></span><span class="lt"></span>`);
     rec.label.title = `${su.id} · ${su.name}`;
     rec.labelTel = rec.label.querySelector('.lt');
@@ -712,7 +713,7 @@
       Object.entries(live.rackItems || {}).forEach(([rack, list]) => (list || []).forEach(ci => {
         const sid = setupByRack[rack] || null; const id = 'LIVE-' + ci.id;
         const history = Array.isArray(ci.tracking_history) ? ci.tracking_history : []; const owner = live.owners?.['item:' + ci.id] || null;
-        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', model: ci.model || '', part_number: ci.part_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', last_seen_at: ci.last_seen_at || null, tracking: { count: history.length, last: history[history.length - 1] || null }, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', owner, live: { rack, u: ci.u, owner }, ...pickOv(id) });
+        items.push({ id, dcimId: ci.id, name: ci.name, serial_number: ci.serial_number || '', model: ci.model || '', part_number: ci.part_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', last_seen_at: ci.last_seen_at || null, tracking: { count: history.length, last: history[history.length - 1] || null }, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', owner, live: { rack, u: ci.u, owner }, ...pickOv(id) });
       }));
       // 4) chillers from DCIM
       if (live.chillers?.units?.length) {
@@ -791,10 +792,29 @@
   // number and name: NVIDIA Spectrum SN#### / Quantum QM#### switches, ConnectX NICs, BlueField DPUs. A generic unit
   // that has a serial number is most likely a switch under test (the lab owner's rule), so it is marked as one.
   const SN_FAMILY = { 2: 'Spectrum', 3: 'Spectrum-2', 4: 'Spectrum-3', 5: 'Spectrum-4' }, QM_FAMILY = { 8: 'Quantum', 9: 'Quantum-2' };
-  // Not a switch by the serial-number rule (as frontend/src/api/scanParse.js serialUnitType): a server or compute node,
-  // an NVIDIA board / GPU OPN (900-9X766-…), a NIC / DPU / cable / PDU / KVM part, or another vendor's unit whose model
-  // or name does not say "switch".
-  const NOT_SWITCH = /\b(DGX|HGX|servers?|PowerEdge|ProLiant|compute|nodes?|nic|dpu|hca|adapter|gpu|Cisco|Arista|Juniper|Dell|HPE|HP|Hewlett|Aruba|Lenovo|Supermicro|Brocade|Extreme\s+Networks|Netgear|Ubiquiti|MikroTik|Huawei|Fortinet|Edgecore|Celestica|Quanta)\b|(^|[^0-9A-Z])(900|699)-[0-9A-Z]{5}-[0-9A-Z]{4}|\b(MCX|MBF|MCP|MFS|MMA|MC2|MMS|PX\d?-|DKX|DLX|KX\d)/i;
+  // The serial-number rule, as frontend/src/api/scanParse.js serialUnitType + isGenericUnit (keep the two in step): only
+  // a generic unit (type other, named "Unit" or after its own barcode / serial / id, or unnamed) is marked as a likely
+  // switch, and not when its model or part number names a server, GPU, board, UPS, NIC / DPU / cable / PDU / KVM part,
+  // when its serial or barcode is an NVIDIA board OPN (900-9X766-…), or when it is another vendor's unit whose model does
+  // not say "switch" or name an NVIDIA switch model. A unit named as something else ("UPS box") is never marked.
+  const NOT_SWITCH = /\b(DGX|HGX|servers?|PowerEdge|ProLiant|ThinkSystem|ThinkAgile|compute|nodes?|workstation|UPS|boards?|superchip|Grace|Hopper|[AHBL]\d{2,3}S?|GB\d{3}|NVL\d+)\b|\b(connect-?x|blue-?field|nic|dpu|hca|adapter|gpu)|\b(MCX|MBF|MCP|MFS|MMA|MC2|MMS|PX\d?-|PX[234]\b|RARITAN\s+PX|DKX|DLX|KX\d|DOMINION)/i;
+  const BOARD_OPN = /(^|[^0-9A-Z])(900|699)-[0-9A-Z]{5}-[0-9A-Z]{4}/i;
+  const OTHER_VENDORS = /\b(Cisco|Arista|Juniper|Dell|HPE|HP|Hewlett|Aruba|Lenovo|Supermicro|Gigabyte|ASUS|ASRock|Inspur|Wiwynn|Foxconn|Brocade|Extreme\s+Networks|Netgear|Ubiquiti|MikroTik|Huawei|Fortinet|Edgecore|Celestica|Quanta)\b/i;
+  const SWITCH_WORDS = /switch(es)?\b|\bM?(SN|QM)\d{4}[A-Z]{0,2}\b|\b(Spectrum|Quantum)\b/i;
+  function genericUnit(it) {
+    const type = String(it?.type || '').replace(/^equip-/, '') || 'other'; if (type !== 'other') return false;
+    const name = String(it?.name || '').trim().toLowerCase();
+    if (!name || name === 'unit') return true;
+    return [it.barcode, it.serial_number, it.dcimId, it.id].some(c => String(c || '').trim().toLowerCase() === name);
+  }
+  function serialSwitch(it) {
+    const clean = v => String(v || '').trim();
+    const serial = clean(it?.serial_number), barcode = clean(it?.barcode);
+    if (!(serial || barcode) || !genericUnit(it)) return false;
+    const product = [clean(it?.part_number), clean(it?.model)].join(' ');
+    if (NOT_SWITCH.test(product) || BOARD_OPN.test(product) || BOARD_OPN.test(serial + ' ' + barcode)) return false;
+    return !OTHER_VENDORS.test(product) || SWITCH_WORDS.test(product);
+  }
   function unitInfo(it) {
     const clean = v => String(v || '').trim();
     const model = clean(it?.model), pn = clean(it?.part_number), name = clean(it?.name);
@@ -812,7 +832,7 @@
     else if (nic && kind === 'other') { kind = 'nic'; typeText = 'ConnectX-' + nic[1]; }
     else if (kind === 'other' && /\b(spectrum|quantum|switch)\b/i.test(text)) kind = 'switch';
     // the serial may be stored only as the unit's barcode (Scan & Track registers the scanned code that way)
-    else if (kind === 'other' && (clean(it?.serial_number) || clean(it?.barcode)) && !NOT_SWITCH.test(text)) { kind = 'switch'; likely = true; }
+    else if (kind === 'other' && serialSwitch(it)) { kind = 'switch'; likely = true; }
     if (kind === 'switch' && !typeText) typeText = model || pn;
     if (kind === 'nic' && !typeText) typeText = model || pn;
     return { kind, tag: UNIT_TAG[kind] || 'DEV', typeText, likely, name };
@@ -2742,24 +2762,32 @@
     const sw = (cls, style, label) => `<span class="li" title="${label}" aria-label="${label}"><span class="sw ${cls}"${style ? ` style="${style}"` : ''} aria-hidden="true"></span><span class="li-t" aria-hidden="true">${label}</span></span>`;
     // server bodies show the PDU outlet's power (not ping health): their own group, with tower-shaped swatches
     const tower = (p, label) => `<span class="li pw" data-short="${POWER[p].t}" title="Server body: ${POWER[p].title}" aria-label="Server body: ${label}"><span class="sw tower${p === 'unknown' ? ' unk' : ''}" style="background:${POWER[p].c}" aria-hidden="true"></span><span class="li-t" aria-hidden="true">${label}</span></span>`;
-    const power = `<span class="lg-sep" aria-hidden="true"></span><span class="lg-t">Server body = power</span>${tower('on', 'Power ON')}${tower('off', 'Power OFF')}${tower('unknown', 'Power unknown')}`;
+    const power = `<span class="lg-sep" aria-hidden="true"></span><span class="lg-t lg-pt" data-short="Server body"><span class="pt-l">Server body = power</span></span>${tower('on', 'Power ON')}${tower('off', 'Power OFF')}${tower('unknown', 'Power unknown')}`;
     if (S.colorBy === 'health') lg.innerHTML = `<span class="lg-t">Health</span>${sw('dot', `background:${HEALTH.up.c}`, 'Up')}${sw('dot', `background:${HEALTH.down.c}`, 'Down')}${sw('dot unk', '', 'Unknown')}${sw('sq', `background:${HEALTH.maint.c}`, 'Maintenance')}${sw('sq sel', '', 'Selected')}${power}`;
     else lg.innerHTML = `<span class="lg-t">Lifecycle</span>${STATUSES.map(st => sw('dot', `background:${STATUS_COLOR[st]}`, STATUS_LABEL[st])).join('')}${sw('sq dashed', '', 'Low confidence')}${sw('sq sel', '', 'Selected')}${power}`;
     lg.title = (S.colorBy === 'health' ? 'Health (outlines, LEDs, label dots): ping and PDU state. Dashed = health unknown (no live signal). Shelves stay neutral.' : 'Dashed outline = low placement confidence; faded = medium') +
       ' Server body colour = PDU outlet power: green ON, red OFF, grey unknown (no reading), separate from ping health.';
     layoutLegend();
   }
-  // Keep the legend on one row beside the zoom bar: full → no titles (gap 10 px) → power words shortened to ON / OFF / ?
-  // → swatches only, as the view narrows.
+  // Keep the legend on one row beside the zoom bar, as the view narrows: full → no Health / Lifecycle title (gap 10 px)
+  // → power words shortened to ON / OFF / ? → health swatches without words (their tooltips stay) → "Server body" as
+  // the power title. The server body power group always keeps words, so its colours are explained on screen. Phones
+  // show only that group (styles.css).
+  // When even the last form does not fit beside the zoom bar, the legend moves up to its own row above it (lg-above).
   function layoutLegend() {
     const lg = $('#legend'), vp = $('#viewport'); if (!lg || !vp || !lg.offsetParent) return;
+    lg.classList.remove('lg-above');
     const zb = $('.zoombar'); const v = vp.getBoundingClientRect(); const z = zb ? zb.getBoundingClientRect() : null;
     const sameRow = z && z.width > 0 && Math.abs((z.top + z.bottom) / 2 - lg.getBoundingClientRect().top - 16) < 24;
-    const room = (sameRow ? z.left - 12 : v.right - 16) - lg.getBoundingClientRect().left;
-    for (const mode of ['', 'lg-compact', 'lg-compact lg-pshort', 'lg-compact lg-pshort lg-swatches']) {
-      lg.classList.remove('lg-compact', 'lg-pshort', 'lg-swatches'); if (mode) lg.classList.add(...mode.split(' '));
-      if (lg.scrollWidth <= room) break;
-    }
+    const left = lg.getBoundingClientRect().left;
+    const fit = room => {
+      for (const mode of ['', 'lg-compact', 'lg-compact lg-pshort', 'lg-compact lg-pshort lg-swatches', 'lg-compact lg-pshort lg-swatches lg-ptshort']) {
+        lg.classList.remove('lg-compact', 'lg-pshort', 'lg-swatches', 'lg-ptshort'); if (mode) lg.classList.add(...mode.split(' '));
+        if (lg.scrollWidth <= room) return true;
+      }
+      return false;
+    };
+    if (!fit((sameRow ? z.left - 12 : v.right - 16) - left) && sameRow) { lg.classList.add('lg-above'); fit(v.right - 16 - left); }
   }
 
   // ───────────────────────────────────────────────────────────── rack front view (one rack, shelf by shelf)

@@ -289,8 +289,10 @@ body.show-power .lbl .lt:not(:empty) { display: flex; }
 .rf-bar { display: none; }
 /* legend (bottom left) */
 .vp-legend { position: absolute; left: 16px; bottom: 16px; z-index: 5; height: 32px; display: flex; flex-wrap: nowrap; align-items: center; gap: 14px; padding: 0 12px; border-radius: 8px; background: rgba(18,19,22,.95); border: 1px solid var(--line); font-size: 12px; color: var(--z-300); white-space: nowrap; overflow: hidden; }
-.vp-legend.lg-compact { gap: 10px; } .vp-legend.lg-compact .lg-t { display: none; }
-.vp-legend.lg-swatches .li-t { display: none; }
+.vp-legend.lg-compact { gap: 10px; } .vp-legend.lg-compact .lg-t:not(.lg-pt) { display: none; }
+.vp-legend.lg-swatches .li:not(.pw) .li-t { display: none; }   /* health swatches keep their tooltips; the power group keeps its words */
+.vp-legend.lg-ptshort .lg-pt .pt-l { display: none; }
+.vp-legend.lg-ptshort .lg-pt::after { content: attr(data-short); }
 .vp-legend .lg-t { color: var(--muted); }
 .vp-legend .li { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .vp-legend .sw { width: 10px; height: 10px; flex: 0 0 auto; }
@@ -304,7 +306,7 @@ body.show-power .lbl .lt:not(:empty) { display: flex; }
 .vp-legend .lg-sep { width: 1px; height: 16px; background: var(--line-2); flex: 0 0 auto; }
 .vp-legend.lg-pshort .li.pw .li-t { display: none; }   /* narrow: "Power ON" → "ON" (the tower shape and tooltip say power) */
 .vp-legend.lg-pshort .li.pw::after { content: attr(data-short); }
-.vp-legend.lg-swatches .li.pw::after { content: none; }
+@media (min-width: 721px) { .vp-legend.lg-above { bottom: 56px; } }   /* no room beside the zoom bar: a row above it */
 /* zoom / focus / fit / reset (bottom right) */
 .zoombar { position: absolute; right: 16px; bottom: 16px; z-index: 6; display: flex; gap: 6px; }
 .zoombar .zb { background: rgba(18,19,22,.95); }
@@ -638,7 +640,13 @@ body.moving .rackfront { padding-top: 120px; }
   body.front #crumbPath { display: none; }
   body.front .rf-nav { margin: 0; gap: 6px; }
   .crumb-btn { height: 44px; padding: 0 12px; background: rgba(18,19,22,.95); }
-  .vp-legend { display: none; }
+  /* phone: only the server body power key ("Server body ▮ON ▮OFF ▮?"), above the sheet at the left; health is told by
+     the attention list and the labels */
+  .vp-legend { left: 12px; bottom: calc(var(--sheet-h) + 12px); gap: 8px; padding: 0 10px; pointer-events: none; }
+  .vp-legend > :not(.pw):not(.lg-pt) { display: none !important; }
+  .vp-legend .lg-pt { display: inline !important; } .vp-legend .lg-pt .pt-l { display: none; } .vp-legend .lg-pt::after { content: attr(data-short); }
+  .vp-legend .li.pw .li-t { display: none; } .vp-legend .li.pw::after { content: attr(data-short); }
+  body.front .vp-legend { display: none; }   /* the rack front says ON / OFF on each server */
   .zoombar { right: 12px; bottom: calc(var(--sheet-h) + 12px); flex-direction: column; }
   /* rack front: one 44 px row above the rack (previous · this rack · next · Overview) instead of the breadcrumb and Back */
   body.front .crumb, body.front .zoombar #vBack { display: none !important; }

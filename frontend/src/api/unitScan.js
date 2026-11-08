@@ -67,7 +67,9 @@ async function fillMissing(item, parsed, revision) {
 // "Switch". One guarded save of the equipment list (If-Match); when the unit changed meanwhile, or the save is refused,
 // the unit is left as the scan saved it. retyped: its type and name before, for Undo.
 async function markAsSwitch(before, after, filled) {
-  if (!filled.serial_number || !isGenericUnit(before) || serialUnitType({ part_number: after.part_number, model: after.model }) !== "switch") return { item: after };
+  // the serial and the unit's own barcode go in as the code: a board OPN scanned as the serial is not a switch
+  const code = [filled.serial_number, before.barcode, after.barcode].filter(Boolean).join(" ");
+  if (!filled.serial_number || !isGenericUnit(before) || serialUnitType({ part_number: after.part_number, model: after.model, code }) !== "switch") return { item: after };
   try {
     const items = await loadRackItems();
     const rack = Object.keys(items).find(r => items[r].some(i => i.id === after.id));

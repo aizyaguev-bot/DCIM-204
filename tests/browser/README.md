@@ -48,7 +48,9 @@ panel, health colours and legend, injected maintenance / ping / offline states, 
 power confirmation, Viewer, and the phone bottom sheet with 44 px targets at 390 × 844) and `twin-shelves.cjs`
 (read-only; the app's floor model in 3D: 4 floors per rack, Rack-05's derived floor 4, a 16-shelf storage rack; the
 selected rack's shelf cards always shown with full detail and the same cards for the same camera; no card through
-another rack or from behind over the selected one; the server power legend). All default to port
+another rack's box or its drawn posts, shelves and equipment (mesh raycast, also on views grazing a corner post and
+56 views around the racks), none from behind over the selected one; the server power legend, also at 1440, 1024 and
+390 px; the 3D switch marking of generic units only). All default to port
 8770; `twin-v3.cjs` saves screenshots to `DCIM_QA_SHOTS` (default `C:/t/tv3-after`), `twin-shelves.cjs` too
 (default `C:/t/twin-shelves`).
 

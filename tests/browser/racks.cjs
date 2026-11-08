@@ -502,26 +502,26 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
 
     // SCAN-14: a Serial number typed into the equipment panel of a generic unit (type Other, named "Unit") marks it as a
     // switch, with a hint, by the scan's rule; a model that names a server, or a unit that says what it is, stays Other.
-    const PG=`PGEN${run}`,PS=`PSRV${run}`,PU=`PUPS${run}`;
+    const PG=`PGEN${run}`,PS=`PSRV${run}`,PU=`PUPS${run}`,PO=`POPN${run}`;
     // on OPT22's floor of Rack-02 (shown open throughout this suite)
-    await putItems(d=>{d['Rack-02']=[...(d['Rack-02']||[]),...[[PG,'Unit'],[PS,'Unit'],[PU,`UPS box ${run}`]].map(([code,name])=>({id:`ci-${code.toLowerCase()}`,name,type:'other',barcode:code,u:floor,shelf_position:''}))];});
+    await putItems(d=>{d['Rack-02']=[...(d['Rack-02']||[]),...[[PG,'Unit'],[PS,'Unit'],[PU,`UPS box ${run}`],[PO,'Unit']].map(([code,name])=>({id:`ci-${code.toLowerCase()}`,name,type:'other',barcode:code,u:floor,shelf_position:''}))];});
     await op.reload();await op.locator(`[data-rack-id="Rack-02"] .equipment-cell[data-item-id="ci-${PG.toLowerCase()}"]`).first().waitFor({state:'attached'});
     if(await op.locator('button.edit-toggle').getAttribute('aria-pressed')!=='true')await op.locator('button.edit-toggle').click();
     const typeSelect=equip.locator('select').filter({has:op.locator('option[value="patchpanel"]')});
-    for(const [code,model,want] of [[PG,'','switch'],[PS,'DGX H100','other'],[PU,'','other']]){
+    for(const [code,model,want,serial=`SN${code}`] of [[PG,'','switch'],[PS,'DGX H100','other'],[PU,'','other'],[PO,'','other',`900-9X766-003N-SQ${run}`]]){
       await op.locator(`.equipment-cell[data-item-id="ci-${code.toLowerCase()}"] .equipment-type`).first().click();
       await equip.getByText('Save changes').waitFor();
       assert.equal(await typeSelect.inputValue(),'other');
       if(model)await field('Model').fill(model);
-      await field('Serial number').fill(`SN${code}`);
+      await field('Serial number').fill(serial);
       assert.equal(await typeSelect.inputValue(),want,`${code}: type after typing a serial number`);
       assert.equal(await equip.getByText('Marked as a switch').count(),want==='switch'?1:0);
       await equip.getByRole('button',{name:'Save changes'}).click();await equip.getByRole('button',{name:'Saved'}).waitFor();
-      const [i]=await withCode(`SN${code}`);
-      assert.deepEqual([i.type,i.name],[want,code===PG?'Switch':code===PS?'Unit':`UPS box ${run}`],`${code} saved`);
+      const [i]=await withCode(serial);
+      assert.deepEqual([i.type,i.name],[want,code===PG?'Switch':code===PU?`UPS box ${run}`:'Unit'],`${code} saved`);
       await op.keyboard.press('Escape');await equip.waitFor({state:'detached'});
     }
-    passed.push('SCAN-14 typing a Serial number for a generic "Unit" in the equipment panel marks it as a switch named Switch (with a hint); a DGX model or a named UPS box stays Other');
+    passed.push('SCAN-14 typing a Serial number for a generic "Unit" in the equipment panel marks it as a switch named Switch (with a hint); a DGX model, a named UPS box or an NVIDIA board OPN typed as the serial stays Other');
 
     const unexpected=writes.filter(w=>!SCAN_WRITE.test(w.split(' ')[1]));
     assert.deepEqual(unexpected,[],'Scanning writes only inventory registrations, locations and the equipment list (Undo)');

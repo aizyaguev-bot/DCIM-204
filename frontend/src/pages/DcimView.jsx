@@ -833,9 +833,10 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   const uError = uChanged && slot === null ? U_SLOT_ERROR : "";
   // The lab owner's rule, as a scan applies it (serialUnitType): a serial number entered for a generic unit (type
   // Other, named "Unit" or after its own code) that has none yet marks it as a switch, unless its part number or model
-  // names another product. A unit identified as something else, or a type chosen here, is never changed.
+  // names another product, or the serial (or its barcode) is an NVIDIA board OPN. A unit identified as something else,
+  // or a type chosen here, is never changed.
   const autoSwitch = !typeTouched && isGenericUnit(item) && !detailText(item, "serial_number").trim() && details.serial_number.trim() !== ""
-    && serialUnitType({ part_number: details.part_number, model: details.model }) === "switch";
+    && serialUnitType({ part_number: details.part_number, model: details.model, code: [details.serial_number, item.barcode].filter(Boolean).join(" ") }) === "switch";
   const shownType = autoSwitch ? "switch" : type;
   const shownName = autoSwitch && !nameTouched && String(item.name || "").trim().toLowerCase() === GENERIC_UNIT_NAME.toLowerCase() ? unitTypeLabel("switch") : name;
   const changes = {};

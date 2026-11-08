@@ -421,7 +421,13 @@ test("a scan that fills the serial number of a legacy barcode-only generic unit 
     { id: "ci-u", name: "Unit", type: "other", barcode: "TAG-U", u: 1, shelf_position: "" },
     { id: "ci-c", name: "TAG-C", type: "other", barcode: "TAG-C", u: 2, shelf_position: "" },
     { id: "ci-b", name: "UPS box", type: "other", barcode: "TAG-B", u: 3, shelf_position: "" },
-    { id: "ci-d", name: "Unit", type: "other", barcode: "TAG-D", u: 4, shelf_position: "" }] });
+    { id: "ci-d", name: "Unit", type: "other", barcode: "TAG-D", u: 4, shelf_position: "" },
+    { id: "ci-o", name: "Unit", type: "other", barcode: "900-9X766-003N-SQ0", u: 4, shelf_position: "" }] });
+  // a board OPN scanned as the serial of a generic unit is not a switch (as a new unit scanned with it)
+  const opn = await placeScannedUnit(parseUnitBarcode("900-9X766-003N-SQ0"), { rack: "Rack-03", u: 4, position: "" });
+  assert.deepEqual(opn.filled, { serial_number: "900-9X766-003N-SQ0" });
+  assert.deepEqual([stored(state, "ci-o").type, stored(state, "ci-o").name], ["other", "Unit"], "a board OPN code keeps the unit other");
+  assert.equal(parseUnitBarcode("900-9X766-003N-SQ0").type, "other", "the same as a new unit");
   const result = await placeScannedUnit(parseUnitBarcode("tag-u"), shelf2);
   assert.deepEqual(result.filled, { serial_number: "tag-u" });
   assert.deepEqual([stored(state, "ci-u").type, stored(state, "ci-u").name, stored(state, "ci-u").serial_number], ["switch", "Switch", "tag-u"], "the generic name follows the type");

@@ -7,7 +7,10 @@
 //     so OPT54 (u = 4) has a mesh, its power colour and a card; a storage-type rack has 16 shelves;
 //  3. cards are not drawn over other racks: no shown card's sight line crosses another rack's box, and none of another
 //     rack's cards is drawn over the selected rack from behind it (also after rotating around a focused rack);
-//  6. the legend explains the server body power colours separately from health.
+//     A mesh raycast to each shown card must not hit another rack's posts, shelves or equipment (also on views that
+//     graze a corner post, and 8 views around every rack);
+//  6. the legend explains the server body power colours separately from health, in words also at 1440 / 1024 / 390 px;
+//  the 3D switch marking follows the site: only generic units, never one named as something else or with a board OPN.
 // Read-only: every non-GET request except the sign-in is aborted and reported; changes live only in the page.
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
@@ -104,6 +107,17 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-shelves';
           return box.containsPoint(o) || (hit && hit.distanceTo(o) < len);
         });
       }).map(c => c.id);
+      // the same with the drawn geometry: a ray from the camera to the card's anchor must not hit an opaque, visible mesh
+      // of another rack (its posts, frame, shelves or the equipment on them) — catches a sight line that grazes a post
+      const owner = new Map(); for (const r of S.recs.values()) { const sid = r.cat === 'setup' ? r.id : r.setup; if (!sid || !['setup', 'shelf', 'item'].includes(r.cat)) continue; for (const o of [r.group, ...(r.meshes || [])].filter(Boolean)) o.traverse?.(x => { if (!owner.has(x)) owner.set(x, sid); }); }
+      const ownerOf = o => { for (let x = o; x; x = x.parent) if (owner.has(x)) return owner.get(x); return null; };
+      const shownTo = o => { for (let x = o; x; x = x.parent) if (!x.visible) return false; return true; };
+      const rc = new THREE.Raycaster();
+      const meshBlocked = cards.filter(c => c.shown && c.setup !== sel).map(c => {
+        const a = S.recs.get(c.id).cardAnchor; const d = a.clone().sub(cam); const len = d.length(); rc.set(cam, d.normalize()); rc.far = len - 0.03;
+        const hit = rc.intersectObjects(t.scene.children, true).find(h => h.object.isMesh && !(h.object.material?.transparent && (h.object.material.opacity ?? 1) < 0.5) && shownTo(h.object) && ownerOf(h.object) && ownerOf(h.object) !== c.setup);
+        return hit ? `${c.id} behind ${ownerOf(hit.object)} at ${hit.distance.toFixed(2)} m` : null;
+      }).filter(Boolean);
       // the selected rack's outline on screen (its 8 box corners; null when one is behind the camera) and distance
       let foot = null; const su = S.recs.get(sel);
       if (su?.cat === 'setup') {
@@ -111,7 +125,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-shelves';
         let front = true; for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) { const v = new THREE.Vector3(x, y, z).applyMatrix4(su.group.matrixWorld).project(t.camera); if (v.z > 1) front = false; xs.push((v.x + 1) / 2 * vr.width); ys.push((1 - v.y) / 2 * vr.height); }
         if (front) foot = { pts: xs.map((x, i) => [x, ys[i]]), dist: new THREE.Vector3(b.max.x, (b.min.y + b.max.y) / 2, 0).applyMatrix4(su.group.matrixWorld).distanceTo(cam) };
       }
-      return { sel, cards, hosts, blocked, foot, cam: cam.toArray().map(v => +v.toFixed(4)) };
+      return { sel, cards, hosts, blocked, meshBlocked, foot, cam: cam.toArray().map(v => +v.toFixed(4)) };
     });
     // is a point inside the convex hull of pts? (inside every edge of the hull, built by gift wrapping)
     const hullOf = pts => { const p = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]); const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
@@ -131,6 +145,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-shelves';
       assert.ok(others.every(c => c.lod !== 'line'), label + ': only the selected rack uses the detailed one-line card');
       assert.equal(overlaps(s.cards), 0, label + ': shown cards overlap');
       assert.deepEqual(s.blocked, [], label + ': cards shown through another rack');
+      assert.deepEqual(s.meshBlocked, [], label + ': cards shown through another rack\'s geometry');
       if (s.foot) { const behind = others.filter(c => behindOver(c, s.foot)); assert.deepEqual(behind.map(c => c.id), [], label + ': cards of racks behind the selected one drawn over it'); }
     };
     const runs = [];
@@ -176,6 +191,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-shelves';
       await page.mouse.move(mx, my); await page.mouse.down({ button: 'right' }); await page.mouse.move(mx + 200, my, { steps: 12 }); await page.mouse.up({ button: 'right' }); await settle();
       const s = await snap();
       assert.deepEqual(s.blocked, [], id + ' rotated: cards shown through another rack');
+      assert.deepEqual(s.meshBlocked, [], id + ' rotated: cards shown through another rack\'s geometry');
       if (s.foot) { const behind = s.cards.filter(c => c.setup !== s.sel && c.shown && behindOver(c, s.foot)); assert.deepEqual(behind.map(c => c.id), [], id + ' rotated: cards from behind over the selected rack'); }
       const mine = s.cards.filter(c => c.setup === s.sel); const facing = await page.evaluate(sel => [...__twin.S.recs.values()].filter(r => r.cat === 'shelf' && r.setup === sel).map(r => [r.id, __twin.camera.position.clone().sub(r.cardAnchor).normalize().dot(r.front)]), s.sel);
       for (const [sid, f] of facing) if (f > 0.05) { const c = mine.find(x => x.id === sid); assert.ok(c.shown && c.lod !== 'compact', `${id} rotated: own card ${sid} (facing ${f.toFixed(2)}) shown in detail: ${c.lod} ${c.why}`); }
@@ -184,6 +200,34 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-shelves';
     }
     pass('rotating around Focus Rack-03 / Rack-05: no card through another rack or from behind over the focused rack; its own front cards shown');
 
+    // a sight line that grazes another rack's corner post (Rack-04's cards seen past Rack-07's front post, with Rack-05
+    // selected and with nothing selected) hides the card; more oblique views around the rows are checked the same way
+    const setCam = async (sel, cam, tgt) => {
+      await page.evaluate(([sel, cam, tgt]) => { const t = __twin, S = t.S; if (sel) t.select(sel, { keepCamera: true }); else t.closeDetail(); S.tween = null; t.controls.cancel();
+        const p = new THREE.Vector3(...cam), q = new THREE.Vector3(...tgt); S.tween = { ms: 0, t0: performance.now(), p0: p.clone(), p1: p.clone(), t0v: q.clone(), t1v: q.clone() }; }, [sel, cam, tgt]);
+      await settle(); return snap();
+    };
+    const grazes = [[-4.498, 1.442, 1.71], [-4.606, 1.442, 1.777], [-4.3, 1.5, 1.6], [-4.8, 1.3, 1.9]];
+    let shownOther = 0;
+    for (const sel of ['SETUP-005', null]) for (const cam of grazes) {
+      const s = await setCam(sel, cam, [-2.494, 1.163, 5.107]);
+      assert.deepEqual(s.meshBlocked, [], `graze ${sel} ${cam}: cards shown through another rack's geometry`);
+      assert.deepEqual(s.blocked, [], `graze ${sel} ${cam}: cards shown through another rack`);
+      if (sel) assert.ok(s.cards.filter(c => c.setup === sel).every(c => c.shown), `graze ${sel} ${cam}: the selected rack keeps its cards`);
+      shownOther += s.cards.filter(c => c.shown && c.setup !== sel).length;
+    }
+    await shot(page, 'graze-SETUP-005.png');
+    // and a sweep of views around every rack (45° steps, 3 m out, eye height): nothing through another rack's geometry
+    let sweep = 0;
+    for (const su of await page.evaluate(() => __twin.S.data.setups.map(s => s.id))) for (let k = 0; k < 8; k++) {
+      const v = await page.evaluate(([id, k]) => { const g = __twin.S.recs.get(id).group; const c = g.localToWorld(new THREE.Vector3(0, 1.2, 0)); const a = k * Math.PI / 4;
+        return { cam: [c.x + 3 * Math.cos(a), 1.5, c.z + 3 * Math.sin(a)], tgt: c.toArray() }; }, [su, k]);
+      const s = await setCam(null, v.cam, v.tgt); sweep += s.cards.filter(c => c.shown).length;
+      assert.deepEqual(s.meshBlocked, [], `view ${k * 45}° around ${su}: cards shown through another rack's geometry`);
+    }
+    assert.ok(sweep > 40, 'the sweep shows cards at all: ' + sweep);
+    pass(`occlusion: a sight line grazing another rack's corner post hides the card (Rack-04 past Rack-07, ${shownOther} other cards still shown); 56 views around the racks, ${sweep} cards, none through another rack's posts, shelves or equipment`);
+
     // ── 6. legend: server body power colours, apart from health
     await page.locator('#vReset').click(); await settle(); await shot(page, 'legend.png');
     const legend = await page.evaluate(() => ({ text: document.querySelector('#legend').textContent.replace(/\s+/g, ' '), shown: document.querySelector('#legend').getBoundingClientRect().width > 0, title: document.querySelector('#legend').title, towers: [...document.querySelectorAll('#legend .sw.tower')].map(e => getComputedStyle(e).backgroundColor) }));
@@ -191,15 +235,44 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-shelves';
     assert.deepEqual(legend.towers, ['rgb(34, 197, 94)', 'rgb(220, 38, 38)', 'rgb(107, 114, 128)'], 'tower swatches green / red / grey');
     assert.match(legend.title, /green ON, red OFF, grey unknown/); assert.match(legend.title, /separate from ping health/);
     pass('legend: "Server body = power" ON green / OFF red / Unknown grey, separate from Health');
+    // narrower views: the power group keeps a title and words on screen (health may drop to swatches with tooltips)
+    const seen = () => page.evaluate(() => {
+      const lg = document.querySelector('#legend'); const vis = e => getComputedStyle(e).display !== 'none';
+      const after = e => getComputedStyle(e, '::after').content.replace(/^"|"$/g, '').replace(/^none$/, '');
+      const pt = lg.querySelector('.lg-pt'); const ptl = pt.querySelector('.pt-l');
+      const r = lg.getBoundingClientRect(); const z = document.querySelector('.zoombar').getBoundingClientRect();
+      const clear = z.width === 0 || r.right <= z.left || r.left >= z.right || r.bottom <= z.top || r.top >= z.bottom;
+      return { shown: vis(lg) && r.width > 0, fits: lg.scrollWidth <= lg.clientWidth + 1 && r.right <= innerWidth && r.left >= 0 && clear, cls: lg.className,
+        title: vis(pt) ? (vis(ptl) ? ptl.textContent : after(pt)) : '',
+        power: [...lg.querySelectorAll('.li.pw')].map(li => vis(li) ? (vis(li.querySelector('.li-t')) ? li.querySelector('.li-t').textContent : after(li)) : '') };
+    });
+    const widths = [];
+    for (const [w, h, sel] of [[1920, 1080, null], [1440, 900, 'SETUP-003'], [1024, 768, null], [1024, 768, 'SETUP-003'], [390, 844, null]]) {
+      await page.setViewportSize({ width: w, height: h }); await page.waitForTimeout(300);
+      if (sel) { await page.evaluate(sel => __twin.select(sel), sel); } else await page.evaluate(() => __twin.closeDetail());
+      await page.waitForTimeout(400); await page.evaluate(() => window.dispatchEvent(new Event('resize'))); await page.waitForTimeout(200);
+      const s = await seen(); const tag = `${w}×${h}${sel ? ' ' + sel : ''}`;
+      assert.ok(s.shown && s.fits, `${tag}: legend shown on one row, clear of the zoom bar: ${JSON.stringify(s)}`);
+      assert.match(s.title, /^Server body/, `${tag}: the power group keeps its title: ${JSON.stringify(s)}`);
+      assert.ok(['Power ON|Power OFF|Power unknown', 'ON|OFF|?'].includes(s.power.join('|')), `${tag}: power words on screen: ${JSON.stringify(s)}`);
+      await shot(page, `legend-${w}${sel ? '-sel' : ''}.png`); widths.push(`${tag}: ${s.title} ${s.power.join(' / ')}`);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 }); await page.evaluate(() => __twin.closeDetail());
+    pass('legend at narrower views keeps the server body power key in words: ' + widths.join('; '));
 
     // the SN-means-switch rule in 3D follows the site's rule: servers, board OPNs and other vendors' units are not switches
     const kinds = await page.evaluate(() => Object.fromEntries(Object.entries({
       sn: { name: 'Unit', serial_number: 'MT2629X00QA1' }, dgx: { name: 'Unit', model: 'DGX H100', serial_number: 'X1' }, node: { name: 'GPU node 3', serial_number: 'X2' },
       opn: { name: 'Unit', part_number: '900-9X766-003N-SQ0', serial_number: 'X3' }, cisco: { name: 'Unit', model: 'Cisco Nexus 9300', serial_number: 'X4' },
       ciscoSw: { name: 'Unit', model: 'Cisco Nexus 9300 switch', serial_number: 'X5' }, code: { name: 'MT2629X00QA2', barcode: 'MT2629X00QA2' },
+      // identified as something else by its name (the Racks page keeps these Other): never a switch
+      ups: { name: 'UPS box', serial_number: 'X9' }, panel: { name: 'Patch panel', barcode: 'PP-1' }, h100: { name: 'H100 tray', serial_number: 'X10' },
+      opnSerial: { name: 'Unit', serial_number: '900-9X766-003N-SQ0' }, opnCode: { name: '900-9X766-003N-SQ0', barcode: '900-9X766-003N-SQ0' },
+      byId: { name: 'ci-77', dcimId: 'ci-77', serial_number: 'MT77' }, hpe: { name: 'Unit', model: 'HPE SN2010M', serial_number: 'X11' }, ups2: { name: 'Unit', model: 'UPS 3000VA', serial_number: 'X12' },
     }).map(([k, v]) => [k, __twin.unitInfo({ type: 'equip-other', ...v }).kind])));
-    assert.deepEqual(kinds, { sn: 'switch', dgx: 'other', node: 'other', opn: 'other', cisco: 'other', ciscoSw: 'switch', code: 'switch' }, '3D unit kinds');
-    pass('3D: a generic unit with an SN or barcode is a switch; DGX, GPU node, board OPN and Cisco (not saying switch) are not');
+    assert.deepEqual(kinds, { sn: 'switch', dgx: 'other', node: 'other', opn: 'other', cisco: 'other', ciscoSw: 'switch', code: 'switch',
+      ups: 'other', panel: 'other', h100: 'other', opnSerial: 'other', opnCode: 'other', byId: 'switch', hpe: 'switch', ups2: 'other' }, '3D unit kinds');
+    pass('3D: a generic unit with an SN or barcode is a switch; DGX, GPU node, board OPN (also as the serial), Cisco (not saying switch) and units named as something else (UPS box, Patch panel) are not');
 
     assert.deepEqual(writes, [], 'no writes'); assert.deepEqual(errors, [], 'page errors');
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
