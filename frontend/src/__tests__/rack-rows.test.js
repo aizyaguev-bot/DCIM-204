@@ -160,3 +160,15 @@ test("a rack whose type is Storage is a 16-shelf storage unit like Storage-Main 
   assert.deepEqual(buildRackRows([], "Storage shelf", {}, {}, {}).rows.map(r => r.u), Array.from({ length: 8 }, (_, i) => i + 1));
 });
 
+test("auto-placed OPTs in a storage rack fill shelves 1-16, then go to the whole-storage row, never to Other", () => {
+  const servers = Array.from({ length: 18 }, (_, i) => server(`opt${String(i + 1).padStart(2, "0")}`));
+  const { rows, uMap } = buildRackRows(servers, MAIN_STORAGE, {}, { [MAIN_STORAGE]: { opt01: 2 } }, {});
+  assert.deepEqual(rows.map(r => r.u), [...Array.from({ length: 16 }, (_, i) => i + 1), 0], "no row above shelf 16");
+  assert.equal(uMap.opt01, 2);
+  assert.equal(Object.values(uMap).filter(u => u === 0).length, 2, "the two OPTs that do not fit are on the whole-storage row");
+  assert.equal(rows.at(-1).auto, true, "the whole-storage row is marked auto-placed");
+  assert.equal(rows.at(-1).items.length, 2);
+  // a saved shelf above 16 is still old data, kept on its own row
+  const old = buildRackRows([server("opt9")], MAIN_STORAGE, {}, { [MAIN_STORAGE]: { opt9: 30 } }, {});
+  assert.deepEqual(old.rows.map(r => r.u).slice(-1), [30]);
+});

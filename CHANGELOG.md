@@ -2,6 +2,60 @@
 
 ---
 
+## v2.46.5 — 2026-11-08 — Serial numbers: export every SN, import product name and P/N, mark switches
+
+### Added
+- **Scan & Track > Serial numbers:** export every unit that has a serial number or barcode
+  (JSON or CSV, switches first), then paste back the looked-up product name and part
+  number (for example from webpe SN analysis). A preview shows what would change per SN
+  (updated, unchanged, not found, ambiguous) before anything is saved; Apply saves all
+  rows together or none, with a history entry on each unit.
+- **Unidentified units become switches:** a unit with no type, or "Other" with a generic
+  name, is marked as a switch when its SN is looked up. A NIC or adapter (by its name or
+  MCX / BlueField part number), and any unit with its own type, keeps its type, and the
+  preview says why.
+- A product name replaces only a generic name (the code itself or "Unit"); a name someone
+  typed is kept.
+- `tools/webpe-sync/sync.cjs`: a laptop tool that looks every lab SN up on webpe and
+  saves name, P/N and model, using the owner's own signed-in browser sessions.
+
+---
+
+## v2.46.4 — 2026-11-08 — One fixed template for every rack floor and shelf
+
+### Changed
+- **Every rack floor is one box of the same size**, filled or empty, in every rack card
+  and (larger) in the rack detail, so floors line up across a row of racks. Each floor
+  has fixed places: the floor number and "+", the server in two lines (name, state,
+  watts, then KVM / SSH / power, owner, KVM port, switch and PDU feeds), and a row of
+  unit slots with labelled **Name / P/N / S/N** fields that are drawn even when empty.
+  More units than slots show a "+N" chip that opens the rest; search reaches a unit
+  behind it.
+- **Storage racks:** each of the 16 shelves is one row of the same labelled slots. The
+  unit type is the colour of the slot's edge (switch blue, UPS green, other grey), so
+  the name has the whole line. Long names and part numbers are cut in the middle so
+  "... 1" and "... 2" stay apart.
+- **Rack detail:** wider shelves card with P/N and S/N columns; the phone list shows the
+  P/N and S/N of every unit.
+
+### Fixed
+- **Lab display:** the lab name in the top bar is drawn slightly smaller instead of being
+  cut with "…" when a long date and the role badge leave it less room.
+
+---
+
+## v2.46.3 — 2026-11-03 — Scanning a product: the code is its serial number, the name is the product
+
+### Changed
+- **Scanning a unit fills the Serial number with the scanned code**, and the unit's Name
+  is the product, not the code: the model on the label, or the product named by the part
+  number (for example "ConnectX-7 NIC", "Spectrum SN2700 switch", "Quantum-2 QM9700
+  switch"), or else the unit type. Rescanning a unit registered earlier fills its empty
+  serial number and keeps its name. A barcode that only names the product (a part number
+  or GTIN alone) is still refused, because many units share it.
+
+---
+
 ## v2.46.2 — 2026-11-03 — Every storage rack has 16 shelves
 
 ### Fixed

@@ -17,17 +17,19 @@ export function samePlace(a, b) {
   return !!a && !!b && a.rack === b.rack && a.u === b.u && (a.position || "") === (b.position || "");
 }
 
-// "floor 2", "rack level", "U7" in a rack (no rack given: a rack); "shelf 7" or "whole storage" in Main storage.
+// "floor 2", "rack level", "U7" in a rack (no rack given: a rack); "shelf 7" or "whole storage" in a storage rack.
 export function floorText(u, rack = null) {
   if (!rackHasFloors(rack)) return Number.isInteger(u) && u > 0 ? `shelf ${u}` : "whole storage";
   if (!Number.isInteger(u) || u === 0) return "rack level";
   return u <= floorsFor(rack) ? `floor ${u}` : `U${u}`;
 }
 
-// "OPT12 · floor 2", "Rack-01 · rack level"; Main storage: "Main storage · shelf 7", or "Main storage" (the whole unit).
+// "OPT12 · floor 2", "Rack-01 · rack level"; Main storage: "Main storage · shelf 7", or "Main storage" (the whole unit);
+// another storage rack: "Storage shelf · shelf 7", or "Storage shelf · whole storage".
 export function placeText(place, label = "") {
   if (!place?.rack) return "no rack";
   if (place.rack === MAIN_STORAGE) return Number.isInteger(place.u) && place.u > 0 ? `Main storage · ${floorText(place.u, place.rack)}` : "Main storage";
+  if (!rackHasFloors(place.rack)) return `${place.rack} · ${floorText(place.u, place.rack)}`;
   return `${label || place.rack} · ${floorText(place.u)}`;
 }
 
@@ -50,7 +52,7 @@ const missing = (item, field) => !detailText(item, field).trim();
 // A known unit: fill only the fields it does not have yet (the server checks again with only_missing). Resolves to
 // { item, filled: { field: value }, fillError? }; a refused fill never undoes the move, it is reported instead.
 async function fillMissing(item, parsed, revision) {
-  const wanted = Object.fromEntries(Object.entries(scanDetails(parsed)).filter(([field]) => missing(item, field)));
+  const wanted = Object.fromEntries(Object.entries(scanDetails(claimsFor(item, parsed))).filter(([field]) => missing(item, field)));
   if (!Object.keys(wanted).length) return { item, filled: {} };
   try {
     const saved = await updateInventory(`/${encodeURIComponent(item.id)}/details`, { ...wanted, only_missing: true }, revision);
@@ -87,9 +89,22 @@ async function lookUp(parsed) {
 const identityOf = value => { const text = String(value || "").trim(); return normalizeMac(text) || text.toLowerCase(); };
 const sameText = (a, b) => identityOf(a) === identityOf(b);
 
+// What the scan says about the unit it found. A plain code is taken as the unit's serial number (parseUnitBarcode
+// serial_from_code), but when the unit was found by that code as its barcode or its id, the code is that barcode or id:
+// it is a serial only for a unit that has no serial yet and was found by its barcode (it is filled in then); a unit that
+// already has another serial keeps it without a conflict, and an id is never taken as a serial.
+export function claimsFor(item, parsed) {
+  if (!parsed?.serial_from_code || !sameText(parsed.serial, parsed.code)) return parsed;
+  const byId = sameText(parsed.code, item?.id), byBarcode = sameText(parsed.code, detailText(item, "barcode"));
+  const stored = detailText(item, "serial_number").trim();
+  if (byId || (byBarcode && stored && !sameText(stored, parsed.serial))) return { ...parsed, serial: "", serial_from_code: false };
+  return parsed;
+}
+
 // The label's serial number or MAC address against the unit it found: a value on both that differs means the label
 // belongs to another unit (or the record is wrong). Returns a refusal Error, or null.
-export function identityConflict(item, parsed) {
+export function identityConflict(item, scanned) {
+  const parsed = claimsFor(item, scanned);
   const name = item.name || item.id;
   const serial = String(parsed?.serial || "").trim(), stored = detailText(item, "serial_number").trim();
   if (serial && stored && !sameText(serial, stored)) {

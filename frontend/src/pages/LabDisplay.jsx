@@ -347,7 +347,9 @@ function TopBar({ feed, status, partial }) {
       <div className="ld-brand">
         <img src={nvidiaLogo} alt="NVIDIA" />
         <span className="ld-brand-rule" aria-hidden="true" />
-        <h1>{LAB_NAME} <span>· {LAB_PLACE}</span></h1>
+        {/* The lab's name is drawn smaller rather than cut when the status word, the role badge or a long date
+            ("Wednesday, 30 September 2026") leaves it less room. */}
+        <FitText as="h1" text={`${LAB_NAME} · ${LAB_PLACE}`} fitKey={status ? `${status.level}|${status.text}` : ""}>{LAB_NAME} <span>· {LAB_PLACE}</span></FitText>
         {status && <span className="ld-status" data-level={status.level} data-testid="lab-status">{status.text}</span>}
       </div>
       <div className="ld-conn" data-level={conn.level}>

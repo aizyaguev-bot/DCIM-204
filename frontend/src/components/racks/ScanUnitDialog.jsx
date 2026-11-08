@@ -3,6 +3,7 @@ import useDialogFocus from "./useDialogFocus.js";
 import { parseUnitBarcode } from "../../api/scanParse.js";
 import { placeScannedUnit, undoScannedUnit, canUndo, filledFields, placeText, floorText } from "../../api/unitScan.js";
 import { MAIN_STORAGE, UNIT_DETAILS } from "../../api/inventory.js";
+import { rackHasFloors } from "./floors.js";
 
 // Add units to a server's floor (or a rack's floor) by scanning their barcodes: each scan looks the code up and, in
 // one step, registers a new unit there or moves the unit that already has that barcode or serial (never a second
@@ -34,8 +35,17 @@ export function filledText(fields) {
   return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
+// "ConnectX-7 NIC (SN MT2245X01234)": a scanned unit is named after its product, so units of one product share a name;
+// the serial number tells them apart. A name that already shows the serial is not repeated.
+export function unitText(item) {
+  const name = String(item?.name || item?.id || "");
+  const serial = String(item?.serial_number || "").trim();
+  const showSerial = serial && !name.toLowerCase().includes(serial.toLowerCase());
+  return <><bdi>{name}</bdi>{showSerial ? <> (SN <bdi className="racks-mono">{serial}</bdi>)</> : null}</>;
+}
+
 function resultText(result, label) {
-  const name = <bdi>{result.item.name}</bdi>;
+  const name = unitText(result.item);
   const here = <bdi>{placeText(result.after, label)}</bdi>;
   const filled = filledFields(result);
   const added = filled.length ? <> Added its {filledText(filled)}.</> : null;
@@ -46,7 +56,7 @@ function resultText(result, label) {
 }
 
 function undoneText(result) {
-  const name = <bdi>{result.item.name}</bdi>;
+  const name = unitText(result.item);
   if (result.action === "created") return <>Undone: {name} was removed.</>;
   if (result.action === "confirmed") return <>Undone: the {filledText(filledFields(result))} added to {name} {filledFields(result).length > 1 ? "were" : "was"} removed.</>;
   return <>Undone: {name} is back in <bdi>{placeText(result.before)}</bdi>{filledFields(result).length ? <>, without the {filledText(filledFields(result))} the scan added</> : null}.</>;
@@ -209,7 +219,8 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
   }
 
   const where = placeText(place, target.label);
-  const storage = target.rack === MAIN_STORAGE;
+  // A storage rack (Main storage, or a rack of type Storage) has shelves 1-16 and a whole-storage place.
+  const storage = !rackHasFloors(target.rack);
   const latestError = log[0] && !log[0].result && log[0].error ? log[0] : null;
   return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
     <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={hintId} tabIndex={-1} className="racks-dialog racks-dialog-wide" data-dialog="scan-unit">
@@ -217,9 +228,9 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
         <h2 id={titleId} className="racks-dialog-title">Scan unit barcode</h2>
         <span className="server-details-tools"><button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>×</button></span>
       </header>
-      <p id={hintId} className="racks-dialog-note">Units go to <strong><bdi>{where}</bdi></strong>{target.label && target.rack !== MAIN_STORAGE ? <> in <bdi>{target.rack}</bdi></> : null}. Scan each unit's serial number barcode; a new unit is added and saved right away, a unit that is already in DCIM is moved here. Scan as many units as you need.</p>
+      <p id={hintId} className="racks-dialog-note">Units go to <strong><bdi>{where}</bdi></strong>{target.label && !storage ? <> in <bdi>{target.rack}</bdi></> : null}. Scan each unit's serial number barcode; a new unit is added and saved right away, a unit that is already in DCIM is moved here. Scan as many units as you need.</p>
       {floorChoices && <div className="racks-field">
-        <label htmlFor={`${titleId}-floor`}>{storage ? <>Shelf in Main storage</> : <>Floor in <bdi>{target.rack}</bdi></>}</label>
+        <label htmlFor={`${titleId}-floor`}>{storage ? (target.rack === MAIN_STORAGE ? <>Shelf in Main storage</> : <>Shelf in <bdi>{target.rack}</bdi></>) : <>Floor in <bdi>{target.rack}</bdi></>}</label>
         <select id={`${titleId}-floor`} value={u} onChange={e => { setU(Number(e.target.value)); inputRef.current?.focus(); }}>
           {floorChoices.map(n => <option key={n} value={n}>{n === 0 ? (storage ? "Whole storage (no shelf)" : "Rack level (no floor)") : capital(floorText(n, target.rack))}</option>)}
         </select>
@@ -243,7 +254,7 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
         {log.map(entry => <li key={entry.key} data-action={entry.result?.action || "error"} data-undo={entry.undo || undefined}>
           {entry.result ? <span className="scan-unit-text">{resultText(entry.result, entry.label)}</span>
             : <span className="scan-unit-text scan-unit-error">{entry.code ? <><bdi className="racks-mono">{entry.code}</bdi>: </> : null}{entry.error}</span>}
-          {entry.matches && <ul className="scan-unit-matches">{entry.matches.map(m => <li key={m.id}><bdi>{m.name}</bdi> · <bdi>{placeText({ rack: m.rack, u: m.u })}</bdi> · <span className="racks-mono">{m.id}</span></li>)}</ul>}
+          {entry.matches && <ul className="scan-unit-matches">{entry.matches.map(m => <li key={m.id}>{unitText(m)} · <bdi>{placeText({ rack: m.rack, u: m.u })}</bdi> · <span className="racks-mono">{m.id}</span></li>)}</ul>}
           {entry.undo === "ready" && <button type="button" className="racks-btn racks-btn-sm" onClick={() => { inputRef.current?.focus(); undo(entry); }}>Undo</button>}
           {entry.undo === "busy" && <span className="racks-muted">Undoing…</span>}
           {entry.undo === "done" && <span className="racks-muted">Undone</span>}
