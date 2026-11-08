@@ -26,14 +26,18 @@ function summary(counts, applied) {
 
 // The server's name_kept note names its API option; here it names the checkbox that does the same.
 const NAME_KEPT = `Name kept: the unit already has its own name. Turn on "${OVERWRITE_LABEL}" to replace it.`;
+const MARK_SWITCH_LABEL = "Mark unidentified units as switches (looked up as Switch; a NIC, PDU, cable or any unit with its own type keeps it)";
+// The server's type_kept note ("kept type other: it is a NIC or adapter ...") says why a unit was not made a switch.
+const typeKept = note => note ? note[0].toUpperCase() + note.slice(1) + "." : "";
 
 function ChangeList({ entry }) {
-  if (entry.status !== "updated") return <span className="text-zinc-400">{entry.detail || (entry.name_kept ? NAME_KEPT : "Already up to date")}</span>;
+  const notes = [entry.name_kept && NAME_KEPT, typeKept(entry.type_kept)].filter(Boolean);
+  if (entry.status !== "updated") return <span className="text-zinc-400">{entry.detail || (notes.length ? notes.join(" ") : "Already up to date")}</span>;
   return <ul className="space-y-0.5">
     {Object.entries(entry.changes).map(([field, { before, after }]) => <li key={field} className="break-words">
       <span className="text-zinc-400">{CHANGE_LABELS[field] || field}:</span> <span className="line-through text-zinc-500">{before || "empty"}</span> → <span className="text-zinc-100">{after}</span>
     </li>)}
-    {entry.name_kept && <li className="text-xs text-zinc-500">{NAME_KEPT}</li>}
+    {notes.map(note => <li key={note} className="text-xs text-zinc-500">{note}</li>)}
   </ul>;
 }
 
@@ -173,7 +177,7 @@ export default function SerialNumbersPanel({ onChanged }) {
         <textarea aria-label="Paste details" rows={6} value={text} disabled={busy} spellCheck={false} placeholder={"SN\tP/N\tDescription\nMT2614X00001\tMQM9700-NS2F\tQuantum-2 QM9700 switch"}
           onChange={e => { edited(e.target.value); setFileName(""); }} className={`${input} font-mono text-xs`}/>
         <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-          <label className="flex items-center gap-2"><input type="checkbox" className="accent-nv-400" checked={markSwitch} disabled={busy} onChange={option(setMarkSwitch, "markSwitch")}/>Mark units of type Other as switches (looked up as Switch; a PDU, cable or KVM keeps its type)</label>
+          <label className="flex items-center gap-2"><input type="checkbox" className="accent-nv-400" checked={markSwitch} disabled={busy} onChange={option(setMarkSwitch, "markSwitch")}/>{MARK_SWITCH_LABEL}</label>
           <label className="flex items-center gap-2"><input type="checkbox" className="accent-nv-400" checked={overwrite} disabled={busy} onChange={option(setOverwrite, "overwrite")}/>{OVERWRITE_LABEL}</label>
         </div>
         <div className="flex flex-wrap gap-2">

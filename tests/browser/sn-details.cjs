@@ -84,7 +84,7 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     await page.getByRole('textbox', { name: 'Paste details' }).fill(
       `SN analysis results\nSN\tP/N\tDescription\n${SN_A}\tMSN2700-CS2F\tSpectrum SN2700 switch\n${SN_B}\tMQM9700-NS2F\tQuantum-2 QM9700\n` +
       `${SN_P}\tPX3-5190V\tRaritan PX3\n${SN_MISSING}\tX-1\tNothing\n\tMCX1\tNo serial\n`);
-    assert.equal(await page.getByRole('checkbox', { name: /Mark units of type Other as switches/ }).isChecked(), true, 'marking switches is on by default');
+    assert.equal(await page.getByRole('checkbox', { name: /Mark unidentified units as switches/ }).isChecked(), true, 'marking switches is on by default');
     await page.getByRole('button', { name: 'Preview changes' }).click();
     await page.getByRole('status').filter({ hasText: 'Preview: 3 will change · 0 unchanged · 1 not found.' }).waitFor();
     await page.getByText('Columns found: Serial number, Part number, Name · 4 rows to check · 1 row left out.').waitFor();

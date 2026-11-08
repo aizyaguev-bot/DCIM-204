@@ -273,3 +273,101 @@ async def test_a_unit_is_found_by_its_barcode_even_when_it_has_a_serial(client):
 def test_is_switch(value, expected):
     from app.routers.serial_details import is_switch
     assert is_switch(value) is expected
+
+
+NIC_UNIT = {"id": "u-nic", "name": "ConnectX-7 NIC", "type": "other", "serial_number": "QA-NIC-1",
+            "part_number": "MCX75310AAS-NEAT", "u": 30}
+
+
+def add_units(*units):
+    data = store.read_items()
+    data["Rack-02"].extend(units)
+    store.write_items(data)
+
+
+async def test_a_nic_is_not_marked_as_a_switch(client):
+    c = client
+    # The scanner stores a NIC as type "other" named "... NIC" with an MCX part number; a generic unit whose looked-up
+    # details name an adapter (or an MCX / ConnectX part number) is a NIC too.
+    add_units(NIC_UNIT,
+              {"id": "u-mcx", "name": "Unit", "type": "other", "serial_number": "QA-NIC-2", "u": 31},
+              {"id": "u-adapter", "name": "QA-NIC-3", "type": "", "serial_number": "QA-NIC-3", "u": 32})
+    rows = [{"serial": "QA-NIC-1", "part_number": "MCX75310AAS-NEAT", "name": "NVIDIA ConnectX-7 adapter card, 400GbE OSFP"},
+            {"serial": "QA-NIC-2", "part_number": "MCX623106AN-CDAT"},
+            {"serial": "QA-NIC-3", "name": "InfiniBand adapter", "type": "switch"}]
+    preview = await c.post(URL, json={"items": rows, "mark_switch": True, "dry_run": True})
+    assert preview.status_code == 200, preview.text
+    results = by_serial(preview.json())
+    for serial, kept in (("QA-NIC-1", "other"), ("QA-NIC-2", "other"), ("QA-NIC-3", "(none)")):
+        assert "type" not in results[serial].get("changes", {}), serial
+        assert results[serial]["type_kept"].startswith(f"kept type {kept}: it is a NIC or adapter"), results[serial]
+    assert results["QA-NIC-1"]["status"] == "unchanged"
+    applied = await c.post(URL, headers={"If-Match": preview.headers["etag"]}, json={"items": rows, "mark_switch": True})
+    assert applied.status_code == 200
+    assert [unit(i)["type"] for i in ("u-nic", "u-mcx", "u-adapter")] == ["other", "other", ""]
+    assert unit("u-mcx")["part_number"] == "MCX623106AN-CDAT"
+    assert "QA-NIC-1" not in [row["serial"] for row in (await c.get("/api/inventory/serials")).json()["items"] if row["type"] == "switch"]
+
+
+async def test_a_generic_unit_is_marked_as_a_switch(client):
+    c = client
+    add_units({"id": "u-untyped", "name": "", "serial_number": "QA-GEN-2", "u": 33},
+              {"id": "u-pdu-named", "name": "PDU", "type": "other", "serial_number": "QA-GEN-3", "u": 39})
+    rows = [{"serial": "MT2614X00001", "part_number": "MSN2700-CS2F"}, {"serial": "MT2614X00003"}, {"serial": "QA-GEN-2"},
+            {"serial": "QA-GEN-3"}]
+    response = await c.post(URL, headers=await headers(c), json={"items": rows, "mark_switch": True})
+    assert response.status_code == 200, response.text
+    results = by_serial(response.json())
+    assert results["MT2614X00001"]["changes"]["type"] == {"before": "other", "after": "switch"}
+    assert results["MT2614X00003"]["changes"] == {"type": {"before": "other", "after": "switch"}}
+    assert results["QA-GEN-2"]["changes"] == {"type": {"before": "", "after": "switch"}}
+    # A unit of type other named after another kind is identified by its name.
+    assert results["QA-GEN-3"]["type_kept"] == "kept type other: it is named PDU, not a switch"
+    assert unit("u-pdu-named")["type"] == "other"
+    assert not any("type_kept" in entry for serial, entry in results.items() if serial != "QA-GEN-3")
+    assert [unit(i)["type"] for i in ("u-generic", "u-code-name", "u-untyped")] == ["switch"] * 3
+    # The applied report shows the unit as it is now.
+    assert results["MT2614X00001"]["unit"]["type"] == "switch" and results["MT2614X00001"]["unit"]["part_number"] == "MSN2700-CS2F"
+
+
+async def test_a_row_that_says_switch_marks_an_other_unit_with_its_own_name(client):
+    c = client
+    add_units({"id": "u-gear", "name": "Lab gear 7", "type": "other", "serial_number": "QA-SW-1", "u": 34},
+              {"id": "u-gear2", "name": "Lab gear 8", "type": "other", "serial_number": "QA-SW-2", "u": 35},
+              {"id": "u-gear3", "name": "Lab gear 9", "type": "other", "serial_number": "QA-SW-3", "u": 36})
+    rows = [{"serial": "QA-SW-1", "type": "Switch"},
+            {"serial": "QA-SW-2", "name": "NVIDIA Spectrum-4 SN5600 SWITCH"},
+            {"serial": "QA-SW-3", "part_number": "PN-9"}]
+    # Without mark_switch: the row's type or its description saying switch is enough.
+    plain = by_serial((await c.post(URL, json={"items": rows, "dry_run": True})).json())
+    assert plain["QA-SW-1"]["changes"] == {"type": {"before": "other", "after": "switch"}}
+    assert plain["QA-SW-2"]["changes"]["type"] == {"before": "other", "after": "switch"}
+    assert "type" not in plain["QA-SW-3"]["changes"] and "type_kept" not in plain["QA-SW-3"]
+    # mark_switch alone does not mark a unit somebody named; the preview says the type is kept.
+    marked = await c.post(URL, headers=await headers(c), json={"items": rows, "mark_switch": True})
+    results = by_serial(marked.json())
+    assert results["QA-SW-3"]["type_kept"].startswith("kept type other: the unit has its own name")
+    assert [unit(i)["type"] for i in ("u-gear", "u-gear2", "u-gear3")] == ["switch", "switch", "other"]
+    assert unit("u-gear2")["name"] == "Lab gear 8"
+
+
+@pytest.mark.parametrize("kind", ["server", "nic", "cable", "psu", "pdu"])
+async def test_a_unit_of_another_type_keeps_it_even_when_the_row_says_switch(client, kind):
+    c = client
+    add_units({"id": "u-typed", "name": "Unit", "type": kind, "serial_number": "QA-T-1", "u": 37})
+    rows = [{"serial": "QA-T-1", "type": "switch", "name": "Spectrum switch"}]
+    response = await c.post(URL, headers=await headers(c), json={"items": rows, "mark_switch": True})
+    entry = response.json()["results"][0]
+    assert "type" not in entry["changes"]
+    assert entry["type_kept"] == f"kept type {kind}: it is a {kind}, not a switch"
+    assert unit("u-typed")["type"] == kind
+
+
+async def test_a_barcode_matched_in_another_case_keeps_its_own_spelling_as_serial(client):
+    c = client
+    add_units({"id": "u-bc", "name": "QA-BC1", "type": "other", "barcode": "QA-BC1", "u": 38})
+    response = await c.post(URL, headers=await headers(c), json={"items": [{"serial": "qa-bc1", "part_number": "MCX75310"}]})
+    entry = response.json()["results"][0]
+    assert entry["changes"]["serial_number"] == {"before": "", "after": "QA-BC1"}
+    assert (unit("u-bc")["serial_number"], unit("u-bc")["barcode"]) == ("QA-BC1", "QA-BC1")
+    assert entry["unit"]["serial"] == "QA-BC1"

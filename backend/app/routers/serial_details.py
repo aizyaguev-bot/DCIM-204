@@ -29,8 +29,20 @@ GENERIC_NAMES = {name.casefold() for name in (
 DUPLICATE_ROW = "This serial number is listed more than once in the request; none of its rows were applied."
 AMBIGUOUS = "More than one unit has this serial number or barcode. Resolve the duplicate in DCIM first."
 NAME_KEPT = "The unit already has its own name, so it was kept; overwrite=true replaces it."
-# Types that say nothing about the product: mark_switch turns only these into "switch" (a PDU, cable or KVM stays one).
+# Types that say nothing about the product: only a unit of one of these can become a switch (a PDU, cable, NIC, server
+# or any other real type stays what it is).
 GENERIC_TYPES = {"", "other"}
+# Looked-up row types that do not identify the product either ("Other", "Unit"): they neither mark nor block a switch.
+GENERIC_ROW_TYPES = {"", "other", "unit", "unknown", "n/a", "na", "-"}
+# A name, model or description that says the unit is a network adapter, not a switch. The scanner stores a NIC as type
+# "other" named "ConnectX-7 NIC" (scanParse.js), so the name and part number are the only signs it is not a switch.
+NOT_SWITCH_NAME = re.compile(r"(?<![a-z0-9])(?:super)?nics?(?![a-z0-9])|(?<![a-z0-9])adapters?(?![a-z0-9])|connect-?x"
+                             r"|(?<![a-z0-9])hcas?(?![a-z0-9])|bluefield|(?<![a-z0-9])dpus?(?![a-z0-9])", re.IGNORECASE)
+# NVIDIA / Mellanox adapter part numbers: MCX... ConnectX NICs, MBF... BlueField DPUs.
+NOT_SWITCH_PART = re.compile(r"^\s*(?:MCX|MBF)|connect-?x", re.IGNORECASE)
+NIC = "a NIC or adapter by its name or part number"
+# Type labels of other kinds (GENERIC_NAMES): a unit of type "other" named "PDU" or "Server" is identified by its name.
+KIND_NAMES = {name.casefold() for name in ("Cable", "PDU", "KVM", "UPS", "Computer", "Patch panel", "patchpanel", "Server")}
 
 
 class SerialDetail(BaseModel):
@@ -71,8 +83,9 @@ class SerialDetailsRequest(BaseModel):
     items: list[SerialDetail] = Field(min_length=1, max_length=MAX_ROWS)
     dry_run: bool = False
     overwrite: bool = False   # True: the looked-up name and model replace a unit's real (non-generic) name and model too
-    # True: a matched unit whose type is still generic ("other" or empty) becomes a switch, because the serial numbers
-    # were looked up as Switch. A unit with a real type (PDU, cable, KVM...) keeps it; only a row's own type changes it.
+    # True: a matched unit that is not identified yet (no type, or "other" with a generic name) becomes a switch, because
+    # the serial numbers were looked up as Switch. A unit identified as something else (a NIC by its name or part
+    # number, or any real type: PDU, cable, server...) keeps its type, and the report says so (type_kept).
     mark_switch: bool = False
 
 
@@ -90,6 +103,46 @@ def generic_name(item):
 def is_switch(value):
     """True for a type that names a switch ("switch", "Ethernet Switch", "Switch system"), not "non-switch" or "switchgear"."""
     return bool(value) and re.search(r"(?<![\w-])switch(es)?(?![\w-])", value, re.IGNORECASE) is not None
+
+
+def not_switch_reason(item, row):
+    """Why the unit is known not to be a switch, or None: a real type other than switch, a looked-up type other than
+    switch, or a NIC / adapter name or part number (the unit's own or the looked-up one)."""
+    current = str(item.get("type") or "").strip()
+    if current.casefold() not in GENERIC_TYPES | {"switch"}:
+        return f"it is a {current}"
+    looked_up = str(row.type or "").strip()
+    if looked_up.casefold() not in GENERIC_ROW_TYPES and not is_switch(looked_up):
+        return f"it was looked up as {looked_up}"
+    for name in (item.get("name"), row.name):
+        if " ".join(str(name or "").split()).casefold() in KIND_NAMES:
+            return f"it is named {name}"
+    names = (item.get("name"), item.get("model"), row.name, row.model)
+    parts = (item.get("part_number"), item.get("model"), row.part_number, row.model)
+    if any(NOT_SWITCH_NAME.search(str(v or "")) for v in names) or any(NOT_SWITCH_PART.search(str(v or "")) for v in parts):
+        return f"it is {NIC}"
+    return None
+
+
+def switch_change(item, row, mark_switch):
+    """(make_switch, type_kept note): whether the unit becomes a switch, and when a switch was asked for (by the row or
+    by mark_switch) but the unit keeps its type, a note that says which type it keeps and why."""
+    current = str(item.get("type") or "").strip()
+    if current.casefold() == "switch":
+        return False, None
+    # The looked-up row says so: its type, or a product name / description with the word "switch".
+    said = is_switch(row.type) or is_switch(row.name)
+    if not (said or mark_switch):
+        return False, None
+    kept = f"kept type {current or '(none)'}"
+    reason = not_switch_reason(item, row)
+    if reason:
+        return False, f"{kept}: {reason}, not a switch"
+    # mark_switch alone marks only a unit nobody identified yet: no type, or "other" with a generic name (or its own
+    # name that says switch).
+    if said or generic_name(item) or is_switch(str(item.get("name") or "")):
+        return True, None
+    return False, f"{kept}: the unit has its own name; a looked-up type or description that says Switch changes it"
 
 
 def match_index(data):
@@ -113,6 +166,21 @@ def unit_view(rack, item):
 
 def planned_changes(item, row, overwrite, mark_switch=False):
     """{field: (before, after)} that `row` makes to `item`; nothing for a value the row does not carry."""
+    return plan(item, row, overwrite, mark_switch)[0]
+
+
+def own_serial(item, row):
+    """The serial number a unit found by its barcode gets: its own barcode as stored (the row may spell the code in
+    another case or as another MAC spelling); the row's spelling only when the barcode cannot be stored as one."""
+    barcode = str(item.get("barcode") or "").strip()
+    usable = (barcode and len(barcode) <= store.DETAIL_LIMITS["serial_number"]
+              and not any(ord(c) < 32 or ord(c) == 127 for c in barcode)
+              and store.identity_key(barcode) == store.identity_key(row.serial))
+    return barcode if usable else row.serial
+
+
+def plan(item, row, overwrite, mark_switch=False):
+    """({field: (before, after)}, type_kept note or None) for `row` applied to `item`."""
     changes = {}
     if row.part_number and item.get("part_number") != row.part_number:
         changes["part_number"] = (item.get("part_number", ""), row.part_number)
@@ -120,13 +188,13 @@ def planned_changes(item, row, overwrite, mark_switch=False):
         changes["model"] = (item.get("model", ""), row.model)
     if row.name and item.get("name") != row.name and (overwrite or generic_name(item)):
         changes["name"] = (item.get("name", ""), row.name)
-    generic_type = str(item.get("type") or "").strip() in GENERIC_TYPES
-    if (is_switch(row.type) or (mark_switch and not row.type and generic_type)) and item.get("type") != "switch":
+    make_switch, type_kept = switch_change(item, row, mark_switch)
+    if make_switch:
         changes["type"] = (item.get("type", ""), "switch")
     # A unit without a serial number was found by its barcode: that code is its serial number, so it is recorded as one.
     if not item.get("serial_number"):
-        changes["serial_number"] = ("", row.serial)
-    return changes
+        changes["serial_number"] = ("", own_serial(item, row))
+    return changes, type_kept
 
 
 LABELS = {**store.DETAIL_LABELS, "name": "Name", "type": "Type"}
@@ -155,30 +223,35 @@ async def apply_serial_details(body: SerialDetailsRequest, response: Response, i
                 entry.update(status="ambiguous", detail=AMBIGUOUS, units=[unit_view(rack, item) for rack, item in found])
             else:
                 rack, item = found[0]
-                changes = planned_changes(item, row, body.overwrite, body.mark_switch)
+                changes, type_kept = plan(item, row, body.overwrite, body.mark_switch)
                 entry["unit"] = unit_view(rack, item)
                 if changes:
                     entry.update(status="updated", changes={field: {"before": before, "after": after} for field, (before, after) in changes.items()})
-                    plans.append((rack, item, row, changes))
+                    plans.append((rack, item, row, changes, entry))
                 else:
                     entry["status"] = "unchanged"
                 if row.name and "name" not in changes and item.get("name") != row.name:
                     entry["name_kept"] = NAME_KEPT
+                if type_kept:
+                    entry["type_kept"] = type_kept
             report.append(entry)
         if plans and not body.dry_run:
             # Work on a copy so a refused value leaves the stored list exactly as it was.
             updated = deepcopy(data)
             by_id = {item["id"]: item for items in updated.values() for item in items}
-            for rack, item, row, changes in plans:
+            for rack, item, row, changes, entry in plans:
                 target = by_id[item["id"]]
                 for field, (_, after) in changes.items():
                     target[field] = after
                 if "serial_number" in changes:
-                    store.ensure_unique(updated, row.serial, target["id"])
+                    store.ensure_unique(updated, target["serial_number"], target["id"])
                 store.record(target, "details updated", store.location(rack, target), store.location(rack, target),
                              f"Details from {row.source or SOURCE_DEFAULT}: " + ", ".join(LABELS[field] for field in changes))
             store.write_items(updated)
             data = updated
+            # The applied report shows each changed unit as it is now (its new name, type and part number).
+            for rack, item, row, changes, entry in plans:
+                entry["unit"] = unit_view(rack, by_id[item["id"]])
         set_headers(response, data)
     counts = {status: sum(entry["status"] == status for entry in report) for status in ("updated", "unchanged", "not_found", "ambiguous")}
     return {"dry_run": body.dry_run, "overwrite": body.overwrite, "mark_switch": body.mark_switch, "counts": counts, "results": report}

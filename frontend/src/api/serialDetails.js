@@ -3,7 +3,9 @@
 // by name (SN / Serial / Serial Number, P/N / Part Number / PN / OPN / מק"ט, Name / Description / Product, Model, Type).
 // The server matches each row to a unit by serial number (or barcode) and reports what would change (dry run) before
 // anything is applied. Lookups on the SN analysis page are done as "switch", so with "Mark as switches" on (mark_switch)
-// a matched unit whose type is still generic (Other) becomes a switch; a PDU, cable or KVM keeps its type.
+// a matched unit nobody identified yet (no type, or Other with a generic name) becomes a switch; a unit identified as
+// something else (a NIC by its name or MCX / ConnectX part number, a PDU, cable, server...) keeps its type and the
+// preview says so ("kept type ...").
 
 export const LOOKUP_AS = "switch";
 const HEADER_SEARCH = 5;   // a copied web table may start with a title line or two above its header row
@@ -152,7 +154,7 @@ export function parseDetails(text) {
 }
 
 // Rows -> the request items: only the values a row carries. Marking units as switches is the request's mark_switch
-// option (the server applies it only to units of a generic type), never a type added to every row.
+// option (the server applies it only to units not identified as something else), never a type added to every row.
 export function requestItems(rows, { source = "" } = {}) {
   return rows.map(row => {
     const item = { serial: row.serial };

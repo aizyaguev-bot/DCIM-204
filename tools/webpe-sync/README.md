@@ -64,13 +64,18 @@ Request:
 - `serial` is required (1-200 characters); every other field is optional. Leave a field out when webpe did not show
   it - an empty value never clears anything.
 - `mark_switch` (request option, default false): the serial numbers were looked up as "Switch", so a matched unit
-  whose DCIM type is still generic (`other` or empty) becomes a switch. A unit with a real type (PDU, cable, KVM,
-  computer...) keeps it. This is the normal way to mark switches; send it as `true` together with the dry run and
-  the apply.
+  nobody identified yet - no type, or `other` with a generic name such as "Unit" or its own code - becomes a switch.
+  This is the normal way to mark switches; send it as `true` together with the dry run and the apply.
 - `type` (per row, optional): send it only when the SN analysis result itself names the product kind. A value with
-  the word "switch" ("Switch", "Ethernet Switch", "Switch system"; not "non-switch" or "switchgear") sets the unit's
-  type to switch whatever its current type; other values are ignored. Do not add `"switch"` to every row - use
-  `mark_switch` instead.
+  the word "switch" ("Switch", "Ethernet Switch", "Switch system"; not "non-switch" or "switchgear"), or a `name`
+  (description) with that word, makes a unit of type `other` or empty a switch even when it has its own name. Do not
+  add `"switch"` to every row - use `mark_switch` instead.
+- A unit identified as something else is never made a switch, whatever the row or `mark_switch` says: any real type
+  (`pdu`, `cable`, `nic`, `server`, `psu`...), a looked-up `type` that is not a switch, a name that is another kind's
+  label ("PDU", "Cable", "Server"...), or a NIC / adapter - a name, model or description with NIC, adapter, ConnectX,
+  HCA, BlueField or DPU, or an MCX / MBF / ConnectX part number (the scanner stores a NIC as `other` named
+  "ConnectX-7 NIC"). The row then says `type_kept`, for example `"kept type other: it is a NIC or adapter by its name
+  or part number, not a switch"`.
 - `name` is the product name / description (cut to 160 characters). `part_number` and `model` up to 120 characters.
 - `source` (up to 80 characters) is written into the unit's history note; default "webpe SN analysis".
 - At most 5000 items per request. A row with control characters or a too-long serial / P/N refuses the whole request
@@ -85,8 +90,9 @@ What DCIM does per row:
   unit's own serial, barcode or part number. A name somebody typed is kept (the row says `name_kept`) unless
   `overwrite: true`.
 - `model`: set when the unit has none (or always with `overwrite: true`).
-- `type`: set to `switch` as described above (`mark_switch` or the row's own `type`).
-- A unit without a serial number, matched by its barcode, also gets that code as its serial number.
+- `type`: set to `switch` as described above (`mark_switch`, the row's own `type` or a description with "switch").
+- A unit without a serial number, matched by its barcode, also gets that barcode (as the unit spells it) as its
+  serial number.
 - Each changed unit gets a history entry "details updated", note "Details from webpe SN analysis: Part number, Name, ...".
   Its place, notes and every other field stay as they are.
 
