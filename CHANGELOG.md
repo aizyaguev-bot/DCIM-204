@@ -2,6 +2,23 @@
 
 ---
 
+## v2.46.6 — 2026-11-08 — Admin can remove a server (OPT) from the lab and restore it
+
+### Added
+- **Remove from lab (Admin only):** in a server's details or its Edit panel. A preview
+  shows what changes before you confirm: its rack position, switch and owner are cleared,
+  its ping check is paused (history kept), other servers keep their shelf, and the
+  equipment beside it and the PDU/KVM labels stay as they are. An optional reason is
+  recorded with who removed it and when. An Undo button appears right after.
+- The removed server disappears from Racks, monitoring, the lab display (including
+  consoles in use), owners, Locations, SSH and the 3D twin.
+- **Admin > Removed servers:** the list of removed servers with who, when and why, and a
+  Restore button that brings a server back and resumes its ping check if it was running.
+  A change made meanwhile in another session is refused and the list reloads, instead
+  of being overwritten.
+
+---
+
 ## v2.46.5 — 2026-11-08 — Serial numbers: export every SN, import product name and P/N, mark switches
 
 ### Added

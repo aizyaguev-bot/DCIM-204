@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { hiddenSet, loadRemoved } from "./api/removedServers.js";
 import { useAccounts } from "./accounts.jsx";
 
@@ -16,8 +16,11 @@ const POLL_MS = 60000;
 export function RemovedServersProvider({ children }) {
   const { user } = useAccounts();
   const [state, setState] = useState({ data: null, hidden: new Set(), etag: null, loaded: false });
+  const latest = useRef(0);   // a slower, older read must not overwrite the answer of a newer one
   const refresh = useCallback(async () => {
+    const ticket = ++latest.current;
     const { data, etag } = await loadRemoved();
+    if (ticket !== latest.current) return data;
     // An unchanged answer keeps the same state, so a poll re-renders nothing (the lab display must not redraw).
     setState(prev => {
       if (prev.loaded && prev.etag === etag && JSON.stringify(prev.data) === JSON.stringify(data)) return prev;

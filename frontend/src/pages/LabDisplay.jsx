@@ -302,7 +302,7 @@ function DisplayScreen() {
       status: labStatus(attention),
       kpi: kpis({ ...data, servers }),
       racks: buildRacks(data.devices, data.pduStatuses, servers, data.maintenance, { sensors: env.sensors, attention }),
-      inUse: consolesInUse(data.devices, data.kvmStatuses),
+      inUse: withoutRemoved(consolesInUse(data.devices, data.kvmStatuses), removedHidden, row => row.server),
       changes: recentChanges(data),
       maintenance: maintenanceEntries(data),
     };

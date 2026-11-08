@@ -465,30 +465,31 @@ async def restore_server(body: dict, request: Request, response: Response, db: A
     if not isinstance(key, str) or not key or len(key) > 4 * MAX_NAME:   # casefold can lengthen a name ("ß" -> "ss")
         raise HTTPException(400, "key is required (as the removed servers list gives it)")
     _require_if_match(if_match)
-    store = read_store(strict=True)
-    if if_match != _revision_on_disk():
-        raise HTTPException(409, STALE)
-    record = store["servers"].get(key)
-    if not isinstance(record, dict):
-        raise HTTPException(404, NOT_REMOVED)
-    by = _who(request)
-    resumed = False
-    monitor = record.get("monitor") or {}
-    if monitor.get("was_enabled") and isinstance(monitor.get("id"), str):
-        target = await db.get(PingTarget, monitor["id"])
-        if target is not None and not target.enabled and target.source_key == "server:" + key:
-            target.enabled = True
-            target.revision += 1
-            resumed = True
-    await db.flush()
-    new_store = {"servers": {k: v for k, v in store["servers"].items() if k != key}, "log": list(store.get("log") or [])}
-    _log_entry(new_store, "restored", {"key": key, "name": record.get("name") or key}, by)
-    try:
-        revisions = inventory_store.save_layouts([("removed_servers", store_path(), new_store, if_match, EMPTY)])
-    except BaseException:
-        await db.rollback()
-        raise
-    await _commit_or_put_back(db, [("removed_servers", store_path(), store, revisions["removed_servers"], EMPTY)])
+    async with devices._labels_lock:   # a removal in flight (file written, monitor pause not yet committed) finishes first
+        store = read_store(strict=True)
+        if if_match != _revision_on_disk():
+            raise HTTPException(409, STALE)
+        record = store["servers"].get(key)
+        if not isinstance(record, dict):
+            raise HTTPException(404, NOT_REMOVED)
+        by = _who(request)
+        resumed = False
+        monitor = record.get("monitor") or {}
+        if monitor.get("was_enabled") and isinstance(monitor.get("id"), str):
+            target = await db.get(PingTarget, monitor["id"])
+            if target is not None and not target.enabled and target.source_key == "server:" + key:
+                target.enabled = True
+                target.revision += 1
+                resumed = True
+        await db.flush()
+        new_store = {"servers": {k: v for k, v in store["servers"].items() if k != key}, "log": list(store.get("log") or [])}
+        _log_entry(new_store, "restored", {"key": key, "name": record.get("name") or key}, by)
+        try:
+            revisions = inventory_store.save_layouts([("removed_servers", store_path(), new_store, if_match, EMPTY)])
+        except BaseException:
+            await db.rollback()
+            raise
+        await _commit_or_put_back(db, [("removed_servers", store_path(), store, revisions["removed_servers"], EMPTY)])
     log.info("Server %s restored to the lab by %s", key, by)
     response.headers["ETag"] = revisions["removed_servers"]
     return {"ok": True, "key": key, "name": record.get("name") or key, "monitor_resumed": resumed,
