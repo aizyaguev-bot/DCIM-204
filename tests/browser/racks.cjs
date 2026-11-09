@@ -791,6 +791,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     if(await op.locator('button.edit-toggle').getAttribute('aria-pressed')!=='true')await op.locator('button.edit-toggle').click();
     const typeSelect=equip.locator('select').filter({has:op.locator('option[value="patchpanel"]')});
     for(const [code,model,want,serial=`SN${code}`] of [[PG,'','switch'],[PS,'DGX H100','other'],[PU,'','other'],[PO,'','other',`900-9X766-003N-SQ${run}`]]){
+      // one unit slot per floor: the others are behind the floor's "+N" chip
+      await op.locator(`.equipment-cell[data-item-id="ci-${code.toLowerCase()}"]`).first().evaluate(e=>{if(!e.offsetParent)e.closest('.floor-more:not([data-open])')?.querySelector(':scope > .floor-more-toggle')?.click();});
       await op.locator(`.equipment-cell[data-item-id="ci-${code.toLowerCase()}"] .equipment-type`).first().click();
       await equip.getByText('Save changes').waitFor();
       assert.equal(await typeSelect.inputValue(),'other');
