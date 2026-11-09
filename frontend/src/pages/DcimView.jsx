@@ -721,7 +721,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
   const keep = view.rowKeep;
   const floors = rackHasFloors(r.rack);
   const count = floorsFor(r.rack);
-  // A floor's unit slots and a storage shelf's slots: more of them in the (larger) rack detail, except on a phone.
+  // A floor's unit slots and a storage shelf's slots (one each today; the detail could take more, except on a phone).
   const phone = useMediaQuery("(max-width: 640px)");
   const slots = detail && !phone ? SHELF_SLOTS.detail : SHELF_SLOTS.card;
   const unitSlots = detail && !phone ? FLOOR_UNIT_SLOTS.detail : FLOOR_UNIT_SLOTS.card;
@@ -2839,13 +2839,19 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   }, [coolingEditable, onRequestEdit]);
   holdCoolingRef.current = coolingDialog != null;
   const addCooling = useCallback(rackName => setCoolingDialog({ mode: "create", rack: rackName || null, newId: newChillerId() }), []);
-  // After a save the focus goes to the unit's chip in its new place (the panel when its card is closed or hidden).
+  // After a save the focus goes to the unit's chip in its new place (the panel when its card is closed or hidden). A
+  // chip behind its floor's "+N" chip (the floor's one slot already holds a unit) opens that list first.
   const focusUnit = useCallback(id => {
     const css = window.CSS.escape(id);
     const tries = [`[data-rack-id] .cooling-chip[data-unit-id="${css}"]`, `#cooling-panel li[data-unit-id="${css}"] button`, `[data-unit-id="${css}"] button`];
-    requestAnimationFrame(() => requestAnimationFrame(() => {
+    const land = () => {
       const el = tries.flatMap(sel => [...document.querySelectorAll(sel)]).find(x => x.offsetParent !== null);
       if (el) { el.focus({ preventScroll: true }); el.scrollIntoView({ block: "nearest" }); flash(el); }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const behind = [...document.querySelectorAll(tries[0])].find(x => x.offsetParent === null && x.closest(".floor-more:not([data-open])"));
+      if (behind) { revealInFloor(behind); requestAnimationFrame(() => requestAnimationFrame(land)); }
+      else land();
     }));
   }, []);
   const saveCoolingDialog = useCallback(async ({ name, rack: rackName, u }) => {

@@ -47,7 +47,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
   const puts=[];page.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/api/rack-items'))puts.push(r.url());});
   const card=rack=>page.locator(`[data-rack-id="${rack}"]`);
   const cell=name=>page.locator(`.equipment-cell[aria-label="View ${name}"]`);
-  // A unit behind its floor's "+N units" chip (the floor template has 2 unit slots): open that list first.
+  // A unit behind its floor's "+N units" chip (the floor template has one unit slot): open that list first.
   // The unit cell by its id (several units can share a product name), opening its floor's "+N" list when it is behind it.
   async function revealId(pg,id){const c=pg.locator(`.equipment-cell[data-item-id="${id}"]`).first();await c.waitFor({state:'attached'});
    if(!(await c.isVisible()))await pg.locator('.floor-more').filter({has:c}).first().locator('.floor-more-toggle').first().click();await c.waitFor();}
@@ -187,7 +187,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
    const sixteen=Array.from({length:16},(_,i)=>String(i+1));
    assert.deepEqual(await storage.locator('[data-u-slot]').evaluateAll(els=>els.map(e=>e.dataset.uSlot)),[...sixteen,'20','0']);
    assert.equal(await storage.locator('[data-u-slot][data-empty]').count(),14,'shelves 1-16 always drawn; 14 of them are empty');
-   assert.deepEqual(await storage.locator('[data-u-slot][data-empty]').first().evaluate(e=>[e.dataset.uSlot,e.querySelectorAll('.unit-slot-empty').length,!!e.querySelector('[data-floor-add]')]),['2',3,true],'an empty shelf keeps its 3 empty slots and its +');
+   assert.deepEqual(await storage.locator('[data-u-slot][data-empty]').first().evaluate(e=>[e.dataset.uSlot,e.querySelectorAll('.unit-slot-empty').length,!!e.querySelector('[data-floor-add]')]),['2',1,true],'an empty shelf keeps its one empty slot and its +');
    assert.deepEqual(await storage.locator('[data-u-slot] .shelf-index').evaluateAll(els=>els.slice(1,16).map(e=>e.title)),sixteen.slice(1).map(n=>`Shelf ${n}`));
    assert.equal(await storage.locator('[data-u-slot="3"] .server-cell[data-server="OPT72"]').count(),1);
    assert.equal(await storage.locator('[data-u-slot="1"] .server-cell[data-server="OPT63"]').count(),1);
@@ -195,12 +195,14 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
    // one list per shelf: servers and units together, never the rack's server | units columns
    assert.equal(await storage.locator('[data-units]').count(),0);
    assert.equal(await storage.locator('.floor-servers, .floor-units').count(),0);
-   assert.deepEqual(await storage.locator('[data-u-slot="3"][data-shelf-list] .shelf-list > [role="listitem"]').evaluateAll(els=>els.map(e=>e.querySelector('.server-cell')?.dataset.server||e.querySelector('.equipment-cell')?.getAttribute('aria-label'))),['OPT72','View Shelf3 NIC']);
+   assert.deepEqual(await storage.locator('[data-u-slot="3"][data-shelf-list] .shelf-list > [role="listitem"]').evaluateAll(els=>els.map(e=>e.querySelector('.server-cell')?.dataset.server||e.querySelector('.equipment-cell')?.getAttribute('aria-label'))),['OPT72'],'one slot per shelf: OPT72 in it');
+   assert.equal(await storage.locator('[data-u-slot="3"] [data-floor-more="shelf"] > .floor-more-toggle').innerText(),'+1','the NIC beside it is behind +1');
+   assert.equal(await storage.locator('[data-u-slot="3"] [data-floor-more="shelf"] > .floor-more-list .equipment-cell[aria-label="View Shelf3 NIC"]').count(),1);
    assert.equal(await storage.locator('[data-floor-add]').count(),16,'one + per shelf 1-16');
    // old data above shelf 16 is not lost
    assert.equal(await storage.locator('.floors-other').innerText(),'Other · not on shelves 1–16');
    assert.equal(await storage.locator('[data-u-slot="20"] .equipment-cell[aria-label="View Old U20"]').count(),1);
-   passed.push('LOC-3 Main storage draws shelves 1-16 (empty ones keep their 3 empty slots), one list per shelf (OPT72 + NIC on shelf 3), Spare as the whole unit, old u20 under Other');
+   passed.push('LOC-3 Main storage draws shelves 1-16 (empty ones keep their empty slot), one list per shelf (OPT72 + NIC on shelf 3), Spare as the whole unit, old u20 under Other');
    assert.equal(await storage.locator('.shelf-row[data-auto]').count(),1);
    assert.equal(await storage.locator('[data-u-slot="1"][data-auto]').count(),1);
    const autoIndex=storage.locator('[data-u-slot="1"] .shelf-index');
@@ -267,16 +269,16 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
    try{
     // Rack-06: two OPTs on floor 1 and two on floor 3 (old data); floor 2 keeps only its Switch 06, floor 4 is empty;
     // floor 3 also holds three units.
-    // Storage shelf: OPT72 on shelf 3, four units on shelf 5 (one more than the card's three slots).
+    // Storage shelf: OPT72 on shelf 3, four units on shelf 5 (three more than its one slot); the two long names on shelves 6 and 8.
     await putLayout('/api/rack-slots',d=>{d['Rack-06']={opt61:1,opt62:1,opt63:3,opt64:3};d['Storage shelf']={opt72:3};});
     await putLayout('/api/rack-overrides',d=>{d.opt72='Storage shelf';});
     await putItems(d=>{dropTpl(d);
      d['Rack-05']=[...(d['Rack-05']||[]),{id:'ci-tpl-move',name:'TPL Move me',type:'other',u:1,part_number:'PN-MOVE'},
       {id:'ci-tpl-sn',name:'TPL QM8790',type:'switch',u:4,part_number:'MQM8790-HS2F',serial_number:'MT2231X12345',model:'QM8790',mac:'02:00:00:00:00:66'}];
-     d['Rack-06']=[...(d['Rack-06']||[]),{id:'ci-tpl-a',name:'TPL Switch A with a very long name that cannot fit',type:'switch',u:3,part_number:'MQM8790-HS2F-LONG-PART-NUMBER',serial_number:'SN-TPL-A',model:'QM8790',mac:'02:00:00:00:00:0A'},
+     d['Rack-06']=[...(d['Rack-06']||[]),{id:'ci-tpl-a',name:'TPL Switch A with a very long name, longer than a whole floor slot is wide, so that it cannot fit',type:'switch',u:3,part_number:'MQM8790-HS2F-LONG-PART-NUMBER',serial_number:'SN-TPL-A',model:'QM8790',mac:'02:00:00:00:00:0A'},
       {id:'ci-tpl-b',name:'TPL NIC B',type:'other',u:3,part_number:'MCX75310'},{id:'ci-tpl-c',name:'TPL UPS C',type:'ups',u:3}];
      d['Storage shelf']=[...(d['Storage shelf']||[]),...[1,2,3,4].map(n=>({id:`ci-tpl-s${n}`,name:`TPL Shelf item ${n}`,type:'other',u:5,part_number:`PN-S${n}`})),
-      ...[1,2].map(n=>({id:`ci-tpl-cx${n}`,name:`Spare ConnectX-7 adapter long name ${n}`,type:'other',u:6,part_number:`MCX75310AAS-NEAT-${n}`})),
+      ...[1,2].map(n=>({id:`ci-tpl-cx${n}`,name:`Spare ConnectX-7 adapter long name ${n}`,type:'other',u:n===1?6:8,part_number:`MCX75310AAS-NEAT-${n}`})),
       {id:'ci-tpl-psu',name:'Spare PSU 2000W',type:'other',u:7,part_number:'930-9BPSU-0000-000',serial_number:'SN-PSU-1'}];});
     for(const [asset,name] of Object.entries(OWNERS)){
      let r=await admin.c.request.post(origin+'/api/engineers',{data:{name},headers:headers(admin)});
@@ -321,8 +323,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
      const r6=compute.find(c=>c.rack==='Rack-06');
      assert.deepEqual(r6.floors.map(f=>[f.u,f.empty]),[['1',false],['2',false],['3',false],['4',true]],'Rack-06: floor 4 is empty');
      assert.ok(r6.floors.every(f=>Math.abs(f.h-r6.floors[3].h)<=1),'filled (two servers, a unit with no server, three units) and empty floors are the same height');
-     assert.ok(compute.every(c=>c.floors.every(f=>f.slots===2)),`${w}: every floor has its 2 unit slots, filled or empty`);
-     assert.ok(storage.every(c=>c.floors.every(f=>f.slots===3)),`${w}: every storage shelf has its 3 slots`);
+     assert.ok(compute.every(c=>c.floors.every(f=>f.slots===1)),`${w}: every floor has its one unit slot, filled or empty`);
+     assert.ok(storage.every(c=>c.floors.every(f=>f.slots===1)),`${w}: every storage shelf has its one slot`);
      // two cards side by side in one grid row: their floors are the same height and line up
      const row=compute.filter(c=>c.top===compute[0].top);
      assert.ok(row.length>=2,`${w}: at least two cards in the first grid row (${row.map(c=>c.rack)})`);
@@ -330,7 +332,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
       assert.ok(Math.max(...heights)-Math.min(...heights)<=1&&Math.max(...tops)-Math.min(...tops)<=1,`${w}: floor ${i+1} lines up across ${row.map(c=>c.rack)} (${tops.map(Math.round)})`);}
      await tp.screenshot({path:`${SHOTS}/tpl-overview-${w}.png`});
     }
-    passed.push('TPL-1 every floor box is one height in every compute card and every shelf one height in the storage racks (1536x864 and 1920x1080), filled = empty, floors line up across the cards of a grid row, every floor keeps its 2 unit slots (storage: 3), no text wraps or leaves its floor box');
+    passed.push('TPL-1 every floor box is one height in every compute card and every shelf one height in the storage racks (1536x864 and 1920x1080), filled = empty, floors line up across the cards of a grid row, every floor and storage shelf keeps its one unit slot, no text wraps or leaves its floor box');
 
     // TPL-2: the unit slots: labelled fields at fixed places; empty slots keep their labels; "+N units" opens the rest
     const f3=tcard('Rack-06').locator('[data-u-slot="3"]');
@@ -343,15 +345,15 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.ok(await a.locator('.equipment-name .mid-head').evaluate(e=>e.scrollWidth>e.clientWidth&&getComputedStyle(e).textOverflow==='ellipsis'),'a long name is cut with …');
     assert.equal(await a.locator('.equipment-name .mid-tail').innerText(),'ot fit','… in the middle: its end stays');
     assert.equal(await a.locator('.slot-field[data-field="part_number"] .mid-tail').innerText(),'UMBER','a long P/N keeps its end');
-    assert.deepEqual(await f3.locator(':scope > .floor-units > .floor-unit > .equipment-cell').evaluateAll(els=>els.map(e=>e.dataset.itemId)),['ci-tpl-a','ci-tpl-b'],'both slots show a unit');
+    assert.deepEqual(await f3.locator(':scope > .floor-units > .floor-unit > .equipment-cell').evaluateAll(els=>els.map(e=>e.dataset.itemId)),['ci-tpl-a'],'the one slot shows a unit');
     const toggle=f3.locator('[data-floor-more="units"] > .floor-more-toggle');
-    assert.equal(await toggle.innerText(),'+2','4 units (3 + its cooling unit) in 2 slots: 2 drawn, +2 on the last slot');
-    assert.equal(await toggle.getAttribute('aria-label'),'2 more units on floor 3');
+    assert.equal(await toggle.innerText(),'+3','4 units (3 + its cooling unit) in one slot: 1 drawn, +3 on it');
+    assert.equal(await toggle.getAttribute('aria-label'),'3 more units on floor 3');
     assert.ok((await toggle.boundingBox()).width<=44,'+N is a small chip, not a slot');
     assert.equal(await f3.locator('[data-floor-more="units"] > .floor-more-list').isVisible(),false);
     await toggle.click();
     assert.equal(await toggle.getAttribute('aria-expanded'),'true');
-    assert.deepEqual(await f3.locator('[data-floor-more="units"] > .floor-more-list .equipment-cell').evaluateAll(els=>els.map(e=>e.dataset.itemId)),['ci-tpl-c']);
+    assert.deepEqual(await f3.locator('[data-floor-more="units"] > .floor-more-list .equipment-cell').evaluateAll(els=>els.map(e=>e.dataset.itemId)),['ci-tpl-b','ci-tpl-c']);
     assert.equal(await f3.locator('[data-floor-more="units"] > .floor-more-list .cooling-chip[data-unit-id="ch6"]').count(),1,'its cooling unit is listed too');
     assert.equal(await f3.locator('[data-floor-more="units"] > .floor-more-list .equipment-cell[data-item-id="ci-tpl-c"] .slot-field[data-field="part_number"] .slot-value').innerText(),'—','no P/N recorded: its place says —');
     await tp.keyboard.press('Escape');
@@ -379,7 +381,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await search.press('Enter');
     await tp.waitForFunction(()=>document.activeElement?.matches('.equipment-cell[data-item-id="ci-tpl-c"]'));
     await search.fill('');await tp.waitForFunction(()=>document.querySelectorAll('.racks-grid > [data-rack-id]').length===9);
-    passed.push('TPL-2 unit slots show labelled Name, P/N, S/N one per line (cut in the middle, the end stays; whole in the tooltip; — when not recorded; type, model and MAC in the tooltip); empty slots keep Name / P/N / S/N; both slots show a unit and a small "+2" chip opens the rest, Escape closes it with focus back; two OPTs on a floor show the first + "+1 server"; search Enter opens the +N list and focuses the hit');
+    passed.push('TPL-2 unit slots show labelled Name, P/N, S/N one per line (cut in the middle, the end stays; whole in the tooltip; — when not recorded; type, model and MAC in the tooltip); empty slots keep Name / P/N / S/N; the one slot shows a unit and a small "+3" chip opens the rest, Escape closes it with focus back; two OPTs on a floor show the first + "+1 server"; search Enter opens the +N list and focuses the hit');
 
     // TPL-3: the fixture's "Storage shelf" (rack type Storage) is a 16-shelf storage unit like Storage-Main
     const st=tcard('Storage shelf');
@@ -389,10 +391,10 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.equal(await st.locator('.floor-servers, .floor-units').count(),0,'no server-beside layout');
     assert.deepEqual(await st.locator('[data-u-slot] > .shelf-index').evaluateAll(els=>els.slice(0,16).map(e=>e.title)),Array.from({length:16},(_,i)=>`Shelf ${i+1}`));
     assert.equal(await st.locator('[data-u-slot="3"] .server-cell[data-server="OPT72"]').count(),1,'OPT72 on shelf 3, a slot of the shelf line');
-    assert.equal(await st.locator('[data-u-slot="5"] [data-floor-more="shelf"] > .floor-more-toggle').innerText(),'+1');
-    assert.equal(await st.locator('[data-u-slot="5"] [data-floor-more="shelf"] > .floor-more-toggle').getAttribute('aria-label'),'1 more on shelf 5');
-    assert.deepEqual(await st.locator('[data-u-slot="5"] .shelf-list > [role="listitem"] > .equipment-cell .slot-field[data-field="part_number"] .slot-value').allInnerTexts(),['PN-S1','PN-S2','PN-S3'],'name + P/N in each shelf slot, all 3 slots show a unit');
-    assert.deepEqual(await st.locator('[data-u-slot="5"] .shelf-list > [role="listitem"] > .equipment-cell .slot-label').allInnerTexts(),['P/N','P/N','P/N'],'a storage slot: the name has the whole first line (no type chip, no label)');
+    assert.equal(await st.locator('[data-u-slot="5"] [data-floor-more="shelf"] > .floor-more-toggle').innerText(),'+3');
+    assert.equal(await st.locator('[data-u-slot="5"] [data-floor-more="shelf"] > .floor-more-toggle').getAttribute('aria-label'),'3 more on shelf 5');
+    assert.deepEqual(await st.locator('[data-u-slot="5"] .shelf-list > [role="listitem"] > .equipment-cell .slot-field[data-field="part_number"] .slot-value').allInnerTexts(),['PN-S1'],'name + P/N in the shelf slot');
+    assert.deepEqual(await st.locator('[data-u-slot="5"] .shelf-list > [role="listitem"] > .equipment-cell .slot-label').allInnerTexts(),['P/N'],'a storage slot: the name has the whole first line (no type chip, no label)');
     assert.equal(await st.locator('[data-u-slot="0"] .equipment-cell[aria-label="View Spare switch"]').count(),1,'the whole-storage row');
     await st.locator('[data-floor-add="9"]').click();
     const scanDialog=tp.getByRole('dialog',{name:'Scan unit barcode'});await scanDialog.waitFor();
@@ -403,7 +405,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     const det=tp.getByRole('dialog',{name:'OPT72'});await det.waitFor();
     assert.equal(await det.locator('dt',{hasText:/^Shelf$/}).locator('xpath=..').locator('dd').innerText(),'Shelf 3');
     await tp.keyboard.press('Escape');await det.waitFor({state:'detached'});
-    passed.push('TPL-3 "Storage shelf" (rack type Storage) draws shelves 1-16 + whole storage, a + per shelf, one line of slots per shelf (name + P/N in all 3, "+1"), no server-beside layout; its + scans onto "Storage shelf · shelf 9"; OPT72\'s details say Shelf 3');
+    passed.push('TPL-3 "Storage shelf" (rack type Storage) draws shelves 1-16 + whole storage, a + per shelf, one slot per shelf (name + P/N, "+3"), no server-beside layout; its + scans onto "Storage shelf · shelf 9"; OPT72\'s details say Shelf 3');
 
     // TPL-4: Edit mode: its cooling dialog and selects follow it (16 shelves), the server panel says Shelf, and
     //        "Move to rack" a storage rack offers its shelves and saves the shelf chosen
