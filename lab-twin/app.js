@@ -992,16 +992,19 @@
     if (inMaintenance(it.dcim?.pdu)) return 'Maintenance';
     const id = it.dcim?.pdu; const at = S.live.pduAt?.[id];
     if (!at) return 'No data';
+    if (S.live.pdu?.[id]?.reachable === false) return 'No data · PDU unreachable';
     if (!pduFresh(id)) return `Stale – last reading ${hhmm(at)}`;
     if (it.live.state === 'on') return 'On' + (it.live.watts != null ? ` · ${Math.round(it.live.watts)} W` : '');
     if (it.live.state === 'off') return 'Off';
-    return S.live.pdu?.[id]?.reachable === false ? 'Unknown · PDU unreachable' : 'Unknown';
+    return 'Unknown';
   }
   // Where the power reading comes from and how old it is: "PDU 01 · outlet 2 · 8 s ago" (· "last poll failed hh:mm").
+  // A PDU that answered "unreachable" gave no reading: "PDU 07 · outlet 1 · PDU unreachable · checked 2 s ago".
   function powerSource(it) {
     if (!S.live.connected || it?.live?.inDcim !== true) return '';
     const id = it.dcim?.pdu; const at = S.live.pduAt?.[id]; const err = S.live.pduErr?.[id];
-    const age = !at ? 'no reading yet' : Date.now() - at < 60000 ? Math.max(0, Math.round((Date.now() - at) / 1000)) + ' s ago' : ageText(at);
+    const ago = at && (Date.now() - at < 60000 ? Math.max(0, Math.round((Date.now() - at) / 1000)) + ' s ago' : ageText(at));
+    const age = !at ? 'no reading yet' : S.live.pdu?.[id]?.reachable === false ? `PDU unreachable · checked ${ago}` : ago;
     return [it.dcim?.pduName || id || 'PDU ?', `outlet ${it.dcim?.outlet ?? '?'}`, age, err && (!at || err > at) ? `last poll failed ${hhmm(err)}` : ''].filter(Boolean).join(' · ');
   }
   function pingText(it) {
@@ -1095,7 +1098,7 @@
         const k = items.find(i => i.type === 'kvm' && i.dcim?.deviceId === d.id);
         add('warn', 'kvm-error', d.id, `${k?.name || d.name || d.id} sign-in failed`, `The KVM answers but sign-in failed: ${live.kvm[d.id].error} — check its credentials in Lab Manager`, k?.id, k?.setup || model.setupByRack?.[d.rack] || null);
       });
-      bySetup(opts.filter(o => o.live && o.live.inDcim === false)).forEach((list, sid) => add('warn', 'not-in-dcim', sid || 'none', list.length === 1 ? `${list[0].name} not in DCIM labels` : `${list.length} OPTs not in DCIM labels`, at(sid, `not in the live PDU labels: ${names(list)}`), list.length === 1 || !sid ? list[0].id : sid, sid));
+      bySetup(opts.filter(o => o.live && o.live.inDcim === false && !o.notInLm)).forEach((list, sid) => add('warn', 'not-in-dcim', sid || 'none', list.length === 1 ? `${list[0].name} not in DCIM labels` : `${list.length} OPTs not in DCIM labels`, at(sid, `not in the live PDU labels: ${names(list)}`), list.length === 1 || !sid ? list[0].id : sid, sid));
       items.filter(i => i.id.startsWith('LIVE-') && i.type.startsWith('equip-') && i.last_seen_at).forEach(i => {
         const t = Date.parse(i.last_seen_at); if (!Number.isFinite(t)) return; const days = Math.floor((now - t) / 864e5);
         if (days > STALE_DAYS) add('info', 'stale', i.id, `${i.name} not seen for ${days} days`, `Last scan ${String(i.last_seen_at).slice(0, 10)} — scan its barcode to confirm the location`, i.id, i.setup);
@@ -1582,7 +1585,8 @@
   // Data-quality findings about this object: the Data quality entries, live warnings, an estimated place
   function dqOf(rec) {
     const out = (S.attention || []).filter(e => e.group === 'dq' && e.id === rec.id).map(e => esc(e.text) + (e.hint ? `<small>${esc(e.hint)}</small>` : ''));
-    if (rec.item?.liveWarning) out.push(esc(rec.item.liveWarning));
+    // A record Lab Manager does not list is reported once, by its 'unplaced' entry (its live warning still shows in the drawer).
+    if (rec.item?.liveWarning && !rec.item.notInLm) out.push(esc(rec.item.liveWarning));
     if (rec.pconf === 'low' && !(S.attention || []).some(e => e.kind === 'auto-u' && e.id === rec.id)) out.push('Place is estimated (low placement confidence)');
     return out;
   }
@@ -1605,7 +1609,7 @@
       const pw = powerTarget(it); const kvLive = kvmTargets(it); const stale = live && !pw;
       const maint = pw && inMaintenance(pw.pduId);
       const pState = powerText(it);
-      html += section('Status', `<div class="sgrid">${cell('Power', pState, /^On/.test(pState) ? 'ok' : /^Off|unreachable/.test(pState) ? 'bad' : '', powerSource(it))}${cell('Ping monitor', pingText(it), /^Up/.test(pingText(it)) ? 'ok' : /^Down/.test(pingText(it)) ? 'bad' : '')}${cell('Owner', it.owner || '—')}${cell('Console', consoleText(it))}</div>`);
+      html += section('Status', `<div class="sgrid">${cell('Power', pState, /^On/.test(pState) ? 'ok' : /^Off/.test(pState) ? 'bad' : /^(Stale|No data|Unknown)/.test(pState) ? 'unk' : '', powerSource(it))}${cell('Ping monitor', pingText(it), /^Up/.test(pingText(it)) ? 'ok' : /^Down/.test(pingText(it)) ? 'bad' : '')}${cell('Owner', it.owner || '—')}${cell('Console', consoleText(it))}</div>`);
       let act;
       if (!canOperate) act = `<div class="note readonly-note">Read-only · Power and console need the Operator role.</div>`;
       else {
@@ -3604,7 +3608,8 @@
       const pdus = S.data.dcim?.pdus || [];
       html += `<section class="sec big">${field('Name', 'eName')}<input class="in-lg" id="eName" dir="auto" value="${esc(it.name || '')}" />${status(it.status)}</section>
         <section class="sec big">${H('Where')}${where}
-          <div class="row-lg">${moveBtn}<button type="button" class="kbtn secondary md" id="eUnplace">Unplace</button></div>
+          ${it.notInLm ? `<div class="edit-note">Unplaced here because Lab Manager does not list it; lab-data.json keeps it on ${esc(it.jsonPlace || 'a mapped rack')}.</div>` : ''}
+          <div class="row-lg">${moveBtn}${it.notInLm ? '' : '<button type="button" class="kbtn secondary md" id="eUnplace">Unplace</button>'}</div>
           ${it.setup ? `<div class="row-lg"><button type="button" class="kbtn secondary md" data-side="left">Hang on left side</button><button type="button" class="kbtn secondary md" data-side="right">Hang on right side</button><button type="button" class="kbtn secondary md" data-side="bay">Bottom bay</button></div>` : ''}</section>
         <section class="sec big">${field('Type', 'eType')}<select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${esc(ITEM_KIND[t] ? `${ITEM_KIND[t]} (${t})` : t)}</option>`).join('')}</select>
           ${field('Owner', 'eOwner')}${ownerPicker(it.owner)}
@@ -3681,7 +3686,7 @@
     const rp = $('#eReplace'); if (rp) rp.onclick = () => {
       const name = prompt('Name of the NEW device (the old one is kept as “dismantled” history):', it.name); if (!name) return;
       const n = { ...JSON.parse(JSON.stringify(it)), id: nextItemId(), name, status: 'building', confidence: 'high', placementConfidence: 'high', photos: [], notes: `Replaced ${it.name} (${it.id}) on ${new Date().toISOString().slice(0, 10)}.` };
-      if (n.dcim) n.dcim.optKey = optKey(name); delete n.live; delete n.effStatus; delete n.liveWarning; delete n.unmappedRack;
+      if (n.dcim) n.dcim.optKey = optKey(name); delete n.live; delete n.effStatus; delete n.liveWarning; delete n.unmappedRack; delete n.notInLm; delete n.jsonPlace;
       S.data.items.push(n);
       patchDef(rec.id, { status: 'dismantled', setup: null, shelf: null, placement: undefined, storage: undefined, pos: undefined, notes: (cleanNotes(it.notes) + ` Replaced by ${n.id} (${name}) on ${new Date().toISOString().slice(0, 10)}.`).trim() });
       rebuildAll(); select(n.id, { keepCamera: true }); toast(`${name} installed in place of ${it.name}`, 'ok');

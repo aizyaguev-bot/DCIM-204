@@ -5,6 +5,9 @@
 // Edit layout offers only Move / Owner and "Edit details in Racks" for Lab Manager records and "Add in Racks…" instead of
 // twin-only adds on mapped racks and derived floors; a lab-data.json record cannot be moved onto a mapped rack; an owner
 // change reads Lab Manager back (refreshSoon); PDU power is grey "Stale – last reading hh:mm" once the reading is old.
+// QA follow-ups: a PDU that answers "unreachable" gives grey "No data · PDU unreachable" (no fresh-looking age); a
+// lab-data.json server Lab Manager does not know is reported once in Data quality (no extra "not in DCIM labels");
+// its editor has no Unplace (that would wipe the place lab-data.json keeps).
 // Writes only fixture data: one owner change of OPT11 (PUT /api/opt-owners/opt11).
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
@@ -31,7 +34,7 @@ const JSON_ONLY = ['Opt207', 'optn85', 'Opt168', 'Opt133'];   // lab-data.json s
     page.on('pageerror', e => errors.push(e.message));
     page.on('dialog', d => { errors.push('native dialog: ' + d.message()); d.dismiss(); });
     await page.goto(origin + '/twin/');
-    await page.waitForFunction(() => window.__twin?.S.live.connected && window.__twin.S.recs.size > 10 && window.__twin.S.live.pdu.pdu1 && window.__twin.S.live.pduAt?.pdu1, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.__twin?.S.live.connected && window.__twin.S.recs.size > 10 && window.__twin.S.live.pdu.pdu1 && window.__twin.S.live.pduAt?.pdu1 && window.__twin.S.live.pduAt?.pdu7, null, { timeout: 60000 });
     await page.waitForTimeout(1000);
 
     // 1 — one server per floor, no lab-data.json server on a mapped rack, all of them under Unplaced
@@ -61,10 +64,23 @@ const JSON_ONLY = ['Opt207', 'optn85', 'Opt168', 'Opt133'];   // lab-data.json s
     for (const n of JSON_ONLY) assert.ok(unplaced.includes(n), n + ' listed under Unplaced');
     const dq = await page.evaluate(() => __twin.S.attention.filter(e => e.kind === 'unplaced' && /not in Lab Manager/.test(e.text)).length);
     assert.ok(dq >= JSON_ONLY.length, 'data-quality entries name them: ' + dq);
+    const once = await page.evaluate(names => names.map(n => { const t = __twin, S = t.S; const i = S.model.items.find(x => x.name === n);
+      const dqFor = S.attention.filter(e => e.group === 'dq' && (e.id === i.id || e.text.includes(n)));
+      t.select(i.id, { keepCamera: true });
+      const sum = [...document.querySelectorAll('#dBody details.more summary')].map(x => x.textContent).find(x => /^Data quality/.test(x)) || '';
+      return { n, type: i.type, kinds: dqFor.map(e => e.kind), drawer: sum, li: [...document.querySelectorAll('#dBody .dq-ul li')].length }; }), JSON_ONLY);
+    await page.evaluate(() => __twin.closeDetail());
+    for (const x of once) {
+      assert.deepEqual(x.kinds, ['unplaced'], x.n + ' is reported once in Data quality: ' + JSON.stringify(x));
+      assert.equal(x.drawer, 'Data quality · 1 issue', x.n + ' drawer: ' + JSON.stringify(x));
+      assert.equal(x.li, 1, x.n + ' drawer lists one data-quality finding');
+    }
+    assert.ok(once.some(x => x.type === 'opt'), 'at least one is a server (OPT)');
     pass(`one server per floor (max ${model.maxOpt}) and one unit (max ${model.maxUnits}); ${JSON_ONLY.join(', ')} have no setup and are under Unplaced as "In lab-data.json, not in Lab Manager"`);
+    pass(`${JSON_ONLY.join(', ')}: one Data quality entry each (no "not in DCIM labels" duplicate), drawer "Data quality · 1 issue"`);
 
     // 2 — Edit layout: derived floor and mapped shelf / rack offer "Add in Racks…", never a twin-only add
-    const ed = await page.evaluate(() => {
+    const ed = await page.evaluate(names => {
       const t = __twin, S = t.S; t.toggleEdit(true); const body = () => document.querySelector('#dBody');
       const look = id => { t.select(id, { keepCamera: true }); const b = body(); const a = b.querySelector('#eAddRacks');
         return { here: !!b.querySelector('#eAddHere'), bay: !!b.querySelector('#eAddBay'), store: !!b.querySelector('#eAddStore'), racks: a ? { text: a.textContent.trim(), href: a.getAttribute('href'), target: a.target } : null, derived: !!S.recs.get(id)?.def.derived }; };
@@ -72,9 +88,12 @@ const JSON_ONLY = ['Opt207', 'optn85', 'Opt168', 'Opt133'];   // lab-data.json s
       const out = { derived: look('SHELF-SETUP-005-L0'), shelf: look(shelf11), rack: look('SETUP-001'), storage: look('STORAGE-01') };
       t.select('LIVE-opt11', { keepCamera: true });
       const b = body(); const link = [...b.querySelectorAll('a')].find(a => /Edit details in Racks/.test(a.textContent));
+      out.jsonOnly = names.map(n => { const i = S.model.items.find(x => x.name === n); t.select(i.id, { keepCamera: true }); const e = body();
+        return { n, unplace: !!e.querySelector('#eUnplace'), move: !!e.querySelector('#eMove'), note: [...e.querySelectorAll('.edit-note')].map(x => x.textContent).join(' | ') }; });
+      t.select('LIVE-opt11', { keepCamera: true });
       out.opt11 = { name: !!b.querySelector('#eName'), type: !!b.querySelector('#eType'), pdu: !!b.querySelector('#ePdu'), move: !!b.querySelector('#eMove'), owner: !!b.querySelector('#eOwner'), materialize: !!b.querySelector('#eMaterialize'), href: link?.getAttribute('href') || '', target: link?.target || '' };
       return out;
-    });
+    }, JSON_ONLY);
     assert.equal(ed.derived.derived, true, 'SHELF-SETUP-005-L0 is the derived Rack-05 floor 4');
     assert.equal(ed.derived.here, false, 'derived floor: no #eAddHere');
     assert.match(ed.derived.racks?.href || '', /tab=racks&rack=Rack-05/);
@@ -86,6 +105,12 @@ const JSON_ONLY = ['Opt207', 'optn85', 'Opt168', 'Opt133'];   // lab-data.json s
     assert.deepEqual([ed.opt11.name, ed.opt11.type, ed.opt11.pdu, ed.opt11.materialize], [false, false, false, false], 'OPT11: no Name / Type / PDU / twin copy');
     assert.deepEqual([ed.opt11.move, ed.opt11.owner], [true, true], 'OPT11: Move and Owner');
     assert.match(ed.opt11.href, /tab=racks&rack=Rack-01/); assert.equal(ed.opt11.target, '_top');
+    for (const x of ed.jsonOnly) {
+      assert.equal(x.unplace, false, x.n + ': no Unplace for a record that is only in lab-data.json');
+      assert.equal(x.move, true, x.n + ': Move stays');
+      assert.match(x.note, /Unplaced here because Lab Manager does not list it; lab-data.json keeps it on Rack-01/, x.n + ' note');
+    }
+    pass(`Edit layout: ${JSON_ONLY.join(', ')} offer no Unplace (their lab-data.json place is kept) and say why they are unplaced`);
     pass('Edit layout: derived Rack-05 floor 4, a Rack-01 shelf and Rack-01 show "Add in Racks…" (target _top, rack=…); OPT11 has only Move, Owner and "Edit details in Racks"');
 
     // 3 — a lab-data.json record cannot be moved onto a mapped rack (it would vanish again on the next refresh)
@@ -114,6 +139,16 @@ const JSON_ONLY = ['Opt207', 'optn85', 'Opt168', 'Opt133'];   // lab-data.json s
     const pc = fresh.cells.find(c => c.l === 'Power');
     assert.match(pc.v, /^On/); assert.match(pc.s, /^PDU 01 · outlet 1 · \d+ s ago$/);
     assert.ok(fresh.cells.some(c => c.l === 'Ping monitor'), 'the ping cell is labelled "Ping monitor"');
+    const unreach = await page.evaluate(() => { const t = __twin; t.select('LIVE-opt71', { keepCamera: true });
+      const c = [...document.querySelectorAll('#dBody .scell')].find(x => x.querySelector('.sl')?.textContent === 'Power');
+      return { v: c.querySelector('.sv').textContent, s: c.querySelector('.ss')?.textContent || '', cls: c.className, color: getComputedStyle(c.querySelector('.sv')).color, power: t.powerOf(t.S.recs.get('LIVE-opt71').item) }; });
+    assert.equal(unreach.v, 'No data · PDU unreachable', 'OPT71 on the unreachable PDU 07');
+    assert.ok(!/\bbad\b/.test(unreach.cls) && /\bunk\b/.test(unreach.cls), 'grey unknown tone, never red: ' + unreach.cls);
+    assert.equal(unreach.color, 'rgb(156, 163, 175)', 'Power value colour');
+    assert.match(unreach.s, /^PDU 07 · outlet \d+ · PDU unreachable · checked (\d+ s ago|just now|\d+ min ago)$/);
+    assert.doesNotMatch(unreach.s.replace(/checked .*$/, ''), /\d+ s ago/, 'no bare age that reads as a fresh reading');
+    assert.equal(unreach.power, 'unknown');
+    pass(`PDU 07 answers unreachable: OPT71 Power "${unreach.v}" in grey, source "${unreach.s}"`);
     await page.route('**/api/pdus/*/status', r => r.abort());
     for (let i = 0; i < 3; i++) {
       await page.evaluate(() => { const real = window.__realNow || (window.__realNow = Date.now.bind(Date)); window.__shift = (window.__shift || 0) + 16000; Date.now = () => real() + window.__shift; });

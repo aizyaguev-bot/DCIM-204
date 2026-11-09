@@ -2,6 +2,23 @@
 
 ---
 
+## v2.46.11 — 2026-11-09 — 3D twin shows what Lab Manager has; stale power readings are grey
+
+### Changed
+- **3D twin, Lab Manager is the inventory:** on every rack that is mapped to DCIM, the 3D shows
+  only the servers and units Lab Manager has. An entry that exists only in the twin's own file
+  is listed under Unplaced as "In lab-data.json, not in Lab Manager" and reported once in Data
+  quality, so a floor never shows two servers.
+- **3D twin, editing:** a Lab Manager server or unit can be moved and given an owner in 3D; its
+  other details open in Racks ("Edit details in Racks"). Adding a unit to a mapped rack is done
+  in Racks ("Add in Racks…"). The view refreshes right after a move or an owner change.
+- **3D twin, power readings:** an old PDU reading turns the server grey with "Stale – last
+  reading hh:mm", a missing one "No data", and a PDU that cannot be reached "No data · PDU
+  unreachable", with the PDU, outlet and time of the reading underneath. Red now means Off only.
+- **3D twin:** the ping status is labelled "Ping monitor".
+
+---
+
 ## v2.46.10 — 2026-11-09 — Shelf labels: project, owner and server for every floor
 
 ### Added
