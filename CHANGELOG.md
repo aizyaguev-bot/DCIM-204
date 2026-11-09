@@ -2,6 +2,62 @@
 
 ---
 
+## v2.46.10 — 2026-11-09 — Shelf labels: project, owner and server for every floor
+
+### Added
+- **Shelf labels (Racks):** every floor with a server or a unit has a small label button; on a
+  storage shelf the shelf number is the button. It opens a three-line label: `project:` the
+  product on the floor, `owner:` the server's owner, and the server name. The lines can be
+  edited for that printout only (nothing is saved), then copied or printed.
+- **Labels for a rack or for all racks:** a "Shelf labels" button on each rack card, in the rack
+  detail and on the Racks page (with an "All racks" choice) lists one label per server, with
+  Copy all and Print all. Printing prints only the labels, in bordered boxes.
+- Every role (Viewer, Operator, Admin) can use it. Copy also works on the plain-http lab site.
+
+---
+
+## v2.46.9 — 2026-11-09 — New units get their P/N and name from webpe automatically
+
+### Added
+- **Automatic webpe lookup:** a new tool mode on the lab laptop (`tools/webpe-sync/start-webpe-sync.cmd`)
+  checks every 20 seconds for units that have a serial number and no P/N, looks each one up in
+  webpe SN analysis and fills its P/N, model and product name. A name typed by hand is kept.
+  An unknown serial number is asked again only after 6 hours.
+- **Status on the site:** Scan & Track > Serial numbers and the scan dialog show whether the lookup
+  runs ("Active", "webpe sign-in needed" or "Not running"). After a scan the dialog says the P/N and
+  name will be filled from webpe within a minute.
+
+### Changed
+- **webpe sync tool:** the one-time `--apply` run sends the CSRF header, and a row DCIM refuses no
+  longer blocks the other units in the same batch.
+
+---
+
+## v2.46.8 — 2026-11-09 — 3D twin: servers green/red by power, a card on every shelf, map-style navigation
+
+### Changed
+- **3D twin, power colours:** a server is green when its PDU outlet is ON, red when OFF and
+  grey when there is no reading. The legend names each colour in words.
+- **3D twin, shelf cards:** every shelf of every rack has a card with the server name, its IP
+  and the switch type. The rack you select always shows its full cards; cards of other racks
+  that would show through or float over it are hidden. Every rack shows its 4 floors (a
+  storage rack its 16 shelves), the same floor model as the Racks page.
+- **3D twin, navigation:** map-style moves: drag to pan, wheel or pinch to zoom at the
+  pointer, right-drag or two fingers to rotate and tilt, with gentle inertia. Wheel zoom,
+  orbit and pan keep the camera at least 0.4 m outside every rack, so the view never ends
+  up inside a rack.
+- **3D twin, unit kind:** a unit is shown with the type stored in Lab Manager; the 3D no
+  longer guesses a switch from a serial number or model.
+- **3D twin, edit layout:** a shelf that comes from the Lab Manager floor model is read-only
+  in the 3D editor ("edit it in Racks"); a save that cannot be written shows an error
+  instead of "Saved".
+- **Scan & Track and Racks:** a new unit whose barcode gives only a serial number is saved as
+  a switch (change its type if it is something else). A board part number (900-…, 699-…)
+  read as the serial number is not a switch, and neither is a unit with its own name or a
+  server model.
+
+---
+
 ## v2.46.7 — 2026-11-09 — One unit slot per floor and per storage shelf
 
 ### Changed

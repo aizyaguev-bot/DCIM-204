@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useAccounts } from "../accounts";
 import { applyDetails, CHANGE_LABELS, COLUMN_LABELS, downloadSerialsCsv, loadSerials, parseDetails, previewDetails, requestItems, serialsText } from "../api/serialDetails";
+import { webpeStatusText } from "../api/webpeStatus.js";
+import { useWebpeStatus } from "../api/useWebpeStatus.js";
 
 // Scan & Track > Serial numbers: export every unit's serial number (switches first) to look the units up elsewhere,
 // for example as "Switch" on the SN analysis page, then import the product name and part number found there.
@@ -16,6 +18,14 @@ const STATUS_DONE = { updated: "Updated", unchanged: "No change", not_found: "No
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const placeOf = unit => unit ? `${unit.rack}${unit.u ? ` · U${unit.u}` : ""}${unit.position ? ` · ${unit.position}` : ""}` : "";
 const failure = e => e instanceof TypeError ? "Could not reach the server. Check the connection and try again." : e?.message || "Something went wrong.";
+
+// The automatic webpe lookup on the lab laptop (tools/webpe-sync): whether it runs, signed in to webpe or stopped.
+const WEBPE_TONE = { active: "text-nv-400", problem: "text-amber-300", signin: "text-amber-300", stopped: "text-zinc-400" };
+function WebpeStatusLine({ status, className = "" }) {
+  const line = webpeStatusText(status);
+  if (!line) return null;
+  return <p data-webpe-status={line.state} aria-live="polite" className={`text-xs ${WEBPE_TONE[line.state]} ${className}`}>{line.text}</p>;
+}
 
 function summary(counts, applied) {
   const parts = [`${counts.updated} ${applied ? "updated" : "will change"}`, `${counts.unchanged} unchanged`];
@@ -57,6 +67,7 @@ export default function SerialNumbersPanel({ onChanged }) {
   const [error, setError] = useState("");
   const mounted = useRef(true);
   const listId = useId();
+  const webpe = useWebpeStatus();
   const items = list?.items || [];
   const switches = items.filter(item => item.type === "switch").length;
 
@@ -143,6 +154,7 @@ export default function SerialNumbersPanel({ onChanged }) {
       <div>
         <h2 id={`${listId}-title`} className="font-medium">Serial numbers · {items.length}</h2>
         <p className="text-xs text-zinc-400 mt-1">Every unit with a serial number or barcode{items.length ? `, switches first (${switches})` : ""}. Look each one up as <strong className="text-zinc-200">Switch</strong> in SN analysis, then import the product name and P/N it shows.</p>
+        <WebpeStatusLine status={webpe} className="mt-1"/>
       </div>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={secondary} onClick={exportCsv} disabled={!list}>Export serial numbers</button>

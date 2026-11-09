@@ -168,7 +168,9 @@
     }
     _stopMotion() { this._vel.pan.set(0, 0, 0); this._vel.theta = 0; this._vel.phi = 0; this._zoom.log = 0; this._zoom.anchor = null; }
     // Drop inertia and pending wheel zoom but keep a gesture going (the app stopped the camera in front of a rack).
-    halt() { this._stopMotion(); }
+    // Stops motion after a clamp. A pan in progress takes its grab point again at the corrected camera, so dragging
+    // back moves at once instead of first retracing the part the clamp refused.
+    halt() { this._stopMotion(); const g = this._gesture; if (g && g.grab !== undefined) g.grab = null; this._samples = []; }
     _pointerDown(e) {
       if (!this.enabled) return;
       if (e.pointerType !== 'touch' && ![0, 1, 2].includes(e.button)) return;

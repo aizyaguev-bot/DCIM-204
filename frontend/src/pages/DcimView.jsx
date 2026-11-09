@@ -28,6 +28,8 @@ import { useRemovedServers } from "../removedServers.jsx";
 import { withoutRemoved, restoreServer } from "../api/removedServers.js";
 import UndoToast from "../components/racks/UndoToast.jsx";
 import ScanUnitDialog from "../components/racks/ScanUnitDialog.jsx";
+import ShelfLabelsDialog from "../components/racks/ShelfLabelsDialog.jsx";
+import { buildShelfLabels } from "../shelfLabels.js";
 import useDialogFocus from "../components/racks/useDialogFocus.js";
 import { useStoredState, useMediaQuery, useDebounced, flash, prefersReducedMotion } from "../components/racks/hooks.js";
 import { mergeServerFeeds } from "../labDisplay.js";
@@ -94,6 +96,7 @@ const Icon = {
   grip:  <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor"><circle cx="3" cy="2" r="1.3"/><circle cx="7" cy="2" r="1.3"/><circle cx="3" cy="7" r="1.3"/><circle cx="7" cy="7" r="1.3"/><circle cx="3" cy="12" r="1.3"/><circle cx="7" cy="12" r="1.3"/></svg>,
   edit:  <I d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" size={11}/>,
   trash: <I d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" size={11}/>,
+  tag:   <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><path d="M7 7h.01"/></svg>,
 };
 const Spinner = () => (
   <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -303,7 +306,7 @@ const RackViewContext = createContext({
   visualFor: () => ({ state: "unknown", maintenance: false, word: "Unknown", title: "" }),
   summaryFor: null, matchKeys: null, rowKeep: null,
   coolingByRack: {}, coolingDrop: false, coolingDraggable: false, coolingEditable: false, coolingCanPlace: false,
-  onOpenCooling: null, onPlaceCooling: null, onAddCooling: null, itemsError: false,
+  onOpenCooling: null, onPlaceCooling: null, onAddCooling: null, itemsError: false, onShelfLabels: null,
 });
 
 // SSH slot: empty (and taking no space) until the SSH release sets renderSsh on ServerActionsContext.
@@ -555,7 +558,7 @@ function shelfIndex(u, floors, auto) {
 // slot's first line opens the rest. A storage shelf (floors false) is one row of `slots` unit slots for everything on
 // it, servers and units alike ("+N" on the last); never servers | units.
 function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, sortable = false, floors = true, slots = SHELF_SLOTS.card, unitSlots = FLOOR_UNIT_SLOTS.card }) {
-  const { coolingByRack, coolingDrop, matchKeys } = useContext(RackViewContext);
+  const { coolingByRack, coolingDrop, matchKeys, onShelfLabels } = useContext(RackViewContext);
   const { scanUnit } = useContext(ServerActionsContext);
   const cooling = u > 0 ? coolingByRack?.[rack]?.placed?.[u] || [] : [];
   // Only a place the cooling dialog offers takes a cooling drop: floors 1-RACK_FLOORS (a storage rack: shelves
@@ -574,7 +577,20 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
     ? <button type="button" className="floor-add" data-floor-add={u} onClick={() => scanUnit({ rack, u, label: names, fixed: true })}
         aria-label={addText} title={`${addText} (scan its barcode)`}>+</button>
     : null;
-  const indexCell = <span className="shelf-index" title={index.title}><span>{index.text}</span>{addHere}</span>;
+  // Its shelf label (project, owner, server; ShelfLabelsDialog): a small tag under the "+" of a floor; a storage shelf has
+  // no room for a third line, so its number is the button. Only a floor or shelf with a server or a unit has a label.
+  const labelled = !!onShelfLabels && validFloor(u, rack) && items.length > 0;
+  const labelName = `Label for ${rack} ${word} ${u}`;
+  const labelTitle = `Shelf label · ${rack} · ${floors ? "Floor" : "Shelf"} ${u}`;
+  const number = labelled && !floors
+    ? <button type="button" className="floor-label floor-label-number" data-floor-label={u} aria-label={labelName} title={labelTitle}
+        onClick={() => onShelfLabels({ rack, u })}>{index.text}</button>
+    : <span>{index.text}</span>;
+  const labelHere = labelled && floors
+    ? <button type="button" className="floor-label" data-floor-label={u} aria-label={labelName} title={labelTitle}
+        onClick={() => onShelfLabels({ rack, u })}>{Icon.tag}</button>
+    : null;
+  const indexCell = <span className="shelf-index" title={index.title}>{number}{addHere}{labelHere}</span>;
   const empty = !items.length && !cooling.length;
   const Row = sortable ? SortableServerRow : ServerCell;
   const serverRow = (data, variant, more = null) => <Row key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]}
@@ -769,6 +785,8 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
       <div className="rack-card-badges">
         {!detail && <span className={`rack-status ${summary.status}`}>{summary.statusText}</span>}
         {!detail && summary.maintenancePdus.length > 0 && <span className="maint-badge" title={`In maintenance: ${summary.maintenancePdus.join(", ")}`}>Maintenance</span>}
+        {!detail && view.onShelfLabels && <button type="button" className="icon-btn rack-labels" aria-label={`Shelf labels for ${r.rack}`} title="Shelf labels"
+          onClick={() => view.onShelfLabels({ rack: r.rack })}>{Icon.tag}</button>}
         {editMode && canAdmin && onEdit && <button type="button" className="icon-btn" aria-label={`Edit ${r.rack}`} title="Edit rack" onClick={onEdit}>{Icon.edit}</button>}
         {onToggleCollapse && <button type="button" className="icon-btn rack-collapse" aria-expanded={!collapsed} aria-controls={shelvesId}
           aria-label={`${collapsed ? "Show" : "Hide"} shelves of ${r.rack}`} onClick={onToggleCollapse}>
@@ -1437,6 +1455,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
         <span className={`rack-status ${summary.status}`}>{summary.statusText}</span>
         {summary.maintenancePdus.length > 0 && <span className="maint-badge" title={`In maintenance: ${summary.maintenancePdus.join(", ")}`}>Maintenance</span>}
         {editMode && canAdmin && <button type="button" className="racks-btn racks-btn-sm" onClick={onEdit}>{Icon.edit} Edit rack</button>}
+        {view.onShelfLabels && <button type="button" className="racks-btn racks-btn-sm" data-action="shelf-labels" onClick={() => view.onShelfLabels({ rack: r.rack })}>{Icon.tag} Shelf labels</button>}
       </div>
       <RackFigures r={r} summary={summary} equipment={equipment.length} itemsError={view.itemsError} detail/>
       <LoadBar r={r}/>
@@ -1931,6 +1950,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
   const [activeId,       setActiveId]       = useState(null);
   const [coolingActive,  setCoolingActive]  = useState(null);
   const [pendingMove,    setPendingMove]    = useState(null);
+  const [labelsScope,    setLabelsScope]    = useState(null); // shelf labels: { rack, u } (rack null: every rack)
   const editMode = useContext(EditContext);
   const { scanUnit } = useContext(ServerActionsContext);
   const phone = useMediaQuery("(max-width: 640px)");
@@ -2201,10 +2221,17 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
   const rackChips = useMemo(() => rackStats.map(rs => { const s = summaryFor(rs); return { rack: rs.rack, status: s.status, statusText: s.statusText, on: s.on, total: s.total, storage: s.status === "storage" }; }), [rackStats, summaryFor]);
 
   const overviewEdit = editMode && !r && cooling.editable;
+  // Shelf labels of every rack, from the same rows the cards draw (computed only while the labels dialog is open).
+  const labelGroups = useMemo(() => !labelsScope ? [] : rackStats.map(rs => {
+    const storage = !rackHasFloors(rs.rack);
+    const { rows } = buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems);
+    return { rack: rs.rack, storage, labels: buildShelfLabels([{ rack: rs.rack, storage, rows }], optOwners) };
+  }), [labelsScope, rackStats, rackOrder, rackSlots, customItems, optOwners]);
   const viewCtx = useMemo(() => ({
     ...base, matchKeys: searching ? search.keys : null, rowKeep,
     coolingByRack: cooling.groups.byRack, coolingDrop: overviewEdit, coolingDraggable: overviewEdit, coolingEditable: cooling.editable,
     coolingCanPlace: cooling.canPlace, onOpenCooling: cooling.open, onPlaceCooling: cooling.canPlace ? cooling.edit : null, onAddCooling: cooling.add,
+    onShelfLabels: setLabelsScope,
   }), [base, searching, search, rowKeep, cooling, overviewEdit]);
 
   const countText = searching ? `${search.total} ${search.total === 1 ? "match" : "matches"} in ${search.racks.size} ${search.racks.size === 1 ? "rack" : "racks"}` : "";
@@ -2235,9 +2262,10 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
             rackChips={rackChips} onJump={jumpTo}
             allCollapsed={allCollapsed} onToggleAll={toggleAll} coolingOpen={showPanel} onToggleCooling={() => toggleCooling()}
             coolingTotal={coolingTotal} coolingNeeds={coolingNeeds}/>
-          {phone && <div className="racks-phone-options">
-            <button type="button" className="racks-chip" onClick={toggleAll}>{allCollapsed ? "Expand all" : "Collapse all"}</button>
-          </div>}
+          <div className="racks-phone-options" data-desktop={phone ? undefined : ""}>
+            {phone && <button type="button" className="racks-chip" onClick={toggleAll}>{allCollapsed ? "Expand all" : "Collapse all"}</button>}
+            <button type="button" className="racks-chip" data-action="shelf-labels" onClick={() => setLabelsScope({ rack: null })}>{Icon.tag} Shelf labels</button>
+          </div>
           {hiding && hiddenRacks > 0 && visibleRacks.length > 0 && <p className="racks-hidden-note">
             {hiddenRacks} {hiddenRacks === 1 ? "rack has" : "racks have"} no match · <button type="button" className="racks-link" onClick={clearFind}>{searching ? "Clear search" : "Show all"}</button></p>}
           {hiding && visibleRacks.length === 0 && <p className="racks-empty" role="status">
@@ -2312,6 +2340,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
           </Portal>
         ) : null;
       })()}
+      {labelsScope && <ShelfLabelsDialog groups={labelGroups} scope={labelsScope} onClose={() => setLabelsScope(null)}/>}
       {pendingMove && (
         <Portal>
           <CrossRackMoveModal

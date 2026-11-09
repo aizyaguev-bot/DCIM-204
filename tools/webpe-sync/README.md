@@ -2,8 +2,8 @@
 
 The lab owner wants every serial number (SN) in the lab looked up on the internal **SN analysis** page of
 webpe.nvidia.com, so each unit gets its product name and part number (P/N) in DCIM. webpe needs NVIDIA SSO, so the
-lookup runs as a browser tool on the owner's laptop. `sync.cjs` here is that tool (see "Sync tool" at the end); the rest describes what DCIM
-offers it. Everything here also works by hand today from **Scan & Track > Serial numbers** in the site.
+lookup runs as a browser tool on the owner's laptop. `sync.cjs` here is that tool (see "Automatic lookup" and "Sync tool" at
+the end); the rest describes what DCIM offers it. Everything here also works by hand today from **Scan & Track > Serial numbers** in the site.
 
 ## The flow
 
@@ -146,3 +146,51 @@ cookie.
    Report: `sync-applied.csv`. Run the dry run again afterwards: it should report 0 units to change.
 
 The DCIM address comes from `DCIM_URL` (or `vm_site` in the git-ignored `.team/ops/release.local.json`).
+
+## Automatic lookup (`start-webpe-sync.cmd`)
+
+Every unit added to DCIM with a serial number (or barcode) and no P/N gets its P/N, model, product name and type
+switch from webpe within a minute, without running anything by hand. It runs on the lab laptop, because only that
+laptop can sign in to webpe.
+
+The owner's steps, once:
+
+1. Double-click `tools\webpe-sync\start-webpe-sync.cmd` (or run `start-webpe-sync.cmd --install-startup` once, so it
+   also starts by itself at every sign-in to Windows).
+2. An Edge window opens with its own profile (`%LOCALAPPDATA%\webpe-profile`) on two tabs: DCIM and webpe. Sign in to
+   both there (DCIM with an Operator or Admin account). The profile remembers the sign-ins; keep that window open
+   (minimized is fine).
+3. Done. Scan & Track > Serial numbers and the scan dialog show "webpe auto lookup: Active · last check 10:05 · 3 looked
+   up today". "webpe sign-in needed on the lab laptop" means: sign in to webpe again in that Edge window. "Not running"
+   means: start `start-webpe-sync.cmd` again.
+
+What it does: `node sync.cjs --watch` checks every 20 seconds (`WEBPE_INTERVAL`). It reads `GET /api/inventory/serials`
+in the DCIM tab, looks up each unit that has a serial number or barcode and no P/N with the webpe tab's own session,
+and saves the found ones with `POST /api/inventory/serial-details` (`mark_switch`, no `overwrite`, `If-Match`; on 409 it
+reads again and retries once). Only those units' rows are sent, so a name someone typed is kept. Name = the product
+(first part of the description), model = product line, type switch when the description says SWITCH - the same rule
+as the one-shot sync. After every check it reports to `PUT /api/inventory/webpe-status`, which the site shows (Active
+while a report came within 3 intervals); a long check (up to 25 lookups, a slow webpe) also reports once per interval
+while it runs, so the site keeps saying Active.
+
+- It remembers what it looked up in `%LOCALAPPDATA%\webpe-sync\state.json`: an SN webpe does not know is asked again
+  after 6 hours, an SN that failed after 5 minutes; a signed-out webpe marks nothing, so those units are looked up right
+  after signing in again. A broken or hand-edited state file is not a problem: bad entries are dropped and looked up
+  again.
+- If DCIM refuses what webpe gave for one unit (a P/N longer than 120 characters, say), the units of that check are
+  saved one by one: the others are filled, the refused one is reported ("DCIM refused the webpe details of ...") and
+  asked again after 6 hours. Control characters are removed from webpe text, and a product line DCIM cannot store is
+  left out.
+- Signed out of webpe (401, a redirect to the sign-in page, or a page instead of data): it reports "webpe sign-in needed"
+  and keeps waiting. Signed out of DCIM: it cannot report to the site (the site then says "Not running"); the window
+  of the tool says "DCIM sign-in needed".
+- No password, cookie or token is read, printed or stored: the lookups and saves run inside the two signed-in tabs.
+- Edge's remote debugging listens on 127.0.0.1 only. `WEBPE_CDP_PORT` (default 9333), `DCIM_URL` (default `vm_site` in
+  `.team/ops/release.local.json`) and `WEBPE_PAGE` (the page the webpe tab opens; the SN analysis page) can be set
+  before starting. The first start installs `playwright-core` (the library only, no browser download) into
+  `%LOCALAPPDATA%\webpe-sync\node` when Playwright is not installed. Node.js must be installed.
+- To stop it: close the "webpe auto lookup" window. To stop starting it at sign-in: delete "webpe auto lookup" from the
+  Startup folder (`shell:startup`).
+
+Test: `tests/browser/webpe-auto.cjs` runs all of this against a local mock of webpe and the test fixture
+(`WEBPE_CDP` and `WEBPE_ORIGIN` point the tool at them).
