@@ -197,7 +197,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
         note: document.querySelector('#dBody .act-note')?.textContent, more: [...document.querySelectorAll('#dBody details.more summary')].map(s => s.textContent) };
     });
     assert.equal(dr.name, 'OPT11'); assert.equal(dr.id, 'Server · host opt11'); assert.equal(dr.health, 'Up');
-    assert.equal(dr.cells.Owner, 'Fixture owner'); assert.equal(dr.cells.Console, 'Free'); assert.match(dr.cells.Power, /^On · \d+ W$/); assert.ok(dr.cells.Ping);
+    assert.equal(dr.cells.Owner, 'Fixture owner'); assert.equal(dr.cells.Console, 'Free'); assert.match(dr.cells.Power, /^On · \d+ W$/); assert.ok(dr.cells['Ping monitor']);   // WP1: the ping cell is labelled "Ping monitor"
     assert.equal(dr.kvm, true, 'Open console = the live KVM 01 port 1'); assert.equal(dr.kvmText, 'Open console'); assert.equal(dr.power, 'Power…');
     assert.equal(dr.note, 'Power actions always ask for confirmation and show the exact PDU and outlet.');
     assert.ok(dr.conn.includes('PDU 01 · outlet 1 | On'), dr.conn.join(' / ')); assert.ok(dr.conn.includes('KVM 01 · port 1 | Free'));
@@ -348,11 +348,11 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     await page.evaluate(() => { __twin.toggleEdit(true); __twin.select('LIVE-opt11', { keepCamera: true }); }); await page.waitForTimeout(300);
     const ed = await page.evaluate(() => {
       const mv = document.querySelector('#eMove'), toast = [...document.querySelectorAll('#toasts .toast')].pop()?.getBoundingClientRect(), vp = document.querySelector('#viewport').getBoundingClientRect();
-      return { w: Math.round(document.querySelector('#detail').getBoundingClientRect().width), name: document.querySelector('#dName').textContent, where: document.querySelector('#dBody .where').textContent, move: [mv.textContent, Math.round(mv.getBoundingClientRect().height), mv.className], mat: document.querySelector('#eMaterialize').className,
+      return { w: Math.round(document.querySelector('#detail').getBoundingClientRect().width), name: document.querySelector('#dName').textContent, where: document.querySelector('#dBody .where').textContent, move: [mv.textContent, Math.round(mv.getBoundingClientRect().height), mv.className], mat: [!!document.querySelector('#eMaterialize'), document.querySelector('#eRacks')?.className, document.querySelector('#eRacks')?.textContent],   // WP1: no twin-only copy of a Lab Manager record; details are edited in Racks
         hint: document.querySelector('#dBody .edit-hint').textContent, hFont: getComputedStyle(document.querySelector('#dBody .lbl-lg')).fontSize, hCase: getComputedStyle(document.querySelector('#dBody .lbl-lg')).textTransform, text: document.querySelector('#dBody').innerText,
         toastDx: toast ? Math.abs(toast.left + toast.width / 2 - (vp.left + vp.width / 2)) : null, toastBottom: toast?.bottom, legendTop: document.querySelector('#legend').getBoundingClientRect().top, zoomTop: document.querySelector('.zoombar').getBoundingClientRect().top };
     });
-    assert.deepEqual([ed.w, ed.name, ed.move, ed.mat, ed.hFont, ed.hCase], [380, 'OPT11', ['Move…', 36, 'kbtn secondary md'], 'link', '12px', 'uppercase']);
+    assert.deepEqual([ed.w, ed.name, ed.move, ed.mat, ed.hFont, ed.hCase], [380, 'OPT11', ['Move…', 36, 'kbtn secondary md'], [false, 'kbtn secondary md', 'Edit details in Racks'], '12px', 'uppercase']);
     assert.match(ed.where, /^Rack-01 › Shelf \d › Left$/); assert.match(ed.hint, /^Edit mode/); assert.doesNotMatch(ed.text, /SETUP-|SHELF-|\bL\d\b/);
     // toasts are centred on the 3D view, above the legend and the zoom bar
     assert.ok(ed.toastDx !== null && ed.toastDx < 2 && ed.toastBottom <= Math.min(ed.legendTop, ed.zoomTop), 'toast over the 3D view: ' + JSON.stringify({ dx: ed.toastDx, b: ed.toastBottom, lg: ed.legendTop, zb: ed.zoomTop }));

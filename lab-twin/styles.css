@@ -396,6 +396,7 @@ button.rf-free.dest:hover { background: rgba(34,211,238,.08); }
 .scell { padding: 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line); min-width: 0; }
 .scell .sl { color: var(--muted); font-size: 11px; }
 .scell .sv { overflow-wrap: anywhere; }
+.scell .ss { color: var(--muted); font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
 .scell.ok .sv { color: #86efac; } .scell.bad .sv { color: #fca5a5; } .scell.maint .sv { color: #e9d5ff; }
 .act-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
 .act-note { font-size: 12px; color: var(--muted); }

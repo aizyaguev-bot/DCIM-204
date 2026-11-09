@@ -37,7 +37,7 @@ const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
   await drag('left',30,10);await page.mouse.down();await page.mouse.move(850,560,{steps:8});await page.evaluate(()=>window.dispatchEvent(new Event('blur')));await page.mouse.move(750,580,{steps:10});await page.mouse.up();await stable('window blur');
   await page.setViewportSize({width:1000,height:720});await page.waitForTimeout(200);a=await stable('resize');assert.ok(a.p.every(Number.isFinite));
   await page.locator('#vFit').click();await page.waitForTimeout(650);a=await snapshot();assert.ok(a.distance>3);checks.push('fit lab');
-  const selection=await page.evaluate(()=>{const t=__twin;const r=[...t.S.recs.values()].find(r=>r.cat==='item'&&r.item?.type==='opt');t.select(r.id,{keepCamera:true});return r.id;});
+  const selection=await page.evaluate(()=>{const t=__twin;const r=[...t.S.recs.values()].find(r=>r.cat==='item'&&r.item?.type==='opt'&&r.group);t.select(r.id,{keepCamera:true});return r.id;});
   await page.waitForTimeout(200);assert.equal((await snapshot()).selected,selection);
   let same=await snapshot();await page.locator('#search').fill('OPT');await page.waitForTimeout(100);assert.ok(dist(same.p,(await snapshot()).p)<1e-6);checks.push('UI does not move camera');
   await page.locator('#search').fill('');await page.locator('#vFocus').click();await page.waitForTimeout(650);a=await snapshot();assert.ok(dist(a.p,same.p)>.01);checks.push('focus selection');

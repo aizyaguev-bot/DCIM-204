@@ -55,7 +55,7 @@
     filters: { zone: '', setup: '', statuses: new Set(STATUSES), onlyLow: false, q: '' },
     dirty: false,                        // unsaved edits to S.data (draft mirrored in localStorage)
     settings: LS.get('settings', { url: '', pass: '', poll: true }),
-    live: { connected: false, connecting: false, errorStatus: null, retrying: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, ping: {}, updatedAt: null, error: null, timer: null },
+    live: { connected: false, connecting: false, errorStatus: null, retrying: false, devices: [], engineers: [], pdu: {}, kvm: {}, rackSlots: {}, rackOrder: {}, sw: {}, owners: {}, rackItems: {}, chillers: null, rackOverrides: {}, ping: {}, pduAt: {}, pduErr: {}, updatedAt: null, error: null, timer: null },
     labelMode: 'setups', wallsVisible: true, zonesVisible: true,
     colorBy: LS.get('colorBy', 'health') === 'status' ? 'status' : 'health', showPower: !!LS.get('showPower', false), envPanel: !!LS.get('envPanel', false),
     attnSeen: new Map(), drawerOpen: LS.get('drawerOpen', {}), racksList: LS.get('racksList', 'tree') === 'inv' ? 'inv' : 'tree',
@@ -666,15 +666,17 @@
       const servers = new Map();
       pdus.forEach(pdu => {
         const stored = pdu.labels || {}; const liveOut = live.pdu[pdu.id]?.reachable ? live.pdu[pdu.id].outlets || [] : []; const liveByN = Object.fromEntries(liveOut.map(o => [String(o.number), o]));
+        // an old reading (the last polls failed) still names the outlets, but its on / off is not shown as current
+        const fresh = pduFresh(pdu.id, live); const stateOf = o => (fresh && o?.state) || 'unknown'; const wattsOf = o => (fresh ? o?.watts ?? null : null);
         Object.entries(stored).forEach(([num, label]) => {
           if (!isServerLabel(label) || isRemoved(label)) return; const key = optKey(label); if (servers.has(key)) return;
           const lo = liveByN[num];
-          servers.set(key, { key, name: label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: lo?.state ?? 'unknown', watts: lo?.watts ?? null });
+          servers.set(key, { key, name: label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: parseInt(num, 10), state: stateOf(lo), watts: wattsOf(lo) });
         });
         liveOut.forEach(o => {
           if (!isServerLabel(o.label) || isRemoved(o.label)) return; const key = optKey(o.label);
-          if (servers.has(key)) { const e = servers.get(key); e.state = o.state; e.watts = o.watts ?? null; return; }
-          servers.set(key, { key, name: o.label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: o.state, watts: o.watts ?? null });
+          if (servers.has(key)) { const e = servers.get(key); e.state = stateOf(o); e.watts = wattsOf(o); return; }
+          servers.set(key, { key, name: o.label.trim(), rack: live.rackOverrides[key] || pdu.rack || null, pduId: pdu.id, pduName: pdu.name, outlet: o.number, state: stateOf(o), watts: wattsOf(o) });
         });
       });
       // KVM cross-reference
@@ -748,12 +750,28 @@
       const liveShelves = new Set(liveEq.map(i => i.shelf).filter(Boolean));
       items = items.filter(i => !(i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && (liveNames.has(norm(i.name)) || (i.shelf && liveShelves.has(i.shelf)))));
       items.forEach(i => { if (i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && i.setup && setups.find(x => x.id === i.setup)?.dcimRack) i.liveWarning = LIVE_WARN.notInRackItems; });
+      // Lab Manager is the inventory of a DCIM-mapped rack: a lab-data.json server, unit, PDU or KVM that Lab Manager
+      // does not know is not drawn there (it would take a floor's server / unit slot next to the real one); it is listed
+      // under Unplaced as "In lab-data.json, not in Lab Manager". lab-data.json keeps the geometry and the inventory of
+      // unmapped racks; offline nothing changes.
+      const mapped = sid => !!(sid && setups.find(x => x.id === sid)?.dcimRack);
+      const jsonOnly = i => !i.id.startsWith('LIVE-') && (
+        (i.type === 'opt' && i.live?.inDcim === false) || i.type.startsWith('equip-') || ((i.type === 'pdu' || i.type === 'kvm') && !i.live?.device));
+      items.forEach(i => {
+        if (!jsonOnly(i) || !mapped(i.setup)) return;
+        i.notInLm = true; i.jsonPlace = placeText(i); i.setup = null; i.shelf = null; i.placement = undefined; i.side = undefined; i.zone = null;
+      });
     }
     // DCIM racks without a physical setup
     const liveRacks = live.connected ? [...new Set(live.devices.filter(x => x.kind === 'pdu' || x.kind === 'rack').map(x => x.rack).filter(Boolean))] : (d.dcim?.pdus || []).map(p => p.rack);
     const unmappedRacks = liveRacks.filter(r => !setupByRack[r]);
     S.model = { setups, setupByRack, items, unmappedRacks, liveRacks };
+    S.freshSig = pduFreshSig();
   }
+  // Which PDU readings are fresh now; the 1 s ticker rebuilds the items when one turns stale between polls (a poll that
+  // hangs or polling switched off), so a tower never stays green / red on an old reading.
+  function pduFreshSig() { return S.live.connected ? (S.live.devices || []).filter(d => d.kind === 'pdu').map(d => (pduFresh(d.id) ? 1 : 0)).join('') : ''; }
+  function checkPduFreshness() { if (S.model && S.live.connected && pduFreshSig() !== S.freshSig) { computeModel(); buildItems({ refresh: true }); } }
   function pickOv() { return {}; }
 
   // ───────────────────────────────────────────────────────────── health, names, rows, ping, feeds (pure helpers)
@@ -770,6 +788,7 @@
       if (maintOf(live, it.dcim?.pdu)) return { h: 'maint', why: 'Maintenance' };
       if (it.live.state === 'off') return { h: 'down', why: 'Off' };
       if (it.live.state === 'on') return live.ping?.[pingKey(it.name)]?.status === 'down' ? { h: 'down', why: 'No ping' } : { h: 'up', why: '' };
+      if (!pduFresh(it.dcim?.pdu, live)) return { h: 'unknown', why: live.pduAt?.[it.dcim?.pdu] ? 'Power reading stale' : 'No power reading' };
       return { h: 'unknown', why: live.pdu?.[it.dcim?.pdu]?.reachable === false ? 'PDU unreachable' : 'Power state unknown' };
     }
     if (it.type === 'pdu') {
@@ -791,7 +810,7 @@
   // Power state of a server for its body colour and ON / OFF tag: 'on' | 'off' | 'unknown' (offline, not in the live
   // DCIM, PDU unreachable or no reading yet). Maintenance keeps its own health marker (outline, LED, label dot).
   function powerOf(it, live = S.live) {
-    if (!it || it.type !== 'opt' || !live?.connected || it.live?.inDcim !== true) return 'unknown';
+    if (!it || it.type !== 'opt' || !live?.connected || it.live?.inDcim !== true || !pduFresh(it.dcim?.pdu, live)) return 'unknown';
     return it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unknown';
   }
   // What kind of unit sits next to a server, and its type / model for the shelf label. The kind is the unit's stored
@@ -869,6 +888,11 @@
   }
   function ageText(ms, now = Date.now()) { const s = Math.max(0, (now - ms) / 1000); return s < 60 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' days ago'; }
   const hhmm = ms => { const d = new Date(ms); const p = n => String(n).padStart(2, '0'); return `${p(d.getHours())}:${p(d.getMinutes())}`; };
+  // PDU readings carry their age: S.live.pduAt[id] = when the last status answer arrived, S.live.pduErr[id] = when the
+  // last poll failed. A reading is fresh while it is at most 2.5 refresh intervals old (the live pill turns amber at the
+  // same age); an older one is never shown as ON / OFF (grey, "Stale – last reading hh:mm").
+  function refreshMs() { return (window.DCIM_ACCOUNT_PREFS?.refresh_seconds || 15) * 1000; }
+  function pduFresh(id, live = S.live, now = Date.now()) { const at = live?.pduAt?.[id]; return !!at && now - at <= 2.5 * refreshMs(); }
   // First time this page saw each issue (only maintenance and ping have a server time). Pruned only with live data.
   function noteAttentionSeen() {
     const now = Date.now(); const keys = new Set();
@@ -958,7 +982,7 @@
     if (su && it.placement === 'rack-strips') return `${rack} › power strips`;
     if (su) return rack;
     if (it.storage) return storageName(S.data.storage.find(s => s.id === it.storage) || { id: it.storage });
-    if (rec.unplaced) return it.live?.rack ? `${it.live.rack} · no shelf in 3D` : 'Not placed';
+    if (rec.unplaced) return it.notInLm ? 'In lab-data.json, not in Lab Manager' : it.live?.rack ? `${it.live.rack} · no shelf in 3D` : 'Not placed';
     const a = anchorOf(rec); return a ? `Floor · x ${DX(a.x).toFixed(2)} · z ${a.z.toFixed(2)} m` : '—';
   }
   // Drawer status cells (text only; escaped by the caller)
@@ -966,9 +990,19 @@
     if (!S.live.connected) return 'No live data';
     if (it.live?.inDcim !== true) return 'Not in live DCIM';
     if (inMaintenance(it.dcim?.pdu)) return 'Maintenance';
+    const id = it.dcim?.pdu; const at = S.live.pduAt?.[id];
+    if (!at) return 'No data';
+    if (!pduFresh(id)) return `Stale – last reading ${hhmm(at)}`;
     if (it.live.state === 'on') return 'On' + (it.live.watts != null ? ` · ${Math.round(it.live.watts)} W` : '');
     if (it.live.state === 'off') return 'Off';
-    return S.live.pdu?.[it.dcim?.pdu]?.reachable === false ? 'Unknown · PDU unreachable' : 'Unknown';
+    return S.live.pdu?.[id]?.reachable === false ? 'Unknown · PDU unreachable' : 'Unknown';
+  }
+  // Where the power reading comes from and how old it is: "PDU 01 · outlet 2 · 8 s ago" (· "last poll failed hh:mm").
+  function powerSource(it) {
+    if (!S.live.connected || it?.live?.inDcim !== true) return '';
+    const id = it.dcim?.pdu; const at = S.live.pduAt?.[id]; const err = S.live.pduErr?.[id];
+    const age = !at ? 'no reading yet' : Date.now() - at < 60000 ? Math.max(0, Math.round((Date.now() - at) / 1000)) + ' s ago' : ageText(at);
+    return [it.dcim?.pduName || id || 'PDU ?', `outlet ${it.dcim?.outlet ?? '?'}`, age, err && (!at || err > at) ? `last poll failed ${hhmm(err)}` : ''].filter(Boolean).join(' · ');
   }
   function pingText(it) {
     if (!S.live.connected) return 'No live data';
@@ -1051,7 +1085,7 @@
       opts.filter(o => o.live?.inDcim).forEach(o => {
         const where = `${shelfOf(o)} · outlet #${o.dcim?.outlet ?? '?'} on ${o.dcim?.pduName || o.dcim?.pdu || 'the PDU'}`;
         if (o.live.state === 'off') add('warn', 'opt-off', o.id, `${o.name} is off`, at(o.setup, `${where} is off`), o.id, o.setup);
-        else if (o.live.state !== 'on' && live.pdu?.[o.dcim?.pdu]?.reachable === true) add('warn', 'opt-unknown', o.id, `${o.name} state unknown`, at(o.setup, `${where} reports no state`), o.id, o.setup);
+        else if (o.live.state !== 'on' && live.pdu?.[o.dcim?.pdu]?.reachable === true && pduFresh(o.dcim?.pdu, live, now)) add('warn', 'opt-unknown', o.id, `${o.name} state unknown`, at(o.setup, `${where} reports no state`), o.id, o.setup);
         // outlet on but the server does not answer ping (only when ping monitoring knows the host)
         const ping = live.ping?.[pingKey(o.name)];
         if (o.live.state === 'on' && ping?.status === 'down') add('warn', 'ping-down', o.id, `${o.name} not answering ping`, at(o.setup, `${shelfOf(o)} · outlet on`), o.id, o.setup, Date.parse(ping.lastUpAt || ''));
@@ -1079,7 +1113,9 @@
       add('info', 'offline', st === 'off' || st === 'signedout' ? 'live' : st, text, hint); out[out.length - 1].state = st;
     }
     // static checks (also offline)
-    [...(recs ? recs.values() : [])].filter(r => r.unplaced).forEach(r => add('warn', 'unplaced', r.id, `${r.def?.name || r.id} has no position`, 'No place in 3D — place it with Edit layout (Move) or in Lab Manager', r.id, r.setup));
+    [...(recs ? recs.values() : [])].filter(r => r.unplaced).forEach(r => r.item?.notInLm
+      ? add('warn', 'unplaced', r.id, `${r.def?.name || r.id}: in lab-data.json, not in Lab Manager`, `lab-data.json puts it on ${r.item.jsonPlace || 'a mapped rack'}; Lab Manager holds that rack's inventory — add it in Racks if it is really there`, r.id, null)
+      : add('warn', 'unplaced', r.id, `${r.def?.name || r.id} has no position`, 'No place in 3D — place it with Edit layout (Move) or in Lab Manager', r.id, r.setup));
     (model.unmappedRacks || []).forEach(rack => add('warn', 'unmapped-rack', rack, `DCIM rack ${rack} has no physical setup`, 'Assign it to a rack with Edit layout › rack details › DCIM rack'));
     const lowMap = (model.setups || []).filter(s => s.dcimMappingConfidence === 'low');
     if (lowMap.length) add('info', 'mapping', 'setups', lowMap.length === 1 ? `${lowMap[0].id} rack mapping unverified` : `${lowMap.length} rack mappings unverified`, `Physical rack ↔ Rack-0X not verified: ${lowMap.map(s => s.id).join(', ')}`, lowMap[0].id);
@@ -1287,7 +1323,10 @@
     const el = $('#unplaced'); const list = [...S.recs.values()].filter(r => r.unplaced); const m = S.model;
     let html = '';
     if (m.unmappedRacks.length) html += `<div class="zone-h">DCIM racks without a physical rack</div>` + m.unmappedRacks.map(r => `<div class="tn static"><span class="st" style="background:#fbbf24"></span><span class="nm">${esc(r)}</span><span class="tag">assign in rack details</span></div>`).join('');
-    if (list.length) html += `<div class="zone-h">Objects with no place in 3D</div>` + list.map(r => `<div class="tn" data-id="${esc(r.id)}" tabindex="0" role="button">${dot(r)}<span class="nm item" dir="auto">${esc(r.def.name)}</span><span class="tag">${esc(ITEM_KIND[r.item.type] || r.item.type)}</span></div>`).join('');
+    const row = r => `<div class="tn" data-id="${esc(r.id)}" tabindex="0" role="button">${dot(r)}<span class="nm item" dir="auto">${esc(r.def.name)}</span><span class="tag">${esc(ITEM_KIND[r.item.type] || r.item.type)}</span></div>`;
+    const other = list.filter(r => !r.item?.notInLm), jsonOnly = list.filter(r => r.item?.notInLm);
+    if (other.length) html += `<div class="zone-h">Objects with no place in 3D</div>` + other.map(row).join('');
+    if (jsonOnly.length) html += `<div class="zone-h" title="lab-data.json puts these on DCIM-mapped racks, whose inventory comes from Lab Manager">In lab-data.json, not in Lab Manager</div>` + jsonOnly.map(row).join('');
     if (!html) html = `<div class="muted small" style="padding:8px">Everything is placed.</div>`;
     el.innerHTML = html;
     $$('.tn[data-id]', el).forEach(n => { n.onclick = () => activateTreeRow(n.dataset.id); n.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTreeRow(n.dataset.id); } }; });
@@ -1520,7 +1559,7 @@
     hb.className = 'hbadge' + (h ? ' h-' + h.h : ' hidden'); hb.textContent = h ? HEALTH[h.h].t : ''; hb.title = h?.why || '';
     $('#detail').setAttribute('aria-label', `${$('#dName').textContent} details`);
   }
-  const cell = (label, value, cls = '') => `<div class="scell${cls ? ' ' + cls : ''}"><div class="sl">${esc(label)}</div><div class="sv" dir="auto">${esc(value)}</div></div>`;
+  const cell = (label, value, cls = '', src = '') => `<div class="scell${cls ? ' ' + cls : ''}"><div class="sl">${esc(label)}</div><div class="sv" dir="auto">${esc(value)}</div>${src ? `<div class="ss" dir="auto">${esc(src)}</div>` : ''}</div>`;
   const section = (title, body) => `<section class="sec"><h3 class="sec-h">${title}</h3>${body}</section>`;
   const more = (key, title, body) => `<details class="more" data-more="${esc(key)}"${S.drawerOpen[key] ? ' open' : ''}><summary>${title}</summary><div class="more-b">${body}</div></details>`;
   function inventoryKv(rec) {
@@ -1566,7 +1605,7 @@
       const pw = powerTarget(it); const kvLive = kvmTargets(it); const stale = live && !pw;
       const maint = pw && inMaintenance(pw.pduId);
       const pState = powerText(it);
-      html += section('Status', `<div class="sgrid">${cell('Power', pState, /^On/.test(pState) ? 'ok' : /^Off|unreachable/.test(pState) ? 'bad' : '')}${cell('Ping', pingText(it), /^Up/.test(pingText(it)) ? 'ok' : /^Down/.test(pingText(it)) ? 'bad' : '')}${cell('Owner', it.owner || '—')}${cell('Console', consoleText(it))}</div>`);
+      html += section('Status', `<div class="sgrid">${cell('Power', pState, /^On/.test(pState) ? 'ok' : /^Off|unreachable/.test(pState) ? 'bad' : '', powerSource(it))}${cell('Ping monitor', pingText(it), /^Up/.test(pingText(it)) ? 'ok' : /^Down/.test(pingText(it)) ? 'bad' : '')}${cell('Owner', it.owner || '—')}${cell('Console', consoleText(it))}</div>`);
       let act;
       if (!canOperate) act = `<div class="note readonly-note">Read-only · Power and console need the Operator role.</div>`;
       else {
@@ -1752,11 +1791,14 @@
     if (it.id.startsWith('LIVE-') && it.type.startsWith('equip-')) return 'item:' + it.id.slice(5);
     return null;
   }
+  // Lab Manager's Racks tab for a rack (the twin may be embedded in the Lab Manager page: links open in the whole window)
+  function racksHref(rack) { const base = (S.settings.url || '').replace(/\/$/, ''); return `${base}/?tab=racks${rack ? '&rack=' + encodeURIComponent(rack) : ''}`; }
   async function saveDcimOwner(key, name) {
     const person = name ? S.live.engineers.find(p => p.name === name) : null;
     if (name && !person) throw new Error('Choose an engineer from the list');
     S.live.owners = await layoutWrite(() => api('/api/opt-owners/' + encodeURIComponent(key), { method: 'PUT', body: JSON.stringify({ engineer_id: person ? person.id : null }) }));
     computeModel(); buildItems();
+    refreshSoon();   // read back what Lab Manager stores (and what others changed meanwhile)
   }
   function findDef(id) { const d = S.data; return d.setups.find(x => x.id === id) || d.shelves.find(x => x.id === id) || d.storage.find(x => x.id === id) || d.items.find(x => x.id === id) || null; }
   function patchDef(id, patch) { const def = findDef(id); if (!def) return false; Object.entries(patch).forEach(([k, v]) => { if (v === undefined) delete def[k]; else def[k] = v; }); markDirty(); return true; }
@@ -1937,12 +1979,12 @@
       computeModel(); buildItems();
     }
   }
-  function disconnect() { ++liveSession; S.live.connected = false; S.live.connecting = false; S.live.error = null; S.live.errorStatus = null; S.live.retrying = false; S.live.signedOut = false; S.live.updatedAt = null; S.live.ping = {}; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
+  function disconnect() { ++liveSession; S.live.connected = false; S.live.connecting = false; S.live.error = null; S.live.errorStatus = null; S.live.retrying = false; S.live.signedOut = false; S.live.updatedAt = null; S.live.ping = {}; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.pduAt = {}; S.live.pduErr = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
   // 401 = the session expired or the user signed out: never keep showing frozen data as "Live".
   // Data polling stops; only the public auth status is checked until someone signs in again.
   function signedOut() {
     if (!S.live.signedOut) {
-      ++liveSession; S.live.signedOut = true; S.live.connected = false; S.live.connecting = false; S.live.updatedAt = null; S.live.ping = {}; S.live.pdu = {}; S.live.kvm = {};
+      ++liveSession; S.live.signedOut = true; S.live.connected = false; S.live.connecting = false; S.live.updatedAt = null; S.live.ping = {}; S.live.pdu = {}; S.live.pduAt = {}; S.live.pduErr = {}; S.live.kvm = {};
       if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null;
       pill('error', 'Signed out · sign in to resume'); $('#sStatus').textContent = 'Signed out — sign in to Lab Manager again; live data resumes automatically.';
       toast('Signed out — live data paused until you sign in again', 'err');
@@ -1961,7 +2003,7 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) resumeAfterSignIn(); });
   // A reachable PDU reports its real outlets; remember how many, so an unreachable PDU still shows its own outlet count.
   function setPduStatus(id, s) {
-    S.live.pdu[id] = s;
+    S.live.pdu[id] = s; S.live.pduAt[id] = Date.now();
     const n = s?.reachable && Array.isArray(s.outlets) ? s.outlets.length : 0;
     if (n && S.pduOutletsSeen[id] !== n) { S.pduOutletsSeen[id] = n; LS.set('pduOutlets', S.pduOutletsSeen); }
   }
@@ -2005,7 +2047,7 @@
       // refresh: keep the detail panel's scroll / an editor that has focus, never move the camera.
       computeModel(); buildItems({ refresh: true });
       await Promise.all([
-        ...pdus.map(p => api(`/api/pdus/${p.id}/status`).then(s => { if (session === liveSession) setPduStatus(p.id, s); }).catch(() => {})),
+        ...pdus.map(p => api(`/api/pdus/${p.id}/status`).then(s => { if (session === liveSession) setPduStatus(p.id, s); }).catch(() => { if (session === liveSession) S.live.pduErr[p.id] = Date.now(); })),
         ...kvms.map(k => api(`/api/kvms/${k.id}/status`).then(s => { if (session === liveSession) S.live.kvm[k.id] = s; }).catch(() => {})),
         refreshPing(session),
       ]);
@@ -3395,6 +3437,7 @@
       if (!fresh.rackItems.etag) throw new Error('Refresh the backend connection before moving equipment');
       S.live.rackItems = await layoutWrite(() => api('/api/rack-items', { method: 'PUT', headers: { 'If-Match': fresh.rackItems.etag }, body: JSON.stringify(items) }));
     }
+    refreshSoon();   // read back the layout Lab Manager stores now
     return dest.map(m => `${m.rack} · U${m.u}`);
   }
   const setupName = id => rackName(S.data.setups.find(x => x.id === id) || { id });
@@ -3436,6 +3479,10 @@
     if (kind && target.cat === 'setup') { const low = recsOf(r => r.cat === 'shelf' && r.setup === target.id).sort((a, b) => a.level - b.level)[0]; if (low) target = low; }
     const plan = { id, rec, mit, def, name: it.name || id, kind, target, from: placeText(it), to: targetText(target, kind), occupant: null, swappable: false, swapWhy: '', source: null, error: null, same: false };
     if (kind) { try { dcimDestination(target); } catch (e) { plan.error = e.message; } }
+    else if (S.live.connected && (it.type === 'opt' || it.type === 'pdu' || it.type === 'kvm' || String(it.type).startsWith('equip-'))) {
+      const sid = target.cat === 'shelf' ? target.setup : target.cat === 'setup' ? target.id : null; const rack = sid ? dcimRackOf(S.data.setups.find(s => s.id === sid) || {}) : '';
+      if (rack) plan.error = `${rack} gets its servers and units from Lab Manager — add ${plan.name} there in Racks`;
+    }
     if (target.cat !== 'shelf') return plan;
     if (it.shelf === target.id) { plan.same = true; return plan; }
     const isPC = it.type === 'opt';
@@ -3529,7 +3576,15 @@
   function renderEditor(rec) {
     // The v3 drawer frame (same header, 12 px section headings), Kaizen-size controls; places are written like the
     // drawer's Location ("Rack-01 › Shelf 1 › Left"), internal ids stay in the Inventory section of the drawer.
-    const def = rec.def; const it = rec.item; const isLive = rec.id.startsWith('LIVE-');
+    // A Lab Manager record (live-only, or a lab-data.json record matched to a live server, or moved through Lab Manager)
+    // gets only Move and Owner here; name, type and PDU are edited in Racks (the link opens it in the whole window).
+    const def = rec.def; const it = rec.item;
+    const isLive = rec.cat === 'item' && (rec.id.startsWith('LIVE-') || it?.live?.inDcim === true || !!movesViaDcim(it));
+    // While connected, Lab Manager holds the inventory of a DCIM-mapped rack (and a derived floor is never in
+    // lab-data.json): new servers / units are added in Racks, not as twin-only records.
+    const rackOfSetup = sid => dcimRackOf(S.data.setups.find(s => s.id === sid) || {}) || '';
+    const lmRack = sid => (S.live.connected && rackOfSetup(sid)) || '';
+    const racksLink = (text, id, rack) => `<a class="kbtn secondary md" id="${id}" href="${esc(racksHref(rack))}" target="_top" rel="noopener">${text}</a>`;
     const H = t => `<h3 class="lbl-lg">${t}</h3>`;
     const field = (t, id) => `<label class="lbl-lg" for="${id}">${t}</label>`;
     const where = `<div class="where" dir="auto">${esc(placeLabel(rec))}</div>`;
@@ -3543,7 +3598,8 @@
           <div class="edit-note">Live from Lab Manager. Moving it writes the rack and U slot back into Lab Manager.</div>
           ${movesViaDcim(it) ? `<div class="row-lg">${moveBtn}</div>` : ''}</section>
         ${dcimOwnerKey(it) ? `<section class="sec big">${field('Owner (saved in Lab Manager)', 'eOwner')}${ownerPicker(it.owner)}</section>` : ''}
-        <div><button type="button" class="link" id="eMaterialize">Add a physical record of it here</button></div>`;
+        <section class="sec big"><div class="edit-note">Name, type, PDU and the other details are kept in Lab Manager.</div>
+          <div class="row-lg">${racksLink('Edit details in Racks', 'eRacks', it.live?.rack || rackOfSetup(it.setup))}</div></section>`;
     } else if (rec.cat === 'item') {
       const pdus = S.data.dcim?.pdus || [];
       html += `<section class="sec big">${field('Name', 'eName')}<input class="in-lg" id="eName" dir="auto" value="${esc(it.name || '')}" />${status(it.status)}</section>
@@ -3564,7 +3620,7 @@
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
       html += `<section class="sec big">${H('On this shelf')}${where}
           ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>${esc(kindOf(i))}${i.item.dcim?.outlet ? ' · outlet ' + esc(i.item.dcim.outlet) : ''}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button><button type="button" class="kbtn secondary small" data-move="${esc(i.id)}">Move…</button></div>`).join('') : '<div class="edit-note">Nothing on this shelf.</div>'}
-          <div class="row-lg"><button type="button" class="kbtn secondary md" id="eAddHere">Add a device on this shelf</button></div></section>
+          <div class="row-lg">${def.derived || lmRack(def.setup) ? racksLink('Add in Racks…', 'eAddRacks', rackOfSetup(def.setup)) : '<button type="button" class="kbtn secondary md" id="eAddHere">Add a device on this shelf</button>'}</div></section>
         ${def.derived
           // a floor the twin adds from the app's floor model is not in lab-data.json, so its status / notes cannot be saved here
           ? `<section class="sec big"><div class="edit-note derived-note" id="eDerived">This shelf comes from the DCIM floor model; edit it in Racks.</div></section>`
@@ -3577,7 +3633,7 @@
           <div class="edit-note">Which Lab Manager rack this physical rack is. The photos do not show it; a change is kept with Save to server.</div>
           ${status(def.status)}${notes(def.notes || '')}${save}</section>
         <section class="sec big">${H('Shelves')}${shelves.map(sh => { const its = recsOf(r => r.cat === 'item' && r.shelf === sh.id); return `<div class="itm-lg" data-go="${esc(sh.id)}" role="button" tabindex="0"><span class="lvl-lg">${esc(shelfCaption(sh))}</span><span class="itm-name" dir="auto">${its.length ? its.map(i => esc(i.item.name)).join(', ') : '<i>empty</i>'}</span><span class="chev" aria-hidden="true">›</span></div>`; }).join('')}
-          <div class="row-lg"><button type="button" class="kbtn secondary md" id="eAddBay">Add a rack-level item (bottom bay)</button></div></section>`;
+          <div class="row-lg">${lmRack(rec.id) ? racksLink('Add in Racks…', 'eAddRacks', lmRack(rec.id)) : '<button type="button" class="kbtn secondary md" id="eAddBay">Add a rack-level item (bottom bay)</button>'}</div></section>`;
     } else if (rec.cat === 'storage') {
       const its = recsOf(r => r.cat === 'item' && r.item?.storage === rec.id);
       html += `<section class="sec big">${field('Name', 'eName')}<input class="in-lg" id="eName" dir="auto" value="${esc(def.name)}" />${status(def.status)}${notes(def.notes || '')}${save}</section>
@@ -3602,7 +3658,16 @@
       const patch = { status: $('#eStatus').value, notes: cleanNotes($('#eNotes') ? $('#eNotes').value : def.notes) };
       if ($('#eName')) patch.name = $('#eName').value.trim() || def.name;
       const ownerKey = rec.cat === 'item' ? dcimOwnerKey(it) : null; const owner = $('#eOwner') ? $('#eOwner').value.trim() || null : null;
-      if (rec.cat === 'item') {
+      // a Lab Manager server keeps its Lab Manager name, type and PDU outlet (the editor does not offer them; this guards
+      // any other way in): a rename here would split it from its live record
+      if (rec.cat === 'item' && (it.live?.inDcim === true || rec.id.startsWith('LIVE-'))) {
+        const pduNow = $('#ePdu') ? $('#ePdu').value || null : it.dcim?.pdu || null;
+        if ((patch.name != null && patch.name !== it.name) || ($('#eType') && $('#eType').value !== it.type) || pduNow !== (it.dcim?.pdu || null)) {
+          toast('Not saved: the name, type and PDU of a Lab Manager record are edited in Racks', 'err'); return;
+        }
+        delete patch.name;
+      }
+      if (rec.cat === 'item' && $('#eType')) {
         patch.type = $('#eType').value; if (!ownerKey) patch.owner = owner;
         const pdu = $('#ePdu').value, outlet = parseInt($('#eOutlet').value, 10);
         if (pdu) { const pd = (S.data.dcim?.pdus || []).find(x => x.id === pdu); patch.dcim = { ...(it.dcim || {}), pdu, pduName: pd?.name, outlet: isNaN(outlet) ? undefined : outlet, optKey: optKey(patch.name) }; }
@@ -3626,7 +3691,6 @@
     const ah = $('#eAddHere'); if (ah) ah.onclick = () => addItem({ setup: def.setup, shelf: def.id, zone: def.zone, type: 'opt', typeLabel: 'OPT — switch under test', name: 'New device', status: 'building' });
     const ab = $('#eAddBay'); if (ab) ab.onclick = () => addItem({ setup: def.id, placement: 'bottom-bay', zone: def.zone, type: 'chiller', name: 'New rack-level item', status: 'building' });
     const as_ = $('#eAddStore'); if (as_) as_.onclick = () => addItem({ storage: def.id, zone: def.zone, type: 'spare-chassis', quantity: 1, name: 'New stored item', status: 'inactive' });
-    const mat_ = $('#eMaterialize'); if (mat_) mat_.onclick = () => { const c = { id: nextItemId(), name: it.name, category: 'item', type: it.type, typeLabel: it.typeLabel, setup: it.setup || null, shelf: it.shelf || null, placement: it.placement, zone: it.zone || null, status: it.status || 'active', owner: it.owner || null, confidence: 'high', placementConfidence: 'medium', photos: [], notes: 'Added from live DCIM data.', dcim: it.dcim ? { optKey: it.dcim.optKey, pdu: it.dcim.pdu, pduName: it.dcim.pduName, outlet: it.dcim.outlet, deviceId: it.dcim.deviceId } : undefined }; S.data.items.push(c); markDirty(); rebuildAll(); select(c.id, { keepCamera: true }); };
   }
 
   // ───────────────────────────────────────────────────────────── telemetry (power / env) per rack
@@ -3787,7 +3851,7 @@
     VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
     previousCamera.copy(camera.position); previousTarget.copy(controls.target); markView('orbit');
     const racksList = S.racksList; setSheet('half', 'issues'); showTab(LS.get('sideTab', 'attn')); setRacksList(racksList); placeAttnDock();
-    setInterval(renderLive, 1000);
+    setInterval(() => { renderLive(); checkPduFreshness(); }, 1000);
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
     if (S.settings.url) connect();
