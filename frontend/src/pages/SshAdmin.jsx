@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAccounts } from "../accounts";
+import { useRemovedServers } from "../removedServers.jsx";
+import { withoutRemoved } from "../api/removedServers.js";
 import { passwordLabel } from "../components/MaintenanceDialog";
 import SshButton, { useSshStatus } from "../components/SshButton";
 import {
@@ -24,6 +26,7 @@ const KEY_SOURCE_SAVED = {
 // log. Private keys never leave the VM; only the public key, key file names/types and fingerprints are shown.
 export default function SshAdmin() {
   const { canOperate, canAdmin, mode } = useAccounts();
+  const { hidden: removedHidden } = useRemovedServers();
   const snapshot = useSshStatus();
   const status = snapshot.data;
   const [keyInfo, setKeyInfo] = useState({ data: null, error: null, loading: false });
@@ -184,7 +187,7 @@ export default function SshAdmin() {
         ["SSH support", !status ? "—" : status.installed === false ? "Missing" : "Installed"],
         ["Key", !status ? "—" : status.key_exists ? "Ready" : "None"],
         ["Sign-in keys", !status ? "—" : SIGN_IN_KPI[keySource] || "—"],
-        ["Servers allowed", !status ? "—" : optIn ? `${servers.filter(s => s.allowed).length} / ${servers.length}` : servers.length],
+        ["Servers allowed", !status ? "—" : (shown => optIn ? `${shown.filter(s => s.allowed).length} / ${shown.length}` : shown.length)(withoutRemoved(servers, removedHidden, s => s.key))],
         ...(systemKeys ? [] : [["Host keys to check", status ? keyStates.filter(k => k.state === "unconfirmed" || k.state === "changed").length : "—"]])].map(([label, value]) =>
         <div key={label}><span>{label}</span><strong>{value}</strong></div>)}
     </div>
@@ -429,6 +432,9 @@ function HostKeyCell({ server, state, canAdmin, onAccept, systemKeys }) {
 }
 
 function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, setting, onAutoAllow, autoAllowLocked, onDirtyChange, onAccept, onSaved, systemKeys }) {
+  // Servers removed from the lab are not listed; their SSH settings stay in the saved payload (built from `servers`).
+  const { hidden: removedHidden } = useRemovedServers();
+  const rows = withoutRemoved(servers, removedHidden, s => s.key);
   // Unsaved edits survive status refreshes; rows that appear later start from their saved values.
   const [form, setForm] = useState(null);
   const [errors, setErrors] = useState({});
@@ -526,7 +532,7 @@ function ServersCard({ status, config, servers, optIn, canAdmin, accountMode, se
         <table className="user-table">
           <thead><tr>{columns.map(h => <th key={h}>{h}</th>)}</tr></thead>
           <tbody>
-            {servers.map(s => {
+            {rows.map(s => {
               const entry = entryFor(s.key);
               const approved = entry.allowed ? entry.approved_host || s.host : "";
               const moved = optIn && !autoMode && entry.allowed && entry.approved_host && s.host && !sameHost(entry.approved_host, s.host);

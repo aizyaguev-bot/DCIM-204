@@ -5,7 +5,9 @@ import { validShelf, floorLabel, placeWord, describePlace, placeChanges } from "
 // One cooling unit as a button: on its floor, in a rack's "not on a floor" strip, or in the page panel.
 // dragHandle: dnd-kit listeners/attributes/setNodeRef for Edit mode on the overview (null otherwise).
 // actionLabel ("Place…"): the chip opens the unit to be placed (an Operator outside Edit mode); it replaces "no floor".
-export function CoolingChip({ unit, variant = "shelf", onOpen, dragHandle = null, highlighted = false, actionLabel = null }) {
+// variant "slot": a unit slot of the rack's floor template; extra: its labelled lines (name, P/N, S/N; lines: how many),
+// drawn in place of the plain name.
+export function CoolingChip({ unit, variant = "shelf", onOpen, dragHandle = null, highlighted = false, actionLabel = null, extra = null, lines = undefined }) {
   const placed = validShelf(unit.u);
   const where = actionLabel || (placed ? floorLabel(unit.u, unit.rack) : unit.rack ? `no ${placeWord(unit.rack)}` : "no rack");
   const { setNodeRef, listeners, attributes, isDragging } = dragHandle || {};
@@ -16,11 +18,13 @@ export function CoolingChip({ unit, variant = "shelf", onOpen, dragHandle = null
     aria-roledescription={undefined} aria-describedby={undefined} aria-pressed={undefined}
     className="cooling-chip" data-unit-id={unit.id} data-variant={variant} data-action={actionLabel ? "" : undefined}
     data-placed={placed ? "" : undefined} data-unassigned={unit.rack ? undefined : ""} data-match={highlighted ? "" : undefined}
-    data-dragging={isDragging ? "" : undefined} data-draggable={dragHandle ? "" : undefined}
+    data-dragging={isDragging ? "" : undefined} data-draggable={dragHandle ? "" : undefined} data-lines={lines}
     aria-label={label} title={`${unit.name} · ${describePlace(unit)}${actionLabel ? ` · ${actionLabel}` : ""}`}
     onClick={e => { e.stopPropagation(); onOpen?.(unit, e.currentTarget); }} onKeyDown={e => e.stopPropagation()}>
-    <span aria-hidden="true" className="cooling-glyph">❄</span><span dir="auto" className="cooling-name">{unit.name}</span>
-    {variant !== "shelf" && <span className="cooling-where">{where}</span>}
+    {variant === "slot"
+      ? extra || <span className="slot-line slot-name"><span aria-hidden="true" className="cooling-glyph">❄</span><span dir="auto" className="cooling-name">{unit.name}</span></span>
+      : <><span aria-hidden="true" className="cooling-glyph">❄</span><span dir="auto" className="cooling-name">{unit.name}</span></>}
+    {variant !== "shelf" && variant !== "slot" && <span className="cooling-where">{where}</span>}
   </button>;
 }
 

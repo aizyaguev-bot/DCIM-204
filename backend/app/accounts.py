@@ -172,6 +172,8 @@ def required_role(path, method):
         return "Admin" if re.fullmatch(r"/api/pxe/jobs/[^/]+/acknowledge", path) else "Operator"
     if (path == "/api/engineers" or path.startswith("/api/engineers/")) and method not in ("GET", "HEAD", "OPTIONS"): return "Admin"
     if path == "/api/opt-owners" and method not in ("GET", "HEAD", "OPTIONS"): return "Admin"
+    # Removed servers: every page reads the list to hide them; removing and restoring are Admin only.
+    if (path == "/api/removed-servers" or path.startswith("/api/removed-servers/")) and method not in ("GET", "HEAD", "OPTIONS"): return "Admin"
     if path == "/api/users" or path.startswith("/api/users/"): return "Admin"
     if path.startswith("/api/kvms/") and any(part in path for part in ("/proxy", "/autologin", "/console-url", "/viewer")):
         return "Operator"

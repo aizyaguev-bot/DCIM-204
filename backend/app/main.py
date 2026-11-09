@@ -13,7 +13,8 @@ import pathlib
 
 from .database import init_db, AsyncSessionLocal, get_db
 from .models import Device
-from .routers import devices, device_names, pdus, pdu_maintenance, kvms, kvm_proxy, inventory, monitoring, pxe, mapping_export, ssh
+from .routers import devices, device_names, pdus, pdu_maintenance, kvms, kvm_proxy, inventory, monitoring, pxe, mapping_export, ssh, serial_details
+from .routers import removed_servers
 from .ping_monitor import monitor_loop
 from .alerts import alert_loop
 from .accounts import AccountAccess, bootstrap_admin, router as accounts_router
@@ -170,9 +171,11 @@ app.include_router(pdu_maintenance.router)
 app.include_router(kvms.router)
 app.include_router(kvm_proxy.router)
 app.include_router(inventory.router)
+app.include_router(serial_details.router)
 app.include_router(monitoring.router)
 app.include_router(pxe.router)
 app.include_router(ssh.router)
+app.include_router(removed_servers.router)
 app.include_router(assistant_router)
 app.include_router(assistant_actions_router)
 app.include_router(accounts_router)

@@ -1,6 +1,8 @@
 // DCIM Racks view on the isolated fixture (tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1):
 // RACK-1 stale equipment panel after a 409, RACK-2 U validation, RACK-3 equipment reload, RACK-4 phone width,
-// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, SCAN-1..13 Scan barcode (add units to a
+// RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, TPL-1..5 the floor template (one size for
+// every floor, fixed labelled unit slots, +N, no wrapping; every rack of type Storage has 16 shelves; names, P/N, S/N,
+// watts and PDU feeds readable at 1366), SCAN-1..13 Scan barcode (add units to a
 // server's floor with a USB scanner or a stubbed camera; serial, part number, model and MAC saved as the unit's own
 // fields, shown and edited in its panels; Undo keeps a unit someone else changed; a label that contradicts its unit is
 // refused; the scanned code is the Serial number and the Name is the product). Every change it makes is undone.
@@ -45,6 +47,12 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
   const puts=[];page.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/api/rack-items'))puts.push(r.url());});
   const card=rack=>page.locator(`[data-rack-id="${rack}"]`);
   const cell=name=>page.locator(`.equipment-cell[aria-label="View ${name}"]`);
+  // A unit behind its floor's "+N units" chip (the floor template has 2 unit slots): open that list first.
+  // The unit cell by its id (several units can share a product name), opening its floor's "+N" list when it is behind it.
+  async function revealId(pg,id){const c=pg.locator(`.equipment-cell[data-item-id="${id}"]`).first();await c.waitFor({state:'attached'});
+   if(!(await c.isVisible()))await pg.locator('.floor-more').filter({has:c}).first().locator('.floor-more-toggle').first().click();await c.waitFor();}
+  async function reveal(pg,name){const c=pg.locator(`.equipment-cell[aria-label="View ${name}"]`).first();await c.waitFor({state:'attached'});
+   if(!(await c.isVisible()))await pg.locator('.floor-more').filter({has:c}).first().locator('.floor-more-toggle').first().click();await c.waitFor();}
   await page.goto(origin+'/?tab=racks');
   await cell('B08 Switch').waitFor();
   await page.locator('button.edit-toggle').click();
@@ -52,7 +60,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
 
   // ── RACK-1: the open panel saves only its own changes, and is refreshed after a 409 ──
   const panel=page.locator('div.fixed.inset-0.z-50.flex.justify-end');
-  await cell('B08 Switch').locator('.equipment-type').click();
+  await cell('B08 Switch').locator('.slot-field[data-field="part_number"]').click();
   await panel.getByText('Save changes').waitFor();
   const save=panel.getByRole('button',{name:/Save changes|Saved/});
   let before=puts.length;
@@ -128,7 +136,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
 
   // ── RACK-1: the open item was deleted in another session: the 409 closes its panel and reloads resume ──
   if(await page.locator('button.edit-toggle').getAttribute('aria-pressed')!=='true')await page.locator('button.edit-toggle').click();
-  await cell('B08 Switch').locator('.equipment-type').click();
+  await cell('B08 Switch').locator('.slot-field[data-field="part_number"]').click();
   await panel.getByText('Save changes').waitFor();
   await putItems(dropOwn);
   await panel.locator('textarea').fill('deleted meanwhile');
@@ -178,8 +186,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
    await storage.locator('.server-cell[data-server="OPT72"]').waitFor();
    const sixteen=Array.from({length:16},(_,i)=>String(i+1));
    assert.deepEqual(await storage.locator('[data-u-slot]').evaluateAll(els=>els.map(e=>e.dataset.uSlot)),[...sixteen,'20','0']);
-   assert.equal(await storage.locator('.shelf-empty').count(),14,'shelves 1-16 always drawn; the 14 empty ones are Free');
-   assert.deepEqual(await storage.locator('.shelf-empty').first().evaluate(e=>[e.dataset.uSlot,e.querySelector('.shelf-empty-line').textContent,!!e.querySelector('[data-floor-add]')]),['2','Free',true],'an empty shelf is Free with its +');
+   assert.equal(await storage.locator('[data-u-slot][data-empty]').count(),14,'shelves 1-16 always drawn; 14 of them are empty');
+   assert.deepEqual(await storage.locator('[data-u-slot][data-empty]').first().evaluate(e=>[e.dataset.uSlot,e.querySelectorAll('.unit-slot-empty').length,!!e.querySelector('[data-floor-add]')]),['2',3,true],'an empty shelf keeps its 3 empty slots and its +');
    assert.deepEqual(await storage.locator('[data-u-slot] .shelf-index').evaluateAll(els=>els.slice(1,16).map(e=>e.title)),sixteen.slice(1).map(n=>`Shelf ${n}`));
    assert.equal(await storage.locator('[data-u-slot="3"] .server-cell[data-server="OPT72"]').count(),1);
    assert.equal(await storage.locator('[data-u-slot="1"] .server-cell[data-server="OPT63"]').count(),1);
@@ -192,7 +200,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
    // old data above shelf 16 is not lost
    assert.equal(await storage.locator('.floors-other').innerText(),'Other · not on shelves 1–16');
    assert.equal(await storage.locator('[data-u-slot="20"] .equipment-cell[aria-label="View Old U20"]').count(),1);
-   passed.push('LOC-3 Main storage draws shelves 1-16 (empty ones Free), one list per shelf (OPT72 + NIC on shelf 3), Spare as the whole unit, old u20 under Other');
+   passed.push('LOC-3 Main storage draws shelves 1-16 (empty ones keep their 3 empty slots), one list per shelf (OPT72 + NIC on shelf 3), Spare as the whole unit, old u20 under Other');
    assert.equal(await storage.locator('.shelf-row[data-auto]').count(),1);
    assert.equal(await storage.locator('[data-u-slot="1"][data-auto]').count(),1);
    const autoIndex=storage.locator('[data-u-slot="1"] .shelf-index');
@@ -207,7 +215,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
    assert.deepEqual(shelves01,[['1',true,['OPT11']],['2',true,['OPT12']],['3',true,['OPT14']],['7',false,['OPT13']]]);
    // the rack detail table says the same (by U: servers before equipment, rack level last)
    await rack01.locator('.rack-card-name').click();await page.getByRole('button',{name:'All racks'}).waitFor();
-   const uCells=await page.locator('tbody tr').evaluateAll(rows=>rows.filter(r=>r.cells[2]?.textContent==='OPT').map(r=>[r.cells[1].textContent.trim(),r.cells[0].textContent.trim()]));
+   const uCells=await page.locator('tbody tr').evaluateAll(rows=>rows.filter(r=>r.cells[4]?.textContent==='OPT').map(r=>[r.cells[1].textContent.trim(),r.cells[0].textContent.trim()]));
    assert.deepEqual(uCells,[['OPT11','U1 (auto)'],['OPT12','U2 (auto)'],['OPT14','U3 (auto)'],['OPT13','U7']]);
    await page.getByRole('button',{name:'All racks'}).click();
    passed.push('CONN-4 auto-placed shelves marked (Main storage 1 of 2, Rack-01 U1-U3 of the C7 vector, not the saved U7)');
@@ -244,6 +252,276 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     passed.push('LOC-4 + on Main storage shelf 7 scans a unit onto it (saved u 7, shown in that shelf); the detail draws shelves 1-16 and names them Shelf N');
    }finally{
     await putItems(d=>{for(const rack of Object.keys(d))d[rack]=d[rack].filter(i=>i.serial_number!==code&&i.barcode!==code);});
+   }
+  }
+
+  // ── TPL-1..6: the floor template: every floor of every rack the same size with fixed unit slots (labelled Name / P/N /
+  //    S/N), "+N" for the rest, nothing wraps; every rack of type Storage (the fixture's "Storage shelf") has 16 shelves ──
+  {
+   const SHOTS=process.env.DCIM_QA_SCREENSHOT_DIR||require('node:os').tmpdir();require('node:fs').mkdirSync(SHOTS,{recursive:true});
+   const TPL=['ci-tpl-a','ci-tpl-b','ci-tpl-c','ci-tpl-s1','ci-tpl-s2','ci-tpl-s3','ci-tpl-s4','ci-tpl-move','ci-tpl-sn','ci-tpl-cx1','ci-tpl-cx2','ci-tpl-psu'];
+   // TPL-5 owners: a 40-character owner on OPT63 and a Hebrew one on OPT61 (engineers deactivated and owners cleared after)
+   const OWNERS={opt63:'Alexander Konstantinopolsky-Vanderbilt QA',opt61:'אברהם כהן-לוי בדיקה'};const ownerIds=[];
+   const dropTpl=d=>{for(const rack of Object.keys(d))d[rack]=d[rack].filter(i=>!TPL.includes(i.id));};
+   const kept={overrides:await layout('/api/rack-overrides'),slots:await layout('/api/rack-slots')};
+   try{
+    // Rack-06: two OPTs on floor 1 and two on floor 3 (old data); floor 2 keeps only its Switch 06, floor 4 is empty;
+    // floor 3 also holds three units.
+    // Storage shelf: OPT72 on shelf 3, four units on shelf 5 (one more than the card's three slots).
+    await putLayout('/api/rack-slots',d=>{d['Rack-06']={opt61:1,opt62:1,opt63:3,opt64:3};d['Storage shelf']={opt72:3};});
+    await putLayout('/api/rack-overrides',d=>{d.opt72='Storage shelf';});
+    await putItems(d=>{dropTpl(d);
+     d['Rack-05']=[...(d['Rack-05']||[]),{id:'ci-tpl-move',name:'TPL Move me',type:'other',u:1,part_number:'PN-MOVE'},
+      {id:'ci-tpl-sn',name:'TPL QM8790',type:'switch',u:4,part_number:'MQM8790-HS2F',serial_number:'MT2231X12345',model:'QM8790',mac:'02:00:00:00:00:66'}];
+     d['Rack-06']=[...(d['Rack-06']||[]),{id:'ci-tpl-a',name:'TPL Switch A with a very long name that cannot fit',type:'switch',u:3,part_number:'MQM8790-HS2F-LONG-PART-NUMBER',serial_number:'SN-TPL-A',model:'QM8790',mac:'02:00:00:00:00:0A'},
+      {id:'ci-tpl-b',name:'TPL NIC B',type:'other',u:3,part_number:'MCX75310'},{id:'ci-tpl-c',name:'TPL UPS C',type:'ups',u:3}];
+     d['Storage shelf']=[...(d['Storage shelf']||[]),...[1,2,3,4].map(n=>({id:`ci-tpl-s${n}`,name:`TPL Shelf item ${n}`,type:'other',u:5,part_number:`PN-S${n}`})),
+      ...[1,2].map(n=>({id:`ci-tpl-cx${n}`,name:`Spare ConnectX-7 adapter long name ${n}`,type:'other',u:6,part_number:`MCX75310AAS-NEAT-${n}`})),
+      {id:'ci-tpl-psu',name:'Spare PSU 2000W',type:'other',u:7,part_number:'930-9BPSU-0000-000',serial_number:'SN-PSU-1'}];});
+    for(const [asset,name] of Object.entries(OWNERS)){
+     let r=await admin.c.request.post(origin+'/api/engineers',{data:{name},headers:headers(admin)});
+     let person=r.status()===201?await r.json():(await(await admin.c.request.get(origin+'/api/engineers')).json()).find(p=>p.name===name);
+     if(!person.active)await admin.c.request.put(origin+`/api/engineers/${person.id}`,{data:{name,active:true},headers:headers(admin)});
+     ownerIds.push([person.id,name]);
+     r=await admin.c.request.put(origin+`/api/opt-owners/${asset}`,{data:{engineer_id:person.id},headers:headers(admin)});assert.equal(r.status(),200,await r.text());}
+    const tp=await admin.c.newPage();tp.on('pageerror',e=>errors.push(e.message));
+    const settledTp=()=>tp.waitForFunction(()=>document.querySelector('[data-rack-id]')&&!document.querySelector('[data-state="loading"]'),null,{timeout:20000});
+    const tcard=rack=>tp.locator(`[data-rack-id="${rack}"]`);
+    for(const [w,h] of [[1536,864],[1920,1080]]){
+     await tp.setViewportSize({width:w,height:h});
+     await tp.goto(origin+'/?tab=racks');await settledTp();
+     if(await tp.locator('button.edit-toggle').getAttribute('aria-pressed')==='true')await tp.locator('button.edit-toggle').click();
+     await tcard('Rack-06').locator('[data-u-slot="3"] [data-floor-more="units"]').waitFor();
+     await tcard('Storage shelf').locator('[data-u-slot="5"] [data-floor-more="shelf"]').waitFor();
+     const m=await tp.evaluate(()=>{
+      const cards=[...document.querySelectorAll('.racks-grid > [data-rack-id]')].map(c=>({rack:c.dataset.rackId,type:c.dataset.rackType,top:Math.round(c.getBoundingClientRect().top),
+       floors:[...c.querySelectorAll('.rack-shelves > [data-u-slot]')].map(f=>({u:f.dataset.uSlot,h:f.getBoundingClientRect().height,top:f.getBoundingClientRect().top,empty:f.hasAttribute('data-empty'),
+        slots:f.querySelectorAll(':scope > .floor-units > .floor-unit, :scope > .shelf-list > .shelf-list-item').length}))}));
+      // every text in a floor box: one line (no wrap), and its element inside the floor box
+      const bad=[];
+      for(const f of document.querySelectorAll('.racks-grid .rack-shelves > [data-u-slot]')){
+       const box=f.getBoundingClientRect();const w=document.createTreeWalker(f,NodeFilter.SHOW_TEXT);let n;
+       while((n=w.nextNode())){const t=n.textContent.trim();if(!t)continue;const el=n.parentElement;if(el.closest('[hidden]'))continue;
+        // what is drawn of it: its box cut by every ancestor that clips (a "…" line), up to the floor box
+        let r=el.getBoundingClientRect();if(!r.width)continue;
+        for(let a=el.parentElement;a&&a!==f;a=a.parentElement){const cs=getComputedStyle(a);if(cs.overflowX==='visible'&&cs.overflowY==='visible')continue;
+         const c=a.getBoundingClientRect();r={left:Math.max(r.left,c.left),right:Math.min(r.right,c.right),top:Math.max(r.top,c.top),bottom:Math.min(r.bottom,c.bottom)};}
+        const range=document.createRange();range.selectNodeContents(n);const tops=new Set([...range.getClientRects()].filter(x=>x.width>0).map(x=>Math.round(x.top)));
+        const where=`${f.closest('[data-rack-id]').dataset.rackId} ${f.dataset.uSlot} "${t.slice(0,24)}"`;
+        if(tops.size>1)bad.push(`${where} wraps (${tops.size} lines)`);
+        if(r.left<box.left-1||r.right>box.right+1||r.top<box.top-1||r.bottom>box.bottom+1)bad.push(`${where} outside its floor box`);}
+      }
+      return {cards,bad};
+     });
+     assert.deepEqual(m.bad,[],`${w}x${h}: text in floor boxes`);
+     const compute=m.cards.filter(c=>c.type==='compute'),storage=m.cards.filter(c=>c.type==='storage');
+     const hs=compute.flatMap(c=>c.floors.map(f=>f.h)),ss=storage.flatMap(c=>c.floors.map(f=>f.h));
+     assert.ok(Math.max(...hs)-Math.min(...hs)<=1,`${w}: every compute floor box is one height (${[...new Set(hs.map(Math.round))]})`);
+     assert.ok(Math.max(...ss)-Math.min(...ss)<=1,`${w}: every storage shelf is one height (${[...new Set(ss.map(Math.round))]})`);
+     const r6=compute.find(c=>c.rack==='Rack-06');
+     assert.deepEqual(r6.floors.map(f=>[f.u,f.empty]),[['1',false],['2',false],['3',false],['4',true]],'Rack-06: floor 4 is empty');
+     assert.ok(r6.floors.every(f=>Math.abs(f.h-r6.floors[3].h)<=1),'filled (two servers, a unit with no server, three units) and empty floors are the same height');
+     assert.ok(compute.every(c=>c.floors.every(f=>f.slots===2)),`${w}: every floor has its 2 unit slots, filled or empty`);
+     assert.ok(storage.every(c=>c.floors.every(f=>f.slots===3)),`${w}: every storage shelf has its 3 slots`);
+     // two cards side by side in one grid row: their floors are the same height and line up
+     const row=compute.filter(c=>c.top===compute[0].top);
+     assert.ok(row.length>=2,`${w}: at least two cards in the first grid row (${row.map(c=>c.rack)})`);
+     for(let i=0;i<4;i++){const tops=row.map(c=>c.floors[i].top),heights=row.map(c=>c.floors[i].h);
+      assert.ok(Math.max(...heights)-Math.min(...heights)<=1&&Math.max(...tops)-Math.min(...tops)<=1,`${w}: floor ${i+1} lines up across ${row.map(c=>c.rack)} (${tops.map(Math.round)})`);}
+     await tp.screenshot({path:`${SHOTS}/tpl-overview-${w}.png`});
+    }
+    passed.push('TPL-1 every floor box is one height in every compute card and every shelf one height in the storage racks (1536x864 and 1920x1080), filled = empty, floors line up across the cards of a grid row, every floor keeps its 2 unit slots (storage: 3), no text wraps or leaves its floor box');
+
+    // TPL-2: the unit slots: labelled fields at fixed places; empty slots keep their labels; "+N units" opens the rest
+    const f3=tcard('Rack-06').locator('[data-u-slot="3"]');
+    const a=f3.locator('.equipment-cell[data-item-id="ci-tpl-a"]');
+    assert.deepEqual(await a.locator('.slot-field').evaluateAll(els=>els.map(e=>[e.dataset.field,e.querySelector('.slot-label').textContent,e.querySelector('.slot-value').textContent])),
+     [['part_number','P/N','MQM8790-HS2F-LONG-PART-NUMBER'],['serial_number','S/N','SN-TPL-A']],'one field per line: P/N, then S/N on its own line');
+    assert.deepEqual(await a.locator('.slot-label').allInnerTexts(),['Name','P/N','S/N'],'a filled slot has the same labelled places as an empty one');
+    assert.match(await a.getAttribute('title'),/^Switch: TPL Switch A .* · Model QM8790 · MAC 02:00:00:00:00:0A$/,'type, model and MAC are in its tooltip');
+    assert.equal(await a.locator('.slot-field[data-field="part_number"]').getAttribute('title'),'P/N: MQM8790-HS2F-LONG-PART-NUMBER','a cut value is whole in its tooltip');
+    assert.ok(await a.locator('.equipment-name .mid-head').evaluate(e=>e.scrollWidth>e.clientWidth&&getComputedStyle(e).textOverflow==='ellipsis'),'a long name is cut with …');
+    assert.equal(await a.locator('.equipment-name .mid-tail').innerText(),'ot fit','… in the middle: its end stays');
+    assert.equal(await a.locator('.slot-field[data-field="part_number"] .mid-tail').innerText(),'UMBER','a long P/N keeps its end');
+    assert.deepEqual(await f3.locator(':scope > .floor-units > .floor-unit > .equipment-cell').evaluateAll(els=>els.map(e=>e.dataset.itemId)),['ci-tpl-a','ci-tpl-b'],'both slots show a unit');
+    const toggle=f3.locator('[data-floor-more="units"] > .floor-more-toggle');
+    assert.equal(await toggle.innerText(),'+2','4 units (3 + its cooling unit) in 2 slots: 2 drawn, +2 on the last slot');
+    assert.equal(await toggle.getAttribute('aria-label'),'2 more units on floor 3');
+    assert.ok((await toggle.boundingBox()).width<=44,'+N is a small chip, not a slot');
+    assert.equal(await f3.locator('[data-floor-more="units"] > .floor-more-list').isVisible(),false);
+    await toggle.click();
+    assert.equal(await toggle.getAttribute('aria-expanded'),'true');
+    assert.deepEqual(await f3.locator('[data-floor-more="units"] > .floor-more-list .equipment-cell').evaluateAll(els=>els.map(e=>e.dataset.itemId)),['ci-tpl-c']);
+    assert.equal(await f3.locator('[data-floor-more="units"] > .floor-more-list .cooling-chip[data-unit-id="ch6"]').count(),1,'its cooling unit is listed too');
+    assert.equal(await f3.locator('[data-floor-more="units"] > .floor-more-list .equipment-cell[data-item-id="ci-tpl-c"] .slot-field[data-field="part_number"] .slot-value').innerText(),'—','no P/N recorded: its place says —');
+    await tp.keyboard.press('Escape');
+    assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+    assert.equal(await tp.evaluate(()=>document.activeElement?.classList.contains('floor-more-toggle')),true,'Escape returns focus to +N');
+    const empty=tcard('Rack-06').locator('[data-u-slot="4"] .unit-slot-empty').first();
+    assert.deepEqual(await empty.locator('.slot-label').allInnerTexts(),['Name','P/N','S/N'],'an empty slot keeps its labelled places');
+    assert.equal(await tcard('Rack-06').locator('[data-u-slot="4"] .shelf-empty-line').innerText(),'Free');
+    assert.equal(await tcard('Rack-06').locator('[data-u-slot="2"] .floor-no-server').innerText(),'Free','a floor with a unit and no server: Free in the server zone');
+    // two servers on one floor (old data): the first, and "+1 server" (the floor does not grow)
+    const f1=tcard('Rack-06').locator('[data-u-slot="1"]');
+    assert.equal(await f1.locator('.floor-servers > .unit-sortable > .server-cell, .floor-servers > .server-cell').count(),1);
+    const more1=f1.locator('[data-floor-more="servers"] > .floor-more-toggle');
+    assert.equal(await more1.innerText(),'+1 server');
+    await more1.click();
+    await f1.locator('[data-floor-more="servers"] > .floor-more-list .server-cell[data-server="OPT62"]').waitFor();
+    await f1.locator('[data-floor-more="servers"] > .floor-more-list button.server-open[aria-label="View OPT62"]').click();
+    await tp.getByRole('dialog',{name:'OPT62'}).waitFor();
+    await tp.keyboard.press('Escape');await tp.getByRole('dialog',{name:'OPT62'}).waitFor({state:'detached'});
+    await tp.mouse.click(5,5);
+    // search finds a unit behind "+N": Enter opens the list and focuses it
+    const search=tp.getByRole('searchbox',{name:/Find server/});
+    await search.fill('TPL UPS C');await tp.waitForFunction(()=>document.querySelectorAll('.racks-grid > [data-rack-id]').length===1);
+    assert.equal(await f3.locator('[data-floor-more="units"] > .floor-more-toggle[data-match]').count(),1,'+N is marked when a hit is behind it');
+    await search.press('Enter');
+    await tp.waitForFunction(()=>document.activeElement?.matches('.equipment-cell[data-item-id="ci-tpl-c"]'));
+    await search.fill('');await tp.waitForFunction(()=>document.querySelectorAll('.racks-grid > [data-rack-id]').length===9);
+    passed.push('TPL-2 unit slots show labelled Name, P/N, S/N one per line (cut in the middle, the end stays; whole in the tooltip; — when not recorded; type, model and MAC in the tooltip); empty slots keep Name / P/N / S/N; both slots show a unit and a small "+2" chip opens the rest, Escape closes it with focus back; two OPTs on a floor show the first + "+1 server"; search Enter opens the +N list and focuses the hit');
+
+    // TPL-3: the fixture's "Storage shelf" (rack type Storage) is a 16-shelf storage unit like Storage-Main
+    const st=tcard('Storage shelf');
+    assert.equal(await st.getAttribute('data-rack-type'),'storage');
+    assert.deepEqual(await st.locator('.rack-shelves > [data-u-slot]').evaluateAll(els=>els.map(e=>e.dataset.uSlot)),[...Array.from({length:16},(_,i)=>String(i+1)),'0']);
+    assert.equal(await st.locator('[data-floor-add]').count(),16,'one + per shelf 1-16');
+    assert.equal(await st.locator('.floor-servers, .floor-units').count(),0,'no server-beside layout');
+    assert.deepEqual(await st.locator('[data-u-slot] > .shelf-index').evaluateAll(els=>els.slice(0,16).map(e=>e.title)),Array.from({length:16},(_,i)=>`Shelf ${i+1}`));
+    assert.equal(await st.locator('[data-u-slot="3"] .server-cell[data-server="OPT72"]').count(),1,'OPT72 on shelf 3, a slot of the shelf line');
+    assert.equal(await st.locator('[data-u-slot="5"] [data-floor-more="shelf"] > .floor-more-toggle').innerText(),'+1');
+    assert.equal(await st.locator('[data-u-slot="5"] [data-floor-more="shelf"] > .floor-more-toggle').getAttribute('aria-label'),'1 more on shelf 5');
+    assert.deepEqual(await st.locator('[data-u-slot="5"] .shelf-list > [role="listitem"] > .equipment-cell .slot-field[data-field="part_number"] .slot-value').allInnerTexts(),['PN-S1','PN-S2','PN-S3'],'name + P/N in each shelf slot, all 3 slots show a unit');
+    assert.deepEqual(await st.locator('[data-u-slot="5"] .shelf-list > [role="listitem"] > .equipment-cell .slot-label').allInnerTexts(),['P/N','P/N','P/N'],'a storage slot: the name has the whole first line (no type chip, no label)');
+    assert.equal(await st.locator('[data-u-slot="0"] .equipment-cell[aria-label="View Spare switch"]').count(),1,'the whole-storage row');
+    await st.locator('[data-floor-add="9"]').click();
+    const scanDialog=tp.getByRole('dialog',{name:'Scan unit barcode'});await scanDialog.waitFor();
+    assert.match(await scanDialog.innerText(),/Units go to Storage shelf · shelf 9\./);
+    await scanDialog.getByRole('button',{name:'Close'}).click();await scanDialog.waitFor({state:'detached'});
+    // the server details name its shelf (was "U3")
+    await st.locator('button.server-open[aria-label="View OPT72"]').click();
+    const det=tp.getByRole('dialog',{name:'OPT72'});await det.waitFor();
+    assert.equal(await det.locator('dt',{hasText:/^Shelf$/}).locator('xpath=..').locator('dd').innerText(),'Shelf 3');
+    await tp.keyboard.press('Escape');await det.waitFor({state:'detached'});
+    passed.push('TPL-3 "Storage shelf" (rack type Storage) draws shelves 1-16 + whole storage, a + per shelf, one line of slots per shelf (name + P/N in all 3, "+1"), no server-beside layout; its + scans onto "Storage shelf · shelf 9"; OPT72\'s details say Shelf 3');
+
+    // TPL-4: Edit mode: its cooling dialog and selects follow it (16 shelves), the server panel says Shelf, and
+    //        "Move to rack" a storage rack offers its shelves and saves the shelf chosen
+    const edit=async on=>{if((await tp.locator('button.edit-toggle').getAttribute('aria-pressed')==='true')!==on)await tp.locator('button.edit-toggle').click();
+     await tp.waitForFunction(v=>document.querySelector('button.edit-toggle')?.getAttribute('aria-pressed')===String(v),on);};
+    await edit(true);
+    await st.locator('button.server-open[aria-label="View OPT72"]').click();
+    const side=tp.locator('div.fixed.inset-0.z-50.flex.justify-end');await side.getByText('Remove from DCIM').waitFor();
+    assert.match(await side.innerText(),/Shelf\s+Shelf 3/,'the edit panel header says Shelf 3');
+    assert.equal(await side.locator('select[aria-label="Shelf"] option').count(),16,'its Shelf select offers shelves 1-16');
+    await tp.keyboard.press('Escape');await side.waitFor({state:'detached'});
+    await tp.goto(origin+'/?tab=racks&rack=Storage%20shelf');await tp.locator('#rack-detail-title').waitFor();await edit(true);
+    await tp.locator('.rack-detail [data-rack-id="Storage shelf"] [data-u-slot="0"] .equipment-cell').waitFor();
+    assert.equal(await tp.locator('.rack-detail [data-rack-id="Storage shelf"] .rack-shelves > [data-u-slot]').count(),17);
+    assert.equal(await tp.locator('.racks-table thead th').first().textContent(),'Shelf');
+    await tp.getByRole('button',{name:'Cooling unit',exact:false}).filter({hasText:'Cooling unit'}).first().click();
+    const cd=tp.locator('[role="dialog"][data-dialog="cooling"]');await cd.waitFor();
+    assert.equal(await cd.locator('label[for="cooling-floor"]').innerText(),'Shelf');
+    const opts=await cd.locator('#cooling-floor option').allInnerTexts();
+    assert.equal(opts.length,17,`cooling dialog: not on a shelf + shelves 1-16 (${opts.length})`);
+    assert.match(opts.at(-1),/^Shelf 16 · /);
+    await tp.keyboard.press('Escape');await cd.waitFor({state:'detached'});
+    await tp.getByRole('button',{name:'Equipment',exact:true}).click();
+    const add=tp.locator('div.fixed.inset-0.z-50').filter({hasText:'Add Equipment — Storage shelf'});
+    assert.equal(await add.locator('select[aria-label="Shelf"] option').count(),17,'Add equipment: whole unit + shelves 1-16');
+    await tp.keyboard.press('Escape');await add.waitFor({state:'detached'});
+    await tp.goto(origin+'/?tab=racks&rack=Rack-05');await tp.locator('#rack-detail-title').waitFor();await edit(true);
+    await tp.locator('.rack-detail .equipment-cell[data-item-id="ci-tpl-move"]').waitFor();
+    await tp.locator('.rack-detail .equipment-cell[data-item-id="ci-tpl-move"] .slot-field[data-field="part_number"]').click();
+    await side.getByText('Save changes').waitFor();
+    await side.getByLabel('Move to rack').selectOption('Storage shelf');
+    await side.getByLabel('Shelf in Storage shelf').selectOption('9');
+    await side.getByRole('button',{name:'Move',exact:true}).click();await side.waitFor({state:'detached'});
+    let movedItem;for(let i=0;i<30;i++){movedItem=find((await items()).data,'ci-tpl-move');if(movedItem?.rack==='Storage shelf')break;await tp.waitForTimeout(150);}
+    assert.deepEqual([movedItem?.rack,movedItem?.item.u],['Storage shelf',9],'moved onto shelf 9');
+    await edit(false);
+    passed.push('TPL-4 Edit mode on "Storage shelf": the OPT panel says Shelf 3 and offers shelves 1-16, its detail has 16 shelves + whole storage and a Shelf column, the cooling dialog and Add equipment offer shelves 1-16, Move to rack onto it saves the shelf chosen (u 9)');
+
+    // TPL-5: what the floor template must keep readable at 1366x768 (the common laptop) and wider: storage names and the
+    //        end of their P/N, a compute S/N whole, the watts on every floor, the PDU feeds next to a 40-character owner
+    //        (also in Edit mode); the rack detail is wider and its table has P/N and S/N; a Hebrew owner stays at the
+    //        start of its cell; the phone list names every unit's P/N and S/N.
+    const whole=el=>{const r=el.getBoundingClientRect();let l=r.left,rt=r.right;
+     for(let a=el.parentElement;a&&a!==document.body;a=a.parentElement){if(getComputedStyle(a).overflowX!=='visible'){const q=a.getBoundingClientRect();l=Math.max(l,q.left);rt=Math.min(rt,q.right);}}
+     const cut=[el,...el.querySelectorAll('*')].some(x=>getComputedStyle(x).display!=='inline'&&x.scrollWidth>x.clientWidth+1);
+     return r.width>0&&!cut&&rt-l>=r.width-1;};
+    const shown=(loc)=>loc.evaluate(new Function('el',`return (${whole})(el);`));
+    for(const [w,h] of [[1366,768],[1920,1080]]){
+     await tp.setViewportSize({width:w,height:h});await tp.goto(origin+'/?tab=racks');await settledTp();
+     const sc=tcard('Storage shelf');
+     for(const n of [1,2]){
+      assert.equal(await sc.locator(`[data-item-id="ci-tpl-cx${n}"] .equipment-name .mid-tail`).innerText(),`name ${n}`);
+      assert.ok(await shown(sc.locator(`[data-item-id="ci-tpl-cx${n}"] .equipment-name .mid-tail`)),`${w}: "... name ${n}" can be told apart without hovering`);
+      assert.ok(await shown(sc.locator(`[data-item-id="ci-tpl-cx${n}"] [data-field="part_number"] .mid-tail`)),`${w}: P/N ...-${n} keeps its end`);}
+     if(w===1366){assert.ok(await shown(sc.locator('[data-item-id="ci-tpl-psu"] .equipment-name')),'1366: "Spare PSU 2000W" whole in a storage card slot');
+      assert.ok(await sc.locator('[data-item-id="ci-tpl-psu"] .equipment-name .mid-head').evaluate(e=>e.scrollWidth<=e.clientWidth),'1366: "Spare PSU 2000W" not cut by even 1 px (no "…")');}
+     assert.equal(await tp.locator('.racks-grid .equipment-type').count(),0,'no type chip');
+     assert.deepEqual(await sc.locator('[data-item-id="ci-tpl-cx1"], [data-u-slot="0"] .equipment-cell').evaluateAll(els=>els.map(e=>getComputedStyle(e).borderLeftWidth+' '+getComputedStyle(e).borderLeftColor)),
+      ['3px rgb(113, 113, 122)','3px rgb(56, 189, 248)'],'the type is the colour of the slot edge (other grey, switch blue)');
+     const sn=tcard('Rack-05').locator('[data-item-id="ci-tpl-sn"]');
+     assert.equal(await sn.locator('[data-field="serial_number"] .slot-value').textContent(),'MT2231X12345');
+     assert.ok(await shown(sn.locator('[data-field="serial_number"] .slot-value')),`${w}: a 12-character S/N is whole in a card slot`);
+     assert.equal(await tp.locator('.racks-grid .unit-slot [data-field="model"], .racks-grid .unit-slot [data-field="mac"]').count(),0,'no Model or MAC label squeezed into a slot');
+     const nameX=await tcard('Rack-05').evaluate(card=>{const x=e=>Math.round(e.getBoundingClientRect().left-e.closest('.unit-slot').getBoundingClientRect().left);
+      return [x(card.querySelector('[data-item-id="ci-tpl-sn"] .equipment-name')),x(card.querySelector('[data-item-id="ci-tpl-sn"] [data-field="part_number"] .slot-value')),x(card.querySelector('.unit-slot-empty .slot-value'))];});
+     assert.ok(Math.max(...nameX)-Math.min(...nameX)<=1,`${w}: Name, P/N and S/N values start at one place in filled and empty slots (${nameX})`);
+     const watts=await tp.locator('.racks-grid .server-cell[data-variant="floor"]').evaluateAll(new Function('els',`const whole=${whole};
+      return els.filter(s=>(s.dataset.state==='on'||s.dataset.state==='off')&&!s.closest('[hidden]')).map(s=>{const wt=s.querySelector('.server-watts');return [s.dataset.server,!!wt&&getComputedStyle(wt).display!=='none'&&whole(wt)];});`));
+     assert.ok(watts.length>=20&&watts.every(([,ok])=>ok),`${w}: every ON/OFF floor shows its watts (${watts.filter(([,ok])=>!ok).map(([n])=>n)})`);
+     const o63=tcard('Rack-06').locator('.server-cell[data-server="OPT63"]');
+     assert.equal(await o63.locator(':scope > .unit-facts > .unit-fact[data-fact="owner"]').innerText(),OWNERS.opt63);
+     assert.equal(await o63.locator(':scope > .unit-facts > .unit-fact[data-fact="feeds"]').textContent(),'PDU 06 · 3');
+     assert.ok(await shown(o63.locator(':scope > .unit-facts > .unit-fact[data-fact="feeds"]')),`${w}: "PDU 06 · 3" whole next to a 40-character owner`);
+     const cool=tcard('Rack-04').locator('.cooling-chip[data-variant="slot"]').first();
+     assert.deepEqual(await cool.locator('.slot-label').allInnerTexts(),['Name','P/N','S/N'],'a cooling unit in a slot: Name, P/N, S/N like any unit');
+     if(w===1366){
+      await edit(true);
+      assert.ok(await shown(tcard('Rack-06').locator('.server-cell[data-server="OPT63"] > .unit-facts > .unit-fact[data-fact="feeds"]')),'Edit mode: "PDU 06 · 3" whole');
+      await tp.screenshot({path:`${SHOTS}/tpl5-edit-${w}.png`});
+      await edit(false);}
+     await tp.screenshot({path:`${SHOTS}/tpl5-overview-${w}.png`});
+    }
+    // the rack detail at 1920: a wider shelves card, P/N and S/N columns, the Hebrew owner at its cell's start
+    await tp.goto(origin+'/?tab=racks&rack=Rack-06');await tp.locator('#rack-detail-title').waitFor();await settledTp();
+    assert.ok((await tp.locator('.rack-detail [data-rack-id="Rack-06"]').boundingBox()).width>=740,'1920: the detail shelves card is about 760 px');
+    const heads=await tp.locator('.racks-table thead th').allTextContents();
+    assert.deepEqual(heads.slice(0,5),['U','Name','P/N','S/N','Type']);
+    const rowA=tp.locator('.racks-table tr[data-item-id="ci-tpl-a"] td');
+    assert.deepEqual([await rowA.nth(2).textContent(),await rowA.nth(3).textContent()],['MQM8790-HS2F-LONG-PART-NUMBER','SN-TPL-A']);
+    assert.deepEqual([await tp.locator('.racks-table tr[data-item-id="ci-tpl-c"] td').nth(2).textContent(),await tp.locator('.racks-table tr[data-server="OPT61"] td').nth(3).textContent()],['—','—']);
+    assert.ok(await shown(tp.locator('.rack-detail [data-item-id="ci-tpl-a"] [data-field="serial_number"] .slot-value')),'detail: the S/N is whole');
+    const he=await tp.locator('.racks-table tr[data-server="OPT61"] td').nth(heads.indexOf('Owner')).evaluate(td=>{const b=td.querySelector('bdi');
+     return [b?.textContent,getComputedStyle(td).direction,b?Math.round(b.getBoundingClientRect().left-td.getBoundingClientRect().left):null];});
+    assert.equal(he[0],OWNERS.opt61);assert.equal(he[1],'ltr');assert.ok(he[2]<=16,`the Hebrew owner sits at the start of its cell (${he[2]} px)`);
+    assert.ok(await tp.locator('.racks-table-wrap').evaluate(w=>w.scrollWidth<=w.clientWidth),'1920: long names and P/Ns wrap in their columns, Outlet, Switch and Actions stay in view');
+    await tp.screenshot({path:`${SHOTS}/tpl5-detail-1920.png`,fullPage:true});
+    // 1366: the table may scroll inside its box, never the page (also with a power switch in a row scrolled out of view)
+    await tp.setViewportSize({width:1366,height:768});
+    for(const rack of ['Storage shelf','Rack-06']){
+     await tp.goto(origin+`/?tab=racks&rack=${encodeURIComponent(rack)}`);await tp.locator('#rack-detail-title').waitFor();await settledTp();
+     assert.ok(await tp.evaluate(()=>document.documentElement.scrollWidth===document.documentElement.clientWidth),`1366 ${rack} detail: no sideways page scroll`);}
+    // the phone list: every unit with its labelled P/N and S/N, no sideways scroll
+    await tp.setViewportSize({width:390,height:844});
+    await tp.goto(origin+'/?tab=racks&rack=Rack-06');await tp.locator('#rack-detail-title').waitFor();
+    if(await tp.getByRole('button',{name:'List',exact:true}).count())await tp.getByRole('button',{name:'List',exact:true}).click();
+    await tp.locator('.detail-list li[data-item-id="ci-tpl-a"]').waitFor();
+    assert.deepEqual(await tp.locator('.detail-list li[data-item-id="ci-tpl-a"] .detail-item-id').allTextContents(),['P/NMQM8790-HS2F-LONG-PART-NUMBER','S/NSN-TPL-A']);
+    assert.deepEqual(await tp.locator('.detail-list li[data-item-id="ci-tpl-c"] .detail-item-id').allTextContents(),['P/N—','S/N—']);
+    assert.ok(await tp.evaluate(()=>document.documentElement.scrollWidth===document.documentElement.clientWidth),'no sideways scroll at 390');
+    await tp.screenshot({path:`${SHOTS}/tpl5-phone-390.png`,fullPage:true});
+    passed.push('TPL-5 at 1366x768 and 1920x1080: storage names "... name 1/2" and their P/N ends stay apart, "Spare PSU 2000W" whole at 1366, type on the slot edge (no chip), a 12-character S/N whole, no Model/MAC squeezed in, Name/P/N/S/N values at one place, watts on every ON/OFF floor, "PDU 06 · 3" whole beside a 40-character owner (and in Edit mode), cooling slots Name/P/N/S/N; the 1920 detail is ~760 px with P/N and S/N columns (wrapped, Actions in view) and the Hebrew owner at its cell start, no page scroll in the 1366 detail; the 390 phone list shows P/N and S/N');
+    await tp.close();
+   }finally{
+    await putItems(dropTpl);
+    for(const asset of Object.keys(OWNERS))await admin.c.request.put(origin+`/api/opt-owners/${asset}`,{data:{engineer_id:null},headers:headers(admin)});
+    for(const [id,name] of ownerIds)await admin.c.request.put(origin+`/api/engineers/${id}`,{data:{name,active:false},headers:headers(admin)});
+    await putLayout('/api/rack-slots',d=>{restore(d,'Rack-06',kept.slots['Rack-06']);restore(d,'Storage shelf',kept.slots['Storage shelf']);});
+    await putLayout('/api/rack-overrides',d=>{restore(d,'opt72',kept.overrides.opt72);});
    }
   }
 
@@ -453,7 +731,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await op.getByRole('dialog',{name:'OPT22'}).waitFor({state:'detached'});
     const equip=op.locator('div.fixed.inset-0.z-50.flex.justify-end');
     const F_ID=(await withCode(F))[0].id;
-    await op.locator(`.equipment-cell[data-item-id="${F_ID}"][aria-label="View QM8790"] .equipment-type`).first().click();
+    await revealId(op,F_ID);
+    await op.locator(`.equipment-cell[data-item-id="${F_ID}"] .slot-field[data-field="part_number"]`).first().click();
     await equip.getByText('Save changes').waitFor();
     const field=label=>equip.getByRole('textbox',{name:label,exact:true});
     assert.deepEqual(await Promise.all(['Serial number','Part number','Model','MAC address'].map(l=>field(l).inputValue())),[F,'MQM8790-HS2F','QM8790',MAC1]);
@@ -491,7 +770,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.deepEqual([found[0].serial_number,found[0].part_number,'model' in found[0],found[0].mac],[F,'MQM8790-HS2R',false,MAC4]);
     await op.keyboard.press('Escape');await equip.waitFor({state:'detached'});
     await op.locator('button.edit-toggle').click();
-    await op.locator(`.equipment-cell[data-item-id="${F_ID}"] .equipment-type`).first().click();
+    await revealId(op,F_ID);
+    await op.locator(`.equipment-cell[data-item-id="${F_ID}"] .slot-field[data-field="part_number"]`).first().click();
     const shown=op.getByRole('dialog',{name:'QM8790',exact:true});
     await shown.waitFor();
     const text=await shown.innerText();
@@ -576,7 +856,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await vp.getByRole('dialog',{name:'OPT22'}).getByText('Viewer · read only').waitFor();
     assert.equal(await vp.getByRole('button',{name:'Scan barcode'}).count(),0);
     await vp.keyboard.press('Escape');await vp.getByRole('dialog',{name:'OPT22'}).waitFor({state:'detached'});
-    await vp.locator(`.equipment-cell[data-item-id="${F_ID}"] .equipment-type`).first().click();
+    await revealId(vp,F_ID);
+    await vp.locator(`.equipment-cell[data-item-id="${F_ID}"] .slot-field[data-field="part_number"]`).first().click();
     const viewerUnit=vp.getByRole('dialog',{name:'QM8790',exact:true});
     await viewerUnit.waitFor();
     assert.ok((await viewerUnit.innerText()).includes('MQM8790-HS2R'),'Viewer sees the part number');
@@ -584,7 +865,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await vp.keyboard.press('Escape');await viewerUnit.waitFor({state:'detached'});
     // SCAN-13 in the unit panel: the scanned NIC reads as its product, with its serial and part number in their fields.
     const NIC_ID=(await withCode('MT2245X01234'))[0].id;
-    await vp.locator(`.equipment-cell[data-item-id="${NIC_ID}"][aria-label="View ConnectX-7 NIC"] .equipment-type`).first().click();
+    await vp.locator(`.equipment-cell[data-item-id="${NIC_ID}"][aria-label="View ConnectX-7 NIC"] .slot-field[data-field="part_number"]`).first().click();
     const nicUnit=vp.getByRole('dialog',{name:'ConnectX-7 NIC',exact:true});
     await nicUnit.waitFor();
     const nicText=await nicUnit.innerText();
@@ -606,7 +887,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
   await phone.getByRole('button',{name:'Equipment',exact:true}).waitFor();await phone.waitForTimeout(300);
   assert.equal(await width(),375,'Edit on');
   const inside=async locator=>{const b=await locator.boundingBox();assert.ok(b,'visible');assert.ok(b.x>=0&&b.x+b.width<=375,`${b.x}+${b.width} within 375`);};
-  await phone.locator('.equipment-cell[aria-label="View B08 Switch"] .equipment-type').click();
+  await phone.locator('.equipment-cell[aria-label="View B08 Switch"] .slot-field[data-field="part_number"]').click();
   const phonePanel=phone.locator('div.fixed.inset-0.z-50.flex.justify-end');
   await phonePanel.getByText('Save changes').waitFor();
   await inside(phonePanel.getByRole('button',{name:'Close'}));
