@@ -49,8 +49,9 @@ const KEYS = [
   [/^(PN|P\/N|PART|PART\s*(NO|NUMBER|#)|PARTNUMBER)$/i, "part_number"],
   [/^(MODEL|MODEL\s*(NO|NAME))$/i, "model"],
   [/^(MAC|MAC\s*ADDRESS|MAC\s*ADDR)$/i, "mac"],
+  [/^(DESC|DESCRIPTION|PRODUCT|PRODUCT\s*NAME)$/i, "description"],
 ];
-const KEY_WORDS = "SN|S\\/N|SER|SERIAL(?:\\s*(?:NO|NUMBER|#))?|PN|P\\/N|PART(?:\\s*(?:NO|NUMBER|#))?|PARTNUMBER|MODEL(?:\\s*(?:NO|NAME))?|MAC(?:\\s*(?:ADDRESS|ADDR))?";
+const KEY_WORDS = "SN|S\\/N|SER|SERIAL(?:\\s*(?:NO|NUMBER|#))?|PN|P\\/N|PART(?:\\s*(?:NO|NUMBER|#))?|PARTNUMBER|MODEL(?:\\s*(?:NO|NAME))?|MAC(?:\\s*(?:ADDRESS|ADDR))?|DESC(?:RIPTION)?|PRODUCT(?:\\s*NAME)?";
 const KEY_VALUE = new RegExp(`^\\s*(${KEY_WORDS})\\s*[:=]\\s*(.*?)\\s*$`, "i");
 const NEXT_KEY = new RegExp(`\\s+(?=(?:${KEY_WORDS})\\s*[:=])`, "i");
 
@@ -75,6 +76,40 @@ export function productForPart(text) {
   if (!value) return "";
   for (const [pattern, product] of PART_PRODUCTS) if (pattern.test(value)) return product;
   return "";
+}
+
+// The lab owner's rule: a unit that has a serial number and nothing that names another product is most likely a switch
+// under test, so it is saved (or marked) as a switch. Not caught: a part number or model of a known type (a cable, PDU,
+// KVM ... keeps that type); a NIC, DPU or other known NVIDIA part (MCX…, MBF…, MCP…, ConnectX, BlueField, adapter);
+// an NVIDIA board or GPU OPN (900-9X766-…, 699-…), also as the serial or code itself; a model or description that
+// names a server or another product (DGX, HGX, server, PowerEdge, ProLiant, ThinkSystem, compute, node, UPS, board,
+// superchip, an H100 / A100 / GB200 … GPU, an NVL72 system); and another vendor's unit (Cisco, Arista, Dell …), which is a switch only
+// when its label says so ("switch", "PowerSwitch") or names an NVIDIA switch model (an HPE-sold SN2010M).
+// code: the unit's serial number (a labelled SN, a GS1 (21) or a plain scanned code); only checked for a board OPN.
+// Returns the type: "switch", a known type, or "other".
+const SERVER_WORDS = /\b(DGX|HGX|servers?|PowerEdge|ProLiant|ThinkSystem|ThinkAgile|compute|nodes?|workstation|UPS|boards?|superchip|Grace|Hopper|[AHBL]\d{2,3}S?|GB\d{3}|NVL\d+)\b/i;
+const BOARD_OPN = /(^|[^0-9A-Z])(900|699)-[0-9A-Z]{5}-[0-9A-Z]{4}/i;
+const OTHER_VENDORS = /\b(Cisco|Arista|Juniper|Dell|HPE|HP|Hewlett|Aruba|Lenovo|Supermicro|Gigabyte|ASUS|ASRock|Inspur|Wiwynn|Foxconn|Brocade|Extreme\s+Networks|Netgear|Ubiquiti|MikroTik|Huawei|Fortinet|Edgecore|Celestica|Quanta)\b/i;
+const SWITCH_WORDS = /switch(es)?\b|\bM?(SN|QM)\d{4}[A-Z]{0,2}\b|\b(Spectrum|Quantum)\b/i;
+export function serialUnitType({ part_number = "", model = "", description = "", code = "" } = {}) {
+  const named = typeForPart(part_number) || typeForPart(model);
+  if (named) return named;
+  const words = [model, description].join(" "), all = [part_number, words].join(" ");
+  if (productForPart(part_number) || /\b(connect-?x|blue-?field|nic|dpu|hca|adapter|gpu)/i.test(words)) return "other";
+  if (BOARD_OPN.test(part_number) || BOARD_OPN.test(words) || BOARD_OPN.test(code)) return "other";
+  if (SERVER_WORDS.test(all)) return "other";
+  if (OTHER_VENDORS.test(all)) return SWITCH_WORDS.test(all) ? "switch" : "other";
+  return "switch";
+}
+
+// A unit nothing identifies yet: type other with the generic name ("Unit", the name a scan gives it) or with its own
+// code (barcode, serial number or id) as its name. A serial number entered for it marks it as a switch by the rule above.
+export const GENERIC_UNIT_NAME = TYPE_LABELS.other;
+export function isGenericUnit(item) {
+  if ((item?.type || "other") !== "other") return false;
+  const name = String(item?.name || "").trim().toLowerCase();
+  if (!name || name === GENERIC_UNIT_NAME.toLowerCase()) return true;
+  return [item.barcode, item.serial_number, item.id].some(code => String(code || "").trim().toLowerCase() === name);
 }
 
 // "00:1A:…", "00-1a-…", "001A2B3C4D5E" or "001a.2b3c.4d5e" (the forms the server reads as a MAC) -> "00:1A:2B:3C:4D:5E".
@@ -146,6 +181,7 @@ export function parseUnitBarcode(raw) {
 
   // serial_from_code: the serial is the scanned code itself (a plain code), not a value the label calls a serial.
   const result = { code: "", raw: "", serial: "", serial_from_code: false, part_number: "", model: "", mac: "", gtin: "", lot: "", type: "", name: "" };
+  let description = "";
   const fields = gs1Bracketed(text) || ((gs1 || text.includes(GS)) ? gs1Raw(text) : null);
   let readable = clean(text, Infinity);
   if (fields) {
@@ -163,6 +199,7 @@ export function parseUnitBarcode(raw) {
       result.part_number = clean(pairs.part_number || "");
       result.model = clean(pairs.model || "");
       result.mac = macOf(pairs.mac) || clean(pairs.mac || "");
+      description = clean(pairs.description || "");
     } else if (/^MT\d{4}[A-Z0-9]{4,}$/i.test(readable)) {
       result.serial = readable.toUpperCase();
     } else if (macOf(readable)) {
@@ -188,10 +225,14 @@ export function parseUnitBarcode(raw) {
     result.serial_from_code = true;
   }
 
-  result.type = typeForPart(result.part_number) || typeForPart(result.model) || "other";
+  // A unit whose label gives its serial number but no other product is most likely a switch under test, by the lab
+  // owner's rule (serialUnitType), so it is saved as a switch; its type can be changed in DCIM. A part number, model or
+  // description that names a NIC, DPU, board, server or any other known product keeps that product's type (or other).
+  const named = typeForPart(result.part_number) || typeForPart(result.model);
+  result.type = named || (result.serial ? serialUnitType({ part_number: result.part_number, model: result.model, description, code: result.serial }) : "other");
   // The product, never the serial: two units of one product share a name; the serial tells them apart.
   const kind = /^MCX/i.test(result.part_number) ? "NIC" : TYPE_LABELS[result.type];
-  result.name = clean(result.model || productForPart(result.part_number) || result.part_number || kind, NAME_MAX);
+  result.name = clean(result.model || productForPart(result.part_number) || description || result.part_number || kind, NAME_MAX);
   return result;
 }
 

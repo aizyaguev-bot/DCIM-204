@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import JsBarcode from "jsbarcode";
 import { loadInventory, updateInventory, labelCode, parseLocationCode, MAIN_STORAGE, UNIT_DETAILS, detailText } from "../api/inventory";
 import { STORAGE_SHELVES } from "../components/racks/floors.js";
+import { parseUnitBarcode, serialUnitType, typeForPart } from "../api/scanParse.js";
 import { qrSvgPath } from "../qr";
 import {useAccounts} from "../accounts";
 import SerialNumbersPanel from "../components/SerialNumbersPanel";
@@ -25,6 +26,11 @@ const errorText = e => networkFailure(e) ? "Could not reach the server. Check th
 // Main storage: the whole unit (0) or one of its shelves 1-STORAGE_SHELVES, without a position.
 const validLocation = (value, racks) => value && racks.includes(value.rack) && Number.isInteger(value.u) && value.u >= 0 && value.u <= 42 && (value.rack !== MAIN_STORAGE || value.u <= STORAGE_SHELVES && !value.position);
 function where(p) { return p ? p.rack === MAIN_STORAGE ? (p.u ? `Main storage · Shelf ${String(p.u).padStart(2, "0")}` : "Main storage · whole unit") : `${p.rack} · ${p.u ? `Shelf ${String(p.u).padStart(2, "0")}` : "Whole rack / no shelf"}${p.position ? ` · ${p.position}` : ""}` : "Not registered"; }
+// The type of automatically registered equipment: a scanned serial number is most likely a switch (the lab owner's
+// rule), unless the code names another product (a NIC, DPU or cable part number, a board OPN, a server, a MAC address ...).
+function autoType(code) {
+  try { return parseUnitBarcode(code).type; } catch { return typeForPart(code) || serialUnitType({ description: code, code }); }
+}
 function when(value) { return value ? new Date(value).toLocaleString() : "Not confirmed by scan yet"; }
 
 function Field({ label, children }) {
@@ -268,7 +274,7 @@ export default function ScanView() {
       setError("This code matches multiple items. Select the correct item by ID and location; nothing has been changed." + notProcessed(dropQueue()));
     } else if (autoOn && validLocation(target, result.data.racks)) {
       try {
-        const saved = await updateInventory("", { code, name: Array.from(code).slice(0, 160).join(""), type: "other", ...target }, result.revision);
+        const saved = await updateInventory("", { code, name: Array.from(code).slice(0, 160).join(""), type: autoType(code), ...target }, result.revision);
         if (!mounted.current) return;
         acceptSaved(saved, target);
         setMessage(`Registered automatically: ${saved.data.name} → ${where(place(saved.data))}. Saved in DCIM. Scan the next equipment barcode.`);
@@ -360,7 +366,7 @@ export default function ScanView() {
         <p className="w-full text-xs text-zinc-400 empty:hidden" aria-live="polite">{pendingCount > 0 ? `${plural(pendingCount, "scan")} waiting. Keep scanning; they are processed in order.` : null}</p>
       </form>
       <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="accent-nv-400" checked={autoOn} disabled={busy || !canOperate} title={canOperate ? undefined : READ_ONLY} onChange={e => { setAutoRegister(e.target.checked); inputRef.current?.focus(); }}/>Automatically register new equipment</label>
-      <p className="text-xs text-zinc-400">{autoOn ? "New barcodes are saved immediately at your selected destination, using the barcode as the name and type Other. Edit these details later in DCIM. Existing equipment moves still require Save." : "Unknown barcodes can be linked to existing equipment or registered manually. Moves require Save."}</p>
+      <p className="text-xs text-zinc-400">{autoOn ? "New barcodes are saved immediately at your selected destination, using the barcode as the name. A serial number is saved as a switch unless the code names another product (a NIC, cable, PDU …). Edit these details later in DCIM. Existing equipment moves still require Save." : "Unknown barcodes can be linked to existing equipment or registered manually. Moves require Save."}</p>
       <p className="text-xs text-zinc-400">USB / Bluetooth keyboard scanner: use English keyboard mode and an Enter or Tab suffix. Location QR codes need a 2D (imager) scanner. Shelf 01 is the top shelf.</p>
     </section>
     {error && <div role="alert" className="rounded-xl border border-rose-800 bg-rose-950/30 text-rose-200 p-4">{error}</div>}

@@ -4,6 +4,8 @@ import { parseUnitBarcode } from "../../api/scanParse.js";
 import { placeScannedUnit, undoScannedUnit, canUndo, filledFields, placeText, floorText } from "../../api/unitScan.js";
 import { MAIN_STORAGE, UNIT_DETAILS } from "../../api/inventory.js";
 import { rackHasFloors } from "./floors.js";
+import { FILL_NOTE, webpeStatusText, willFill } from "../../api/webpeStatus.js";
+import { useWebpeStatus } from "../../api/useWebpeStatus.js";
 
 // Add units to a server's floor (or a rack's floor) by scanning their barcodes: each scan looks the code up and, in
 // one step, registers a new unit there or moves the unit that already has that barcode or serial (never a second
@@ -136,6 +138,11 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
   const cameraRef = useRef(camera);
   cameraRef.current = camera;
   const withCamera = cameraAvailable();
+  // The automatic webpe lookup on the lab laptop fills a new unit's P/N and name from its serial number.
+  const webpe = useWebpeStatus();
+  const webpeRef = useRef(webpe);
+  webpeRef.current = webpe;
+  const webpeLine = webpeStatusText(webpe);
   useDialogFocus(panelRef, { initialRef: inputRef, onEscape: () => { if (cameraRef.current) { setCamera(false); inputRef.current?.focus(); } else onClose(); } });
   useEffect(() => () => { mounted.current = false; }, []);
 
@@ -169,7 +176,8 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
     const at = { ...placeRef.current };
     try {
       const result = await placeScannedUnit(parsed, at);
-      const entry = { key, code: parsed.code, result, label: target.label, undo: canUndo(result) ? "ready" : null };
+      const entry = { key, code: parsed.code, result, label: target.label, undo: canUndo(result) ? "ready" : null,
+        fill: result.action === "created" && willFill(result.item, webpeRef.current) };
       entry.state = { undo: entry.undo };
       if (mounted.current) setLog(list => [entry, ...list]);
       if (result.action !== "confirmed" || filledFields(result).length) onItemsChanged(null);
@@ -228,7 +236,7 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
         <h2 id={titleId} className="racks-dialog-title">Scan unit barcode</h2>
         <span className="server-details-tools"><button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>×</button></span>
       </header>
-      <p id={hintId} className="racks-dialog-note">Units go to <strong><bdi>{where}</bdi></strong>{target.label && !storage ? <> in <bdi>{target.rack}</bdi></> : null}. Scan each unit's serial number barcode; a new unit is added and saved right away, a unit that is already in DCIM is moved here. Scan as many units as you need.</p>
+      <p id={hintId} className="racks-dialog-note">Units go to <strong><bdi>{where}</bdi></strong>{target.label && !storage ? <> in <bdi>{target.rack}</bdi></> : null}. Scan each unit's serial number barcode; a new unit is added and saved right away, a unit that is already in DCIM is moved here. A new unit whose barcode gives only its serial number is saved as a switch; change its type in DCIM if it is something else. Scan as many units as you need.</p>
       {floorChoices && <div className="racks-field">
         <label htmlFor={`${titleId}-floor`}>{storage ? (target.rack === MAIN_STORAGE ? <>Shelf in Main storage</> : <>Shelf in <bdi>{target.rack}</bdi></>) : <>Floor in <bdi>{target.rack}</bdi></>}</label>
         <select id={`${titleId}-floor`} value={u} onChange={e => { setU(Number(e.target.value)); inputRef.current?.focus(); }}>
@@ -249,11 +257,13 @@ export default function ScanUnitDialog({ target, floorChoices = null, onClose, o
         ? <CameraScanner onCode={value => enqueue(value)} onStop={() => { setCamera(false); inputRef.current?.focus(); }}/>
         : <div className="scan-unit-camera"><button type="button" className="racks-btn racks-btn-sm" onClick={() => setCamera(true)}>Use camera</button></div>)
         : <p className="racks-field-hint">Camera scanning is not available in this browser or over plain HTTP. Use a USB barcode scanner, or type the code.</p>}
+      {webpeLine && <p className="racks-field-hint" data-webpe-status={webpeLine.state} aria-live="polite">{webpeLine.text}</p>}
       {latestError && <p id={`${titleId}-error`} role="alert" className="racks-dialog-error">{latestError.error}</p>}
       {log.length > 0 && <ol className="scan-unit-log" aria-label="Scanned units">
         {log.map(entry => <li key={entry.key} data-action={entry.result?.action || "error"} data-undo={entry.undo || undefined}>
           {entry.result ? <span className="scan-unit-text">{resultText(entry.result, entry.label)}</span>
             : <span className="scan-unit-text scan-unit-error">{entry.code ? <><bdi className="racks-mono">{entry.code}</bdi>: </> : null}{entry.error}</span>}
+          {entry.fill && entry.undo !== "done" && <span className="racks-muted" data-webpe-fill="">{FILL_NOTE}.</span>}
           {entry.matches && <ul className="scan-unit-matches">{entry.matches.map(m => <li key={m.id}>{unitText(m)} · <bdi>{placeText({ rack: m.rack, u: m.u })}</bdi> · <span className="racks-mono">{m.id}</span></li>)}</ul>}
           {entry.undo === "ready" && <button type="button" className="racks-btn racks-btn-sm" onClick={() => { inputRef.current?.focus(); undo(entry); }}>Undo</button>}
           {entry.undo === "busy" && <span className="racks-muted">Undoing…</span>}

@@ -4,11 +4,13 @@ example from the "SN analysis" page of an internal site. Uses the same records, 
 history as the scanner and DCIM."""
 import csv
 from copy import deepcopy
+from datetime import datetime, timezone
 import io
+import json
 import re
 
-from fastapi import APIRouter, Header, Response
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Header, HTTPException, Response
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .. import inventory_store as store
 from .inventory import set_headers
@@ -298,3 +300,89 @@ async def serials_csv():
     return Response("﻿" + out.getvalue(), media_type="text/csv", headers={
         "Content-Disposition": 'attachment; filename="serial-numbers.csv"', "Cache-Control": "no-store",
         "ETag": store.revision(data)})
+
+
+# ---- automatic webpe lookup: the laptop tool's heartbeat (tools/webpe-sync/sync.cjs --watch) ----
+# The tool runs on the lab laptop (webpe needs NVIDIA SSO, which this server cannot reach) and reports after every check;
+# the site shows whether it runs. One small JSON file next to the inventory.
+WEBPE_STATUS_NAME = "webpe_status.json"
+WEBPE_STATUS_FIELDS = ("last_check", "last_lookup", "looked_up_today", "pending", "last_error", "version", "interval", "seen_at")
+WEBPE_INTERVAL_DEFAULT = 20
+
+
+def webpe_status_file():
+    return store.ITEMS_FILE.parent / WEBPE_STATUS_NAME
+
+
+class WebpeStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    last_check: datetime | None = None
+    last_lookup: datetime | None = None
+    looked_up_today: int = Field(default=0, ge=0, le=1_000_000)
+    pending: int = Field(default=0, ge=0, le=1_000_000)
+    last_error: str | None = Field(default=None, max_length=200)
+    version: str | None = Field(default=None, max_length=40)
+    interval: int = Field(default=WEBPE_INTERVAL_DEFAULT, ge=1, le=3600)
+
+    @field_validator("last_error", "version")
+    @classmethod
+    def plain_text(cls, value, info):
+        if value is None:
+            return None
+        if any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError(f"{info.field_name} cannot contain control characters")
+        return value.strip() or None
+
+
+def iso(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def read_webpe_status():
+    try:
+        data = json.loads(webpe_status_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {field: data.get(field) for field in WEBPE_STATUS_FIELDS} if isinstance(data, dict) else {}
+
+
+def webpe_status_view(data, now=None):
+    """The stored report plus "active": the tool reported within 3 check intervals (by this server's clock, so a laptop
+    clock that is off does not matter)."""
+    now = now or datetime.now(timezone.utc)
+    view = {field: data.get(field) for field in WEBPE_STATUS_FIELDS}
+    interval = data.get("interval") if isinstance(data.get("interval"), int) and data.get("interval") > 0 else WEBPE_INTERVAL_DEFAULT
+    view["interval"] = interval
+    try:
+        seen = datetime.fromisoformat(str(data.get("seen_at")).replace("Z", "+00:00"))
+        view["active"] = 0 <= (now - seen).total_seconds() <= 3 * interval
+    except (TypeError, ValueError):
+        view["active"] = False
+    return view
+
+
+@router.get("/webpe-status")
+async def get_webpe_status(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return webpe_status_view(read_webpe_status())
+
+
+@router.put("/webpe-status")
+async def put_webpe_status(body: WebpeStatus, response: Response):
+    """The laptop tool's report after each check (Operator and up, with the CSRF header like every other write)."""
+    now = datetime.now(timezone.utc)
+    data = {"last_check": iso(body.last_check), "last_lookup": iso(body.last_lookup), "looked_up_today": body.looked_up_today,
+            "pending": body.pending, "last_error": body.last_error, "version": body.version, "interval": body.interval,
+            "seen_at": iso(now)}
+    path = webpe_status_file()
+    with store.locked_file(path, "The webpe lookup status could not be saved. Please retry."):
+        try:
+            store.write_json(path, data, prefix=".webpe-status-")
+        except OSError as exc:
+            raise HTTPException(503, "The webpe lookup status could not be saved. Please retry.") from exc
+    response.headers["Cache-Control"] = "no-store"
+    return webpe_status_view(data, now)

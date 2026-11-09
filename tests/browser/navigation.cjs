@@ -15,19 +15,23 @@ const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
   await page.goto(origin+'/twin/?embed=1');
   await page.waitForFunction(()=>window.__twin?.S.live.connected&&window.__twin.S.recs.size>10);
   await page.waitForTimeout(700);
-  const snapshot=()=>page.evaluate(()=>{const t=__twin;return{p:t.camera.position.toArray(),target:t.controls.target.toArray(),q:t.camera.quaternion.toArray(),distance:t.camera.position.distanceTo(t.controls.target),polar:t.controls.getPolarAngle(),min:t.controls.minDistance,max:t.controls.maxDistance,up:t.camera.up.toArray(),data:JSON.stringify(t.S.data),dirty:t.S.dirty,selected:t.S.selected,move:t.S.moveItem,edit:t.S.editMode};});
+  const snapshot=()=>page.evaluate(()=>{const t=__twin;return{p:t.camera.position.toArray(),target:t.controls.target.toArray(),q:t.camera.quaternion.toArray(),distance:t.camera.position.distanceTo(t.controls.target),polar:t.controls.getPolarAngle(),minPolar:t.controls.minPolarAngle,maxPolar:t.controls.maxPolarAngle,min:t.controls.minDistance,max:t.controls.maxDistance,up:t.camera.up.toArray(),data:JSON.stringify(t.S.data),dirty:t.S.dirty,selected:t.S.selected,move:t.S.moveItem,edit:t.S.editMode};});
   const dist=(a,b)=>Math.hypot(...a.map((v,i)=>v-b[i]));
-  async function stable(label){await page.waitForTimeout(100);const a=await snapshot();await page.waitForTimeout(450);const b=await snapshot();assert.ok(dist(a.p,b.p)<1e-6,label+' drift');assert.ok(dist(a.target,b.target)<1e-6,label+' target drift');checks.push(label+' stops');return b;}
+  // map navigation glides briefly after a release (inertia); "stable" = nothing moves once the glide has ended
+  async function stable(label){await page.waitForFunction(()=>!__twin.controls.moving&&!__twin.S.tween,null,{timeout:20000});await page.waitForTimeout(100);const a=await snapshot();await page.waitForTimeout(450);const b=await snapshot();assert.ok(dist(a.p,b.p)<1e-6,label+' drift');assert.ok(dist(a.target,b.target)<1e-6,label+' target drift');checks.push(label+' stops');return b;}
   let initial=await snapshot();assert.equal(initial.edit,false);assert.equal(initial.dirty,false);assert.ok(initial.distance>3);
   assert.deepEqual(initial.up,[0,1,0]);checks.push('clear initial view');
   async function box(){return page.locator('#c').boundingBox();}
   async function drag(button,dx,dy,steps=8){const b=await box();const x=b.x+b.width*.56,y=b.y+b.height*.55;await page.mouse.move(x,y);await page.mouse.down({button});await page.mouse.move(x+dx,y+dy,{steps});await page.mouse.up({button});}
   await page.mouse.move(900,450);await page.mouse.move(1000,510,{steps:20});let hover=await stable('hover');assert.ok(dist(initial.p,hover.p)<1e-6);
-  await drag('left',35,15);let a=await stable('short orbit');assert.ok(dist(a.p,initial.p)>.01);assert.ok(dist(a.target,initial.target)<.001);assert.equal(a.selected,null);
-  await drag('left',-250,200,35);a=await stable('long orbit');assert.ok(a.polar<=Math.PI/2-.025+1e-4);assert.ok(a.polar>=.035-1e-4);
-  await page.locator('#vReset').click();await page.waitForTimeout(600);const beforePan=await snapshot();await drag('right',60,-40,15);const afterPan=await stable('screen pan');assert.ok(dist(beforePan.target,afterPan.target)>.005);assert.ok(Math.abs(beforePan.distance-afterPan.distance)<.01);
+  // map style: right drag rotates / tilts around a fixed target on the floor, left drag pans across the floor
+  assert.ok(Math.abs(initial.target[1])<1e-6,'the overview target is on the floor');
+  await drag('right',35,15);let a=await stable('short rotate');assert.ok(dist(a.p,initial.p)>.01);assert.ok(dist(a.target,initial.target)<.001);assert.equal(a.selected,null);
+  await drag('right',-250,-400,35);a=await stable('long rotate');assert.ok(a.polar<=a.maxPolar+1e-4,'polar '+a.polar);assert.ok(a.polar>=a.minPolar-1e-4);assert.ok(a.p[1]>0.15,'camera above the floor');
+  await drag('right',100,900,35);a=await stable('rotate to the top');assert.ok(a.polar>=a.minPolar-1e-4&&a.polar<.3,'polar '+a.polar);assert.ok(Math.abs(a.target[1])<1e-6,'target stays on the floor');
+  await page.locator('#vReset').click();await stable('reset');const beforePan=await snapshot();await drag('left',60,-40,15);const afterPan=await stable('floor pan');assert.ok(dist(beforePan.target,afterPan.target)>.005);assert.ok(Math.abs(beforePan.distance-afterPan.distance)<.01);assert.ok(Math.abs(afterPan.target[1])<1e-6,'pan keeps the target on the floor');assert.ok(Math.abs(afterPan.polar-beforePan.polar)<1e-3,'pan never tilts');
   for(let i=0;i<45;i++)await page.mouse.wheel(0,-400);a=await stable('rapid zoom in');assert.ok(a.distance>=a.min-1e-5);assert.ok(a.p.every(Number.isFinite));
-  for(let i=0;i<85;i++)await page.mouse.wheel(0,400);a=await stable('rapid zoom out');assert.ok(a.distance<=a.max+1e-4);assert.ok(a.p.every(Number.isFinite));
+  for(let i=0;i<85;i++)await page.mouse.wheel(0,400);a=await stable('rapid zoom out');assert.ok(a.distance<=a.max+1e-4);assert.ok(a.p.every(Number.isFinite));assert.ok(Math.abs(a.target[1])<1e-6,'zoom keeps the target on the floor');assert.ok(a.p[1]>0,'camera above the floor');
   await page.locator('#vReset').click();await page.waitForTimeout(600);
   const b=await box();await page.mouse.move(b.x+b.width*.5,b.y+b.height*.5);await page.mouse.down();await page.mouse.move(b.x+b.width+30,b.y+b.height*.6,{steps:20});await page.mouse.up();a=await stable('release outside viewport');const outside=a.p;await page.mouse.move(b.x+b.width*.4,b.y+b.height*.4,{steps:15});assert.ok(dist(outside,(await snapshot()).p)<1e-6);
   await drag('left',30,10);await page.mouse.down();await page.mouse.move(850,560,{steps:8});await page.evaluate(()=>window.dispatchEvent(new Event('blur')));await page.mouse.move(750,580,{steps:10});await page.mouse.up();await stable('window blur');

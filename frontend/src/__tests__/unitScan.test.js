@@ -257,7 +257,7 @@ test("a plain code makes a unit whose serial number is that code and whose name 
   const result = await placeScannedUnit(parseUnitBarcode("TESTSN12345"), shelf2);
   assert.equal(result.action, "created");
   const item = stored(state, result.item.id);
-  assert.deepEqual([item.barcode, item.serial_number, item.name, item.type], ["TESTSN12345", "TESTSN12345", "Unit", "other"]);
+  assert.deepEqual([item.barcode, item.serial_number, item.name, item.type], ["TESTSN12345", "TESTSN12345", "Switch", "switch"], "a unit scanned by its serial number alone is saved as a switch");
   const again = await placeScannedUnit(parseUnitBarcode("testsn12345"), shelf2);
   assert.deepEqual([again.action, again.item.id, again.filled], ["confirmed", item.id, {}], "the same code (any case) finds it again, no second row");
   assert.equal(count(state, "TESTSN12345"), 1);
@@ -414,4 +414,35 @@ test("a fill the server refuses keeps the move and reports why", async t => {
   assert.ok(canUndo(result));
   await undoScannedUnit(result);
   assert.equal(stored(state, "ci-2").rack, "Rack-02");
+});
+
+test("a scan that fills the serial number of a legacy barcode-only generic unit marks it as a switch; Undo puts it back", async t => {
+  const state = fakeServer(t, { "Rack-01": [], "Rack-03": [
+    { id: "ci-u", name: "Unit", type: "other", barcode: "TAG-U", u: 1, shelf_position: "" },
+    { id: "ci-c", name: "TAG-C", type: "other", barcode: "TAG-C", u: 2, shelf_position: "" },
+    { id: "ci-b", name: "UPS box", type: "other", barcode: "TAG-B", u: 3, shelf_position: "" },
+    { id: "ci-d", name: "Unit", type: "other", barcode: "TAG-D", u: 4, shelf_position: "" },
+    { id: "ci-o", name: "Unit", type: "other", barcode: "900-9X766-003N-SQ0", u: 4, shelf_position: "" }] });
+  // a board OPN scanned as the serial of a generic unit is not a switch (as a new unit scanned with it)
+  const opn = await placeScannedUnit(parseUnitBarcode("900-9X766-003N-SQ0"), { rack: "Rack-03", u: 4, position: "" });
+  assert.deepEqual(opn.filled, { serial_number: "900-9X766-003N-SQ0" });
+  assert.deepEqual([stored(state, "ci-o").type, stored(state, "ci-o").name], ["other", "Unit"], "a board OPN code keeps the unit other");
+  assert.equal(parseUnitBarcode("900-9X766-003N-SQ0").type, "other", "the same as a new unit");
+  const result = await placeScannedUnit(parseUnitBarcode("tag-u"), shelf2);
+  assert.deepEqual(result.filled, { serial_number: "tag-u" });
+  assert.deepEqual([stored(state, "ci-u").type, stored(state, "ci-u").name, stored(state, "ci-u").serial_number], ["switch", "Switch", "tag-u"], "the generic name follows the type");
+  assert.deepEqual([result.item.type, result.item.name], ["switch", "Switch"]);
+  // named after its code: marked as a switch, keeps its name
+  await placeScannedUnit(parseUnitBarcode("tag-c"), shelf2);
+  assert.deepEqual([stored(state, "ci-c").type, stored(state, "ci-c").name], ["switch", "TAG-C"]);
+  // a unit whose name says what it is, and a label that names a server, are not marked
+  await placeScannedUnit(parseUnitBarcode("tag-b"), shelf2);
+  assert.deepEqual([stored(state, "ci-b").type, stored(state, "ci-b").serial_number], ["other", "tag-b"]);
+  const server = await placeScannedUnit(parseUnitBarcode("SN: TAG-D; Model: DGX H100"), { rack: "Rack-03", u: 4, position: "" });
+  assert.deepEqual(server.filled, { serial_number: "TAG-D", model: "DGX H100" });
+  assert.equal(stored(state, "ci-d").type, "other", "a scan whose label names a server does not mark the unit as a switch");
+  // Undo of the first scan: back on Rack-03 floor 1 as an "Unit" of type other without the serial number
+  await undoScannedUnit(result);
+  const back = stored(state, "ci-u");
+  assert.deepEqual([back.rack, back.u, back.type, back.name, "serial_number" in back], ["Rack-03", 1, "other", "Unit", false]);
 });

@@ -31,6 +31,11 @@
   // Health colouring (default): what the object is doing now. Lifecycle status colouring (STATUS_COLOR) stays one menu away.
   const HEALTH = { up: { c: '#4ade80', t: 'Up' }, down: { c: '#f87171', t: 'Down' }, unknown: { c: '#a1a1aa', t: 'Unknown' }, maint: { c: '#c084fc', t: 'Maintenance' } };
   const SELECT_COLOR = '#38bdf8', NEUTRAL = '#71717a', SHELF_NEUTRAL = '#52525b';
+  // A server's body is painted by its power state (its PDU outlet): on = green, off = red, no reading = neutral grey
+  // (never red: an unknown state is not "off"). The label repeats it in words (ON / OFF / ?) for colour-blind people.
+  const POWER = { on: { c: '#22c55e', t: 'ON', title: 'Power on' }, off: { c: '#dc2626', t: 'OFF', title: 'Power off' }, unknown: { c: '#6b7280', t: '?', title: 'Power state unknown' } };
+  // Kinds of the units next to a server on a shelf: short tag shown on the shelf label.
+  const UNIT_TAG = { switch: 'SW', nic: 'NIC', dpu: 'DPU', computer: 'PC', ups: 'UPS', pdu: 'PDU', kvm: 'KVM', patchpanel: 'PP', cable: 'CBL', blank: 'BLK', other: 'DEV' };
   const PING_MS = 60000;
   const VIEW_LABEL = { orbit: 'Overview', front: 'Rack front', eye: 'Aisle', top: 'Top' };
   const CAT_LABEL = { setup: 'Rack', shelf: 'Shelf', storage: 'Storage', zone: 'Zone', structure: 'Structure' };
@@ -72,22 +77,18 @@
   const scene = new THREE.Scene();
   scene.fog = null;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
-  // Official OrbitControls matches the bundled Three.js r128 build.
+  // Map-style navigation (lab-twin/map-controls.js): left drag / one finger pans across the floor, right drag / two
+  // fingers rotate and tilt around a target point on the floor, the wheel / pinch zooms towards the pointer.
   // One navigation controller owns input; equipment moves use the explicit Move tool.
   camera.up.set(0, 1, 0);
-  const controls = new THREE.OrbitControls(camera, canvas);
-  controls.rotateSpeed = 0.45;
-  controls.panSpeed = 0.65;
-  controls.zoomSpeed = 0.65;
+  const controls = new THREE.LabMapControls(camera, canvas);
+  controls.rotateSpeed = 0.5;
+  controls.zoomSpeed = 1;
   controls.enableDamping = true;
-  controls.dampingFactor = 0.18;
-  controls.screenSpacePanning = true;
   controls.minDistance = 0.8;
   controls.maxDistance = 35;
-  controls.minPolarAngle = 0.035;
-  controls.maxPolarAngle = Math.PI / 2 - 0.025;
-  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-  controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+  controls.minPolarAngle = 0.02;              // a hair off straight down: the compass heading stays defined
+  controls.maxPolarAngle = 1.5;               // ~86°: never level with or under the floor
   canvas.style.touchAction = 'none';
   // prefers-reduced-motion: camera moves jump instead of gliding, no inertia, no pulsing.
   const reduceMotionQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
@@ -106,14 +107,14 @@
   canvas.addEventListener('pointerdown', e => {
     if (e.pointerType !== 'touch' && ![0, 1, 2].includes(e.button)) return;
     if (S.tween && S.tween.ms > 0) markView(null);   // interrupted mid-flight: the camera is between two views
-    controls.cancel(); S.tween = null; S.lastInput = performance.now();
+    if (!activePointers.size) controls.cancel();   // a second finger joins the gesture instead of restarting it
+    S.tween = null; S.lastInput = performance.now();
     activePointers.add(e.pointerId);
     if (e.pointerType !== 'touch') { try { canvas.setPointerCapture(e.pointerId); } catch {} }
     canvas.focus({ preventScroll: true });
   }, true);
   window.addEventListener('pointerup', e => {
-    activePointers.delete(e.pointerId);
-    if (!activePointers.size) controls.cancel();
+    activePointers.delete(e.pointerId);   // the controller ends its own gesture (and keeps a short inertia)
     try { canvas.releasePointerCapture(e.pointerId); } catch {}
     downPos = null;
   });
@@ -312,7 +313,7 @@
   function localToWorld(group, x, y, z) { return group.localToWorld(new THREE.Vector3(x, y, z)); }
 
   function buildRack(su, shelvesDefs, tpl) {
-    const { width: w, depth: dd, height: h, shelfLevels, shelfThickness: st, profile: p } = tpl;
+    const { width: w, depth: dd, height: h, shelfThickness: st, profile: p } = tpl;
     const g = new THREE.Group(); g.position.set(su.pos[0], 0, su.pos[1]); g.rotation.y = THREE.MathUtils.degToRad(su.rot || 0); g.updateMatrixWorld(true);
     const status = effStatus(su); const col = STATUS_COLOR[status];
     const postMat = mat('#cdd0d5', { metal: .6, rough: .3, unique: true });
@@ -339,6 +340,9 @@
     down.position.set(0, (h + 0.05) / 2, 0); down.computeLineDistances(); down.visible = false; down.renderOrder = 3; down.userData.baseOpacity = 1; g.add(down); eds.push(down);
     staticGroup.add(g); g.updateMatrixWorld(true);
     const rec = reg({ id: su.id, cat: 'setup', def: su, group: g, meshes, edges: eds, status, conf: su.confidence, zone: su.zone, setup: su.id, anchor: localToWorld(g, 0, h + 0.12, 0), tpl, cap, envSolid: e, envDashed: ed, envDown: down });
+    // the rack as a box in its own frame (sight lines to shelf cards: sightBlocked, rackFootprint): its whole envelope,
+    // posts and top cap included, plus 1 cm, so a sight line that grazes a corner post is blocked too
+    rec.localBox = new THREE.Box3(new THREE.Vector3(-dd / 2 - 0.01, 0, -w / 2 - 0.01), new THREE.Vector3(dd / 2 + 0.01, h + 0.03, w / 2 + 0.01)); rec.invWorld = g.matrixWorld.clone().invert();
     makeLabel(rec, 'setup', `<span class="lp" style="background:${col}"></span><span class="ln" dir="auto">${esc(rackName(su))}</span><span class="ls"></span><span class="lt"></span>`);
     rec.label.title = `${su.id} · ${su.name}`;
     rec.labelTel = rec.label.querySelector('.lt');
@@ -358,7 +362,7 @@
 
     // shelves
     shelvesDefs.forEach(sh => {
-      const y = shelfLevels[sh.level - 1];
+      const y = sh.y;
       const m = box(dd - 2 * p - 0.02, st, w - 2 * p - 0.02, mat('#dfe2e6', { metal: .3, rough: .5, unique: true }), 0, y - st / 2, 0); g.add(m);
       const shStatus = effStatus(sh); const se = setEdgeOp(edges(m, STATUS_COLOR[shStatus]), .7); g.add(se);
       // power strip above the shelf (part of the rack PDU)
@@ -367,11 +371,16 @@
       const srec = reg({ id: sh.id, cat: 'shelf', def: sh, group: m, meshes: [m], edges: [se], status: shStatus, conf: sh.confidence, zone: sh.zone, setup: su.id, level: sh.level, strip, led, anchor: null, y });
       srec.anchor = () => localToWorld(g, dd / 2 - 0.05, y + 0.02, -w / 2 + 0.12);
       // drop-target volume (the space above the shelf) — only visible / pickable while moving an item
-      const nextLv = shelvesDefs.map(s => s.level).filter(l => l > sh.level).sort((a, b) => a - b)[0];
-      const nextY = nextLv ? shelfLevels[nextLv - 1] : h - p; const sh0 = y + 0.01, sh1 = nextY - st - 0.01;
+      const nextYs = shelvesDefs.filter(s => s.level > sh.level).map(s => s.y);
+      const nextY = nextYs.length ? Math.min(...nextYs) : h - p; const sh0 = y + 0.01, sh1 = nextY - st - 0.01;
+      srec.gap = nextY - st - y;   // free height above the shelf: equipment on it stays below the next shelf
       const slot = box(dd - 2 * p - 0.02, Math.max(0.1, sh1 - sh0), w - 2 * p - 0.02, mat('#22d3ee', { opacity: .22, unique: true, emissive: '#22d3ee', emissiveIntensity: .5, rough: 1 }), 0, (sh0 + sh1) / 2, 0);
       slot.material.depthWrite = false; slot.visible = false; slot.userData.id = sh.id; slot.userData.slot = true; g.add(slot); S.pickables.push(slot); srec.slot = slot;
-      makeLabel(srec, 'shelf', `${esc(sh.id)}<small>L${esc(sh.level)}</small>`);
+      // shelf card: what is on this shelf (server · IP · power, units and their type). Filled by renderShelfCards(),
+      // placed by updateLabels() in the middle of the shelf's front; never takes pointer input (picking stays free)
+      makeLabel(srec, 'shelf shelf-card', ''); srec.label.setAttribute('aria-hidden', 'true');
+      srec.cardAnchor = localToWorld(g, dd / 2 + 0.03, y + Math.min(0.15, (nextY - y) / 2), 0);
+      srec.front = new THREE.Vector3(1, 0, 0).transformDirection(g.matrixWorld);
     });
     return rec;
   }
@@ -434,6 +443,8 @@
         return m;
       };
       const bodyCol = TYPE_BODY[it.type] || TYPE_BODY.other;
+      const power = it.type === 'opt' ? powerOf(it) : null; const unit = it.type !== 'opt' ? unitInfo(it) : null;
+      const asSwitch = unit?.kind === 'switch' && it.type.startsWith('equip-');   // stored type switch only (unitInfo never guesses)
       const led = (x, y, z, c, size = 0.014) => box(size, size, size, mat(c, { emissive: c, emissiveIntensity: 1.3, unique: true }), x, y, z);
       let seed = 0; for (const ch of it.id) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
       const cable = (pts, c, r = 0.006) => { const curve = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(...p))); const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 18, r, 6, false), mat(c, { rough: .55, metal: .05, opacity: op, unique: true })); return m; };
@@ -451,16 +462,22 @@
         g = new THREE.Group();
         let w, d, h;
         if (isPC) { w = 0.17; h = 0.24; d = 0.31; }                               // small desktop PC — mini tower standing upright
-        else if (it.type === 'equip-switch') { w = 0.44; h = 0.066; d = 0.50; }     // NVIDIA-style 1U switch under test (Lab Manager rack item of type switch)
+        else if (asSwitch) { w = 0.44; h = 0.066; d = 0.50; }                       // NVIDIA-style 1U switch under test (Lab Manager rack item of type switch)
         else if (it.type === 'kvm') { w = 0.44; d = 0.30; h = 0.045; }
         else { w = 0.40; d = 0.35; h = 0.05; }                                      // other rack equipment (UPS, SSD box …)
-        w = Math.min(w, slotW - 0.02);
+        w = Math.min(w, slotW - 0.02); if (sh.gap) h = Math.min(h, Math.max(0.03, sh.gap - 0.02));
         const body = makeBox(d, h, w, bodyCol); body.position.set(0.02, sh.y + h / 2, zc); g.add(body); meshes.push(body);
+        if (isPC) {   // the whole tower in its power colour (exact legend colour: the renderer writes sRGB)
+          const pc = linear(POWER[power].c); body.material.color.copy(pc); body.material.emissive.copy(pc); body.material.emissiveIntensity = 0.22;
+          body.userData.power = power;
+        }
         const fx = d / 2 + 0.02 + 0.002; // front face x (local)
         const dark = c => mat(c, { rough: .8, opacity: op, unique: true });
         if (isPC) {
           // upright mini tower: bezel, power button (status colour) on top, optical-drive slot, 2 USB + audio, vent grille, silver brand tag
-          g.add(box(0.006, h * .96, w * .94, mat('#4a4e56', { rough: .55, metal: .25, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
+          // the front bezel carries the power colour too (a shade darker), so it reads from the rack front
+          const bezel = box(0.006, h * .96, w * .94, mat('#4a4e56', { rough: .55, metal: .25, opacity: op, unique: true }), fx, sh.y + h / 2, zc);
+          bezel.material.color.copy(linear(POWER[power].c)).multiplyScalar(0.6); bezel.material.emissive.copy(bezel.material.color); bezel.material.emissiveIntensity = 0.2; g.add(bezel);
           g.add(box(0.004, h * .96, w * .94, mat('#22242a', { rough: .6, opacity: op, unique: true }), -d / 2 + 0.02 - 0.002, sh.y + h / 2, zc));      // rear panel
           g.add(led(fx + 0.006, sh.y + h * .90, zc, col, 0.016));                                                                                      // power button
           g.add(box(0.006, 0.006, w * .72, dark('#15161a'), fx + 0.004, sh.y + h * .74, zc));                                                          // DVD slot
@@ -474,7 +491,7 @@
           const postZ = -(rt.width / 2 - rt.profile - 0.02), postX = rt.depth / 2 - rt.profile; const bx = -d / 2 + 0.02;
           const nc = 1 + Math.floor(rnd() * 2);
           for (let i = 0; i < nc; i++) { const y0 = sh.y + h * (.3 + rnd() * .4), z0 = zc + (rnd() - .5) * w * .5; const cc = CABLE_COLORS[Math.floor(rnd() * CABLE_COLORS.length)]; g.add(cable([[bx, y0, z0], [bx - 0.08 - rnd() * 0.05, y0 - 0.1, z0 + (postZ - z0) * 0.5], [fx - 0.1, sh.y - 0.1 - rnd() * 0.1, postZ * 0.95], [postX, sh.y - 0.16 - rnd() * 0.1, postZ]], cc)); }
-        } else if (it.type === 'equip-switch') {
+        } else if (asSwitch) {
           // faceplate, 2 × 12 QSFP cages, link LEDs, NVIDIA badge + green accent, rack ears, DAC cable to the PC
           g.add(box(0.006, h * .94, w * .98, mat('#23262e', { rough: .55, metal: .35, opacity: op, unique: true }), fx, sh.y + h / 2, zc));
           const cageW = 0.02, gap = 0.008, cols = Math.min(12, Math.floor((w * .78) / (cageW + gap))); const z0 = zc - (cols * (cageW + gap) - gap) / 2 + cageW / 2 + w * .04;
@@ -558,12 +575,15 @@
         return;
       }
       if (g && it.placement !== 'rack-strips') S.itemGroups.push(g);
-      const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor });
-      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + 'W')}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) : it.type === 'equip-switch' ? `switch under test${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
+      const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor, power, unit });
+      const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + 'W')}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) 
+        : asSwitch ? `${unit.typeText ? 'switch · ' + unit.typeText : it.type === 'equip-switch' ? 'switch under test' : 'switch'}${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
       const named = it.type === 'opt' || it.type.startsWith('equip-');
-      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span><bdi>${esc(named ? it.name : it.id)}</bdi><small>${esc(it.type === 'opt' ? it.id + ' · ' + sub : sub)}</small>`);
+      const pill = power ? `<span class="pw pw-${power}" title="${POWER[power].title}">${POWER[power].t}</span>` : '';
+      makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${pill}<bdi>${esc(named ? it.name : it.id)}</bdi><small>${esc(it.type === 'opt' ? it.id + ' · ' + sub : sub)}</small>`);
     });
     S.attention = computeAttention(S.model, S.live, S.recs);
+    renderShelfCards();
     noteAttentionSeen(); paintRacks();
     applyFilters(); updateTelemetry(); renderAttention(); renderLegend();
     if (S.selected && !S.recs.has(S.selected)) closeDetail();
@@ -574,6 +594,42 @@
   // ───────────────────────────────────────────────────────────── effective model (static JSON + overrides + live)
   function ov() { return {}; }                       // legacy — edits now mutate S.data directly
   function dcimRackOf(su) { return su.dcimRack; }
+  // Floor model, mirrored from the app (frontend/src/components/racks/floors.js): a rack has RACK_FLOORS floors
+  // (1 = top … 4 = bottom); Main storage and storage-type racks (the rack's first PDU / rack device has model "Storage",
+  // like DcimView's rackStats) have STORAGE_SHELVES shelves. lab-data.json keeps the shelves it knows (Rack-05 has 3);
+  // the missing ones are derived here and never written back, so every floor the app can place a server or unit on has
+  // a shelf, a mesh and a card in 3D. Derived ids are stable: SHELF-<setup>-L<level> (rack) / -S<shelf> (storage).
+  const RACK_FLOORS = 4, STORAGE_SHELVES = 16, MAIN_STORAGE = 'Storage-Main';
+  function isStorageRack(rack, live = S.live) {
+    if (!rack) return false; if (rack === MAIN_STORAGE) return true;
+    const devs = live?.connected ? live.devices || [] : [];
+    return devs.filter(x => (x.kind === 'pdu' || x.kind === 'rack') && x.rack === rack)[0]?.model === 'Storage';
+  }
+  function floorsFor(su, live = S.live) { return isStorageRack(dcimRackOf(su), live) ? STORAGE_SHELVES : RACK_FLOORS; }
+  function floorSignature(d = S.data) { return d.setups.map(su => su.id + ':' + floorsFor(su)).join('|'); }
+  // The shelves of a rack (lowest first), each with its height y: lab-data.json's shelves plus the derived ones.
+  function shelvesFor(su, d = S.data, live = S.live) {
+    const tpl = d.templates.rack; const lv = tpl.shelfLevels; const pitch = lv.length > 1 ? lv[1] - lv[0] : 0.3;
+    const topDown = (d.dcim?.uNumbering || 'top-down') === 'top-down';
+    const json = d.shelves.filter(sh => sh.setup === su.id);
+    const n = floorsFor(su, live);
+    const derived = (id, level, u, word) => ({ id, name: `${rackName(su)} — ${word} ${u} (from the app's floor model)`, category: 'shelf', setup: su.id, level, zone: su.zone, status: su.status || 'active', confidence: 'medium', photos: [], notes: `Not in lab-data.json: the app gives this rack ${n} ${word === 'floor' ? 'floors' : 'shelves'}.`, derived: true });
+    if (n === STORAGE_SHELVES) {
+      // a storage unit: evenly spaced shelves; the known shelves keep their numbers (U order), the rest are derived
+      const ordered = [...json].sort((a, b) => topDown ? b.level - a.level : a.level - b.level); const N = Math.max(n, ordered.length);
+      const lo = 0.14, hi = tpl.height - 0.2; const out = [];
+      for (let u = 1; u <= N; u++) { const level = topDown ? N - u + 1 : u; out.push({ ...(ordered[u - 1] || derived(`SHELF-${su.id}-S${u}`, level, u, 'shelf')), level, y: lo + (level - 1) * (hi - lo) / Math.max(1, N - 1) }); }
+      return out.sort((a, b) => a.level - b.level);
+    }
+    const yOf = l => lv[l - 1] ?? lv[0] + (l - 1) * pitch;
+    const out = json.map(sh => ({ ...sh, y: yOf(sh.level) }));
+    if (!out.length) for (let l = 1; l <= n; l++) out.push({ ...derived(`SHELF-${su.id}-L${l}`, l, topDown ? n - l + 1 : l, 'floor'), y: yOf(l) });
+    // floors the app has but lab-data.json does not: below the lowest shelf (with top-down numbering floors 1…k stay on
+    // the known shelves), else above the highest
+    const levels = out.map(sh => sh.level); let k = 0;
+    while (out.length < n) { k++; const l = topDown ? Math.min(...levels) - k : Math.max(...levels) + k; out.push({ ...derived(`SHELF-${su.id}-L${l}`, l, out.length + 1, 'floor'), y: yOf(l) }); }
+    return out.sort((a, b) => a.level - b.level);
+  }
   function effStatus(def) { return def.status || 'unknown'; }
   function isDefaultOutletLabel(label) { return !label || /^(outlet\s*\d+|port\s*\d+|\s*)$/i.test(label.trim()); }
   // A computer label: not a default "Outlet N" and not "empty" / "KVM Power" / a placeholder. Filtered BEFORE the U
@@ -587,10 +643,13 @@
   const cleanNotes = s => String(s || '').replace(LIVE_WARN_RE, '').trim();
 
   function computeModel() {
+    // a rack's floor model changed (live data says it is a storage rack, or no longer): rebuild the racks first
+    if (S.floorSig != null && floorSignature() !== S.floorSig) rebuildStatic();
     const d = S.data; const live = S.live; const uTopDown = (d.dcim?.uNumbering || 'top-down') === 'top-down';
     const setups = d.setups.map(s => ({ ...s, dcimRack: dcimRackOf(s) }));
     const setupByRack = {}; setups.forEach(s => { if (s.dcimRack) setupByRack[s.dcimRack] = s.id; });
-    const shelvesOf = sid => d.shelves.filter(sh => sh.setup === sid).sort((a, b) => a.level - b.level);
+    const shelvesBy = new Map(d.setups.map(su => [su.id, shelvesFor(su, d, live)]));
+    const shelvesOf = sid => shelvesBy.get(sid) || [];
     const shelfForU = (sid, u) => { const sh = shelvesOf(sid); const n = sh.length; if (!Number.isInteger(Number(u)) || u < 1 || u > n) return null; const idx = uTopDown ? n - Number(u) : Number(u) - 1; return sh[idx].id; };
 
     let items = d.items.map(it => ({ ...it, ...pickOv(it.id) }));
@@ -660,7 +719,7 @@
       Object.entries(live.rackItems || {}).forEach(([rack, list]) => (list || []).forEach(ci => {
         const sid = setupByRack[rack] || null; const id = 'LIVE-' + ci.id;
         const history = Array.isArray(ci.tracking_history) ? ci.tracking_history : []; const owner = live.owners?.['item:' + ci.id] || null;
-        items.push({ id, name: ci.name, serial_number: ci.serial_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', last_seen_at: ci.last_seen_at || null, tracking: { count: history.length, last: history[history.length - 1] || null }, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', owner, live: { rack, u: ci.u, owner }, ...pickOv(id) });
+        items.push({ id, dcimId: ci.id, name: ci.name, serial_number: ci.serial_number || '', model: ci.model || '', part_number: ci.part_number || '', barcode: ci.barcode || '', shelf_position: ci.shelf_position || '', last_seen_at: ci.last_seen_at || null, tracking: { count: history.length, last: history[history.length - 1] || null }, category: 'item', type: 'equip-' + (ci.type || 'other'), typeLabel: (EQUIP_LABEL[ci.type] || 'Equipment') + ' (DCIM rack item)', setup: sid, shelf: sid && ci.u ? shelfForU(sid, ci.u) : null, zone: sid ? setups.find(x => x.id === sid)?.zone : null, status: 'active', confidence: 'high', placementConfidence: ci.u ? 'medium' : 'low', photos: [], notes: ci.notes || '', owner, live: { rack, u: ci.u, owner }, ...pickOv(id) });
       }));
       // 4) chillers from DCIM
       if (live.chillers?.units?.length) {
@@ -729,6 +788,38 @@
     }
     return null;
   }
+  // Power state of a server for its body colour and ON / OFF tag: 'on' | 'off' | 'unknown' (offline, not in the live
+  // DCIM, PDU unreachable or no reading yet). Maintenance keeps its own health marker (outline, LED, label dot).
+  function powerOf(it, live = S.live) {
+    if (!it || it.type !== 'opt' || !live?.connected || it.live?.inDcim !== true) return 'unknown';
+    return it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unknown';
+  }
+  // What kind of unit sits next to a server, and its type / model for the shelf label. The kind is the unit's stored
+  // type, exactly as the Racks page shows it: a unit is a switch (SW) only when its type is switch (the site saves type
+  // switch when a serial number is entered on a generic unit, and a type the user picks by hand wins, so the twin never
+  // guesses). A switch's model / part number / name names its generation (Spectrum SN#### / Quantum QM####); a unit of
+  // type other whose model names a ConnectX NIC or a BlueField DPU is tagged NIC / DPU.
+  const SN_FAMILY = { 2: 'Spectrum', 3: 'Spectrum-2', 4: 'Spectrum-3', 5: 'Spectrum-4' }, QM_FAMILY = { 8: 'Quantum', 9: 'Quantum-2' };
+  function unitInfo(it) {
+    const clean = v => String(v || '').trim();
+    const model = clean(it?.model), pn = clean(it?.part_number), name = clean(it?.name);
+    const text = [model, pn, name].filter(Boolean).join(' ');
+    const type = String(it?.type || '').replace(/^equip-/, '') || 'other';
+    let kind = UNIT_TAG[type] ? type : 'other', typeText = '';
+    const sw = /\bM?(SN|QM)(\d)(\d{3})([A-Z]{0,2})\b/i.exec(text);
+    const nic = /\bconnect-?x[- ]?(\d+)/i.exec(text), dpu = /\bblue-?field[- ]?(\d+)?/i.exec(text);
+    if (sw && kind === 'switch') {
+      const code = sw[1].toUpperCase() + sw[2] + sw[3] + sw[4].toUpperCase();
+      const fam = sw[1].toUpperCase() === 'SN' ? SN_FAMILY[sw[2]] : QM_FAMILY[sw[2]];
+      typeText = fam ? `${fam} ${code}` : code;
+    } else if (dpu && kind === 'other') { kind = 'dpu'; typeText = 'BlueField' + (dpu[1] ? '-' + dpu[1] : ''); }
+    else if (nic && kind === 'other') { kind = 'nic'; typeText = 'ConnectX-' + nic[1]; }
+    if (kind === 'switch' && !typeText) typeText = model || pn;
+    if (kind === 'nic' && !typeText) typeText = model || pn;
+    return { kind, tag: UNIT_TAG[kind] || 'DEV', typeText, name };
+  }
+  // The address the app knows for a server: the host its ping monitor checks (GET /api/monitoring, Viewer-readable).
+  const hostOf = (it, live = S.live) => (it?.type === 'opt' && live?.connected && live.ping?.[pingKey(it.name)]?.host) || '';
   function rackPdus(su, live = S.live) {
     const rack = su?.dcimRack; if (!rack) return [];
     return (live.devices || []).filter(d => d.kind === 'pdu' && (d.rack === rack || (d.notes || '').split(',').map(x => x.trim()).includes('shared:' + rack)));
@@ -808,6 +899,45 @@
         const col = byHealth ? NEUTRAL : STATUS_COLOR[rec.status];
         rec.edges.forEach(e => e.material.color.set(col)); const lp = rec.label?.querySelector('.lp'); if (lp) lp.style.background = col;
       }
+    }
+  }
+  // Shelf labels: per shelf a full card (rack › shelf, every server with its ON / OFF tag, name and IP / host, every
+  // unit with its kind tag and switch / NIC type) and a one-line compact form for middle distances. The plain text is
+  // kept on the record (cardText) and in the card's tooltip.
+  function renderShelfCards() {
+    const byShelf = new Map();
+    for (const r of S.recs.values()) if (r.cat === 'item' && r.shelf && r.item) { if (!byShelf.has(r.shelf)) byShelf.set(r.shelf, []); byShelf.get(r.shelf).push(r); }
+    for (const rec of S.recs.values()) {
+      if (rec.cat !== 'shelf' || !rec.label) continue;
+      const list = byShelf.get(rec.id) || []; const su = S.recs.get(rec.setup);
+      const servers = list.filter(r => r.item.type === 'opt').sort((a, b) => String(a.item.name).localeCompare(String(b.item.name)));
+      const units = list.filter(r => r.item.type !== 'opt' && r.item.type !== 'pdu');
+      const u = shelfToU(rec.setup, rec.id); const head = `${su ? rackName(su.def) : ''} › Shelf ${u}`;
+      const pill = p => `<span class="pw pw-${p}" title="${POWER[p].title}">${POWER[p].t}</span>`;
+      const srv = servers.map(r => {
+        const it = r.item; const p = powerOf(it); const host = hostOf(it); const maint = itemHealth(it)?.h === 'maint';
+        return { p, name: it.name, host, maint,
+          html: `<div class="sc-l">${pill(p)}<bdi class="sc-n">${esc(it.name)}</bdi>${host ? `<span class="sc-ip">${esc(host)}</span>` : '<span class="sc-ip none">no IP</span>'}${maint ? '<span class="sc-m">MAINT</span>' : ''}</div>` };
+      });
+      const uni = units.map(r => {
+        const info = r.unit || unitInfo(r.item); const main = info.typeText || info.name || r.item.id;
+        const code = info.typeText ? info.typeText.split(' ').pop().toLowerCase() : '';
+        const extra = info.typeText && info.name && !info.name.toLowerCase().includes(code) ? info.name : '';
+        return { tag: info.tag, kind: info.kind, main, extra,
+          html: `<div class="sc-l"><span class="sc-k k-${info.kind}">${info.tag}</span><bdi>${esc(main)}</bdi>${extra ? `<span class="sc-x">· <bdi>${esc(extra)}</bdi></span>` : ''}</div>` };
+      });
+      rec.cardEmpty = !srv.length && !uni.length;
+      const before = rec.cardFull;
+      rec.cardFull = `<div class="sc-h">${esc(head)}</div>${srv.map(x => x.html).join('')}${uni.map(x => x.html).join('')}${rec.cardEmpty ? '<div class="sc-l sc-free">Free</div>' : ''}`;
+      rec.cardCompact = `<span class="sc-u">S${u}</span>${srv.map(x => `${pill(x.p)}<bdi class="sc-n">${esc(x.name)}</bdi>`).join(' ')} ${uni.map(x => `<span class="sc-k k-${x.kind}">${x.tag}</span><bdi>${esc(x.main)}</bdi>`).join(' ')}`;
+      // one line with the full card's detail (server power, name and IP, unit type): the selected rack when its full
+      // cards do not fit on screen
+      rec.cardLine = `<span class="sc-u">S${u}</span>${srv.map(x => `${pill(x.p)}<bdi class="sc-n">${esc(x.name)}</bdi>${x.host ? `<span class="sc-ip">${esc(x.host)}</span>` : '<span class="sc-ip none">no IP</span>'}${x.maint ? '<span class="sc-m">MAINT</span>' : ''}`).join(' ')} ${uni.map(x => `<span class="sc-k k-${x.kind}">${x.tag}</span><bdi>${esc(x.main)}</bdi>`).join(' ')}${rec.cardEmpty ? '<span class="sc-free">Free</span>' : ''}`;
+      rec.cardText = [head, ...srv.map(x => `${POWER[x.p].t} ${x.name} ${x.host || 'no IP'}${x.maint ? ' MAINT' : ''}`), ...uni.map(x => `${x.tag} ${x.main}${x.extra ? ' · ' + x.extra : ''}`), rec.cardEmpty ? 'Free' : ''].filter(Boolean).join('\n');
+      // new content: its full size is measured again the next time it is shown full (the line count estimates it until then)
+      rec.cardLines = 1 + Math.max(1, srv.length + uni.length);
+      if (rec.cardFull !== before) rec.cardSize = null;   // measured again (ensureCardSizes)
+      rec.label.dataset.lod = ''; rec.label.title = rec.cardText;
     }
   }
   // The rack (setup record) an object belongs to, or null.
@@ -1677,15 +1807,20 @@
 
   function rebuildAll() {
     // setups/shelves colors follow overrides → rebuild static + items
+    rebuildStatic(); computeModel(); buildItems();
+  }
+  // the room, racks, shelves and storage again (the items follow with buildItems)
+  function rebuildStatic() {
     for (const [id, r] of [...S.recs]) { if (r.label) r.label.remove(); if (r.telem) r.telem.remove(); if (r.attnEl) r.attnEl.remove(); S.recs.delete(id); }
     S.labelHover = null;
-    S.pickables = []; disposeGroup(staticGroup); disposeGroup(wallsGroup); disposeGroup(zonesGroup); disposeGroup(itemsGroup);
-    buildStatic(); computeModel(); buildItems(); refreshLabelsStatic();
+    S.pickables = []; disposeGroup(staticGroup); disposeGroup(wallsGroup); disposeGroup(zonesGroup); disposeGroup(itemsGroup); S.itemGroups = [];
+    buildStatic(); refreshLabelsStatic();
   }
   function refreshLabelsStatic() { setLabelMode(S.labelMode, true); wallsGroup.visible = S.wallsVisible; zonesGroup.visible = S.zonesVisible; }
   function buildStatic() {
     const d = S.data; world.updateMatrixWorld(true); buildRoom(d);
-    d.setups.forEach(su => buildRack(su, d.shelves.filter(s => s.setup === su.id), d.templates.rack));
+    d.setups.forEach(su => buildRack(su, shelvesFor(su, d), d.templates.rack));
+    S.floorSig = floorSignature(d);
     d.storage.forEach(sd => { if (sd.template === 'trayRack') buildTrayRack(sd, d.templates.trayRack); else buildCabinet(sd); });
   }
 
@@ -1839,8 +1974,9 @@
     if (it.dcim?.outlets > 0) return { n: it.dcim.outlets, src: 'lab-data.json' };
     return { n: null, src: '' };
   }
-  // Ping results from Lab Manager's monitor (GET /api/monitoring, at most once a minute). Only the state per server is
-  // kept — never the monitored host names or device addresses that the overview also contains.
+  // Ping results from Lab Manager's monitor (GET /api/monitoring, at most once a minute): per inventory server its state
+  // and the host it checks (shown on the shelf label; Viewers already read it on the Monitoring page). Device (PDU / KVM)
+  // addresses that the overview also contains are never kept. Held in memory only, never saved to lab-data.json.
   let pingAt = 0;
   async function refreshPing(session) {
     if (Date.now() - pingAt < PING_MS) return; pingAt = Date.now();
@@ -1849,7 +1985,7 @@
       const map = {};
       (Array.isArray(m?.targets) ? m.targets : []).forEach(t => {
         if (!t || t.source !== 'inventory') return; const key = pingKey(t.inventory_name || t.name); if (!key) return;
-        map[key] = { status: String(t.status || ''), rtt: Number.isFinite(t.rtt_ms) ? t.rtt_ms : null, checkedAt: t.checked_at || null, lastUpAt: t.last_up_at || null };
+        map[key] = { status: String(t.status || ''), rtt: Number.isFinite(t.rtt_ms) ? t.rtt_ms : null, checkedAt: t.checked_at || null, lastUpAt: t.last_up_at || null, host: String(t.host || '').trim() };
       });
       S.live.ping = map;
     } catch (e) { if (session === liveSession && (e.status === 403 || e.status === 404)) S.live.ping = null; }   // other failures keep the last value
@@ -2140,8 +2276,10 @@
   $('#sbDiscard').onclick = () => { if (confirm('Discard all unsaved edits and reload the saved lab-data.json?')) { LS.set('draft', null); location.reload(); } };
   $('#btnPlan').onclick = () => window.open('floorplan.svg', '_blank');
 
-  // Keep the focus near the lab by translating camera and target together.
-  // The old camera box shortened the viewing radius every frame and caused jumps.
+  // Keep the focus near the lab by translating camera and target together (never shortening the radius).
+  // A camera that would sink under MIN_EYE is lifted on its own: lifting the target too (the old rule) made the
+  // pivot creep upward every frame, one of the reasons the view "ran away" while rotating.
+  const MIN_EYE = 0.2;
   const previousCamera = new THREE.Vector3(), previousTarget = new THREE.Vector3();
   const collisionRay = new THREE.Raycaster();
   function constrainNavigation(collisions = true) {
@@ -2149,7 +2287,7 @@
     const { width: W, depth: D, height: H } = S.data.room;
     const bounded = controls.target.clone().clamp(new THREE.Vector3(-W - 0.5, 0, -0.5), new THREE.Vector3(0.5, H, D + 0.5));
     camera.position.add(bounded.clone().sub(controls.target)); controls.target.copy(bounded);
-    if (camera.position.y < 0.3) { const rise = 0.3 - camera.position.y; camera.position.y += rise; controls.target.y += rise; }
+    if (camera.position.y < MIN_EYE) camera.position.y = MIN_EYE;
     if (collisions) {
       const delta = camera.position.clone().sub(previousCamera), distance = delta.length();
       if (distance > 1e-6) {
@@ -2161,10 +2299,53 @@
           camera.position.lerpVectors(previousCamera, camera.position.clone(), fraction);
           controls.target.lerpVectors(previousTarget, controls.target.clone(), fraction);
         }
+        keepRackClearance();
       }
     }
     camera.lookAt(controls.target);
     previousCamera.copy(camera.position); previousTarget.copy(controls.target);
+  }
+  // The camera keeps RACK_CLEAR metres outside every rack's (and storage unit's) box, so wheel zoom towards the cursor,
+  // orbit, pan and inertia never put it inside or against a rack (seen through its own shelves). Only user movement is
+  // checked (not tweens), and a step is judged against the clearance before it: a camera a preset left closer may still
+  // move away, never nearer. A step that ends too close keeps only the part that stays clear (camera and target
+  // together, from where they were, so there is no jump): the zoom / pan / orbit stops in front of the rack, and the
+  // remaining inertia and wheel zoom are dropped. (Pulling the camera towards the target instead was tried: repeated
+  // every frame it swung an orbit right up to the focused rack.)
+  const RACK_CLEAR = 0.4;
+  const tmpQ = new THREE.Vector3(), tmpP = new THREE.Vector3();
+  function navObstacles() {
+    const out = [];
+    for (const r of S.recs.values()) {
+      if (r.cat === 'setup' && r.localBox && r.invWorld) out.push({ inv: r.invWorld, box: r.localBox });
+      else if (r.cat === 'storage' && r.group) {
+        if (!r.navBox) { r.group.updateMatrixWorld(true); r.navBox = new THREE.Box3().setFromObject(r.group); }
+        if (!r.navBox.isEmpty()) out.push({ inv: null, box: r.navBox });
+      }
+    }
+    return out;
+  }
+  // signed distance from a world point to the nearest obstacle box (negative inside)
+  function rackClearance(p, obstacles = navObstacles()) {
+    let best = Infinity;
+    for (const o of obstacles) {
+      const q = o.inv ? tmpQ.copy(p).applyMatrix4(o.inv) : tmpQ.copy(p); const b = o.box;
+      const dx = Math.max(b.min.x - q.x, 0, q.x - b.max.x), dy = Math.max(b.min.y - q.y, 0, q.y - b.max.y), dz = Math.max(b.min.z - q.z, 0, q.z - b.max.z);
+      const d = dx || dy || dz ? Math.hypot(dx, dy, dz) : -Math.min(q.x - b.min.x, b.max.x - q.x, q.y - b.min.y, b.max.y - q.y, q.z - b.min.z, b.max.z - q.z);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+  function keepRackClearance() {
+    if (camera.position.distanceToSquared(previousCamera) < 1e-12 && controls.target.distanceToSquared(previousTarget) < 1e-12) return;
+    const obstacles = navObstacles(); if (!obstacles.length) return;
+    const now = rackClearance(camera.position, obstacles); if (now >= RACK_CLEAR) return;
+    const need = Math.min(RACK_CLEAR, rackClearance(previousCamera, obstacles)) - 1e-6;
+    if (now >= need) return;                                   // not nearer than before: a preset left it there
+    const p1 = camera.position.clone(), t1 = controls.target.clone(); let lo = 0, hi = 1;
+    for (let i = 0; i < 14; i++) { const f = (lo + hi) / 2; tmpP.lerpVectors(previousCamera, p1, f); if (rackClearance(tmpP, obstacles) >= need) lo = f; else hi = f; }
+    camera.position.lerpVectors(previousCamera, p1, lo); controls.target.lerpVectors(previousTarget, t1, lo);
+    controls.halt();
   }
   // pan the whole view (camera + target together) along the floor, relative to where you look
   function panBy(dx, dz) {
@@ -2183,6 +2364,28 @@
     // reduced motion: a zero-length tween jumps in one frame (collision sweep is skipped for that frame, like any tween)
     S.tween = { t0: performance.now(), ms: reducedMotion() ? 0 : ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() };
   }
+  // Turn the view around its target along the sphere (a straight-line tween would pass through the target): the
+  // shortest way to azimuth `theta` and / or polar angle `phi`, at the same distance. North up = theta π: the camera
+  // looks along +z (data depth, away from the entrance), so the wall opposite the entrance is at the top.
+  const NORTH = Math.PI;
+  function orbitTo(theta, phi, ms = 450) {
+    markView(null); const T = controls.target.clone(); const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(T));
+    let dt = theta == null ? 0 : theta - s0.theta; dt = Math.atan2(Math.sin(dt), Math.cos(dt));
+    const p1 = phi == null ? s0.phi : Math.max(controls.minPolarAngle, Math.min(controls.maxPolarAngle, phi));
+    const end = new THREE.Spherical(s0.radius, p1, s0.theta + dt).makeSafe();
+    tweenCamera(T.clone().add(new THREE.Vector3().setFromSpherical(end)), T, ms);
+    S.tween.orbit = { T, r: s0.radius, phi0: s0.phi, phi1: end.phi, th0: s0.theta, th1: end.theta };
+  }
+  const northUp = () => orbitTo(NORTH, null);
+  function rotateView(dTheta, dPhi) { const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target)); orbitTo(s0.theta + dTheta, s0.phi + dPhi, 250); }
+  // compass needle: where north (+z) points on screen, clockwise from up
+  let compassDeg = null;
+  function updateCompass() {
+    const el = $('#compassRose'); if (!el) return;
+    const th = controls.getAzimuthalAngle(); const deg = Math.round(THREE.MathUtils.radToDeg(Math.atan2(-Math.sin(th), -Math.cos(th))) * 10) / 10;
+    if (deg === compassDeg) return; compassDeg = deg; el.setAttribute('transform', `rotate(${deg} 12 12)`);
+    $('#vCompass').dataset.heading = String(deg);
+  }
   function fitLab(top = false) {
     scene.updateMatrixWorld(true);
     const bounds = new THREE.Box3().setFromObject(world);
@@ -2197,7 +2400,15 @@
     const P = target.clone().addScaledVector(direction, distance);
     fitCam.fov = camera.fov; fitCam.aspect = camera.aspect; fitCam.near = camera.near; fitCam.far = camera.far; fitCam.up.set(0, 1, 0); fitCam.updateProjectionMatrix();
     let T = target; try { T = framing(P, target, bounds, safe).T; } catch { /* keep the room centre */ }
-    tweenCamera(P, T);
+    tweenCamera(P, groundedTarget(P, T));
+  }
+  // The same view with its target slid along the line of sight down to the floor: rotation then pivots on the floor
+  // point in the middle of the view (map style). Kept as is when the line of sight misses the room's floor.
+  function groundedTarget(P, T) {
+    const dir = T.clone().sub(P); const len = dir.length(); if (len < 1e-6) return T.clone(); dir.divideScalar(len);
+    if (dir.y > -0.12) return T.clone();
+    const k = -P.y / dir.y; const F = P.clone().addScaledVector(dir, k); F.y = 0;
+    return k > 0 && k < controls.maxDistance * 0.98 && controls.groundBounds?.containsPoint(F) ? F : T.clone();
   }
   const VIEWS = {
     orbit() { fitLab(); },
@@ -2215,11 +2426,10 @@
   }
   function setView(name) { if (name !== 'front') hideRackFront(); VIEWS[name](); markView(name); }
   // Only a real camera move leaves the preset: a plain click (select / clear the selection) keeps Overview checked.
-  let camAtStart = null;
-  const camMoved = () => !!camAtStart && (camera.position.distanceTo(camAtStart.p) > 1e-3 || controls.target.distanceTo(camAtStart.t) > 1e-3);
-  controls.addEventListener('start', () => { camAtStart = { p: camera.position.clone(), t: controls.target.clone() }; });
-  controls.addEventListener('change', () => { if (camMoved()) { camAtStart = null; markView(null); } });
-  controls.addEventListener('end', () => { if (camMoved()) markView(null); camAtStart = null; });
+  // The controller reports 'change' only when the user's input (drag, inertia, wheel, pinch) moved the camera.
+  let leftPreset = false;
+  controls.addEventListener('start', () => { leftPreset = false; });
+  controls.addEventListener('change', () => { if (!leftPreset) { leftPreset = true; markView(null); } });
   // ── fly-to framing
   // Frame the target's bounding box inside the part of the viewport no overlay covers, from a camera position in free
   // space: inside the room, outside the target's own rack and in front of every other rack, cabinet or free item.
@@ -2510,9 +2720,9 @@
     showTab(n.dataset.tab === 'tree' ? 'racks' : n.dataset.tab); n.focus();
   });
   $('#btnHelp').onclick = () => askChoice({ title: 'Mouse & keyboard help', choices: [{ id: 'cancel', label: 'Close', cls: 'primary' }],
-    html: `<div class="help"><div><b>Left drag</b> or one finger: rotate</div><div><b>Right drag</b>: pan · <b>Wheel</b> or pinch: zoom</div><div><b>Click</b> an object: select it (the camera stays) · <b>Focus</b>: fly to it</div>
+    html: `<div class="help"><div><b>Left drag</b> or one finger: move across the floor, like a map</div><div><b>Right drag</b>, <b>Ctrl + drag</b> or a two-finger twist: rotate · up / down: tilt (two fingers pushed together on a phone)</div><div><b>Wheel</b> or pinch: zoom towards the pointer · <b>Compass</b> or <b>N</b>: north up</div><div><b>Click</b> an object: select it (the camera stays) · <b>Focus</b>: fly to it</div>
       <div><b>R</b> overview · <b>F</b> rack front · <b>E</b> aisle · <b>T</b> top · <b>[</b> / <b>]</b> previous / next rack in the rack front</div>
-      <div><b>/</b> search · <b>W</b> walls · <b>Z</b> zones · <b>L</b> labels · <b>Arrow keys</b> pan</div>
+      <div><b>/</b> search · <b>W</b> walls · <b>Z</b> zones · <b>L</b> labels · <b>Arrow keys</b> pan · <b>Shift + arrows</b> rotate / tilt · <b>+</b> / <b>−</b> zoom</div>
       <div><b>K</b> lab screen mode · <b>F2</b> edit layout · <b>Home</b> reset view · <b>Esc</b> close</div></div>` });
   // ── keyboard: "/" search, views, rack front prev / next, Escape
   const editable = t => !!(t && t.closest && t.closest('input, textarea, select, [contenteditable="true"]'));
@@ -2575,21 +2785,34 @@
   function renderLegend() {
     const lg = $('#legend'); if (!lg) return;
     const sw = (cls, style, label) => `<span class="li" title="${label}" aria-label="${label}"><span class="sw ${cls}"${style ? ` style="${style}"` : ''} aria-hidden="true"></span><span class="li-t" aria-hidden="true">${label}</span></span>`;
-    if (S.colorBy === 'health') lg.innerHTML = `<span class="lg-t">Health</span>${sw('dot', `background:${HEALTH.up.c}`, 'Up')}${sw('dot', `background:${HEALTH.down.c}`, 'Down')}${sw('dot unk', '', 'Unknown')}${sw('sq', `background:${HEALTH.maint.c}`, 'Maintenance')}${sw('sq sel', '', 'Selected')}`;
-    else lg.innerHTML = `<span class="lg-t">Lifecycle</span>${STATUSES.map(st => sw('dot', `background:${STATUS_COLOR[st]}`, STATUS_LABEL[st])).join('')}${sw('sq dashed', '', 'Low confidence')}${sw('sq sel', '', 'Selected')}`;
-    lg.title = S.colorBy === 'health' ? 'Dashed = health unknown (no live signal). Shelves stay neutral.' : 'Dashed outline = low placement confidence; faded = medium';
+    // server bodies show the PDU outlet's power (not ping health): their own group, with tower-shaped swatches
+    const tower = (p, label) => `<span class="li pw" data-short="${POWER[p].t}" title="Server body: ${POWER[p].title}" aria-label="Server body: ${label}"><span class="sw tower${p === 'unknown' ? ' unk' : ''}" style="background:${POWER[p].c}" aria-hidden="true"></span><span class="li-t" aria-hidden="true">${label}</span></span>`;
+    const power = `<span class="lg-sep" aria-hidden="true"></span><span class="lg-t lg-pt" data-short="Server body"><span class="pt-l">Server body = power</span></span>${tower('on', 'Power ON')}${tower('off', 'Power OFF')}${tower('unknown', 'Power unknown')}`;
+    if (S.colorBy === 'health') lg.innerHTML = `<span class="lg-t">Health</span>${sw('dot', `background:${HEALTH.up.c}`, 'Up')}${sw('dot', `background:${HEALTH.down.c}`, 'Down')}${sw('dot unk', '', 'Unknown')}${sw('sq', `background:${HEALTH.maint.c}`, 'Maintenance')}${sw('sq sel', '', 'Selected')}${power}`;
+    else lg.innerHTML = `<span class="lg-t">Lifecycle</span>${STATUSES.map(st => sw('dot', `background:${STATUS_COLOR[st]}`, STATUS_LABEL[st])).join('')}${sw('sq dashed', '', 'Low confidence')}${sw('sq sel', '', 'Selected')}${power}`;
+    lg.title = (S.colorBy === 'health' ? 'Health (outlines, LEDs, label dots): ping and PDU state. Dashed = health unknown (no live signal). Shelves stay neutral.' : 'Dashed outline = low placement confidence; faded = medium') +
+      ' Server body colour = PDU outlet power: green ON, red OFF, grey unknown (no reading), separate from ping health.';
     layoutLegend();
   }
-  // Keep the legend on one row beside the zoom bar: full → no title (gap 10 px) → swatches only, as the view narrows.
+  // Keep the legend on one row beside the zoom bar, as the view narrows: full → no Health / Lifecycle title (gap 10 px)
+  // → power words shortened to ON / OFF / ? → health swatches without words (their tooltips stay) → "Server body" as
+  // the power title. The server body power group always keeps words, so its colours are explained on screen. Phones
+  // show only that group (styles.css).
+  // When even the last form does not fit beside the zoom bar, the legend moves up to its own row above it (lg-above).
   function layoutLegend() {
     const lg = $('#legend'), vp = $('#viewport'); if (!lg || !vp || !lg.offsetParent) return;
+    lg.classList.remove('lg-above');
     const zb = $('.zoombar'); const v = vp.getBoundingClientRect(); const z = zb ? zb.getBoundingClientRect() : null;
     const sameRow = z && z.width > 0 && Math.abs((z.top + z.bottom) / 2 - lg.getBoundingClientRect().top - 16) < 24;
-    const room = (sameRow ? z.left - 12 : v.right - 16) - lg.getBoundingClientRect().left;
-    for (const mode of ['', 'lg-compact', 'lg-compact lg-swatches']) {
-      lg.classList.remove('lg-compact', 'lg-swatches'); if (mode) lg.classList.add(...mode.split(' '));
-      if (lg.scrollWidth <= room) break;
-    }
+    const left = lg.getBoundingClientRect().left;
+    const fit = room => {
+      for (const mode of ['', 'lg-compact', 'lg-compact lg-pshort', 'lg-compact lg-pshort lg-swatches', 'lg-compact lg-pshort lg-swatches lg-ptshort']) {
+        lg.classList.remove('lg-compact', 'lg-pshort', 'lg-swatches', 'lg-ptshort'); if (mode) lg.classList.add(...mode.split(' '));
+        if (lg.scrollWidth <= room) return true;
+      }
+      return false;
+    };
+    if (!fit((sameRow ? z.left - 12 : v.right - 16) - left) && sameRow) { lg.classList.add('lg-above'); fit(v.right - 16 - left); }
   }
 
   // ───────────────────────────────────────────────────────────── rack front view (one rack, shelf by shelf)
@@ -2818,8 +3041,72 @@
     const phone = phoneQuery.matches; const q = S.filters.q; const issue = S.issueIds || new Set();
     const selRack = S.selected ? rackRecOf(S.recs.get(S.selected))?.id : null;
     const cands = [];
+    // Shelf cards. Deterministic: the same camera and data always give the same cards (nothing is carried over from
+    // earlier frames; card sizes are measured once per content, ensureCardSizes). Level of detail: the full card up
+    // close, one compact line at middle distance, nothing far away, from behind its rack, or when the sight line to it
+    // crosses another rack (sightBlocked). The selected rack claims label space first and is never hidden: its full
+    // cards, or when they cannot all fit on screen its one-line cards with the same detail (power, name, IP, unit
+    // type), are spread into one column in shelf order; no other rack shows more detail than it does. Every other rack
+    // shows all-full or all-compact cards, hides the ones that would cover another label and those drawn over the
+    // selected rack from behind it (the ones in front of it are faded).
+    ensureCardSizes();
+    const cards = []; let blockedSel = false;
     for (const rec of S.recs.values()) {
-      const el = rec.label; if (!el) continue;
+      if (rec.cat !== 'shelf' || !rec.label) continue;
+      const el = rec.label; rec.cardShown = false; rec.cardWhy = '';
+      const sel = S.selected === rec.id; const su = S.recs.get(rec.setup); const selR = !!selRack && rec.setup === selRack; const k = selR ? 1.5 : 1;
+      let show = S.labelMode !== 'none' && !S.front && (!rec.filtered || sel) && !(su?.filtered && !sel) && !!rec.cardFull;
+      if (show && phone) show = selR;
+      let lod = null, dist = 0;
+      if (show) {
+        dist = rec.cardAnchor.distanceTo(camPos);
+        const facing = tmpD.copy(camPos).sub(rec.cardAnchor).normalize().dot(rec.front);
+        lod = facing < -0.2 ? null : dist <= 3.4 * k ? 'full' : dist <= 6.5 * k ? 'compact' : null;
+        if (!lod) rec.cardWhy = facing < -0.2 ? 'behind-rack' : 'far';
+        if (lod === 'compact' && rec.cardEmpty && !selR) { lod = null; rec.cardWhy = 'empty'; }
+        // behind another rack: hidden; the selected rack's own cards stay (faded) — they are what the user looks for
+        if (lod && sightBlocked(rec.cardAnchor, camPos, rec.setup)) { if (selR) blockedSel = true; else { lod = null; rec.cardWhy = 'occluded'; } }
+      }
+      if (lod) { tmpV.copy(rec.cardAnchor).project(camera); if (tmpV.z > 1 || tmpV.x < -1.05 || tmpV.x > 1.05 || tmpV.y < -1.05 || tmpV.y > 1.05) { lod = null; rec.cardWhy = 'off-screen'; } }
+      if (!lod) { el.style.display = 'none'; continue; }
+      cards.push({ rec, el, selR, k, dist, lod, x: (tmpV.x + 1) / 2 * r.width, y: (1 - tmpV.y) / 2 * r.height });
+    }
+    const byRack = new Map();
+    for (const c of cards) { if (!byRack.has(c.rec.setup)) byRack.set(c.rec.setup, []); byRack.get(c.rec.setup).push(c); }
+    const meanDist = list => list.reduce((a, c) => a + c.dist, 0) / list.length;
+    // the selected rack: full cards when all fit on screen as one column, else one-line cards with the same detail
+    let cap = 'full';
+    const selCards = selRack ? byRack.get(selRack) || [] : [];
+    if (selCards.length) {
+      let lod = meanDist(selCards) <= 3.4 * 1.5 ? 'full' : 'line';
+      if (lod === 'full' && !spreadColumn(selCards, 'full', r.height)) lod = 'line';
+      if (lod === 'line') spreadColumn(selCards, 'line', r.height);
+      selCards.forEach(c => { c.lod = lod; });
+      cap = lod === 'full' ? 'full' : 'compact';
+    }
+    // the other racks, nearest first: all full only when every card is close enough, the selected rack shows full cards
+    // too (or none is selected) and neighbouring full cards fit side by side or one above the other
+    const others = [...byRack].filter(([setup]) => setup !== selRack).map(([setup, list]) => ({ setup, list, d: meanDist(list) }))
+      .sort((a, b) => a.d - b.d || (a.setup < b.setup ? -1 : 1));
+    for (const g of others) {
+      g.lod = cap === 'full' && g.list.every(c => c.lod === 'full') && columnFits(g.list, 'full') ? 'full' : 'compact';
+      g.list.forEach(c => { c.lod = g.lod; });
+    }
+    for (const c of cards) c.rec.cardShown = true;
+    // the selected rack's screen footprint and distance: cards of other racks drawn over it from behind are hidden
+    const selFoot = selCards.length ? rackFootprint(S.recs.get(selRack), r) : null;
+    const showCard = (c, lod) => {
+      const el = c.el;
+      if (el.dataset.lod !== lod) { el.innerHTML = cardHtml(c.rec, lod); el.dataset.lod = lod; el.classList.toggle('compact', lod !== 'full'); }
+      c.lod = lod;
+    };
+    for (const c of selCards) {
+      showCard(c, c.lod); const s = cardSize(c.rec, c.lod);
+      c.el.style.display = ''; c.el.style.visibility = ''; c.el.style.left = c.x + 'px'; c.el.style.top = c.cy + 'px'; c.el.style.opacity = blockedSel ? 0.75 : 1; c.el.style.zIndex = 95;
+      cands.push({ el: c.el, x: c.x, y: c.cy, w: s.w, h: s.h, dist: c.dist, pri: 0, mid: true, fixed: true, sized: true });
+    }
+    for (const rec of S.recs.values()) {
+      const el = rec.label; if (!el || rec.cat === 'shelf') continue;
       const sel = S.selected === rec.id; const hit = !!q && !rec.filtered && rec.cat !== 'zone';
       let show = !rec.filtered || sel;
       if (show) {
@@ -2827,6 +3114,8 @@
         else if (rec.cat === 'setup' || rec.cat === 'storage') show = S.labelMode !== 'none' || sel;
         else if (rec.cat === 'structure') show = S.wallsVisible && (S.labelMode === 'all' || sel);
         else show = S.labelMode === 'all' || sel || hit;
+        // a server / unit on a shelf whose card is shown is already named there
+        if (show && !sel && !hit && rec.shelf && S.recs.get(rec.shelf)?.cardShown) show = false;
       }
       if (show && phone && !sel) show = rec.cat === 'setup' ? issue.has(rec.id) || rec.id === selRack || hit : hit && rec.cat !== 'structure';
       if (!show) { el.style.display = 'none'; continue; }
@@ -2841,9 +3130,9 @@
       const pri = sel ? 0 : issue.has(rec.id) ? 1 : hit ? 2 : rec.cat === 'setup' ? 3 : rec.cat === 'storage' ? 4 : 5;
       cands.push({ el, x, y, dist, pri, mid: rec.cat === 'zone' });
     }
-    // one layout read for every shown label and card, then the overlap pass
+    // one layout read for every shown label (shelf card sizes come from ensureCardSizes), then the overlap pass
     telems.forEach(t => { t.h = t.el.offsetHeight; });
-    cands.forEach(c => { c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; });
+    cands.forEach(c => { if (!c.sized) { c.w = c.el.offsetWidth; c.h = c.el.offsetHeight; } });
     // a telemetry card cut by the top of the 3D view is hidden rather than half shown
     telems.forEach(t => { t.el.style.visibility = t.y - t.h < 0 ? 'hidden' : ''; });
     cands.sort((a, b) => a.pri - b.pri || a.dist - b.dist);
@@ -2851,12 +3140,122 @@
     const clash = (l, t, w, h) => placed.some(p => Math.min(l + w, p.l + p.w) - Math.max(l, p.l) > 2 && Math.min(t + h, p.t + p.h) - Math.max(t, p.t) > 2);
     for (const c of cands) {
       const l = c.x - c.w / 2, t0 = c.mid ? c.y - c.h / 2 : c.y - c.h; let k = 0;
-      while (k <= 3 && clash(l, t0 - k * (c.h + 2), c.w, c.h)) k++;
+      while (k <= 3 && clash(l, t0 - k * (c.h + 2), c.w, c.h)) { k++; if (c.fixed) { k = 4; break; } }
       if (k > 3 && c.pri > 1) { c.el.style.visibility = 'hidden'; continue; }   // selection and issues are never hidden
       if (k > 3) k = 0;
       placed.push({ l, t: t0 - k * (c.h + 2), w: c.w, h: c.h });
       c.el.style.visibility = ''; if (k) c.el.style.top = (c.y - k * (c.h + 2)) + 'px';
     }
+    // the other racks' cards last, nearest rack first: a full rack whose cards would cover a label turns compact as a
+    // whole; a compact line that still covers one is hidden, never moved
+    const rectOf = (c, lod) => { const s = cardSize(c.rec, lod); return { l: c.x - s.w / 2, t: c.y - s.h / 2, w: s.w, h: s.h }; };
+    // over the selected rack's outline on screen: 'behind' (farther, the card touches the outline) or 'front' (nearer,
+    // its centre is inside the outline)
+    const overFoot = (c, lod) => {
+      if (!selFoot) return ''; const b = rectOf(c, lod);
+      if (c.dist >= selFoot.dist) return convexOverlap([[b.l, b.t], [b.l + b.w, b.t], [b.l + b.w, b.t + b.h], [b.l, b.t + b.h]], selFoot.hull) ? 'behind' : '';
+      return convexOverlap([[c.x, c.y]], selFoot.hull) ? 'front' : '';
+    };
+    for (const g of others) {
+      if (g.lod === 'full' && g.list.some(c => { const b = rectOf(c, 'full'); return clash(b.l, b.t, b.w, b.h) || overFoot(c, 'full') === 'behind'; })) { g.lod = 'compact'; g.list.forEach(c => { c.lod = 'compact'; }); }
+      for (const c of g.list) {
+        const b = rectOf(c, g.lod); const over = overFoot(c, g.lod);
+        const why = g.lod === 'compact' && c.rec.cardEmpty ? 'empty' : over === 'behind' ? 'behind-selected' : clash(b.l, b.t, b.w, b.h) ? 'clash' : '';
+        if (why) { c.rec.cardWhy = why; c.el.style.display = 'none'; continue; }
+        showCard(c, g.lod);
+        c.el.style.display = ''; c.el.style.visibility = ''; c.el.style.left = c.x + 'px'; c.el.style.top = c.y + 'px';
+        // in front of the selected rack: faded, so the rack behind stays readable
+        c.el.style.opacity = over === 'front' ? 0.4 : g.lod === 'compact' ? Math.max(0.35, Math.min(1, (6.5 * c.k - c.dist) / c.k)) : 1;
+        c.el.style.zIndex = Math.max(1, Math.round(90 - c.dist * 3));
+        placed.push(b);
+      }
+    }
+  }
+  // Is the sight line from the camera to a point blocked by a rack (other than its own)? Each rack is a box in its own
+  // frame (posts, shelves and equipment fill it; a little smaller, so a line along its edge is not blocked).
+  const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), tmpD = new THREE.Vector3();
+  function sightBlocked(point, cam, ownSetup) {
+    for (const r of S.recs.values()) {
+      if (r.cat !== 'setup' || r.id === ownSetup || !r.invWorld) continue;
+      tmpA.copy(cam).applyMatrix4(r.invWorld); tmpB.copy(point).applyMatrix4(r.invWorld).sub(tmpA);
+      const s = slab(tmpA, tmpB, r.localBox); if (s && s[1] > 0 && s[0] < 1) return true;   // the segment, t in [0, 1]
+    }
+    return false;
+  }
+  // A rack's outline on screen (convex hull of its 8 box corners; null when a corner is behind the camera) and the
+  // camera's distance to its front centre.
+  function rackFootprint(su, rect) {
+    if (!su?.localBox) return null; const b = su.localBox; const pts = [];
+    for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+      tmpA.set(x, y, z).applyMatrix4(su.group.matrixWorld).project(camera); if (tmpA.z > 1) return null;
+      pts.push([(tmpA.x + 1) / 2 * rect.width, (1 - tmpA.y) / 2 * rect.height]);
+    }
+    tmpA.set(b.max.x, (b.min.y + b.max.y) / 2, 0).applyMatrix4(su.group.matrixWorld);
+    return { hull: convexHull(pts), dist: tmpA.distanceTo(camera.position) };
+  }
+  function convexHull(pts) {   // monotone chain, counter-clockwise in screen coordinates
+    const p = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]); const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const half = list => { const h = []; for (const q of list) { while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop(); h.push(q); } h.pop(); return h; };
+    return [...half(p), ...half([...p].reverse())];
+  }
+  // Do two convex polygons (a single point counts) overlap? Separating axis test on both polygons' edge normals.
+  function convexOverlap(a, b) {
+    for (const poly of [a, b]) for (let i = 0; i < poly.length && poly.length > 1; i++) {
+      const p = poly[i], q = poly[(i + 1) % poly.length]; const nx = q[1] - p[1], ny = p[0] - q[0];
+      const span = list => list.reduce((m, v) => { const d = v[0] * nx + v[1] * ny; return [Math.min(m[0], d), Math.max(m[1], d)]; }, [Infinity, -Infinity]);
+      const sa = span(a), sb = span(b); if (sa[1] <= sb[0] || sb[1] <= sa[0]) return false;
+    }
+    return true;
+  }
+  // The selected rack's cards in one column, in shelf order, none overlapping: each run of touching cards is centred on
+  // its shelves (least movement), then the column is kept inside the view. Sets c.cy (centre y). False when the column
+  // is taller than the view.
+  function spreadColumn(list, lod, viewH) {
+    const gap = 2, pad = 6; const items = [...list].sort((a, b) => a.y - b.y || b.rec.level - a.rec.level);
+    items.forEach(c => { c.s = cardSize(c.rec, lod); });
+    const total = items.reduce((a, c) => a + c.s.h, 0) + gap * (items.length - 1);
+    const runs = items.map(c => ({ items: [c], h: c.s.h, top: c.y - c.s.h / 2 }));
+    for (let merged = true; merged;) {
+      merged = false;
+      for (let i = 1; i < runs.length; i++) {
+        const a = runs[i - 1], b = runs[i]; if (a.top + a.h + gap <= b.top) continue;
+        const its = [...a.items, ...b.items]; let off = 0, sum = 0;
+        its.forEach(c => { sum += c.y - (off + c.s.h / 2); off += c.s.h + gap; });
+        runs.splice(i - 1, 2, { items: its, h: a.h + gap + b.h, top: sum / its.length }); merged = true; break;
+      }
+    }
+    const tops = []; runs.forEach(run => { let off = 0; run.items.forEach(c => { tops.push(run.top + off); off += c.s.h + gap; }); });
+    for (let i = 0; i < items.length; i++) tops[i] = Math.max(tops[i], i ? tops[i - 1] + items[i - 1].s.h + gap : pad);
+    for (let i = items.length - 1; i >= 0; i--) tops[i] = Math.min(tops[i], i < items.length - 1 ? tops[i + 1] - gap - items[i].s.h : viewH - pad - items[i].s.h);
+    if (tops[0] < pad) { const dy = pad - tops[0]; for (let i = 0; i < tops.length; i++) tops[i] += dy; }   // taller than the view: from the top
+    items.forEach((c, i) => { c.cy = tops[i] + c.s.h / 2; });
+    return total <= viewH - 2 * pad;
+  }
+  // Neighbouring cards of one rack (by screen height) fit side by side or one above the other, as they are anchored.
+  function columnFits(list, lod) {
+    const items = [...list].sort((a, b) => a.y - b.y);
+    for (let i = 1; i < items.length; i++) {
+      const a = items[i - 1], b = items[i], sa = cardSize(a.rec, lod), sb = cardSize(b.rec, lod);
+      if (b.y - a.y < (sa.h + sb.h) / 2 + 2 && Math.abs(b.x - a.x) < (sa.w + sb.w) / 2 + 2) return false;
+    }
+    return true;
+  }
+  const CARD_LODS = ['full', 'line', 'compact'];
+  function cardHtml(rec, lod) { return lod === 'full' ? rec.cardFull : lod === 'line' ? rec.cardLine : rec.cardCompact; }
+  // Card sizes per level of detail, measured off screen once per content (and again when the window or kiosk mode
+  // changes), so the layout never depends on what an earlier frame happened to show.
+  let cardSizeKey = '';
+  function cardSize(rec, lod) { return rec.cardSize?.[lod] || { w: 220, h: lod === 'full' ? 8 + 14.5 * (rec.cardLines || 2) : 16 }; }
+  function ensureCardSizes() {
+    if (!labelsLayer.offsetParent) return;   // hidden: nothing to measure (cardSize falls back to an estimate)
+    const key = `${innerWidth}x${innerHeight}${document.body.classList.contains('kiosk') ? 'k' : ''}`; const all = key !== cardSizeKey;
+    const need = []; for (const rec of S.recs.values()) if (rec.cat === 'shelf' && rec.cardFull && (all || !rec.cardSize)) need.push(rec);
+    cardSizeKey = key; if (!need.length) return;
+    const host = document.createElement('div'); host.style.cssText = 'position:absolute;left:0;top:0;visibility:hidden;pointer-events:none';
+    const els = need.map(rec => CARD_LODS.map(lod => { const e = document.createElement('div'); e.className = 'lbl shelf-card' + (lod === 'full' ? '' : ' compact'); e.innerHTML = cardHtml(rec, lod); host.appendChild(e); return e; }));
+    labelsLayer.appendChild(host);
+    need.forEach((rec, i) => { const s = {}; CARD_LODS.forEach((lod, j) => { s[lod] = { w: els[i][j].offsetWidth, h: els[i][j].offsetHeight }; }); rec.cardSize = s.full.w > 0 ? s : null; });
+    host.remove();
   }
 
   // ───────────────────────────────────────────────────────────── render loop
@@ -2864,9 +3263,14 @@
     requestAnimationFrame(animate);
     controls.autoRotate = false;
     const animating = !!S.tween;
-    if (S.tween) { const k = S.tween.ms > 0 ? Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms) : 1; const e = 1 - Math.pow(1 - k, 3); camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); if (k >= 1) S.tween = null; }
+    if (S.tween) {
+      const k = S.tween.ms > 0 ? Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms) : 1; const e = 1 - Math.pow(1 - k, 3); const o = S.tween.orbit;
+      if (o) { controls.target.copy(o.T); camera.position.copy(o.T).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(o.r, o.phi0 + (o.phi1 - o.phi0) * e, o.th0 + (o.th1 - o.th0) * e))); }
+      else { camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); }
+      if (k >= 1) S.tween = null;
+    }
     const pulse = reducedMotion() ? 0.85 : 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
-    controls.update(); constrainNavigation(!animating); renderer.render(scene, camera); updateLabels();
+    controls.update(); constrainNavigation(!animating); renderer.render(scene, camera); updateLabels(); updateCompass();
   }
 
 
@@ -2928,7 +3332,7 @@
     return false;
   }
   function shelfToU(setupId, shelfId) {
-    const shelves = S.data.shelves.filter(sh => sh.setup === setupId).sort((a, b) => a.level - b.level); const n = shelves.length;
+    const shelves = recsOf(r => r.cat === 'shelf' && r.setup === setupId).sort((a, b) => a.level - b.level); const n = shelves.length;
     const uTopDown = (S.data.dcim?.uNumbering || 'top-down') === 'top-down';
     const idx = shelfId ? shelves.findIndex(s => s.id === shelfId) : 0;   // no shelf (bottom bay) → lowest shelf
     return uTopDown ? n - Math.max(0, idx) : Math.max(0, idx) + 1;
@@ -3120,7 +3524,7 @@
 
   function bigChips(cur) { return `<div class="chips-lg" role="group" aria-label="Lifecycle status">${STATUSES.map(st => `<button type="button" class="chip-lg ${cur === st ? 'on' : ''}" data-st="${st}" aria-pressed="${cur === st}" style="--c:${STATUS_COLOR[st]}"><span class="ic" aria-hidden="true"></span>${STATUS_LABEL[st]}</button>`).join('')}</div>`; }
   // A shelf as people say it: "Rack-01 › Shelf 1 (top)" (shelf 1 = top, like Lab Manager) — never SETUP / SHELF ids or the geometric L4.
-  function shelfName(id) { const sh = S.data.shelves.find(x => x.id === id); if (!sh) return id; return `${rackName(S.data.setups.find(x => x.id === sh.setup) || { id: sh.setup })} › ${shelfCaption(sh)}`; }
+  function shelfName(id) { const sh = S.recs.get(id)?.cat === 'shelf' ? S.recs.get(id).def : null; if (!sh) return id; return `${rackName(S.data.setups.find(x => x.id === sh.setup) || { id: sh.setup })} › ${shelfCaption(sh)}`; }
 
   function renderEditor(rec) {
     // The v3 drawer frame (same header, 12 px section headings), Kaizen-size controls; places are written like the
@@ -3161,7 +3565,10 @@
       html += `<section class="sec big">${H('On this shelf')}${where}
           ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>${esc(kindOf(i))}${i.item.dcim?.outlet ? ' · outlet ' + esc(i.item.dcim.outlet) : ''}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button><button type="button" class="kbtn secondary small" data-move="${esc(i.id)}">Move…</button></div>`).join('') : '<div class="edit-note">Nothing on this shelf.</div>'}
           <div class="row-lg"><button type="button" class="kbtn secondary md" id="eAddHere">Add a device on this shelf</button></div></section>
-        <section class="sec big">${status(def.status)}${notes(def.notes || '')}${save}</section>`;
+        ${def.derived
+          // a floor the twin adds from the app's floor model is not in lab-data.json, so its status / notes cannot be saved here
+          ? `<section class="sec big"><div class="edit-note derived-note" id="eDerived">This shelf comes from the DCIM floor model; edit it in Racks.</div></section>`
+          : `<section class="sec big">${status(def.status)}${notes(def.notes || '')}${save}</section>`}`;
     } else if (rec.cat === 'setup') {
       const racks = [...new Set([...(S.data.dcim?.pdus || []).map(p => p.rack), ...S.model.liveRacks])].filter(Boolean).sort(); const cur = def.dcimRack || '';
       const shelves = recsOf(r => r.cat === 'shelf' && r.setup === rec.id).sort((a, b) => b.level - a.level);
@@ -3201,7 +3608,9 @@
         if (pdu) { const pd = (S.data.dcim?.pdus || []).find(x => x.id === pdu); patch.dcim = { ...(it.dcim || {}), pdu, pduName: pd?.name, outlet: isNaN(outlet) ? undefined : outlet, optKey: optKey(patch.name) }; }
         else if (it.dcim) { const { pdu: _p, pduName: _n, outlet: _o, ...rest } = it.dcim; patch.dcim = Object.keys(rest).length ? rest : undefined; }
       }
-      patchDef(rec.id, patch); rebuildAll(); select(rec.id, { keepCamera: true }); toast('Saved — press “Save to server” when done', 'ok');
+      // never report a change as saved when it has no record in lab-data.json to go into
+      if (!patchDef(rec.id, patch)) { toast('Not saved: this object is not in the layout file' + (def?.derived ? ' (it comes from the DCIM floor model; edit it in Racks)' : ''), 'err'); return; }
+      rebuildAll(); select(rec.id, { keepCamera: true }); toast('Saved — press “Save to server” when done', 'ok');
       if (ownerKey && owner !== (it.owner || null)) saveDcimOwner(ownerKey, owner).then(() => toast('Owner saved in Lab Manager', 'ok')).catch(e => toast('Owner not saved: ' + e.message, 'err'));
     };
     const rp = $('#eReplace'); if (rp) rp.onclick = () => {
@@ -3338,8 +3747,19 @@
   $('#rackBar').addEventListener('scroll', () => rackBarEdges(), { passive: true });
   ['rbPrev', 'rbNext'].forEach((id, i) => { $('#' + id).onclick = () => { const bar = $('#rackBar'); bar.scrollBy({ left: (i ? 1 : -1) * Math.max(120, bar.clientWidth * 0.6), behavior: reducedMotion() ? 'auto' : 'smooth' }); }; });
   function zoomBy(f) { markView(null); const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
-  $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4);   // rotate with a drag, pan with the arrow keys or a right drag
-  window.addEventListener('keydown', e => { if (e.target !== canvas && e.target !== document.body) return; const k = e.key; if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1); else return; e.preventDefault(); });
+  $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4);   // pan with a drag or the arrow keys, rotate with a right drag
+  $('#vCompass').onclick = () => { hideRackFront(); northUp(); };
+  // Arrow keys pan along the floor; Shift + arrows rotate / tilt; + / − zoom; N turns north up.
+  window.addEventListener('keydown', e => {
+    if (e.target !== canvas && e.target !== document.body) return; if (e.ctrlKey || e.metaKey || e.altKey || S.front) return;
+    const k = e.key; const turn = Math.PI / 12, tilt = 0.12;
+    if (e.shiftKey && k === 'ArrowLeft') rotateView(turn, 0); else if (e.shiftKey && k === 'ArrowRight') rotateView(-turn, 0);
+    else if (e.shiftKey && k === 'ArrowUp') rotateView(0, tilt); else if (e.shiftKey && k === 'ArrowDown') rotateView(0, -tilt);
+    else if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1);
+    else if (k === '+' || k === '=') zoomBy(0.7); else if (k === '-' || k === '_') zoomBy(1.4);
+    else if (k === 'n' || k === 'N') northUp();
+    else return; e.preventDefault();
+  });
 
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }
@@ -3362,6 +3782,8 @@
     document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); if (S.kiosk) $('#btnKiosk').textContent = 'Leave lab screen mode'; document.body.classList.toggle('editmode', S.editMode); markEdit(); applyLook(); renderLegend();
     resize(); controls.maxDistance = Math.max(25, Math.hypot(S.data.room.width, S.data.room.depth, S.data.room.height) * 5);
     camera.far = controls.maxDistance + 50; camera.updateProjectionMatrix();
+    // a target slid down to the floor must land on the room's floor (world x is mirrored: data x → −x)
+    controls.groundBounds = new THREE.Box3(new THREE.Vector3(-S.data.room.width - 0.5, -0.01, -0.5), new THREE.Vector3(0.5, 0.01, S.data.room.depth + 0.5));
     VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
     previousCamera.copy(camera.position); previousTarget.copy(controls.target); markView('orbit');
     const racksList = S.racksList; setSheet('half', 'issues'); showTab(LS.get('sideTab', 'attn')); setRacksList(racksList); placeAttnDock();
@@ -3381,7 +3803,7 @@
     }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, renderer, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings };
+  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend, rackClearance };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);

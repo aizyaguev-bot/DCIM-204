@@ -120,7 +120,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     });
     assert.equal(health.r7, 'down'); assert.equal(health.label, 'Rack-07 · PDU offline'); assert.match(health.cls, /\bh-down\b/);
     assert.equal(health.legendTitle, 'Health');
-    assert.deepEqual(health.legend.map(l => l.t), ['Up', 'Down', 'Unknown', 'Maintenance', 'Selected']);
+    assert.deepEqual(health.legend.map(l => l.t), ['Up', 'Down', 'Unknown', 'Maintenance', 'Selected', 'Power ON', 'Power OFF', 'Power unknown'], 'health, then the server body power colours');
     assert.equal(health.legend[0].bg, 'rgb(74, 222, 128)'); assert.equal(health.legend[1].bg, 'rgb(248, 113, 113)'); assert.equal(health.legend[2].border, 'dashed'); assert.equal(health.legend[3].bg, 'rgb(192, 132, 252)');
     pass('health: Rack-07 down with label "Rack-07 · PDU offline" (h-down); legend Up / Down / Unknown (dashed) / Maintenance / Selected in the health colours');
 
@@ -292,7 +292,9 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     assert.ok(f1.shelves.every(s => s.same), 'every tile is an object on that shelf'); assert.ok(f1.shelves.every(s => s.free === s.wantFree), 'Free = empty slots');
     assert.ok(f1.shelves.every(s => s.rows === Math.ceil(s.cells / 2)), 'two places per row: ' + JSON.stringify(f1.shelves));
     assert.match(f1.head, /^Rack-01 \| ≥?\d+\.\d\d kW · \d+\/\d+ on$/); assert.equal(f1.crumb, 'Lab › Left rack row › Rack-01');
-    const f5 = await front('SETUP-005'); assert.deepEqual(f5.caps, ['SHELF 1 (TOP)', 'SHELF 2', 'SHELF 3 (BOTTOM)']);
+    // Rack-05 has 3 shelves in lab-data.json; the app's floor model gives it 4 (floor 4 derived below the known ones)
+    const f5 = await front('SETUP-005'); assert.deepEqual(f5.caps, ['SHELF 1 (TOP)', 'SHELF 2', 'SHELF 3', 'SHELF 4 (BOTTOM)']);
+    assert.ok(f5.shelves.every(s => s.same), 'Rack-05: every tile is an object on that shelf');
     await front('SETUP-001'); await page.locator('#rfNext').click(); assert.equal(await page.evaluate(() => __twin.S.front), 'SETUP-002');
     await page.keyboard.press(']'); assert.equal(await page.evaluate(() => __twin.S.front), 'SETUP-003');
     await page.keyboard.press('['); assert.equal(await page.evaluate(() => __twin.S.front), 'SETUP-002');
@@ -319,7 +321,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     await page.locator('#rackFront .rf-tile.sel').focus(); await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => __twin.S.selected), null, 'Escape closes the drawer first'); assert.equal(await page.evaluate(() => __twin.S.front), 'SETUP-001');
     await page.keyboard.press('Escape'); assert.equal(await page.evaluate(() => __twin.S.front), null, 'then returns to the overview');
-    pass('rack front: Rack-01 4 shelves SHELF 1 (TOP)…SHELF 4 (BOTTOM), Rack-05 3, two places per row, Free = empty places, Next / ] / [ , tile click keeps the camera, Next closes a foreign drawer, Rack-01 / Rack-06 fit above the legend, Escape twice');
+    pass('rack front: Rack-01 4 shelves SHELF 1 (TOP)…SHELF 4 (BOTTOM), Rack-05 4 (floor 4 from the floor model), two places per row, Free = empty places, Next / ] / [ , tile click keeps the camera, Next closes a foreign drawer, Rack-01 / Rack-06 fit above the legend, Escape twice');
 
     // rack framing (Rack-03 from the rack bar): whole rack and cap between the breadcrumb band and the legend band,
     // at least 1.2 × the rack height away; breadcrumb names the rack; no telemetry card cut at the top
@@ -377,12 +379,122 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     const clash = await page.evaluate(() => {
       const shown = [...document.querySelectorAll('#labels .lbl')].filter(e => e.style.display !== 'none' && getComputedStyle(e).visibility !== 'hidden').map(e => ({ t: e.textContent, r: e.getBoundingClientRect() }));
       const bad = []; for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) { const a = shown[i].r, b = shown[j].r; if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 2 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 2) bad.push(shown[i].t + ' / ' + shown[j].t); }
-      return { n: shown.length, bad, hits: shown.filter(s => /^OPT1\d/.test(s.t)).length };
+      return { n: shown.length, bad, hits: shown.filter(s => /^(?:ON|OFF|\?)?OPT1\d/.test(s.t)).length };
     });
     assert.deepEqual(clash.bad, [], 'overlapping labels'); assert.ok(clash.hits >= 2, 'search hits labelled: ' + clash.hits);
     await shot(page, 'desktop-12-search-labels.png');
     await page.locator('#search').fill(''); await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
     pass(`labels: ${clash.n} labels for "opt1" with no overlap (${clash.hits} search hits shown)`);
+
+    // TWIN-3D: server colour by power state, shelf cards (server · IP · power · units with switch type) and map navigation
+    // ON = green body, OFF = red body, no reading = neutral grey (never red); the label says it in words too
+    const power = await page.evaluate(() => {
+      const t = __twin, S = t.S; const it = S.model.items.find(i => i.id === 'LIVE-opt12'); window.__savedState = it.live.state; it.live.state = 'off'; t.buildItems({ refresh: true });
+      const body = id => { const r = S.recs.get(id); const c = r.meshes[0].material.color; return { p: r.power, rgb: [c.r, c.g, c.b], pill: r.label.querySelector('.pw')?.textContent, mesh: r.meshes[0].userData.power }; };
+      return { on: body('LIVE-opt11'), off: body('LIVE-opt12'), unknown: body('LIVE-opt71') };
+    });
+    const isGreen = c => c[1] > 0.3 && c[1] > 3 * c[0] && c[1] > 3 * c[2], isRed = c => c[0] > 0.3 && c[0] > 3 * c[1] && c[0] > 3 * c[2], isGrey = c => Math.max(...c) - Math.min(...c) < 0.1;
+    assert.deepEqual([power.on.p, power.on.pill, power.on.mesh], ['on', 'ON', 'on']); assert.ok(isGreen(power.on.rgb), 'ON server mesh green ' + power.on.rgb);
+    assert.deepEqual([power.off.p, power.off.pill], ['off', 'OFF']); assert.ok(isRed(power.off.rgb), 'OFF server mesh red ' + power.off.rgb);
+    assert.deepEqual([power.unknown.p, power.unknown.pill], ['unknown', '?']); assert.ok(isGrey(power.unknown.rgb) && !isRed(power.unknown.rgb), 'unknown server mesh grey ' + power.unknown.rgb);
+    pass('power colours: OPT11 on = green body + "ON", OPT12 off = red body + "OFF", OPT71 (PDU unreachable) = grey body + "?"');
+
+    // the shelf card names the server, its IP / host and power, and the unit with its switch type (from model / part number)
+    const shelfCard = await page.evaluate(() => {
+      const t = __twin, S = t.S; const ci = S.live.rackItems['Rack-01'].find(x => x.id === 'ci-1'); window.__savedModel = ci.model; ci.model = 'MSN2700-CS2F';
+      t.computeModel(); const it = S.model.items.find(i => i.id === 'LIVE-opt12'); it.live.state = 'off'; t.buildItems({ refresh: true });
+      const sh = S.recs.get(S.recs.get('LIVE-ci-1').shelf), opt = S.recs.get('LIVE-opt12');
+      const kinds = { sn: t.unitInfo({ type: 'equip-other', name: 'Unit', serial_number: 'MT2629600G08' }), snSw: t.unitInfo({ type: 'equip-switch', name: 'Unit', serial_number: 'MT2629600G07' }), named: t.unitInfo({ type: 'equip-other', name: 'UPS box', serial_number: 'MT2629600G09' }), nic: t.unitInfo({ type: 'equip-other', name: 'NIC card', model: 'ConnectX-7 MCX75310' }), qm: t.unitInfo({ type: 'equip-switch', name: 'IB', part_number: 'MQM9700-NS2F' }), plain: t.unitInfo({ type: 'equip-other', name: 'Box' }), bc: t.unitInfo({ type: 'equip-other', name: 'MT2629X00QA2', barcode: 'MT2629X00QA2' }) };
+      return { sameShelf: sh.id === opt.shelf, text: sh.cardText, kinds, ev: getComputedStyle(sh.label).pointerEvents };
+    });
+    assert.ok(shelfCard.sameShelf, 'OPT12 and Switch 01 share a shelf in the fixture');
+    assert.match(shelfCard.text, /^Rack-01 › Shelf \d$/m); assert.match(shelfCard.text, /^OFF OPT12 opt12$/m, 'server name + IP + power: ' + shelfCard.text);
+    assert.match(shelfCard.text, /^SW Spectrum SN2700 · Switch 01$/m, 'switch type from the model: ' + shelfCard.text);
+    assert.deepEqual([shelfCard.kinds.sn.kind, shelfCard.kinds.sn.tag], ['other', 'DEV'], 'the 3D view never guesses: a unit stored as Other with an SN stays Other, as on the Racks page');
+    assert.deepEqual([shelfCard.kinds.snSw.kind, shelfCard.kinds.snSw.tag], ['switch', 'SW'], 'a unit stored as a switch (the site saves that when an SN is entered) is SW');
+    assert.equal(shelfCard.kinds.named.kind, 'other', 'a unit whose name says what it is stays other, as on the Racks page');
+    assert.deepEqual([shelfCard.kinds.nic.tag, shelfCard.kinds.nic.typeText], ['NIC', 'ConnectX-7']); assert.deepEqual([shelfCard.kinds.qm.tag, shelfCard.kinds.qm.typeText], ['SW', 'Quantum-2 QM9700']);
+    assert.equal(shelfCard.kinds.plain.kind, 'other');
+    assert.deepEqual([shelfCard.kinds.bc.kind, shelfCard.kinds.bc.tag], ['other', 'DEV'], 'a barcode-only unit stored as Other stays Other in 3D');
+    assert.equal(shelfCard.ev, 'none', 'shelf cards never take pointer input');
+    // level of detail: full card close to the rack, nothing from far away; cards never overlap each other
+    await page.evaluate(() => __twin.select('SETUP-001', { fly: true })); await idle(page); await page.waitForTimeout(300);
+    const near = await page.evaluate(() => { const shown = [...document.querySelectorAll('#labels .lbl.shelf-card')].filter(e => e.style.display !== 'none' && getComputedStyle(e).visibility !== 'hidden');
+      const r = shown.map(e => e.getBoundingClientRect()); let bad = 0; for (let i = 0; i < r.length; i++) for (let j = i + 1; j < r.length; j++) if (Math.min(r[i].right, r[j].right) - Math.max(r[i].left, r[j].left) > 2 && Math.min(r[i].bottom, r[j].bottom) - Math.max(r[i].top, r[j].top) > 2) bad++;
+      return { n: shown.length, full: shown.filter(e => e.dataset.lod === 'full').map(e => e.innerText.replace(/\s+/g, ' ')), bad }; });
+    assert.ok(near.n >= 3, 'shelf cards shown at the rack: ' + near.n); assert.equal(near.bad, 0, 'shelf cards overlap');
+    assert.ok(near.full.some(t => /OFF\s?OPT12\s?opt12/.test(t) && /SW\s?Spectrum SN2700/.test(t)), 'full card for Rack-01: ' + near.full.join(' / '));
+    await shot(page, 'desktop-15-shelf-cards.png');
+    // a label on every shelf at every middle distance: in front of the selected Rack-01 from 2.5 to 7 m all four cards
+    // are shown with full detail (full cards, or for the whole rack one-line cards that still carry power, name, IP and
+    // unit type when full cards would not fit), never hidden, never overlapping
+    const sweep = {};
+    for (const d of [2.5, 3.3, 3.8, 4.5, 5, 5.5, 6.5, 7]) {
+      await page.evaluate(d => { const t = __twin, S = t.S; S.tween = null; t.controls.cancel(); const sh = [...S.recs.values()].filter(r => r.cat === 'shelf' && r.setup === 'SETUP-001');
+        const c = new THREE.Vector3(); sh.forEach(r => c.add(r.cardAnchor)); c.divideScalar(sh.length); const p = c.clone().addScaledVector(sh[0].front, d); p.y = 1.6;
+        // a zero-length camera animation: placed exactly there (an animation frame skips the walk-through collision check)
+        S.tween = { ms: 0, t0: performance.now(), p0: p.clone(), p1: p.clone(), t0v: c.clone(), t1v: c.clone() }; window.__f0 = t.renderer.info.render.frame; }, d);
+      // software WebGL can take a few hundred ms per frame: wait for frames drawn from the new camera, not for a time
+      await page.waitForFunction(() => __twin.renderer.info.render.frame >= window.__f0 + 3, null, { timeout: 20000 });
+      sweep[d] = await page.evaluate(() => { const S = __twin.S; const els = [...S.recs.values()].filter(r => r.cat === 'shelf' && r.setup === 'SETUP-001').map(r => r.label);
+        const st = els.map(e => e.style.display === 'none' ? '-' : getComputedStyle(e).visibility === 'hidden' ? 'HIDDEN' : e.dataset.lod);
+        const shown = [...document.querySelectorAll('#labels .lbl.shelf-card')].filter(e => e.style.display !== 'none' && getComputedStyle(e).visibility !== 'hidden'); const r = shown.map(e => e.getBoundingClientRect()); let bad = 0;
+        for (let i = 0; i < r.length; i++) for (let j = i + 1; j < r.length; j++) if (Math.min(r[i].right, r[j].right) - Math.max(r[i].left, r[j].left) > 2 && Math.min(r[i].bottom, r[j].bottom) - Math.max(r[i].top, r[j].top) > 2) bad++;
+        return { st, bad, camd: Math.min(...[...S.recs.values()].filter(r => r.cat === 'shelf' && r.setup === 'SETUP-001').map(r => r.cardAnchor.distanceTo(__twin.camera.position))) }; });
+      if (d === 4.5) await shot(page, 'desktop-15b-shelf-cards-4_5m.png');
+    }
+    for (const [d, s] of Object.entries(sweep)) {
+      assert.ok(Math.abs(s.camd - d) < 0.3, `camera placed ${d} m in front of Rack-01: ${s.camd}`);
+      assert.ok(s.st.length === 4 && s.st.every(v => v === 'full' || v === 'line'), `every Rack-01 shelf has a detailed card at ${d} m: ${s.st}`);
+      assert.equal(new Set(s.st).size, 1, `one level of detail per rack at ${d} m: ${s.st}`); assert.equal(s.bad, 0, `shelf cards overlap at ${d} m`);
+    }
+    assert.ok(sweep['2.5'].st.every(v => v === 'full') && sweep['7'].st.every(v => v === 'line'), 'full close up, one line farther: ' + JSON.stringify(sweep));
+    await page.evaluate(() => { __twin.closeDetail(); }); await page.locator('#vTop').click(); await idle(page);
+    const far = await page.evaluate(() => [...document.querySelectorAll('#labels .lbl.shelf-card')].filter(e => e.style.display !== 'none').length);
+    assert.equal(far, 0, 'no shelf cards from the top view (far away)');
+    await page.evaluate(() => { const t = __twin, S = t.S; S.live.rackItems['Rack-01'].find(x => x.id === 'ci-1').model = window.__savedModel; t.computeModel(); t.buildItems({ refresh: true }); });
+    pass('shelf cards: "Rack-01 › Shelf n", "OFF OPT12 opt12", "SW Spectrum SN2700 · Switch 01"; stored type decides (Other with an SN stays Other, type switch = SW), ConnectX-7 = NIC, QM9700 = Quantum-2; full card at the rack, none from the top view, no overlap, no pointer input');
+
+    // map navigation: left drag pans on the floor, right drag rotates, wheel zooms to the pointer; the camera stays above
+    // the floor and the target on it; the compass turns north up
+    await page.locator('#vOrbit').click(); await idle(page);
+    const settle = () => page.waitForFunction(() => !__twin.controls.moving && !__twin.S.tween, null, { timeout: 20000 });
+    const cam = () => page.evaluate(() => ({ p: __twin.camera.position.toArray(), t: __twin.controls.target.toArray(), polar: __twin.controls.getPolarAngle(), heading: document.querySelector('#vCompass').dataset.heading }));
+    const vb = await page.locator('#c').boundingBox(); const mx = vb.x + vb.width * .55, my = vb.y + vb.height * .6;
+    const c0 = await cam(); assert.ok(Math.abs(c0.t[1]) < 1e-6, 'overview target on the floor');
+    await page.mouse.move(mx, my); await page.mouse.down(); await page.mouse.move(mx + 140, my + 70, { steps: 12 }); await page.mouse.up(); await settle();
+    await page.mouse.move(mx, my); await page.mouse.down({ button: 'right' }); await page.mouse.move(mx - 220, my - 420, { steps: 20 }); await page.mouse.up({ button: 'right' }); await settle();
+    for (let i = 0; i < 25; i++) await page.mouse.wheel(0, -300); await settle();
+    await page.mouse.move(mx, my); await page.mouse.down({ button: 'right' }); await page.mouse.move(mx + 300, my + 900, { steps: 20 }); await page.mouse.up({ button: 'right' }); await settle();
+    for (let i = 0; i < 40; i++) await page.mouse.wheel(0, 400); await settle();
+    const c1 = await cam();
+    assert.ok(c1.p[1] > 0.15, 'camera above the floor: ' + c1.p); assert.ok(Math.abs(c1.t[1]) < 1e-6, 'target on the floor: ' + c1.t);
+    assert.ok(c1.polar <= 1.5 + 1e-4 && c1.polar >= 0.02 - 1e-4, 'polar inside the limits: ' + c1.polar); assert.ok(c1.p.concat(c1.t).every(Number.isFinite));
+    assert.notDeepEqual(c1.p, c0.p, 'the sequence moved the camera');
+    await page.locator('#vCompass').click(); await idle(page); assert.equal((await cam()).heading, '0', 'compass: north up');
+    await page.locator('#vReset').click(); await idle(page);
+    // touch, as browsers send it (one pointermove per finger): a quick two-finger push up tilts around a fixed target
+    // (it is not taken for a map pan), and a pinch with one finger held still zooms
+    const touch = await page.evaluate(() => {
+      const cv = document.getElementById('c'); const b = cv.getBoundingClientRect(); const cx = b.left + b.width / 2, cy = b.top + b.height * 0.5; const ctl = __twin.controls;
+      const ev = (type, id, x, y) => (type === 'pointerdown' ? cv : window).dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: 'touch', clientX: x, clientY: y, bubbles: true, isPrimary: id === 31, button: 0, buttons: type === 'pointerup' ? 0 : 1 }));
+      const p0 = ctl.getPolarAngle(), t0 = ctl.target.clone();
+      ev('pointerdown', 31, cx - 50, cy + 60); ev('pointerdown', 32, cx + 50, cy + 60);
+      for (let i = 1; i <= 8; i++) { ev('pointermove', 31, cx - 50, cy + 60 - i * 15); ev('pointermove', 32, cx + 50, cy + 60 - i * 15); }
+      ev('pointerup', 31, cx - 50, cy - 60); ev('pointerup', 32, cx + 50, cy - 60); ctl.cancel();
+      const tilt = { dPolar: ctl.getPolarAngle() - p0, moved: t0.distanceTo(ctl.target) };
+      const d0 = ctl.getDistance(), q0 = ctl.getPolarAngle();
+      ev('pointerdown', 33, cx - 40, cy); ev('pointerdown', 34, cx + 40, cy);
+      for (let i = 1; i <= 8; i++) ev('pointermove', 34, cx + 40 + i * 15, cy);
+      ev('pointerup', 33, cx - 40, cy); ev('pointerup', 34, cx + 160, cy); ctl.cancel();
+      return { tilt, pinch: { ratio: ctl.getDistance() / d0, dPolar: ctl.getPolarAngle() - q0 }, aboveFloor: __twin.camera.position.y > 0.15, onFloor: Math.abs(ctl.target.y) < 1e-6 };
+    });
+    assert.ok(Math.abs(touch.tilt.dPolar) > 0.1 && touch.tilt.moved < 0.05, 'fast two-finger push tilts, the target stays: ' + JSON.stringify(touch));
+    assert.ok(touch.pinch.ratio < 0.9 && Math.abs(touch.pinch.dPolar) < 0.01, 'a one-finger-anchored pinch zooms in without tilting: ' + JSON.stringify(touch));
+    assert.ok(touch.aboveFloor && touch.onFloor, 'touch keeps the camera above the floor and the target on it');
+    await page.locator('#vReset').click(); await idle(page);
+    pass('map navigation: pan / rotate / wheel / tilt sequence keeps the camera above the floor and the target on it, polar in [0.02, 1.5]; compass turns north up; a fast two-finger push tilts, a pinch zooms');
+    await page.evaluate(() => { const t = __twin; t.computeModel(); t.buildItems({ refresh: true }); });
 
     // narrower windows: the header never passes the edge (1024 px, long issues badge); at 800 px the critical chip is in view
     await page.evaluate(() => { const t = __twin, S = t.S; window.__saved = { m: S.live.maintenance, p: S.live.ping }; S.live.maintenance = { pdus: { pdu3: { started_at: Date.now() / 1000 - 600, outlets_off: [1], failed: [] } } }; S.live.ping = { ...(S.live.ping || {}), opt12: { status: 'down', rtt: null, checkedAt: new Date().toISOString(), lastUpAt: null } }; t.computeModel(); t.buildItems({ refresh: true }); });

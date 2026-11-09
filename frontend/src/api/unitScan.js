@@ -8,6 +8,7 @@
 // serial number or MAC address contradicts the unit it found is refused, like a code that matches two units.
 import { MAIN_STORAGE, loadInventory, updateInventory, loadRackItems, saveRackItems, UNIT_DETAIL_FIELDS, UNIT_DETAIL_LIMITS, normalizeMac, detailText } from "./inventory.js";
 import { floorsFor, rackHasFloors } from "../components/racks/floors.js";
+import { GENERIC_UNIT_NAME, isGenericUnit, serialUnitType, unitTypeLabel } from "./scanParse.js";
 
 export function placeOf(item) {
   return { rack: item.rack, u: item.u, position: item.shelf_position || "" };
@@ -57,9 +58,32 @@ async function fillMissing(item, parsed, revision) {
   try {
     const saved = await updateInventory(`/${encodeURIComponent(item.id)}/details`, { ...wanted, only_missing: true }, revision);
     const filled = Object.fromEntries(UNIT_DETAIL_FIELDS.filter(f => missing(item, f) && !missing(saved.data, f)).map(f => [f, saved.data[f]]));
-    return { item: saved.data, filled };
+    return { ...await markAsSwitch(item, saved.data, filled), filled };
   } catch (error) {
     return { item, filled: {}, fillError: error?.message || "The unit's details could not be saved." };
+  }
+}
+
+// The scan just gave a generic unit (a legacy barcode-only unit: type other, named "Unit" or after its code) its serial
+// number: by the lab owner's rule (serialUnitType, as for a new unit) it is marked as a switch, and "Unit" is renamed
+// "Switch". One guarded save of the equipment list (If-Match); when the unit changed meanwhile, or the save is refused,
+// the unit is left as the scan saved it. retyped: its type and name before, for Undo.
+async function markAsSwitch(before, after, filled) {
+  // the serial and the unit's own barcode go in as the code: a board OPN scanned as the serial is not a switch
+  const code = [filled.serial_number, before.barcode, after.barcode].filter(Boolean).join(" ");
+  if (!filled.serial_number || !isGenericUnit(before) || serialUnitType({ part_number: after.part_number, model: after.model, code }) !== "switch") return { item: after };
+  try {
+    const items = await loadRackItems();
+    const rack = Object.keys(items).find(r => items[r].some(i => i.id === after.id));
+    const current = rack && items[rack].find(i => i.id === after.id);
+    if (!current || !isGenericUnit({ ...current, serial_number: "" }) || current.serial_number !== filled.serial_number) return { item: after };
+    const renamed = String(current.name || "").trim().toLowerCase() === GENERIC_UNIT_NAME.toLowerCase();
+    const next = { ...current, type: "switch", ...(renamed ? { name: unitTypeLabel("switch") } : {}) };
+    const saved = await saveRackItems({ ...items, [rack]: items[rack].map(i => (i.id === current.id ? next : i)) }, items, { alert: false, alertDuplicates: false });
+    const stored = saved?.[rack]?.find(i => i.id === current.id);
+    return stored ? { item: { ...stored, rack }, retyped: { type: current.type || "other", name: current.name } } : { item: after };
+  } catch {
+    return { item: after };
   }
 }
 
@@ -203,6 +227,7 @@ export async function undoScannedUnit(result) {
     if (!untouchedSinceScan(item, rack, result) || filled.some(f => item[f] !== result.filled[f])) throw failure(CHANGED);
     const restored = { ...item, u: result.before.u, shelf_position: result.before.position || "" };
     for (const field of filled) delete restored[field];
+    if (result.retyped) Object.assign(restored, result.retyped);   // marked as a switch by the scan: back to what it was
     const next = { ...items };
     if (rack === result.before.rack) next[rack] = items[rack].map(i => (i.id === id ? restored : i));
     else {

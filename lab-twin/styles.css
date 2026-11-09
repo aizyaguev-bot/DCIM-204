@@ -226,6 +226,31 @@ body:not(.color-status) .lbl.setup .lp, body:not(.color-status) .lbl.storage .lp
 .lbl.setup.h-unknown { border-style: dashed; border-color: var(--dim); color: #d4d4d8; }
 .lbl.shelf { font-size: 10px; padding: 1px 5px; color: var(--muted); }
 .lbl.item { font-size: 10px; padding: 1px 5px; }
+/* power tag on server labels and shelf cards: words as well as colour (ON green / OFF red / ? dashed grey) */
+.lbl .pw { display: inline-block; font: 700 9px/1 var(--mono); letter-spacing: .3px; padding: 2px 3px; border-radius: 3px; margin-right: 4px; vertical-align: 1px; border: 1px solid transparent; }
+.lbl .pw-on { background: #22c55e; color: #052e16; }
+.lbl .pw-off { background: #dc2626; color: #fff; }
+.lbl .pw-unknown { background: transparent; color: var(--z-300); border: 1px dashed var(--dim); padding: 1px 4px; }
+/* shelf card: one per shelf, centred on its front; never takes pointer input so picking and dragging stay free */
+.lbl.shelf-card { pointer-events: none; cursor: default; transform: translate(-50%, -50%); font: 10.5px/1.35 var(--sans); padding: 3px 7px 4px; max-width: 260px; background: rgba(13,14,16,.9); border-color: var(--line-2); color: var(--text); }
+.lbl.shelf-card .sc-h { font-size: 9.5px; font-weight: 600; color: var(--muted); letter-spacing: .2px; margin-bottom: 1px; }
+.lbl.shelf-card .sc-l { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; }
+.lbl.shelf-card .sc-l + .sc-l { margin-top: 1px; }
+.lbl.shelf-card .pw { margin-right: 0; }
+.lbl.shelf-card .sc-n { font-weight: 600; color: #fafafa; }
+.lbl.shelf-card .sc-ip { font: 10px var(--mono); color: #a5f3fc; }
+.lbl.shelf-card .sc-ip.none { color: var(--dim); font-family: var(--sans); font-style: italic; }
+.lbl.shelf-card .sc-m { font: 700 9px/1 var(--mono); padding: 2px 3px; border-radius: 3px; background: #3b0764; color: #e9d5ff; border: 1px solid #7e22ce; }
+.lbl.shelf-card .sc-k { font: 700 9px/1 var(--mono); padding: 2px 3px; border-radius: 3px; background: var(--z-800); color: var(--z-200); border: 1px solid var(--z-700); }
+.lbl.shelf-card .sc-k.k-switch { background: #164e63; color: #ecfeff; border-color: #22d3ee; }
+.lbl.shelf-card .sc-k.k-nic, .lbl.shelf-card .sc-k.k-dpu { background: #1e3a8a; color: #dbeafe; border-color: #60a5fa; }
+.lbl.shelf-card .sc-x { color: var(--muted); }
+.lbl.shelf-card .sc-free { color: var(--dim); font-style: italic; }
+.lbl.shelf-card.compact { display: flex; align-items: center; gap: 4px; padding: 1px 6px; font-size: 10px; }
+.lbl.shelf-card.compact .sc-u { color: var(--muted); font-weight: 700; margin-right: 1px; }
+body.kiosk .lbl.shelf-card { font-size: 13px; max-width: 340px; }
+/* compass (top of the zoom bar): the needle points to the wall opposite the entrance */
+.zoombar .compass svg { display: block; margin: auto; }
 .lbl.zone { border: 0; background: none; font: 700 11px var(--sans); letter-spacing: .5px; color: var(--muted); text-transform: uppercase; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 6px; }
 .lbl.zone .zn-sw { width: 8px; height: 8px; border-radius: 2px; }
 .lbl.low { border-style: dashed; }
@@ -264,8 +289,10 @@ body.show-power .lbl .lt:not(:empty) { display: flex; }
 .rf-bar { display: none; }
 /* legend (bottom left) */
 .vp-legend { position: absolute; left: 16px; bottom: 16px; z-index: 5; height: 32px; display: flex; flex-wrap: nowrap; align-items: center; gap: 14px; padding: 0 12px; border-radius: 8px; background: rgba(18,19,22,.95); border: 1px solid var(--line); font-size: 12px; color: var(--z-300); white-space: nowrap; overflow: hidden; }
-.vp-legend.lg-compact { gap: 10px; } .vp-legend.lg-compact .lg-t { display: none; }
-.vp-legend.lg-swatches .li-t { display: none; }
+.vp-legend.lg-compact { gap: 10px; } .vp-legend.lg-compact .lg-t:not(.lg-pt) { display: none; }
+.vp-legend.lg-swatches .li:not(.pw) .li-t { display: none; }   /* health swatches keep their tooltips; the power group keeps its words */
+.vp-legend.lg-ptshort .lg-pt .pt-l { display: none; }
+.vp-legend.lg-ptshort .lg-pt::after { content: attr(data-short); }
 .vp-legend .lg-t { color: var(--muted); }
 .vp-legend .li { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .vp-legend .sw { width: 10px; height: 10px; flex: 0 0 auto; }
@@ -274,6 +301,12 @@ body.show-power .lbl .lt:not(:empty) { display: flex; }
 .vp-legend .sw.sq { border-radius: 2px; }
 .vp-legend .sw.sel { border: 2px solid var(--h-sel); }
 .vp-legend .sw.dashed { border: 1.5px dashed var(--muted); }
+.vp-legend .sw.tower { width: 7px; height: 12px; border-radius: 1.5px; }   /* server body = power state */
+.vp-legend .sw.tower.unk { border: 0; }
+.vp-legend .lg-sep { width: 1px; height: 16px; background: var(--line-2); flex: 0 0 auto; }
+.vp-legend.lg-pshort .li.pw .li-t { display: none; }   /* narrow: "Power ON" → "ON" (the tower shape and tooltip say power) */
+.vp-legend.lg-pshort .li.pw::after { content: attr(data-short); }
+@media (min-width: 721px) { .vp-legend.lg-above { bottom: 56px; } }   /* no room beside the zoom bar: a row above it */
 /* zoom / focus / fit / reset (bottom right) */
 .zoombar { position: absolute; right: 16px; bottom: 16px; z-index: 6; display: flex; gap: 6px; }
 .zoombar .zb { background: rgba(18,19,22,.95); }
@@ -607,7 +640,13 @@ body.moving .rackfront { padding-top: 120px; }
   body.front #crumbPath { display: none; }
   body.front .rf-nav { margin: 0; gap: 6px; }
   .crumb-btn { height: 44px; padding: 0 12px; background: rgba(18,19,22,.95); }
-  .vp-legend { display: none; }
+  /* phone: only the server body power key ("Server body ▮ON ▮OFF ▮?"), above the sheet at the left; health is told by
+     the attention list and the labels */
+  .vp-legend { left: 12px; bottom: calc(var(--sheet-h) + 12px); gap: 8px; padding: 0 10px; pointer-events: none; }
+  .vp-legend > :not(.pw):not(.lg-pt) { display: none !important; }
+  .vp-legend .lg-pt { display: inline !important; } .vp-legend .lg-pt .pt-l { display: none; } .vp-legend .lg-pt::after { content: attr(data-short); }
+  .vp-legend .li.pw .li-t { display: none; } .vp-legend .li.pw::after { content: attr(data-short); }
+  body.front .vp-legend { display: none; }   /* the rack front says ON / OFF on each server */
   .zoombar { right: 12px; bottom: calc(var(--sheet-h) + 12px); flex-direction: column; }
   /* rack front: one 44 px row above the rack (previous · this rack · next · Overview) instead of the breadcrumb and Back */
   body.front .crumb, body.front .zoombar #vBack { display: none !important; }
