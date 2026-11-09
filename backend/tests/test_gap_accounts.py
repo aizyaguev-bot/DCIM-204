@@ -152,6 +152,8 @@ ROUTE_ROLES = {
     "POST /api/inventory/{item_id}/location": "Operator", "POST /api/inventory/{item_id}/details": "Operator",
     # Serial numbers: the export is a read for every role; applying looked-up details (also as a dry run) is Operator.
     "GET /api/inventory/serials": "Viewer", "GET /api/inventory/serials.csv": "Viewer", "POST /api/inventory/serial-details": "Operator",
+    # webpe automatic lookup status: shown to every role; reported by the lab laptop's Operator session.
+    "GET /api/inventory/webpe-status": "Viewer", "PUT /api/inventory/webpe-status": "Operator",
     # KVM: status is a read; every console route (and its proxy, any method) needs an Operator.
     "GET /api/kvms/{device_id}/status": "Viewer", "GET /api/kvms/{device_id}/autologin": "Operator",
     "GET /api/kvms/{device_id}/console-url": "Operator", "GET /api/kvms/{device_id}/ports/{port_number}/viewer": "Operator",

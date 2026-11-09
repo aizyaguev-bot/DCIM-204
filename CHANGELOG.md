@@ -2,6 +2,23 @@
 
 ---
 
+## v2.46.9 — 2026-11-09 — New units get their P/N and name from webpe automatically
+
+### Added
+- **Automatic webpe lookup:** a new tool mode on the lab laptop (`tools/webpe-sync/start-webpe-sync.cmd`)
+  checks every 20 seconds for units that have a serial number and no P/N, looks each one up in
+  webpe SN analysis and fills its P/N, model and product name. A name typed by hand is kept.
+  An unknown serial number is asked again only after 6 hours.
+- **Status on the site:** Scan & Track > Serial numbers and the scan dialog show whether the lookup
+  runs ("Active", "webpe sign-in needed" or "Not running"). After a scan the dialog says the P/N and
+  name will be filled from webpe within a minute.
+
+### Changed
+- **webpe sync tool:** the one-time `--apply` run sends the CSRF header, and a row DCIM refuses no
+  longer blocks the other units in the same batch.
+
+---
+
 ## v2.46.8 — 2026-11-09 — 3D twin: servers green/red by power, a card on every shelf, map-style navigation
 
 ### Changed
