@@ -173,6 +173,18 @@ test("the serial-number-means-switch rule does not catch servers, boards or othe
   assert.equal(serialUnitType({ code: "900-9X766-003N-SQ0 TAG-1" }), "other", "the serial and the barcode together");
 });
 
+test("a board OPN given as the labelled serial number is not a switch", () => {
+  for (const raw of ["SN: 900-9X766-003N-SQ0", "S/N: 900-21010-0000-000", "Serial: 699-2G133-0200-100", "SN: 900-9X766-003N-SQ0; MAC: 00:1A:2B:3C:4D:5E", "(21)900-21010-0000-000"]) {
+    const parsed = parseUnitBarcode(raw);
+    assert.deepEqual([parsed.type, parsed.name], ["other", "Unit"], raw);
+    assert.ok(/^(900|699)-/.test(parsed.serial), raw + ": the serial is still kept");
+  }
+  // the same value as a plain code, and a labelled serial that is not an OPN, keep their rules
+  assert.deepEqual([parseUnitBarcode("900-9X766-003N-SQ0").type, parseUnitBarcode("900-9X766-003N-SQ0").name], ["other", "Unit"]);
+  assert.deepEqual([parseUnitBarcode("SN: MT2629X00QA1").type, parseUnitBarcode("SN: MT2629X00QA1").name], ["switch", "Switch"]);
+  assert.deepEqual([parseUnitBarcode("(21)MT2629X00QA1").type], ["switch"]);
+});
+
 test("the serial-number rule: other products and other vendors' switch wording", () => {
   const typeOf = raw => parseUnitBarcode(raw).type;
   // a UPS, a GPU board or superchip, a Lenovo / Gigabyte / Cisco UCS server named without the word server, an NVL system

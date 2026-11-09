@@ -85,7 +85,7 @@ export function productForPart(text) {
 // names a server or another product (DGX, HGX, server, PowerEdge, ProLiant, ThinkSystem, compute, node, UPS, board,
 // superchip, an H100 / A100 / GB200 … GPU, an NVL72 system); and another vendor's unit (Cisco, Arista, Dell …), which is a switch only
 // when its label says so ("switch", "PowerSwitch") or names an NVIDIA switch model (an HPE-sold SN2010M).
-// code: the serial number or a plain scanned code (only checked for a board OPN).
+// code: the unit's serial number (a labelled SN, a GS1 (21) or a plain scanned code); only checked for a board OPN.
 // Returns the type: "switch", a known type, or "other".
 const SERVER_WORDS = /\b(DGX|HGX|servers?|PowerEdge|ProLiant|ThinkSystem|ThinkAgile|compute|nodes?|workstation|UPS|boards?|superchip|Grace|Hopper|[AHBL]\d{2,3}S?|GB\d{3}|NVL\d+)\b/i;
 const BOARD_OPN = /(^|[^0-9A-Z])(900|699)-[0-9A-Z]{5}-[0-9A-Z]{4}/i;
@@ -229,7 +229,7 @@ export function parseUnitBarcode(raw) {
   // owner's rule (serialUnitType), so it is saved as a switch; its type can be changed in DCIM. A part number, model or
   // description that names a NIC, DPU, board, server or any other known product keeps that product's type (or other).
   const named = typeForPart(result.part_number) || typeForPart(result.model);
-  result.type = named || (result.serial ? serialUnitType({ part_number: result.part_number, model: result.model, description, code: result.serial_from_code ? result.code : "" }) : "other");
+  result.type = named || (result.serial ? serialUnitType({ part_number: result.part_number, model: result.model, description, code: result.serial }) : "other");
   // The product, never the serial: two units of one product share a name; the serial tells them apart.
   const kind = /^MCX/i.test(result.part_number) ? "NIC" : TYPE_LABELS[result.type];
   result.name = clean(result.model || productForPart(result.part_number) || description || result.part_number || kind, NAME_MAX);

@@ -444,7 +444,7 @@
       };
       const bodyCol = TYPE_BODY[it.type] || TYPE_BODY.other;
       const power = it.type === 'opt' ? powerOf(it) : null; const unit = it.type !== 'opt' ? unitInfo(it) : null;
-      const asSwitch = unit?.kind === 'switch' && it.type.startsWith('equip-');   // includes a unit marked as a switch by its SN
+      const asSwitch = unit?.kind === 'switch' && it.type.startsWith('equip-');   // stored type switch only (unitInfo never guesses)
       const led = (x, y, z, c, size = 0.014) => box(size, size, size, mat(c, { emissive: c, emissiveIntensity: 1.3, unique: true }), x, y, z);
       let seed = 0; for (const ch of it.id) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
       const cable = (pts, c, r = 0.006) => { const curve = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(...p))); const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 18, r, 6, false), mat(c, { rough: .55, metal: .05, opacity: op, unique: true })); return m; };
@@ -577,7 +577,7 @@
       if (g && it.placement !== 'rack-strips') S.itemGroups.push(g);
       const rec = reg({ id: it.id, cat: 'item', def: it, item: it, group: g, meshes, edges: eds, status, conf: it.confidence, pconf, zone: it.zone || null, setup: it.setup || null, shelf: it.shelf || null, anchor, power, unit });
       const sub = it.type === 'opt' ? (it.live?.inDcim ? `${String(it.live.state || 'unknown').toUpperCase()}${' · ' + (it.live.watts == null ? '\u2014' : Math.round(it.live.watts) + 'W')}${it.live.sw ? ' · ' + it.live.sw.switch + (it.live.sw.port ? '·' + it.live.sw.port : '') : ''}` : `outlet #${it.dcim?.outlet ?? '?'}`) 
-        : asSwitch ? `${unit.typeText ? 'switch · ' + unit.typeText : it.type === 'equip-switch' ? 'switch under test' : unit.likely ? 'switch (has an SN)' : 'switch'}${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
+        : asSwitch ? `${unit.typeText ? 'switch · ' + unit.typeText : it.type === 'equip-switch' ? 'switch under test' : 'switch'}${it.live?.u ? ' · U' + it.live.u : ''}` : (it.typeLabel || it.type);
       const named = it.type === 'opt' || it.type.startsWith('equip-');
       const pill = power ? `<span class="pw pw-${power}" title="${POWER[power].title}">${POWER[power].t}</span>` : '';
       makeLabel(rec, 'item' + (dashed ? ' low' : ''), `<span class="lp" style="background:${col}"></span>${pill}<bdi>${esc(named ? it.name : it.id)}</bdi><small>${esc(it.type === 'opt' ? it.id + ' · ' + sub : sub)}</small>`);
@@ -788,54 +788,29 @@
     if (!it || it.type !== 'opt' || !live?.connected || it.live?.inDcim !== true) return 'unknown';
     return it.live.state === 'on' ? 'on' : it.live.state === 'off' ? 'off' : 'unknown';
   }
-  // What kind of unit sits next to a server, and its type / model for the shelf label, from the unit's model, part
-  // number and name: NVIDIA Spectrum SN#### / Quantum QM#### switches, ConnectX NICs, BlueField DPUs. A generic unit
-  // that has a serial number is most likely a switch under test (the lab owner's rule), so it is marked as one.
+  // What kind of unit sits next to a server, and its type / model for the shelf label. The kind is the unit's stored
+  // type, exactly as the Racks page shows it: a unit is a switch (SW) only when its type is switch (the site saves type
+  // switch when a serial number is entered on a generic unit, and a type the user picks by hand wins, so the twin never
+  // guesses). A switch's model / part number / name names its generation (Spectrum SN#### / Quantum QM####); a unit of
+  // type other whose model names a ConnectX NIC or a BlueField DPU is tagged NIC / DPU.
   const SN_FAMILY = { 2: 'Spectrum', 3: 'Spectrum-2', 4: 'Spectrum-3', 5: 'Spectrum-4' }, QM_FAMILY = { 8: 'Quantum', 9: 'Quantum-2' };
-  // The serial-number rule, as frontend/src/api/scanParse.js serialUnitType + isGenericUnit (keep the two in step): only
-  // a generic unit (type other, named "Unit" or after its own barcode / serial / id, or unnamed) is marked as a likely
-  // switch, and not when its model or part number names a server, GPU, board, UPS, NIC / DPU / cable / PDU / KVM part,
-  // when its serial or barcode is an NVIDIA board OPN (900-9X766-…), or when it is another vendor's unit whose model does
-  // not say "switch" or name an NVIDIA switch model. A unit named as something else ("UPS box") is never marked.
-  const NOT_SWITCH = /\b(DGX|HGX|servers?|PowerEdge|ProLiant|ThinkSystem|ThinkAgile|compute|nodes?|workstation|UPS|boards?|superchip|Grace|Hopper|[AHBL]\d{2,3}S?|GB\d{3}|NVL\d+)\b|\b(connect-?x|blue-?field|nic|dpu|hca|adapter|gpu)|\b(MCX|MBF|MCP|MFS|MMA|MC2|MMS|PX\d?-|PX[234]\b|RARITAN\s+PX|DKX|DLX|KX\d|DOMINION)/i;
-  const BOARD_OPN = /(^|[^0-9A-Z])(900|699)-[0-9A-Z]{5}-[0-9A-Z]{4}/i;
-  const OTHER_VENDORS = /\b(Cisco|Arista|Juniper|Dell|HPE|HP|Hewlett|Aruba|Lenovo|Supermicro|Gigabyte|ASUS|ASRock|Inspur|Wiwynn|Foxconn|Brocade|Extreme\s+Networks|Netgear|Ubiquiti|MikroTik|Huawei|Fortinet|Edgecore|Celestica|Quanta)\b/i;
-  const SWITCH_WORDS = /switch(es)?\b|\bM?(SN|QM)\d{4}[A-Z]{0,2}\b|\b(Spectrum|Quantum)\b/i;
-  function genericUnit(it) {
-    const type = String(it?.type || '').replace(/^equip-/, '') || 'other'; if (type !== 'other') return false;
-    const name = String(it?.name || '').trim().toLowerCase();
-    if (!name || name === 'unit') return true;
-    return [it.barcode, it.serial_number, it.dcimId, it.id].some(c => String(c || '').trim().toLowerCase() === name);
-  }
-  function serialSwitch(it) {
-    const clean = v => String(v || '').trim();
-    const serial = clean(it?.serial_number), barcode = clean(it?.barcode);
-    if (!(serial || barcode) || !genericUnit(it)) return false;
-    const product = [clean(it?.part_number), clean(it?.model)].join(' ');
-    if (NOT_SWITCH.test(product) || BOARD_OPN.test(product) || BOARD_OPN.test(serial + ' ' + barcode)) return false;
-    return !OTHER_VENDORS.test(product) || SWITCH_WORDS.test(product);
-  }
   function unitInfo(it) {
     const clean = v => String(v || '').trim();
     const model = clean(it?.model), pn = clean(it?.part_number), name = clean(it?.name);
     const text = [model, pn, name].filter(Boolean).join(' ');
     const type = String(it?.type || '').replace(/^equip-/, '') || 'other';
-    let kind = UNIT_TAG[type] ? type : 'other', typeText = '', likely = false;
+    let kind = UNIT_TAG[type] ? type : 'other', typeText = '';
     const sw = /\bM?(SN|QM)(\d)(\d{3})([A-Z]{0,2})\b/i.exec(text);
     const nic = /\bconnect-?x[- ]?(\d+)/i.exec(text), dpu = /\bblue-?field[- ]?(\d+)?/i.exec(text);
-    if (sw) {
+    if (sw && kind === 'switch') {
       const code = sw[1].toUpperCase() + sw[2] + sw[3] + sw[4].toUpperCase();
       const fam = sw[1].toUpperCase() === 'SN' ? SN_FAMILY[sw[2]] : QM_FAMILY[sw[2]];
       typeText = fam ? `${fam} ${code}` : code;
-      if (kind === 'other' || kind === 'switch') kind = 'switch';
     } else if (dpu && kind === 'other') { kind = 'dpu'; typeText = 'BlueField' + (dpu[1] ? '-' + dpu[1] : ''); }
     else if (nic && kind === 'other') { kind = 'nic'; typeText = 'ConnectX-' + nic[1]; }
-    else if (kind === 'other' && /\b(spectrum|quantum|switch)\b/i.test(text)) kind = 'switch';
-    // the serial may be stored only as the unit's barcode (Scan & Track registers the scanned code that way)
-    else if (kind === 'other' && serialSwitch(it)) { kind = 'switch'; likely = true; }
     if (kind === 'switch' && !typeText) typeText = model || pn;
     if (kind === 'nic' && !typeText) typeText = model || pn;
-    return { kind, tag: UNIT_TAG[kind] || 'DEV', typeText, likely, name };
+    return { kind, tag: UNIT_TAG[kind] || 'DEV', typeText, name };
   }
   // The address the app knows for a server: the host its ping monitor checks (GET /api/monitoring, Viewer-readable).
   const hostOf = (it, live = S.live) => (it?.type === 'opt' && live?.connected && live.ping?.[pingKey(it.name)]?.host) || '';
@@ -943,7 +918,7 @@
         const code = info.typeText ? info.typeText.split(' ').pop().toLowerCase() : '';
         const extra = info.typeText && info.name && !info.name.toLowerCase().includes(code) ? info.name : '';
         return { tag: info.tag, kind: info.kind, main, extra,
-          html: `<div class="sc-l"><span class="sc-k k-${info.kind}"${info.likely ? ' title="Marked as a switch: it has a serial number and no other type"' : ''}>${info.tag}</span><bdi>${esc(main)}</bdi>${extra ? `<span class="sc-x">· <bdi>${esc(extra)}</bdi></span>` : ''}</div>` };
+          html: `<div class="sc-l"><span class="sc-k k-${info.kind}">${info.tag}</span><bdi>${esc(main)}</bdi>${extra ? `<span class="sc-x">· <bdi>${esc(extra)}</bdi></span>` : ''}</div>` };
       });
       rec.cardEmpty = !srv.length && !uni.length;
       const before = rec.cardFull;
@@ -2317,10 +2292,53 @@
           camera.position.lerpVectors(previousCamera, camera.position.clone(), fraction);
           controls.target.lerpVectors(previousTarget, controls.target.clone(), fraction);
         }
+        keepRackClearance();
       }
     }
     camera.lookAt(controls.target);
     previousCamera.copy(camera.position); previousTarget.copy(controls.target);
+  }
+  // The camera keeps RACK_CLEAR metres outside every rack's (and storage unit's) box, so wheel zoom towards the cursor,
+  // orbit, pan and inertia never put it inside or against a rack (seen through its own shelves). Only user movement is
+  // checked (not tweens), and a step is judged against the clearance before it: a camera a preset left closer may still
+  // move away, never nearer. A step that ends too close keeps only the part that stays clear (camera and target
+  // together, from where they were, so there is no jump): the zoom / pan / orbit stops in front of the rack, and the
+  // remaining inertia and wheel zoom are dropped. (Pulling the camera towards the target instead was tried: repeated
+  // every frame it swung an orbit right up to the focused rack.)
+  const RACK_CLEAR = 0.4;
+  const tmpQ = new THREE.Vector3(), tmpP = new THREE.Vector3();
+  function navObstacles() {
+    const out = [];
+    for (const r of S.recs.values()) {
+      if (r.cat === 'setup' && r.localBox && r.invWorld) out.push({ inv: r.invWorld, box: r.localBox });
+      else if (r.cat === 'storage' && r.group) {
+        if (!r.navBox) { r.group.updateMatrixWorld(true); r.navBox = new THREE.Box3().setFromObject(r.group); }
+        if (!r.navBox.isEmpty()) out.push({ inv: null, box: r.navBox });
+      }
+    }
+    return out;
+  }
+  // signed distance from a world point to the nearest obstacle box (negative inside)
+  function rackClearance(p, obstacles = navObstacles()) {
+    let best = Infinity;
+    for (const o of obstacles) {
+      const q = o.inv ? tmpQ.copy(p).applyMatrix4(o.inv) : tmpQ.copy(p); const b = o.box;
+      const dx = Math.max(b.min.x - q.x, 0, q.x - b.max.x), dy = Math.max(b.min.y - q.y, 0, q.y - b.max.y), dz = Math.max(b.min.z - q.z, 0, q.z - b.max.z);
+      const d = dx || dy || dz ? Math.hypot(dx, dy, dz) : -Math.min(q.x - b.min.x, b.max.x - q.x, q.y - b.min.y, b.max.y - q.y, q.z - b.min.z, b.max.z - q.z);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+  function keepRackClearance() {
+    if (camera.position.distanceToSquared(previousCamera) < 1e-12 && controls.target.distanceToSquared(previousTarget) < 1e-12) return;
+    const obstacles = navObstacles(); if (!obstacles.length) return;
+    const now = rackClearance(camera.position, obstacles); if (now >= RACK_CLEAR) return;
+    const need = Math.min(RACK_CLEAR, rackClearance(previousCamera, obstacles)) - 1e-6;
+    if (now >= need) return;                                   // not nearer than before: a preset left it there
+    const p1 = camera.position.clone(), t1 = controls.target.clone(); let lo = 0, hi = 1;
+    for (let i = 0; i < 14; i++) { const f = (lo + hi) / 2; tmpP.lerpVectors(previousCamera, p1, f); if (rackClearance(tmpP, obstacles) >= need) lo = f; else hi = f; }
+    camera.position.lerpVectors(previousCamera, p1, lo); controls.target.lerpVectors(previousTarget, t1, lo);
+    controls.halt();
   }
   // pan the whole view (camera + target together) along the floor, relative to where you look
   function panBy(dx, dz) {
@@ -3540,7 +3558,10 @@
       html += `<section class="sec big">${H('On this shelf')}${where}
           ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>${esc(kindOf(i))}${i.item.dcim?.outlet ? ' · outlet ' + esc(i.item.dcim.outlet) : ''}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button><button type="button" class="kbtn secondary small" data-move="${esc(i.id)}">Move…</button></div>`).join('') : '<div class="edit-note">Nothing on this shelf.</div>'}
           <div class="row-lg"><button type="button" class="kbtn secondary md" id="eAddHere">Add a device on this shelf</button></div></section>
-        <section class="sec big">${status(def.status)}${notes(def.notes || '')}${save}</section>`;
+        ${def.derived
+          // a floor the twin adds from the app's floor model is not in lab-data.json, so its status / notes cannot be saved here
+          ? `<section class="sec big"><div class="edit-note derived-note" id="eDerived">This shelf comes from the DCIM floor model; edit it in Racks.</div></section>`
+          : `<section class="sec big">${status(def.status)}${notes(def.notes || '')}${save}</section>`}`;
     } else if (rec.cat === 'setup') {
       const racks = [...new Set([...(S.data.dcim?.pdus || []).map(p => p.rack), ...S.model.liveRacks])].filter(Boolean).sort(); const cur = def.dcimRack || '';
       const shelves = recsOf(r => r.cat === 'shelf' && r.setup === rec.id).sort((a, b) => b.level - a.level);
@@ -3580,7 +3601,9 @@
         if (pdu) { const pd = (S.data.dcim?.pdus || []).find(x => x.id === pdu); patch.dcim = { ...(it.dcim || {}), pdu, pduName: pd?.name, outlet: isNaN(outlet) ? undefined : outlet, optKey: optKey(patch.name) }; }
         else if (it.dcim) { const { pdu: _p, pduName: _n, outlet: _o, ...rest } = it.dcim; patch.dcim = Object.keys(rest).length ? rest : undefined; }
       }
-      patchDef(rec.id, patch); rebuildAll(); select(rec.id, { keepCamera: true }); toast('Saved — press “Save to server” when done', 'ok');
+      // never report a change as saved when it has no record in lab-data.json to go into
+      if (!patchDef(rec.id, patch)) { toast('Not saved: this object is not in the layout file' + (def?.derived ? ' (it comes from the DCIM floor model; edit it in Racks)' : ''), 'err'); return; }
+      rebuildAll(); select(rec.id, { keepCamera: true }); toast('Saved — press “Save to server” when done', 'ok');
       if (ownerKey && owner !== (it.owner || null)) saveDcimOwner(ownerKey, owner).then(() => toast('Owner saved in Lab Manager', 'ok')).catch(e => toast('Owner not saved: ' + e.message, 'err'));
     };
     const rp = $('#eReplace'); if (rp) rp.onclick = () => {
@@ -3773,7 +3796,7 @@
     }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend };
+  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend, rackClearance };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);

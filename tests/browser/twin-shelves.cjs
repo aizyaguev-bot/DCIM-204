@@ -10,7 +10,8 @@
 //     A mesh raycast to each shown card must not hit another rack's posts, shelves or equipment (also on views that
 //     graze a corner post, and 8 views around every rack);
 //  6. the legend explains the server body power colours separately from health, in words also at 1440 / 1024 / 390 px;
-//  the 3D switch marking follows the site: only generic units, never one named as something else or with a board OPN.
+//  the 3D unit kind is the stored type (SW only for type switch, as the Racks page);
+//  7. a derived shelf is read-only in Edit layout; 8. wheel zoom / orbit keep the camera ~0.4 m outside every rack.
 // Read-only: every non-GET request except the sign-in is aborted and reported; changes live only in the page.
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
@@ -244,7 +245,8 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-shelves';
       const clear = z.width === 0 || r.right <= z.left || r.left >= z.right || r.bottom <= z.top || r.top >= z.bottom;
       return { shown: vis(lg) && r.width > 0, fits: lg.scrollWidth <= lg.clientWidth + 1 && r.right <= innerWidth && r.left >= 0 && clear, cls: lg.className,
         title: vis(pt) ? (vis(ptl) ? ptl.textContent : after(pt)) : '',
-        power: [...lg.querySelectorAll('.li.pw')].map(li => vis(li) ? (vis(li.querySelector('.li-t')) ? li.querySelector('.li-t').textContent : after(li)) : '') };
+        power: [...lg.querySelectorAll('.li.pw')].map(li => vis(li) ? (vis(li.querySelector('.li-t')) ? li.querySelector('.li-t').textContent : after(li)) : ''),
+        health: [...lg.querySelectorAll('.li:not(.pw)')].map(li => vis(li) && vis(li.querySelector('.li-t')) ? li.querySelector('.li-t').textContent : '') };
     });
     const widths = [];
     for (const [w, h, sel] of [[1920, 1080, null], [1440, 900, 'SETUP-003'], [1024, 768, null], [1024, 768, 'SETUP-003'], [390, 844, null]]) {
@@ -255,24 +257,84 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-shelves';
       assert.ok(s.shown && s.fits, `${tag}: legend shown on one row, clear of the zoom bar: ${JSON.stringify(s)}`);
       assert.match(s.title, /^Server body/, `${tag}: the power group keeps its title: ${JSON.stringify(s)}`);
       assert.ok(['Power ON|Power OFF|Power unknown', 'ON|OFF|?'].includes(s.power.join('|')), `${tag}: power words on screen: ${JSON.stringify(s)}`);
-      await shot(page, `legend-${w}${sel ? '-sel' : ''}.png`); widths.push(`${tag}: ${s.title} ${s.power.join(' / ')}`);
+      await shot(page, `legend-${w}${sel ? '-sel' : ''}.png`); widths.push(`${tag}: ${s.title} ${s.power.join(' / ')}${s.health.every(Boolean) ? ' + health words' : ''}`);
     }
     await page.setViewportSize({ width: 1440, height: 900 }); await page.evaluate(() => __twin.closeDetail());
-    pass('legend at narrower views keeps the server body power key in words: ' + widths.join('; '));
+    pass('legend at narrower views keeps the server body power key in words (health words reported where they fit): ' + widths.join('; '));
 
-    // the SN-means-switch rule in 3D follows the site's rule: servers, board OPNs and other vendors' units are not switches
+    // the 3D view trusts the stored type, as the Racks page does: the site saves type switch when a serial number is
+    // entered on a generic unit, and a type the user picks by hand (Other) wins, so 3D never guesses a switch
     const kinds = await page.evaluate(() => Object.fromEntries(Object.entries({
-      sn: { name: 'Unit', serial_number: 'MT2629X00QA1' }, dgx: { name: 'Unit', model: 'DGX H100', serial_number: 'X1' }, node: { name: 'GPU node 3', serial_number: 'X2' },
-      opn: { name: 'Unit', part_number: '900-9X766-003N-SQ0', serial_number: 'X3' }, cisco: { name: 'Unit', model: 'Cisco Nexus 9300', serial_number: 'X4' },
-      ciscoSw: { name: 'Unit', model: 'Cisco Nexus 9300 switch', serial_number: 'X5' }, code: { name: 'MT2629X00QA2', barcode: 'MT2629X00QA2' },
-      // identified as something else by its name (the Racks page keeps these Other): never a switch
-      ups: { name: 'UPS box', serial_number: 'X9' }, panel: { name: 'Patch panel', barcode: 'PP-1' }, h100: { name: 'H100 tray', serial_number: 'X10' },
-      opnSerial: { name: 'Unit', serial_number: '900-9X766-003N-SQ0' }, opnCode: { name: '900-9X766-003N-SQ0', barcode: '900-9X766-003N-SQ0' },
-      byId: { name: 'ci-77', dcimId: 'ci-77', serial_number: 'MT77' }, hpe: { name: 'Unit', model: 'HPE SN2010M', serial_number: 'X11' }, ups2: { name: 'Unit', model: 'UPS 3000VA', serial_number: 'X12' },
-    }).map(([k, v]) => [k, __twin.unitInfo({ type: 'equip-other', ...v }).kind])));
-    assert.deepEqual(kinds, { sn: 'switch', dgx: 'other', node: 'other', opn: 'other', cisco: 'other', ciscoSw: 'switch', code: 'switch',
-      ups: 'other', panel: 'other', h100: 'other', opnSerial: 'other', opnCode: 'other', byId: 'switch', hpe: 'switch', ups2: 'other' }, '3D unit kinds');
-    pass('3D: a generic unit with an SN or barcode is a switch; DGX, GPU node, board OPN (also as the serial), Cisco (not saying switch) and units named as something else (UPS box, Patch panel) are not');
+      sn: { name: 'Unit', serial_number: 'MT2629X00QA1' }, manual: { name: 'Unit', serial_number: 'MT2629X00QA3' }, code: { name: 'MT2629X00QA2', barcode: 'MT2629X00QA2' },
+      byId: { name: 'ci-77', dcimId: 'ci-77', serial_number: 'MT77' }, ciscoSw: { name: 'Unit', model: 'Cisco Nexus 9300 switch', serial_number: 'X5' },
+      hpe: { name: 'Unit', model: 'HPE SN2010M', serial_number: 'X11' }, snModel: { name: 'Switch 9', model: 'MSN2700-CS2F' },
+      swType: { type: 'equip-switch', name: 'Unit', serial_number: 'MT2629X00QA4' }, swModel: { type: 'equip-switch', name: 'IB', part_number: 'MQM9700-NS2F' },
+      ups: { type: 'equip-ups', name: 'UPS box', serial_number: 'X9' }, nic: { name: 'NIC card', model: 'ConnectX-7 MCX75310' },
+    }).map(([k, v]) => [k, __twin.unitInfo({ type: 'equip-other', ...v }).tag])));
+    assert.deepEqual(kinds, { sn: 'DEV', manual: 'DEV', code: 'DEV', byId: 'DEV', ciscoSw: 'DEV', hpe: 'DEV', snModel: 'DEV',
+      swType: 'SW', swModel: 'SW', ups: 'UPS', nic: 'NIC' }, '3D unit tags follow the stored type');
+    pass('3D: a unit is SW only when its stored type is switch; Other (with an SN, a barcode, or a switch-like model / name) stays Other');
+
+    // ── 7. a derived shelf (from the app floor model, not in lab-data.json) is read-only in Edit layout: no Save that
+    // would report a change it cannot keep; a shelf from lab-data.json still has status, notes and Save
+    const editor = await page.evaluate(() => {
+      const t = __twin, S = t.S; const before = JSON.stringify(S.data); t.toggleEdit(true);
+      const look = id => { t.select(id, { keepCamera: true }); const body = document.querySelector('#dBody');
+        return { note: body.querySelector('#eDerived')?.textContent || '', save: !!body.querySelector('#eSave'), status: !!body.querySelector('#eStatus'), notes: !!body.querySelector('#eNotes'), derived: !!S.recs.get(id)?.def.derived }; };
+      const out = { derived: look('SHELF-SETUP-005-L0'), known: look('SHELF-19') };
+      t.closeDetail(); t.toggleEdit(false); out.same = JSON.stringify(S.data) === before; return out;
+    });
+    assert.deepEqual([editor.derived.derived, editor.derived.save, editor.derived.status, editor.derived.notes], [true, false, false, false], 'derived shelf: no Save / status / notes: ' + JSON.stringify(editor));
+    assert.match(editor.derived.note, /comes from the DCIM floor model; edit it in Racks/, 'derived shelf note');
+    assert.deepEqual([editor.known.derived, editor.known.save, editor.known.status, editor.known.notes], [false, true, true, true], 'known shelf keeps its editor');
+    assert.ok(editor.same, 'opening the editors changes no data');
+    pass('Edit layout: Rack-05 Shelf 4 (derived) is read-only with "This shelf comes from the DCIM floor model; edit it in Racks"; SHELF-19 keeps Save');
+
+    // ── 8. navigation keeps the camera clear of every rack: sampled every frame, the camera stays at least ~0.4 m
+    // outside each rack's box (its own frame), during wheel zoom towards the cursor and orbit after Focus, with no jump
+    await page.evaluate(() => {
+      const t = __twin; const inv = new THREE.Matrix4(), p = new THREE.Vector3();
+      const clear = c => { let best = Infinity, who = '';
+        for (const r of t.S.recs.values()) { if (r.cat !== 'setup' || !r.localBox) continue; inv.copy(r.group.matrixWorld).invert(); p.copy(c).applyMatrix4(inv);
+          const b = r.localBox; const inside = b.containsPoint(p); const d = inside ? -Math.min(p.x - b.min.x, b.max.x - p.x, p.y - b.min.y, b.max.y - p.y, p.z - b.min.z, b.max.z - p.z) : b.distanceToPoint(p);
+          if (d < best) { best = d; who = r.id; } }
+        return { d: best, who }; };
+      window.__navClear = clear;
+      window.__navRec = { on: false, min: Infinity, who: '', maxStep: 0, nearStep: 0, prev: null, prevD: 0, prevClear: Infinity, frames: 0 };
+      (function loop() { const R = window.__navRec; const c = t.camera.position;
+        if (R.on) { const k = clear(c); R.frames++; if (k.d < R.min) { R.min = k.d; R.who = k.who; } if (R.prev) { const s = c.distanceTo(R.prev); R.maxStep = Math.max(R.maxStep, s / Math.max(0.5, R.prevD)); if (R.prevClear < 1) R.nearStep = Math.max(R.nearStep, s); }
+          R.prev = c.clone(); R.prevD = t.controls.getDistance(); R.prevClear = k.d; }
+        requestAnimationFrame(loop); })();
+    });
+    const navStart = () => page.evaluate(() => Object.assign(window.__navRec, { on: true, min: Infinity, who: '', maxStep: 0, nearStep: 0, prev: null, prevD: 0, prevClear: Infinity, frames: 0 }));
+    const navStop = () => page.evaluate(() => { const R = window.__navRec; R.on = false; const t = __twin; return { min: +R.min.toFixed(3), who: R.who, maxStep: +R.maxStep.toFixed(3), nearStep: +R.nearStep.toFixed(3), frames: R.frames, now: +window.__navClear(t.camera.position).d.toFixed(3), dist: +t.controls.getDistance().toFixed(3), cam: t.camera.position.toArray().map(v => +v.toFixed(2)) }; });
+    const vb = await page.locator('#c').boundingBox(); const cx = vb.x + vb.width / 2, cy = vb.y + vb.height / 2;
+    const rdrag = async (dx, dy) => { await page.mouse.move(cx, cy); await page.mouse.down({ button: 'right' }); await page.mouse.move(cx + dx, cy + dy, { steps: 15 }); await page.mouse.up({ button: 'right' }); await settle(); };
+    const navRuns = [];
+    // repro 1: Reset, the pointer at 35 % / 55 % of the view, 5 wheel notches in (towards a rack)
+    for (const [fx, fy, n] of [[0.35, 0.55, 5], [0.7, 0.5, 5], [0.5, 0.5, 10]]) {
+      await page.locator('#vReset').click(); await settle(); const d0 = await page.evaluate(() => __twin.controls.getDistance());
+      await navStart(); await page.mouse.move(vb.x + vb.width * fx, vb.y + vb.height * fy);
+      for (let i = 0; i < n; i++) { await page.mouse.wheel(0, -250); await page.waitForTimeout(60); }
+      await settle(); const r = await navStop(); r.k = `zoom ${fx},${fy} x${n}`; navRuns.push(r);
+      assert.ok(r.dist < d0 - 0.3, `${r.k}: the wheel still zooms in (${d0.toFixed(2)} -> ${r.dist})`);
+    }
+    await shot(page, 'nav-zoom.png');
+    // repro 2: Rack-05 chip, Focus, then right-drag +200, +250, -700 px (orbit past Rack-07 and back)
+    await page.locator('#vReset').click(); await settle();
+    await page.locator('#rackBar [data-jump="SETUP-005"]').click(); await settle(); await page.locator('#vFocus').click(); await settle();
+    const focusClear = await page.evaluate(() => +window.__navClear(__twin.camera.position).d.toFixed(3));
+    for (const dx of [200, 250, -700]) { await navStart(); await rdrag(dx, 0); const r = await navStop(); r.k = `Rack-05 focus orbit ${dx}`; navRuns.push(r); }
+    await shot(page, 'nav-orbit.png');
+    for (const r of navRuns) {
+      assert.ok(r.frames > 0, `${r.k}: frames sampled`);
+      assert.ok(r.min >= 0.38 || r.min >= Math.min(0.38, focusClear) - 1e-3, `${r.k}: the camera came within ${r.min} m of ${r.who}: ${JSON.stringify(r)}`);
+      // no jump: a frame moves the camera less than the viewing distance (the smoothed wheel moves up to ~2/3 of it on a
+      // slow software-rendered frame; an orbit drag about 1/5); the largest step within 1 m of a rack is reported
+      assert.ok(r.maxStep < 0.8, `${r.k}: no jump (largest step per frame ${r.maxStep} x distance, ${r.nearStep} m near a rack)`);
+    }
+    await page.locator('#vReset').click(); await settle();
+    pass('navigation: wheel zoom towards the cursor and orbit after Focus keep the camera >= 0.38 m outside every rack in every frame, no jump (' + navRuns.map(r => `${r.k}: min ${r.min} m, near-rack step <= ${r.nearStep} m`).join('; ') + `; after Focus ${focusClear} m)`);
 
     assert.deepEqual(writes, [], 'no writes'); assert.deepEqual(errors, [], 'page errors');
     console.log(JSON.stringify({ ok: true, checks }, null, 2));

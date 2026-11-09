@@ -404,17 +404,18 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
       const t = __twin, S = t.S; const ci = S.live.rackItems['Rack-01'].find(x => x.id === 'ci-1'); window.__savedModel = ci.model; ci.model = 'MSN2700-CS2F';
       t.computeModel(); const it = S.model.items.find(i => i.id === 'LIVE-opt12'); it.live.state = 'off'; t.buildItems({ refresh: true });
       const sh = S.recs.get(S.recs.get('LIVE-ci-1').shelf), opt = S.recs.get('LIVE-opt12');
-      const kinds = { sn: t.unitInfo({ type: 'equip-other', name: 'Unit', serial_number: 'MT2629600G08' }), named: t.unitInfo({ type: 'equip-other', name: 'UPS box', serial_number: 'MT2629600G09' }), nic: t.unitInfo({ type: 'equip-other', name: 'NIC card', model: 'ConnectX-7 MCX75310' }), qm: t.unitInfo({ type: 'equip-switch', name: 'IB', part_number: 'MQM9700-NS2F' }), plain: t.unitInfo({ type: 'equip-other', name: 'Box' }), bc: t.unitInfo({ type: 'equip-other', name: 'MT2629X00QA2', barcode: 'MT2629X00QA2' }) };
+      const kinds = { sn: t.unitInfo({ type: 'equip-other', name: 'Unit', serial_number: 'MT2629600G08' }), snSw: t.unitInfo({ type: 'equip-switch', name: 'Unit', serial_number: 'MT2629600G07' }), named: t.unitInfo({ type: 'equip-other', name: 'UPS box', serial_number: 'MT2629600G09' }), nic: t.unitInfo({ type: 'equip-other', name: 'NIC card', model: 'ConnectX-7 MCX75310' }), qm: t.unitInfo({ type: 'equip-switch', name: 'IB', part_number: 'MQM9700-NS2F' }), plain: t.unitInfo({ type: 'equip-other', name: 'Box' }), bc: t.unitInfo({ type: 'equip-other', name: 'MT2629X00QA2', barcode: 'MT2629X00QA2' }) };
       return { sameShelf: sh.id === opt.shelf, text: sh.cardText, kinds, ev: getComputedStyle(sh.label).pointerEvents };
     });
     assert.ok(shelfCard.sameShelf, 'OPT12 and Switch 01 share a shelf in the fixture');
     assert.match(shelfCard.text, /^Rack-01 › Shelf \d$/m); assert.match(shelfCard.text, /^OFF OPT12 opt12$/m, 'server name + IP + power: ' + shelfCard.text);
     assert.match(shelfCard.text, /^SW Spectrum SN2700 · Switch 01$/m, 'switch type from the model: ' + shelfCard.text);
-    assert.deepEqual([shelfCard.kinds.sn.kind, shelfCard.kinds.sn.tag, shelfCard.kinds.sn.likely], ['switch', 'SW', true], 'a generic unit entered with an SN is marked as a switch');
+    assert.deepEqual([shelfCard.kinds.sn.kind, shelfCard.kinds.sn.tag], ['other', 'DEV'], 'the 3D view never guesses: a unit stored as Other with an SN stays Other, as on the Racks page');
+    assert.deepEqual([shelfCard.kinds.snSw.kind, shelfCard.kinds.snSw.tag], ['switch', 'SW'], 'a unit stored as a switch (the site saves that when an SN is entered) is SW');
     assert.equal(shelfCard.kinds.named.kind, 'other', 'a unit whose name says what it is stays other, as on the Racks page');
     assert.deepEqual([shelfCard.kinds.nic.tag, shelfCard.kinds.nic.typeText], ['NIC', 'ConnectX-7']); assert.deepEqual([shelfCard.kinds.qm.tag, shelfCard.kinds.qm.typeText], ['SW', 'Quantum-2 QM9700']);
-    assert.deepEqual([shelfCard.kinds.plain.kind, shelfCard.kinds.plain.likely], ['other', false]);
-    assert.deepEqual([shelfCard.kinds.bc.kind, shelfCard.kinds.bc.tag], ['switch', 'SW'], 'a code registered by Scan & Track (stored as its barcode) is marked as a switch');
+    assert.equal(shelfCard.kinds.plain.kind, 'other');
+    assert.deepEqual([shelfCard.kinds.bc.kind, shelfCard.kinds.bc.tag], ['other', 'DEV'], 'a barcode-only unit stored as Other stays Other in 3D');
     assert.equal(shelfCard.ev, 'none', 'shelf cards never take pointer input');
     // level of detail: full card close to the rack, nothing from far away; cards never overlap each other
     await page.evaluate(() => __twin.select('SETUP-001', { fly: true })); await idle(page); await page.waitForTimeout(300);
@@ -452,7 +453,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/tv3-after';
     const far = await page.evaluate(() => [...document.querySelectorAll('#labels .lbl.shelf-card')].filter(e => e.style.display !== 'none').length);
     assert.equal(far, 0, 'no shelf cards from the top view (far away)');
     await page.evaluate(() => { const t = __twin, S = t.S; S.live.rackItems['Rack-01'].find(x => x.id === 'ci-1').model = window.__savedModel; t.computeModel(); t.buildItems({ refresh: true }); });
-    pass('shelf cards: "Rack-01 › Shelf n", "OFF OPT12 opt12", "SW Spectrum SN2700 · Switch 01"; SN-only unit = switch, ConnectX-7 = NIC, QM9700 = Quantum-2; full card at the rack, none from the top view, no overlap, no pointer input');
+    pass('shelf cards: "Rack-01 › Shelf n", "OFF OPT12 opt12", "SW Spectrum SN2700 · Switch 01"; stored type decides (Other with an SN stays Other, type switch = SW), ConnectX-7 = NIC, QM9700 = Quantum-2; full card at the rack, none from the top view, no overlap, no pointer input');
 
     // map navigation: left drag pans on the floor, right drag rotates, wheel zooms to the pointer; the camera stays above
     // the floor and the target on it; the compass turns north up

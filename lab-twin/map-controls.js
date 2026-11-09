@@ -167,6 +167,8 @@
       if (had) this.dispatchEvent({ type: 'end' });
     }
     _stopMotion() { this._vel.pan.set(0, 0, 0); this._vel.theta = 0; this._vel.phi = 0; this._zoom.log = 0; this._zoom.anchor = null; }
+    // Drop inertia and pending wheel zoom but keep a gesture going (the app stopped the camera in front of a rack).
+    halt() { this._stopMotion(); }
     _pointerDown(e) {
       if (!this.enabled) return;
       if (e.pointerType !== 'touch' && ![0, 1, 2].includes(e.button)) return;
