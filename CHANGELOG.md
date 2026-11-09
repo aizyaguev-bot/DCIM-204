@@ -2,6 +2,20 @@
 
 ---
 
+## v2.46.7 — 2026-11-09 — One unit slot per floor and per storage shelf
+
+### Changed
+- **Racks:** every floor of a rack now has one unit slot (it was 2), and every storage
+  shelf has one slot (it was 3), as the lab keeps one unit per floor and per shelf. The
+  slot is drawn even when the floor is empty. When a floor holds more than one unit, the
+  slot shows the first one and a small "+N" button opens the rest; the floor does not grow.
+
+### Fixed
+- Moving a cooling unit onto a floor that already holds a unit now opens that floor's
+  "+N" list and puts the focus on the moved unit, instead of losing the focus.
+
+---
+
 ## v2.46.6 — 2026-11-08 — Admin can remove a server (OPT) from the lab and restore it
 
 ### Added

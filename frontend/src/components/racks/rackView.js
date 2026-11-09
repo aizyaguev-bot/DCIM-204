@@ -179,14 +179,14 @@ export function floorOptions(rows, coolingPlaced = {}, rack = null) {
 }
 
 // ── floor template (v2.47) ──
-// Every floor of a compute rack is one box of the same size: floor number | server zone, and under it a row of
-// FLOOR_UNIT_SLOTS unit slots (each a fixed box with the unit's labelled fields: name, P/N, S/N, model, MAC); a storage
-// shelf is one row of SHELF_SLOTS slots (servers and units alike). Slots are drawn when empty too. When more items are
-// on a floor than it has slots, every slot still shows a unit and a small "+N" chip at the end of the last slot's first
-// line opens the rest, so a full floor is never taller than an empty one. card: the overview's rack cards (and phones);
-// detail: the larger rack detail.
-export const FLOOR_UNIT_SLOTS = { card: 2, detail: 3 };
-export const SHELF_SLOTS = { card: 3, detail: 4 };
+// Every floor of a compute rack is one box of the same size: floor number | server zone, and under it one unit slot
+// (FLOOR_UNIT_SLOTS: a fixed box with the unit's labelled fields: name, P/N, S/N, model, MAC); a storage shelf is one
+// slot too (SHELF_SLOTS, a server or a unit). The lab keeps one unit per floor and per shelf, so the slot is drawn when
+// empty too. When more items are on a floor than it has slots, the slot still shows a unit and a small "+N" chip at the
+// end of its first line opens the rest, so a full floor is never taller than an empty one. card: the overview's rack
+// cards (and phones); detail: the larger rack detail.
+export const FLOOR_UNIT_SLOTS = { card: 1, detail: 1 };
+export const SHELF_SLOTS = { card: 1, detail: 1 };
 
 // How many of count items a template with that many slots shows (every slot holds one), and how many the "+N" chip on
 // the last slot holds.

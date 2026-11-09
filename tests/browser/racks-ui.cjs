@@ -56,6 +56,10 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
  const editToggle=p=>p.locator('button.edit-toggle');
  async function setEdit(p,on){if((await editToggle(p).getAttribute('aria-pressed')==='true')!==on)await editToggle(p).click();await p.waitForFunction(v=>document.querySelector('button.edit-toggle')?.getAttribute('aria-pressed')===String(v),on);}
  const card=(p,rack)=>p.locator(`[data-rack-id="${rack}"]`);
+ // A floor has one unit slot: a second unit on it is behind the floor's "+N" chip. Opens that list when loc is behind it.
+ async function shown(loc,opts={}){await loc.waitFor({state:'attached',...opts});
+  if(!(await loc.isVisible()))await loc.evaluate(e=>e.closest('.floor-more:not([data-open])')?.querySelector(':scope > .floor-more-toggle')?.click());
+  await loc.waitFor(opts);return loc;}
  const visibleRacks=p=>p.locator('.racks-grid > [data-rack-id]').evaluateAll(els=>els.map(e=>e.dataset.rackId));
  async function openPanel(p){if(!(await p.locator('#cooling-panel').isVisible()))await p.locator('.racks-cooling-toggle').first().click();await p.locator('#cooling-panel').waitFor();
   const show=p.locator('#cooling-panel .cooling-panel-show[aria-expanded="false"]');if(await show.count())await show.click();}
@@ -503,7 +507,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await expectUnit('ch-free',{rack:'Rack-02',u:2});
    await setEdit(p,false);
    const heb=card(p,'Rack-02').locator('[data-u-slot="2"] .cooling-chip[data-unit-id="ch-free"] .cooling-name');
-   await heb.waitFor();
+   await shown(heb);
    assert.equal(await heb.getAttribute('dir'),'auto');
    assert.equal(await heb.evaluate(e=>getComputedStyle(e).direction),'rtl');
    // old data: saved on U6 (above floor 4) by another client. The card lists it under "Other" (no empty shelves around
@@ -766,7 +770,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await p.keyboard.press('Escape');await dlg.waitFor({state:'detached'});
    await setEdit(p,false);
    assert.equal(await panel.locator('li[data-unit-id="ch-free"] button').innerText(),'Place…');
-   await card(p,'Rack-05').locator('[data-u-slot="3"] .cooling-chip[data-unit-id="ch5"]').click();await dlg.waitFor();
+   await (await shown(card(p,'Rack-05').locator('[data-u-slot="3"] .cooling-chip[data-unit-id="ch5"]'))).click();await dlg.waitFor();
    assert.equal(await p.evaluate(()=>document.activeElement?.textContent),'Move…','Move… has focus');
    await p.keyboard.press('Enter');
    await p.waitForFunction(()=>document.activeElement?.id==='cooling-rack');
@@ -777,7 +781,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    try{
     await p.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
     const at4=card(p,'Rack-05').locator('[data-u-slot="4"] .cooling-chip[data-unit-id="ch5"]');
-    await at4.waitFor({timeout:20000});
+    await shown(at4,{timeout:20000});
     await at4.click();await dlg.waitFor();
     assert.equal(await dlg.locator('#cooling-floor').inputValue(),'4','the dialog shows the current floor');
     await dlg.locator('#cooling-rack').selectOption('Rack-01');await dlg.locator('#cooling-floor').selectOption('2');
