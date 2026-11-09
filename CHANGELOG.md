@@ -2,6 +2,20 @@
 
 ---
 
+## v2.46.10 — 2026-11-09 — Shelf labels: project, owner and server for every floor
+
+### Added
+- **Shelf labels (Racks):** every floor with a server or a unit has a small label button; on a
+  storage shelf the shelf number is the button. It opens a three-line label: `project:` the
+  product on the floor, `owner:` the server's owner, and the server name. The lines can be
+  edited for that printout only (nothing is saved), then copied or printed.
+- **Labels for a rack or for all racks:** a "Shelf labels" button on each rack card, in the rack
+  detail and on the Racks page (with an "All racks" choice) lists one label per server, with
+  Copy all and Print all. Printing prints only the labels, in bordered boxes.
+- Every role (Viewer, Operator, Admin) can use it. Copy also works on the plain-http lab site.
+
+---
+
 ## v2.46.9 — 2026-11-09 — New units get their P/N and name from webpe automatically
 
 ### Added
