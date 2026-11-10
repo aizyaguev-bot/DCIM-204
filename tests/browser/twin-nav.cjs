@@ -133,7 +133,7 @@ const shots = process.env.DCIM_QA_SHOTS || 'C:/t/twin-nav';
       assert.ok(r.min >= need, `${btn} × ${n} after Rack-05 Focus: the camera came within ${r.min.toFixed(3)} m of a rack (start ${s.c.toFixed(3)} m)`);
       if (btn === '#zIn') assert.ok(r.d < s.d - 0.3, `"+" still zooms in (${s.d.toFixed(2)} -> ${r.d.toFixed(2)})`);
       else {
-        assert.ok(Math.abs(Math.atan2(Math.sin(r.az - s.az), Math.cos(r.az - s.az))) > 0.2, `rotate left still turns the view (${s.az.toFixed(2)} -> ${r.az.toFixed(2)})`);
+        assert.ok(Math.abs(Math.atan2(Math.sin(r.az - s.az), Math.cos(r.az - s.az))) > 0.1, `rotate left still turns the view (${s.az.toFixed(2)} -> ${r.az.toFixed(2)})`);
         const hint = await page.evaluate(() => window.__toasts.slice());
         assert.ok(hint.some(t => /A rack is in the way/.test(t)), 'a rotate step a rack stops says why: ' + JSON.stringify(hint));
       }

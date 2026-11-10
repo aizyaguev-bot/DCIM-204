@@ -2,6 +2,24 @@
 
 ---
 
+## v2.46.13 — 2026-11-10 — 3D twin: navigation buttons and a hover tip
+
+### Added
+- **3D twin, camera buttons:** a column at the right edge with Pan / Rotate (what a left drag
+  does; the choice is remembered), rotate left / right and tilt up / down. On a phone they sit
+  behind a "Rotate" button.
+- **3D twin, hover tip:** pointing at a device with the mouse shows its name, ON / OFF / ? and
+  where it is ("OPT11 · ON · Rack-01 › Shelf 1").
+
+### Changed
+- **3D twin, rack clearance:** zoom, pan, rotate and tilt buttons and keys stop at 0.4 m from a
+  rack, like the mouse already did, so the view never ends up inside a rack.
+- **3D twin, selection stays in view:** an object clicked near the edge is moved into view when
+  its panel opens.
+- **3D twin, zoom out** stops at 1.6 × the whole-lab view, so the lab never shrinks to a dot.
+
+---
+
 ## v2.46.12 — 2026-11-10 — 3D twin: PDUs and KVMs stay in place
 
 ### Fixed
