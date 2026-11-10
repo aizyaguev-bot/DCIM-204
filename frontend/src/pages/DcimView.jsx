@@ -30,6 +30,7 @@ import UndoToast from "../components/racks/UndoToast.jsx";
 import ScanUnitDialog from "../components/racks/ScanUnitDialog.jsx";
 import ShelfLabelsDialog from "../components/racks/ShelfLabelsDialog.jsx";
 import { buildShelfLabels } from "../shelfLabels.js";
+import { floorServer, rowsUnitOwners, unitOwners, withUnitOwners, ownerOfUnit, ownerFromText, itemOwnerKey } from "../unitOwner.js";
 import useDialogFocus from "../components/racks/useDialogFocus.js";
 import { useStoredState, useMediaQuery, useDebounced, flash, prefersReducedMotion } from "../components/racks/hooks.js";
 import { mergeServerFeeds } from "../labDisplay.js";
@@ -528,16 +529,23 @@ function EmptySlot({ lines = 3 }) {
 // the name (a storage slot, two lines: the name alone, on the whole line); line 2: P/N (part number); line 3 (lines 3):
 // S/N, on the whole line. Too long: cut in the middle, the end stays. Its type is the colour of its inline-start edge
 // (and in its tooltip); model and MAC address are in its tooltip and its details. Enter or Space opens it.
-function EquipCell({ item, onSelect, onRename, lines = 3 }) {
+// owner: its owner by the lab's rule (unitOwner.js); ownerFrom: the server on its floor it comes from. Both are in its
+// tooltip and its accessible description (the slot keeps its fixed lines; the server beside it shows the same owner).
+function EquipCell({ item, onSelect, onRename, lines = 3, owner = "", ownerFrom = null }) {
   const meta = ITEM_TYPES[item.type] || ITEM_TYPES.other;
   const { matchKeys } = useContext(RackViewContext);
+  const ownerId = useId();
   const serial = unitSerial(item);
+  const ownerText = owner ? `Owner ${owner}${ownerFrom?.name ? ` (from ${ownerFrom.name})` : ""}` : "";
   const tip = [`${meta.label}: ${item.name}`, detailText(item, "part_number") ? `P/N ${detailText(item, "part_number")}` : "", serial ? `SN ${serial}` : "",
+    ownerText,
     detailText(item, "model") ? `Model ${detailText(item, "model")}` : "", detailText(item, "mac") ? `MAC ${detailText(item, "mac")}` : "",
     item.shelf_position ? `Position ${item.shelf_position}` : ""].filter(Boolean).join(" · ");
   return <div className="equipment-cell unit-slot" data-type={ITEM_TYPES[item.type] ? item.type : "other"} data-item-id={item.id} data-lines={lines} data-match={matchKeys?.has(`e:${item.id}`) ? "" : undefined}
-    onClick={() => onSelect?.(item)} role="button" tabIndex={0} aria-label={`View ${item.name}`} title={tip}
+    data-owner={owner || undefined} data-owner-from={ownerFrom?.name || undefined}
+    onClick={() => onSelect?.(item)} role="button" tabIndex={0} aria-label={`View ${item.name}`} aria-describedby={ownerText ? ownerId : undefined} title={tip}
     onKeyDown={e => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onSelect?.(item); } }}>
+    {ownerText && <span id={ownerId} className="sr-only" dir="auto">{ownerText}</span>}
     <span className="slot-line slot-name">
       {lines > 2 && <span className="slot-label">Name</span>}
       <InlineName value={item.name} onRename={onRename} onOpen={() => onSelect?.(item)} className="equipment-name" mid/>
@@ -623,9 +631,12 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
   const Row = sortable ? SortableServerRow : ServerCell;
   const serverRow = (data, variant, more = null) => <Row key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]}
     onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)} variant={variant} more={more}/>;
-  // Each unit as a slot (lines: 3 on a floor, 2 on a storage shelf; the "+N" list shows all 3).
+  // Each unit as a slot (lines: 3 on a floor, 2 on a storage shelf; the "+N" list shows all 3). optOwners is the shown
+  // map (withUnitOwners): a unit's owner is the owner of the server on this floor (ownerServer), else its own.
+  const ownerServer = floorServer({ u, items });
   const units = [
-    ...equipment.map(({ data }) => ({ key: `e:${data.id}`, el: lines => <EquipCell key={data.id} item={data} lines={lines} onSelect={onSelectCustom} onRename={v => onRenameCustom?.(data, v)}/> })),
+    ...equipment.map(({ data }) => ({ key: `e:${data.id}`, el: lines => <EquipCell key={data.id} item={data} lines={lines} onSelect={onSelectCustom} onRename={v => onRenameCustom?.(data, v)}
+      owner={ownerOfUnit(optOwners, data.id)} ownerFrom={ownerServer}/> })),
     ...cooling.map(unit => ({ key: `c:${unit.id}`, el: lines => <RackCoolingChip key={unit.id} unit={unit} variant="slot" lines={lines}/> })),
   ];
   const hit = list => !!matchKeys && list.some(x => matchKeys.has(x.key));
@@ -976,7 +987,10 @@ function AddEquipmentModal({ rackName, onClose, onSave, onScan = null }) {
 // ─── EDIT EQUIPMENT PANEL (custom items) ──────────────────────────────────────
 // `item` is always the latest saved record. After another session changed it (a rejected save reloads the list) the
 // panel is opened again on the fresh record; `draft` then refills the fields this person had changed.
-function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, ownersLoaded, onOwnerChange, onClose, onSave, onDelete, onMove }) {
+// owner: its owner by the lab's rule (unitOwner.js). ownerFrom: the server on its floor it takes the owner from (then the
+// field is read-only and onOpenServer opens that server, where the owner is changed; offered only while nothing here is
+// unsaved, since it closes this panel); null: its own owner, editable.
+function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, ownerFrom = null, onOpenServer = null, ownersLoaded, onOwnerChange, onClose, onSave, onDelete, onMove }) {
   useEscClose(onClose);
   const [name,      setName]      = useState(draft?.name ?? item.name);
   const [type,      setType]      = useState(draft?.type ?? (item.type || "other"));
@@ -1085,7 +1099,16 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
           {reloaded && <div role="status" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
             This equipment was changed in another session. The panel now shows the saved values{draft ? " with your edits kept" : ""}. Review them and save again.
           </div>}
-          <div><SL>Owner / Engineer</SL><OwnerSelect owner={owner} disabled={!ownersLoaded} label={`Owner for ${item.name}`} onChange={id=>onOwnerChange(`item:${item.id}`,id)}/></div>
+          <div><SL>Owner / Engineer</SL>{ownerFrom ? <>
+            <input type="text" readOnly value={owner || (ownersLoaded ? "No owner" : "Loading…")} aria-label={`Owner for ${item.name}`} aria-describedby="edit-equipment-owner-from"
+              data-owner-from={ownerFrom.name} dir="auto"
+              className="w-full bg-zinc-900/40 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-300 cursor-default focus:outline-none focus:border-nv-400/50"/>
+            <p id="edit-equipment-owner-from" className="mt-1 text-[11px] text-zinc-400" dir="auto">
+              {ownerFromText(ownerFrom, storage)} Change it on the server.
+            </p>
+            {onOpenServer && !dirty && !busy && !moving && <button type="button" onClick={onOpenServer} data-action="open-owner-server"
+              className="mt-1 text-[11px] text-nv-300 underline hover:text-nv-200">Open <bdi>{ownerFrom.name}</bdi></button>}
+          </> : <OwnerSelect owner={owner} disabled={!ownersLoaded} label={`Owner for ${item.name}`} onChange={id=>onOwnerChange(itemOwnerKey(item.id),id)}/>}</div>
           <div><SL>Name</SL>
             <input value={shownName} onChange={e=>{ setName(e.target.value); setNameTouched(true); }}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
@@ -1467,6 +1490,8 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
     () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems),
     [r.servers, r.rack, rackOrder, rackSlots, customItems]
   );
+  // optOwners is the shown map (withUnitOwners); ownerFrom: the server on its floor a unit's owner comes from.
+  const ownerFrom = useMemo(() => rowsUnitOwners(rows, optOwners), [rows, optOwners]);
   const editMode = useContext(EditContext);
   const view = useContext(RackViewContext);
   const { scanUnit } = useContext(ServerActionsContext);
@@ -1552,14 +1577,15 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                         <td><div className="server-actions">{!editMode && <RowPower server={s}/>}<KvmButton server={s} compact/><SshSlot server={s} size="sm"/></div></td>
                       </tr>;
                     }
-                    const item = e.data, meta = ITEM_TYPES[item.type] || ITEM_TYPES.other, owner = optOwners?.[`item:${item.id}`];
+                    const item = e.data, meta = ITEM_TYPES[item.type] || ITEM_TYPES.other, owner = ownerOfUnit(optOwners, item.id);
+                    const from = ownerFromText(ownerFrom[item.id]?.server, storage);
                     return <tr key={`e:${item.id}`} data-item-id={item.id} data-match={view.matchKeys?.has(`e:${item.id}`) ? "" : undefined}>
                       <td className="racks-mono">{uText(e)}</td>
                       <td><button type="button" className="server-open" aria-label={`View ${item.name}`} onClick={() => onSelectCustom(item)}><span dir="auto" className="server-name">{item.name}</span></button></td>
                       <UnitIdCells item={item}/>
                       <td>{meta.label}</td>
                       <td><Dash/></td><td className="num"><Dash/></td>
-                      <td>{owner ? <bdi dir="auto">{owner}</bdi> : <Dash/>}</td>
+                      <td data-field="owner" title={from || undefined}>{owner ? <bdi dir="auto">{owner}</bdi> : <Dash/>}</td>
                       <td className="num"><Dash/></td><td><Dash/></td>
                       <td dir="auto">{item.notes || <Dash/>}</td>
                       <td/>
@@ -1584,11 +1610,11 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
                   <div className="server-actions">{!editMode && <RowPower server={s}/>}<KvmButton server={s}/><SshSlot server={s} size="sm"/></div>
                 </li>;
               }
-              const item = e.data, meta = ITEM_TYPES[item.type] || ITEM_TYPES.other;
+              const item = e.data, meta = ITEM_TYPES[item.type] || ITEM_TYPES.other, owner = ownerOfUnit(optOwners, item.id);
               return <li key={`e:${item.id}`} className="detail-item" data-item-id={item.id}>
                 <div className="detail-item-head"><span className="detail-item-type">{meta.label}</span>
                   <button type="button" className="server-open" aria-label={`View ${item.name}`} onClick={() => onSelectCustom(item)}><span dir="auto" className="server-name">{item.name}</span></button></div>
-                <div className="detail-item-facts" dir="auto">{[uText(e), item.notes].filter(Boolean).join(" · ")}</div>
+                <div className="detail-item-facts" dir="auto">{[uText(e), owner && `Owner ${owner}`, item.notes].filter(Boolean).join(" · ")}</div>
                 <div className="detail-item-ids">
                   {[["part_number", "P/N", detailText(item, "part_number")], ["serial_number", "S/N", unitSerial(item)]].map(([field, label, value]) =>
                     <span key={field} className="detail-item-id" data-field={field} title={`${label}: ${value || "not recorded"}`}>
@@ -2564,13 +2590,14 @@ function KpiBar({servers,rackStats,pdus,pduStatuses}) {
   </div>;
 }
 
-function ReadOnlyAsset({ item, owner, onClose, sshName }) {
+// owner: a unit's owner by the lab's rule (unitOwner.js); ownerFrom: the server on its floor it comes from (named under it).
+function ReadOnlyAsset({ item, owner, ownerFrom = null, onClose, sshName }) {
   const panelRef = useRef(null);
   useDialogFocus(panelRef, { onEscape: onClose });
   return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
     <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="asset-details-title" tabIndex={-1} onClick={e=>e.stopPropagation()} className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-6">
       <div className="flex justify-between gap-3"><h2 id="asset-details-title" dir="auto" className="font-mono text-xl text-white break-all">{item.name}</h2><div className="flex items-start gap-2 flex-shrink-0">{sshName&&<SshButton name={sshName} size="md"/>}<ShowIn3dButton target={itemRef(item.id)} name={item.name} className={PANEL_ICON_BTN}/><CloseBtn onClose={onClose}/></div></div>
-      <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, "Part number":item.part_number, Model:item.model, "MAC address":item.mac, Barcode:item.barcode, Shelf:item.u, Owner:owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words" dir="auto">{value}</dd></div>)}</dl>
+      <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, "Part number":item.part_number, Model:item.model, "MAC address":item.mac, Barcode:item.barcode, Shelf:item.u, Owner:ownerFrom ? <span data-owner-from={ownerFrom.name}>{owner||"No owner"}<span className="block mt-0.5 text-xs text-zinc-400">{ownerFromText(ownerFrom, !rackHasFloors(item.rack))}</span></span> : owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words" dir="auto">{value}</dd></div>)}</dl>
       <p className="text-xs text-zinc-400">Turn on Edit to change this equipment.</p>
     </section>
   </div>;
@@ -2613,6 +2640,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   // cooling dialog is open (its form is based on what it opened with); coolingSeq drops an answer a save overtook.
   const coolingSeq = useRef(0);
   const holdCoolingRef = useRef(false);
+  // Owners are saved the moment they are chosen (never a draft), so they keep reloading in Edit mode too: a server's
+  // owner changed elsewhere reaches its units here at once. ownersSeq counts owner saves (one at the start, one at the
+  // end) and owner reloads: an owner answer is used only when no save or later reload started or ended while it was on
+  // its way (an older, slower answer never replaces a newer one).
+  const ownersSeq = useRef(0);
   const holdItems = selectedCustomId != null;
   const holdItemsRef = useRef(holdItems);
   holdItemsRef.current = holdItems;
@@ -2624,7 +2656,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const editing = !initial && !force && editingRef.current;
     const itemsTurn = holdItemsRef.current ? null : ++itemsSeq.current;
     const coolingTurn = !initial && !force && holdCoolingRef.current ? null : ++coolingSeq.current;
-    if (editing && itemsTurn == null && coolingTurn == null) return Promise.resolve();
+    const ownersTurn = ++ownersSeq.current;
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     const keep = setter => next => setter(prev => same(prev, next) ? prev : next);
     const failed = {};
@@ -2638,7 +2670,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       get("layout", "/api/switch-assignments"),
       itemsTurn == null ? Promise.resolve(null) : loadRackItems().catch(e => { failed.items = reason(e); return null; }),
       get("layout", "/api/rack-overrides"),
-      get(null, "/api/opt-owners"),
+      fetchStore(null, "/api/opt-owners"),
       coolingTurn == null ? Promise.resolve(null) : fetchStore("cooling", "/api/chillers"),
     ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
       const itemsCurrent = itemsTurn != null && itemsTurn === itemsSeq.current;
@@ -2653,13 +2685,13 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         return same(prev, next) ? prev : next;
       });
       if (coolingCurrent && (chill || initial)) { keep(setChillers)(chill||{units:[],connections:[]}); setChillersLoaded(true); }
+      if (owners && ownersTurn === ownersSeq.current) { keep(setOptOwners)(owners); setOwnersLoaded(true); }
       if (!initial && !force && editingRef.current) return;   // editing (or editing started while loading)
       // A failed reload keeps what is shown; the first load falls back to empty documents as before.
       if (order || initial) keep(setRackOrder)(order||{});
       if (slots || initial) keep(setRackSlots)(slots||{});
       if (sw || initial) keep(setSwitchAssignments)(sw||{});
       if (overrides || initial) keep(setRackOverrides)(overrides||{});
-      if (owners) { keep(setOptOwners)(owners); setOwnersLoaded(true); }
     });
   },[]);
   useEffect(()=>{ reloadLayouts(true); },[reloadLayouts]);
@@ -2793,9 +2825,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     }
   }, [customItems]);
 
-  useEffect(()=>{let active=true;accountRequest("/opt-owners").then(data=>{if(active){setOptOwners(data);setOwnersLoaded(true);}}).catch(()=>{});return()=>{active=false;};},[engineerRevision]);
+  useEffect(()=>{let active=true;const turn=ownersSeq.current;accountRequest("/opt-owners").then(data=>{if(active&&turn===ownersSeq.current){setOptOwners(data);setOwnersLoaded(true);}}).catch(()=>{});return()=>{active=false;};},[engineerRevision]);
   const handleOwnerChange = useCallback(async (assetKey, engineerId) => {
-    setOptOwners(await accountRequest(`/opt-owners/${encodeURIComponent(assetKey)}`,"PUT",{engineer_id:engineerId}));
+    ownersSeq.current++;
+    try { setOptOwners(await accountRequest(`/opt-owners/${encodeURIComponent(assetKey)}`,"PUT",{engineer_id:engineerId})); }
+    finally { ownersSeq.current++; }
   },[]);
 
   const pdus       = devices.filter(d=>d.kind==="pdu");
@@ -2883,6 +2917,17 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   // anything below draws a rack, a dialog or a select.
   const storageRacks = useMemo(() => storageRackNames(rackStats), [rackStats]);
   setStorageRacks(storageRacks);
+  // Each unit's owner by the lab's rule (unitOwner.js): the owner of the server on its floor, from the rows the racks
+  // draw, else its own saved owner. shownOwners is the owner map the Racks page shows and searches; optOwners stays the
+  // saved map. It follows owner changes, moves and reloads at once (no page reload).
+  const unitOwnerMap = useMemo(() => unitOwners(rackStats.map(rs => ({ rack: rs.rack, rows: buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems).rows })), optOwners),
+    [rackStats, rackOrder, rackSlots, customItems, optOwners, storageRacks]);
+  // The same object while its content is the same (rackStats changes with every power reading, the owners do not).
+  const shownOwnersRef = useRef(null);
+  const shownOwners = useMemo(() => {
+    const next = withUnitOwners(optOwners, unitOwnerMap), prev = shownOwnersRef.current;
+    return prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : (shownOwnersRef.current = next);
+  }, [optOwners, unitOwnerMap]);
 
   useEffect(() => { onSummary?.(`${racks.length} racks · ${servers.length} OPTs · ${Object.values(customItems).flat().length} equipment items`); }, [racks.length, servers.length, customItems, onSummary]);
 
@@ -3269,7 +3314,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onLabelChange={handleLabelChange} onSlotsChange={setRackSlots}
           onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
           onSaveItems={saveItems} onRefresh={onRefresh}
-          pdus={pdus} rackDevices={rackDevices} optOwners={optOwners}
+          pdus={pdus} rackDevices={rackDevices} optOwners={shownOwners}
           pduStatuses={pduStatuses} base={rackView} cooling={coolingApi}/>
       )}
       {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems} optOwners={optOwners} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}/>}
@@ -3305,12 +3350,14 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         <RemoveServerDialog key={removeTarget} serverName={removeTarget} onRemoved={serverRemoved} onClose={() => setRemoveTarget(null)}/>
       </Portal>}
 
-      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={optOwners[`item:${selectedCustom.id}`]} sshName={["computer","server"].includes(selectedCustom.type)?selectedCustom.name:null} onClose={()=>selectCustom(null)}/></Portal>}
+      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={ownerOfUnit(shownOwners, selectedCustom.id)} ownerFrom={unitOwnerMap[selectedCustom.id]?.server || null} sshName={["computer","server"].includes(selectedCustom.type)?selectedCustom.name:null} onClose={()=>selectCustom(null)}/></Portal>}
       {selectedCustom&&selectedCustomRack&&editMode&&(
         <Portal>
           <EditEquipmentPanel key={`${selectedCustom.id}:${customPanel.epoch}`} item={selectedCustom} rackName={selectedCustomRack}
             draft={customPanel.draft} reloaded={customPanel.notice}
-            owner={optOwners[`item:${selectedCustom.id}`]||""} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}
+            owner={ownerOfUnit(shownOwners, selectedCustom.id)} ownerFrom={unitOwnerMap[selectedCustom.id]?.server || null}
+            onOpenServer={unitOwnerMap[selectedCustom.id]?.server ? () => { const id = unitOwnerMap[selectedCustom.id].server.id; selectCustom(null); setSelectedServerId(id); } : null}
+            ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}
             allRacks={racks} onClose={()=>selectCustom(null)}
             onSave={handleSaveCustom} onDelete={handleDeleteCustom} onMove={handleMoveCustom}/>
         </Portal>

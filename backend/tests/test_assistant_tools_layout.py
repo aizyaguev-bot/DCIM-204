@@ -455,6 +455,38 @@ async def test_cleared_owner_does_not_restore_legacy_or_inventory_owner(lab):
     assert result.data["items"][0]["owner"] is None
 
 
+async def test_unit_on_a_server_floor_reports_the_server_owner(lab):
+    # The lab owner's rule (2026-11-10): a unit on a floor with a server belongs to that server's owner, the first server
+    # in slot order; elsewhere it keeps its own saved owner. The Racks page shows the same (frontend/src/unitOwner.js).
+    lab.db.add(device("pdu-a", {"1": "OPT11", "2": "OPT12", "3": "OPT13"}))
+    lab.db.add_all([Engineer(id=f"e-{key}", name=name, name_key=name.casefold()) for key, name in
+                    (("s11", "Server Owner"), ("s12", "Second Owner"), ("s13", "Third Owner"), ("unit", "Unit Own"), ("box", "Box Own"))])
+    lab.db.add_all([AssetOwner(asset_key=key, engineer_id=engineer) for key, engineer in
+                    (("opt11", "e-s11"), ("opt12", "e-s12"), ("opt13", "e-s13"), ("item:tray", "e-unit"), ("item:box", "e-box"),
+                     ("item:whole", "e-box"), ("item:loose", "e-unit"))])
+    await lab.db.commit()
+    lab.save("items", {"Rack-01": [
+        {"id": "tray", "name": "Tray", "type": "other", "u": 2},
+        {"id": "box", "name": "Box", "type": "other", "u": 5},
+        {"id": "whole", "name": "Whole", "type": "other", "u": 0},
+        {"id": "loose", "name": "Loose", "type": "other"},
+        {"id": "plain", "name": "Plain", "type": "other", "u": 3},
+    ]})
+    # OPT12 comes first in slot order, so both servers on floor 2 give way to it; OPT13 (floor 3) has its own floor.
+    lab.save("slots", {"Rack-01": {"opt11": 2, "opt12": 2, "opt13": 3}})
+    lab.save("positions", {"Rack-01": ["opt12", "opt11", "opt13"]})
+
+    result = await tools_layout.get_rack_layout(lab.ctx, rack="Rack-01")
+
+    items = {i["id"]: i for i in result.data["items"]}
+    assert (items["tray"]["owner"], items["tray"]["owner_from_server"]) == ("Second Owner", "OPT12")
+    assert (items["plain"]["owner"], items["plain"]["owner_from_server"]) == ("Third Owner", "OPT13")
+    for key, own in (("box", "Box Own"), ("whole", "Box Own"), ("loose", "Unit Own")):
+        assert (items[key]["owner"], items[key]["owner_from_server"]) == (own, None), key
+    servers = {s["server_key"]: s for s in result.data["servers"]}
+    assert (servers["opt11"]["owner"], servers["opt12"]["owner"]) == ("Server Owner", "Second Owner")
+
+
 async def test_docs_only_search_allowlist_and_mark_bounded_snippets_untrusted(lab):
     docs = lab.root / "docs"
     docs.mkdir()
