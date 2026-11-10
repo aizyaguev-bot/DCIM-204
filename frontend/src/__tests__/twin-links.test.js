@@ -210,8 +210,8 @@ test("Back / Forward onto a Show in 3D address shows its ref in the twin again",
 });
 
 test("DcimView offers Show in 3D on the rack card, the rack detail, the server dialog, the unit dialog and both edit panels", () => {
-  assert.match(dcim, /\{!detail && <ShowIn3dButton target=\{rackRef\(r\.rack\)\} name=\{r\.rack\}\/>\}/);
-  assert.match(dcim, /<ShowIn3dButton target=\{rackRef\(r\.rack\)\} name=\{r\.rack\} text className="racks-btn racks-btn-sm"\/>/);
+  assert.match(dcim, /\{!detail && floors && <ShowIn3dButton target=\{rackRef\(r\.rack\)\} name=\{r\.rack\}\/>\}/);   // a storage rack (no floors) has no place in the 3D
+  assert.match(dcim, /\{rackHasFloors\(r\.rack\) && <ShowIn3dButton target=\{rackRef\(r\.rack\)\} name=\{r\.rack\} text className="racks-btn racks-btn-sm"\/>\}/);
   assert.match(dcim, /twinButton=\{<ShowIn3dButton target=\{serverRef\(selectedServer\.name\)\} name=\{selectedServer\.name\}\/>\}/);
   assert.match(read("../components/racks/ServerDetailsDialog.jsx"), /<span className="server-details-tools">\{sshSlot\}\{twinButton\}<button/);
   assert.match(dcim, /<ShowIn3dButton target=\{itemRef\(item\.id\)\} name=\{item\.name\} className=\{PANEL_ICON_BTN\}\/>/);
