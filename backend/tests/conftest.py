@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.routers.kvms as kvms_module
 import app.routers.pdus as pdus_module
+from app import name_sync
 from app.database import Base, get_db
 from app.routers import devices, kvms, pdus
 
@@ -70,3 +71,23 @@ def clear_module_caches():
     kvms_module._refreshing.clear()
     pdus_module._cache.clear()
     pdus_module._refreshing.clear()
+
+
+def _no_name_sync_database():
+    raise AssertionError("name_sync used the database in a test that did not give it a test database")
+
+
+def _no_name_sync_device(*_args, **_kwargs):
+    raise AssertionError("name_sync tried to contact a PDU/KVM in a test")
+
+
+@pytest.fixture(autouse=True)
+def name_sync_never_reaches_devices(monkeypatch):
+    """Device name sync in tests: mode off, no database (the real lab_manager.db is never opened) and no driver.
+    Tests that exercise it (test_name_sync.py) set a mode, a test database and fake drivers themselves."""
+    name_sync.reset_state()
+    monkeypatch.setattr(name_sync, "mode", lambda: "off")
+    monkeypatch.setattr(name_sync, "_session_factory", _no_name_sync_database)
+    monkeypatch.setattr(name_sync, "_driver_factory", _no_name_sync_device)
+    yield
+    name_sync.reset_state()

@@ -1,9 +1,12 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ["./index.html", "./src/**/*.{js,jsx}"],
+  content: ["./index.html", "./src/**/*.{js,jsx}", "!./src/.t1-test-temp/**"],
   theme: {
     extend: {
+      borderRadius: {sm:"2px",DEFAULT:"2px",md:"2px",lg:"2px",xl:"2px","2xl":"2px","3xl":"2px"},
+      boxShadow: {sm:"none",DEFAULT:"none",md:"none",lg:"none",xl:"none","2xl":"none"},
       colors: {
+        zinc: { 50: "#fafafa", 100: "#fff", 200: "#eee", 300: "#ccc", 400: "#a7a7a7", 500: "#a7a7a7", 600: "#757575", 700: "#4b4b4b", 800: "#333", 900: "#161616", 950: "#0c0c0c" },
         nv: {
           50:  "#f2fbe6",
           100: "#dff7c2",

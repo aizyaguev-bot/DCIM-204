@@ -1,11 +1,12 @@
 """Read-only PDU/KVM observations and server-to-port associations."""
 import asyncio
 import json
+import re
 import time
 
 from sqlalchemy import select
 
-from .models import Device, MonitorDeviceSnapshot
+from .models import Device, MonitorDeviceSnapshot, MonitorDeviceError
 from .ping_monitor import CONCURRENCY, iso, next_slot, server_identity
 
 
@@ -25,16 +26,22 @@ async def refresh_devices(session_factory):
         router = pdus if device.kind == "pdu" else kvms
         async with gate:
             try:
-                result = await asyncio.wait_for(router._fetch_status(device.id, device), timeout=12)
-            except Exception:
+                budget = 45 if device.kind == "pdu" else 20
+                result = await asyncio.wait_for(router._fetch_status(device.id, device), timeout=budget)
+                reason = failure_reason(getattr(result,"error", "")) if not result.reachable else ""
+            except asyncio.TimeoutError:
+                reason = f"Device status timed out after {budget} seconds. Check device load and VM network access."
+                result = None
+            except Exception as exc:
+                reason = failure_reason(str(exc))
                 result = None  # Never reuse a successful cache entry after a failed check.
-            return device, result, time.time()
+            return device, result, time.time(), reason
 
     tasks = [asyncio.create_task(fetch(device)) for device in devices]
     try:
         # Network requests are bounded and parallel; SQLite writes are serialized.
         for task in asyncio.as_completed(tasks):
-            device, result, checked_at = await task
+            device, result, checked_at, reason = await task
             async with session_factory() as db:
                 current = await db.get(Device, device.id)
                 if not current or _configuration(current) != _configuration(device):
@@ -63,6 +70,16 @@ async def refresh_devices(session_factory):
                 snapshot.kind, snapshot.ip = device.kind, device.ip
                 snapshot.checked_at, snapshot.reachable = checked_at, reachable
                 snapshot.ports_json = json.dumps(list(ports.values()))
+                diagnostic = await db.get(MonitorDeviceError, device.id)
+                if not diagnostic:
+                    diagnostic = MonitorDeviceError(device_id=device.id)
+                    db.add(diagnostic)
+                diagnostic.checked_at, diagnostic.detail = checked_at, reason
+                from .alerts import observe_device_api
+                await observe_device_api(db, current, reachable, reason, checked_at)
+                if device.kind == "pdu":
+                    from .alerts import observe_power
+                    await observe_power(db, current, result, checked_at)
                 await db.commit()
     finally:
         for task in tasks:
@@ -75,6 +92,7 @@ async def connection_index(db, tz, now):
     devices = (await db.execute(select(Device).where(Device.kind.in_(("pdu", "kvm")))
                                 .order_by(Device.name, Device.id))).scalars().all()
     snapshots = {s.device_id: s for s in (await db.execute(select(MonitorDeviceSnapshot))).scalars()}
+    diagnostics = {d.device_id:d for d in (await db.execute(select(MonitorDeviceError))).scalars()}
     index = {}
     for device in devices:
         snapshot = snapshots.get(device.id)
@@ -97,6 +115,9 @@ async def connection_index(db, tz, now):
                 status, detail = "stale", "The last observation is overdue. Run Check all now to refresh."
             elif not snapshot.reachable:
                 status, detail = "error", "Device check failed. Network, credentials or device API may be unavailable."
+                diagnostic = diagnostics.get(device.id)
+                if diagnostic and diagnostic.checked_at == snapshot.checked_at and diagnostic.detail:
+                    detail = diagnostic.detail
             elif port and not port.get("missing"):
                 if device.kind == "pdu":
                     status = port.get("state", "unknown")
@@ -123,3 +144,37 @@ async def connection_index(db, tz, now):
             }
             index.setdefault("server:" + identity[0], {"pdu": [], "kvm": []})[device.kind].append(connection)
     return index
+
+
+def failure_reason(message):
+    """Explain the failure without storing device response bodies or credentials."""
+    lowered = f"{type(message).__name__} {message or ''}".lower()
+    api_path = " This describes the management API path from the VM, not server power."
+    if "proxyerror" in lowered or "proxy error" in lowered or re.search(r"\b407\b", lowered):
+        return "Proxy error: the VM could not access the device management API through its proxy. Check proxy access and authentication." + api_path
+    if "401" in lowered or "403" in lowered or "auth" in lowered:
+        return "Device authentication failed. Check the saved username, password and permissions."
+    if "connecttimeout" in lowered or "connection timeout" in lowered:
+        return "Connection timeout: the VM could not establish a connection to the device API. The connect phase includes the TLS handshake, so a slow handshake can also cause this. Check the address, HTTPS access and network." + api_path
+    if "readtimeout" in lowered or "receiving data from the device took too long" in lowered:
+        return "Device API request timeout: receiving data from the device took too long. Check device load and network stability."
+    if "pooltimeout" in lowered or "local connection slot was not available" in lowered:
+        return "Device API request timeout: a local connection slot was not available in time. This does not establish a device outage."
+    if "timeout" in lowered or "timed out" in lowered:
+        return "The device API did not respond before its request timeout."
+    if any(token in lowered for token in (
+        "dns failure", "name or service not known", "nodename nor servname",
+        "getaddrinfo", "temporary failure in name resolution",
+    )):
+        return "DNS failure: the VM could not resolve the device management API address. Check the hostname and VM DNS configuration." + api_path
+    if "connection refused" in lowered or re.search(r"\berrno\s+111\b", lowered):
+        return "Connection refused: the device management API connection from the VM was refused. Check the HTTPS service, port and firewall rules." + api_path
+    if any(token in lowered for token in ("no route to host", "network is unreachable", "network unreachable")) or re.search(r"\berrno\s+(?:113|101)\b", lowered):
+        return "Network unreachable: the VM has no usable network path to the device management API. Check routing and network access." + api_path
+    if any(token in lowered for token in ("ssl", "certificate", "handshake")):
+        return "TLS error: the VM could not complete a secure connection to the device management API. Check TLS configuration and certificates." + api_path
+    if re.search(r"\bhttp\s+5(?:\d{2}|xx)\b", lowered):
+        return "Device management API responded with HTTP 5xx to the VM. Check the device service and load." + api_path
+    if "connection" in lowered or "connect" in lowered or "unreachable" in lowered:
+        return "Could not connect to the device API from the VM. Check the address and network."
+    return "The device API returned no usable status. Check the device service and configuration."

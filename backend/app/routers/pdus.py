@@ -1,13 +1,17 @@
 import asyncio, json, time
+from contextlib import asynccontextmanager
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from ..database import get_db
-from ..models import Device
+from ..models import Device, PduMaintenance
+from ..pdu_locks import maintenance_lock
 from ..schemas import PduStatus, OutletState, PowerAction
 from ..routers.devices import get_creds
-from drivers.raritan_pdu import RaritanPduDriver, RaritanPduError
+from .. import power_protection
+from ..config import get_settings
+from drivers.raritan_pdu import RaritanPduDriver, safe_error
 
 router = APIRouter(prefix="/api/pdus", tags=["pdus"])
 
@@ -15,6 +19,20 @@ router = APIRouter(prefix="/api/pdus", tags=["pdus"])
 _cache: dict[str, tuple[float, PduStatus]] = {}
 _CACHE_TTL = 20
 _refreshing: set[str] = set()
+# { device_id: generation }: bumped when the device's address, kind or credentials change, so a read that started
+# before the change never lands in the cache afterwards.
+_generation: dict[str, int] = {}
+
+
+def invalidate(device_id: str) -> None:
+    """Drop the cached status and discard any read of this PDU still in flight."""
+    _generation[device_id] = _generation.get(device_id, 0) + 1
+    _cache.pop(device_id, None)
+
+
+def _store(device_id: str, generation: int, result: PduStatus) -> None:
+    if _generation.get(device_id, 0) == generation:
+        _cache[device_id] = (time.monotonic(), result)
 
 
 async def _get_pdu_or_404(device_id: str, db: AsyncSession) -> Device:
@@ -25,6 +43,19 @@ async def _get_pdu_or_404(device_id: str, db: AsyncSession) -> Device:
     if not dev:
         raise HTTPException(status_code=404, detail="PDU not found")
     return dev
+
+
+@asynccontextmanager
+async def locked_pdu(device_id: str, db: AsyncSession):
+    """Holds the per-PDU maintenance lock and yields the PDU re-read inside it,
+    so a concurrent address change cannot redirect the action."""
+    await _get_pdu_or_404(device_id, db)  # unknown ids never get a lock entry
+    async with maintenance_lock(device_id):
+        dev = await db.scalar(select(Device).where(Device.id == device_id, Device.kind == "pdu")
+                              .execution_options(populate_existing=True))
+        if not dev:
+            raise HTTPException(status_code=404, detail="PDU not found")
+        yield dev
 
 
 async def _fetch_status(device_id: str, dev: Device) -> PduStatus:
@@ -42,30 +73,33 @@ async def _fetch_status(device_id: str, dev: Device) -> PduStatus:
             if key in labels:
                 o["label"] = labels[key]
         outlets = [OutletState(**o) for o in outlets_raw]
-        total_watts = sum(o.watts for o in outlets)
+        known_watts = [o.watts for o in outlets if o.watts is not None]
+        total_watts = sum(known_watts) if known_watts else None
         return PduStatus(
             device_id=device_id,
             reachable=True,
-            inlet_voltage=inlet.get("voltage", 0.0),
+            inlet_voltage=inlet.get("voltage"),
+            inlet_readings=inlet.get("readings", []),
             total_watts=total_watts,
+            watts_complete=bool(outlets) and len(known_watts) == len(outlets),
             outlets=outlets,
             temperature=env.get("temperature"),
             humidity=env.get("humidity"),
             leak_detected=env.get("leak_detected"),
         )
     except Exception as e:
-        return PduStatus(device_id=device_id, reachable=False, error=str(e))
+        return PduStatus(device_id=device_id, reachable=False, error=safe_error(e))
     finally:
         await driver.close()
-
 
 async def _refresh_background(device_id: str, dev: Device):
     if device_id in _refreshing:
         return
     _refreshing.add(device_id)
     try:
+        generation = _generation.get(device_id, 0)  # an address change during the read discards it
         result = await _fetch_status(device_id, dev)
-        _cache[device_id] = (time.monotonic(), result)
+        _store(device_id, generation, result)
     finally:
         _refreshing.discard(device_id)
 
@@ -76,13 +110,14 @@ async def pdu_status(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
+    generation = _generation.get(device_id, 0)  # before the read: a later address change discards this result
     dev = await _get_pdu_or_404(device_id, db)
 
     cached = _cache.get(device_id)
     age = time.monotonic() - cached[0] if cached else float("inf")
 
-    if cached and age < _CACHE_TTL:
-        # Fresh — apply latest DB labels and return instantly
+    if cached:
+        # Apply the latest DB labels and return instantly; stale data is also refreshed in the background
         status = cached[1]
         labels = json.loads(dev.labels_json or "{}")
         if labels:
@@ -92,16 +127,13 @@ async def pdu_status(
                 label = labels.get(key, o.label)
                 updated.append(o.model_copy(update={"label": label}))
             status = status.model_copy(update={"outlets": updated})
+        if age >= _CACHE_TTL:
+            background_tasks.add_task(_refresh_background, device_id, dev)
         return status
-
-    if cached:
-        # Stale — return old data instantly, refresh in background
-        background_tasks.add_task(_refresh_background, device_id, dev)
-        return cached[1]
 
     # First load — fetch now
     result = await _fetch_status(device_id, dev)
-    _cache[device_id] = (time.monotonic(), result)
+    _store(device_id, generation, result)
     return result
 
 
@@ -112,16 +144,42 @@ async def outlet_power(
     body: PowerAction,
     db: AsyncSession = Depends(get_db),
 ):
-    dev = await _get_pdu_or_404(device_id, db)
-    username, password = get_creds(dev)
-    driver = RaritanPduDriver(dev.ip, username, password)
-    try:
-        success = await driver.set_outlet_state(outlet_number, body.action)
-        # Invalidate cache so next poll gets fresh state
-        _cache.pop(device_id, None)
-        return {"ok": success, "outlet": outlet_number, "action": body.action}
-    except (RaritanPduError, ValueError) as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    # Validate before any device contact (an unknown action used to reach the PDU first).
+    if body.action not in ("on", "off", "cycle"):
+        raise HTTPException(status_code=400, detail="Unknown action; use on, off or cycle")
+    if outlet_number < 1:
+        raise HTTPException(status_code=400, detail="Outlet numbers start at 1")
+    # The maintenance check and the switch share the shutdown lock, so an "on" cannot slip in after a shutdown.
+    async with locked_pdu(device_id, db) as dev:
+        if not dev.enabled:
+            raise HTTPException(status_code=409, detail="This PDU is disabled; enable it in Admin -> Devices first")
+        if body.action in ("on", "cycle") and await db.get(PduMaintenance, device_id, populate_existing=True):
+            raise HTTPException(status_code=409, detail="PDU is in maintenance mode; restore it first")
+        if body.action in ("off", "cycle"):
+            # Outlets that feed the site itself (POWER_PROTECTED_OUTLETS) are never switched off from the UI either.
+            protection = await power_protection.load(db, get_settings())
+            # A stale entry (renamed PDU, outlet out of range) is dropped by parse() and could be exactly the outlet it
+            # was meant to protect, so an invalid list refuses every off and cycle (the bulk actions' rule as well).
+            if protection.errors:
+                raise HTTPException(status_code=409, detail="Protected outlets setting is invalid; power off is unavailable")
+            if protection.is_protected(device_id, outlet_number):
+                raise HTTPException(status_code=409, detail="This outlet is protected (POWER_PROTECTED_OUTLETS); it cannot be switched off here")
+        try:
+            username, password = get_creds(dev)
+        except Exception:
+            raise HTTPException(status_code=502, detail="Stored PDU credentials could not be read; re-enter them in Admin -> Devices")
+        driver = RaritanPduDriver(dev.ip, username, password)
+        try:
+            success = await driver.set_outlet_state(outlet_number, body.action)
+            # Invalidate cache so next poll gets fresh state
+            _cache.pop(device_id, None)
+            return {"ok": success, "outlet": outlet_number, "action": body.action}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Unknown action; use on, off or cycle")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=safe_error(e))
+        finally:
+            await driver.close()
 
 
 @router.get("/{device_id}/sensors-debug")
@@ -133,6 +191,6 @@ async def sensors_debug(device_id: str, db: AsyncSession = Depends(get_db)):
     try:
         return await driver.list_sensors()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        raise HTTPException(status_code=502, detail=safe_error(e))
     finally:
         await driver.close()

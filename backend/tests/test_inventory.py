@@ -16,7 +16,7 @@ from app.models import Device
 async def inventory_client(db_session, tmp_path, monkeypatch):
     import app.main as main
     monkeypatch.setattr(store, "ITEMS_FILE", tmp_path / "rack_items.json")
-    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(lab_manager_password="test-password"))
+    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(accounts_enabled=False, lab_manager_password="test-password"))
     store.ITEMS_FILE.write_text(json.dumps({
         "Rack-01": [{"id": "ci-existing", "name": "Switch A", "type": "switch", "serial_number": "MT00123", "u": 1, "notes": "Keep this note", "custom_field": {"keep": True}}],
         "Rack-02": [],
@@ -117,7 +117,137 @@ async def test_dcim_and_twin_edits_record_history_and_keep_server_fields(invento
     assert saved["tracking_history"][-1]["note"] == "Edited in DCIM or 3D Twin"
 
 
-@pytest.mark.parametrize("patch", [{"u": -1}, {"u": 43}, {"u": 1.2}, {"u": True}, {"rack": "Missing"}, {"position": "x" * 81}, {"rack": "Storage-Main", "u": 1}, {"rack": "Storage-Main", "u": 0, "position": "shelf"}])
+U_SLOT_INVALID = "U slot must be a whole number from 0 to 42."
+OMIT = object()
+
+
+async def put_items(c, mutate):
+    """PUT the current rack-items mapping after `mutate(data)`, against a fresh ETag."""
+    response = await c.get("/api/rack-items")
+    data = response.json()
+    mutate(data)
+    return await c.put("/api/rack-items", json=data, headers={"If-Match": response.headers["etag"]})
+
+
+def new_item(u):
+    item = {"id": "ci-new", "name": "Patch panel", "type": "patchpanel", "notes": ""}
+    if u is not OMIT:
+        item["u"] = u
+    return item
+
+
+@pytest.mark.parametrize("u", [-1, 43, 99, 1.5, True, False, "3", None, OMIT])
+async def test_new_rack_item_with_invalid_u_is_refused_and_nothing_is_written(inventory_client, u):
+    before = store.ITEMS_FILE.read_bytes()
+    result = await put_items(inventory_client, lambda data: data["Rack-02"].append(new_item(u)))
+    assert result.status_code == 422
+    assert result.json()["detail"] == U_SLOT_INVALID
+    assert store.ITEMS_FILE.read_bytes() == before
+
+
+@pytest.mark.parametrize("u", [0, 42])
+async def test_new_rack_item_accepts_u_range_ends(inventory_client, u):
+    result = await put_items(inventory_client, lambda data: data["Rack-02"].append(new_item(u)))
+    assert result.status_code == 200
+    assert store.read_items()["Rack-02"][0]["u"] == u
+    assert type(store.read_items()["Rack-02"][0]["u"]) is int
+
+
+@pytest.mark.parametrize("u", [43, -1, 1.0, True, "1", None])
+async def test_changing_an_existing_u_to_an_invalid_value_is_refused(inventory_client, u):
+    # 1.0 and true equal the stored 1 in Python, but they are not an unchanged whole-number U.
+    before = store.ITEMS_FILE.read_bytes()
+    result = await put_items(inventory_client, lambda data: data["Rack-01"][0].update(u=u))
+    assert result.status_code == 422
+    assert result.json()["detail"] == U_SLOT_INVALID
+    assert store.ITEMS_FILE.read_bytes() == before
+
+
+async def test_untouched_legacy_u_is_grandfathered_while_other_items_are_edited(inventory_client):
+    c = inventory_client
+    data = store.read_items()
+    data["Rack-02"].append({"id": "ci-legacy", "name": "Old shelf", "type": "other", "u": -1})
+    data["Rack-02"].append({"id": "ci-no-u", "name": "No slot", "type": "other"})
+    store.write_items(data)
+
+    def edit_other(data):
+        data["Rack-01"][0]["u"] = 5
+    result = await put_items(c, edit_other)
+    assert result.status_code == 200
+    saved = store.read_items()
+    assert saved["Rack-01"][0]["u"] == 5
+    assert saved["Rack-02"][0]["u"] == -1
+    assert "u" not in saved["Rack-02"][1]
+    # Renaming a legacy item keeps its U as it is; changing that U to another invalid value is refused.
+    assert (await put_items(c, lambda data: data["Rack-02"][0].update(name="Renamed shelf"))).status_code == 200
+    assert store.read_items()["Rack-02"][0]["name"] == "Renamed shelf"
+    before = store.ITEMS_FILE.read_bytes()
+    refused = await put_items(c, lambda data: data["Rack-02"][0].update(u=-2))
+    assert refused.status_code == 422
+    assert store.ITEMS_FILE.read_bytes() == before
+    # Fixing it to a valid U is accepted.
+    assert (await put_items(c, lambda data: data["Rack-02"][0].update(u=4))).status_code == 200
+    assert store.read_items()["Rack-02"][0]["u"] == 4
+
+
+async def test_revision_is_checked_before_u_and_u_before_uniqueness(inventory_client):
+    c = inventory_client
+    old = await c.get("/api/rack-items")
+    bad = old.json()
+    bad["Rack-02"].append({**new_item(99), "serial_number": "MT00123"})  # invalid U and a duplicate serial
+    assert (await c.put("/api/rack-items", json=bad)).status_code == 428
+    assert (await c.put("/api/rack-items", json=bad, headers={"If-Match": '"stale"'})).status_code == 409
+    result = await c.put("/api/rack-items", json=bad, headers={"If-Match": old.headers["etag"]})
+    assert (result.status_code, result.json()["detail"]) == (422, U_SLOT_INVALID)
+    bad["Rack-02"][-1]["u"] = 2
+    duplicate = await c.put("/api/rack-items", json=bad, headers={"If-Match": old.headers["etag"]})
+    assert duplicate.status_code == 409
+    assert "already belongs to another item" in duplicate.json()["detail"]
+
+
+@pytest.mark.parametrize("change", ["omit", "blank", "null", "different"])
+async def test_whole_list_save_keeps_a_linked_barcode(inventory_client, change):
+    c = inventory_client
+    assert (await c.post("/api/inventory/ci-existing/barcode", json={"code": "000777"}, headers=await headers(c))).status_code == 200
+
+    def stale_panel(data):
+        # A DCIM/Twin copy that predates the scan link, saved after a reload, still moves the item.
+        item = data["Rack-01"][0]
+        item.update(u=6, notes="Edited after reload")
+        if change == "omit":
+            item.pop("barcode")
+        else:
+            item["barcode"] = {"blank": "", "null": None, "different": "OTHER-1"}[change]
+    result = await put_items(c, stale_panel)
+    assert result.status_code == 200
+    saved = store.read_items()["Rack-01"][0]
+    assert (saved["barcode"], saved["u"], saved["notes"]) == ("000777", 6, "Edited after reload")
+    assert saved["serial_number"] == "MT00123"
+    assert len((await c.get("/api/inventory", params={"code": "000777"})).json()["matches"]) == 1
+    assert (await c.get("/api/inventory", params={"code": "OTHER-1"})).json()["matches"] == []
+
+
+async def test_kept_barcode_still_blocks_a_new_item_saved_before_it(inventory_client):
+    c = inventory_client
+    assert (await c.post("/api/inventory/ci-existing/barcode", json={"code": "000777"}, headers=await headers(c))).status_code == 200
+    response = await c.get("/api/rack-items")
+    data = response.json()
+    data["Rack-01"][0].pop("barcode")
+    # The new item comes first in the payload, before the stale copy whose barcode the server restores.
+    payload = {"Rack-00": [{**new_item(3), "barcode": "000777"}], **data}
+    before = store.ITEMS_FILE.read_bytes()
+    result = await c.put("/api/rack-items", json=payload, headers={"If-Match": response.headers["etag"]})
+    assert result.status_code == 409
+    assert store.ITEMS_FILE.read_bytes() == before
+
+
+async def test_whole_list_save_can_still_add_a_first_barcode(inventory_client):
+    result = await put_items(inventory_client, lambda data: data["Rack-01"][0].update(barcode="FIRST-1"))
+    assert result.status_code == 200
+    assert store.read_items()["Rack-01"][0]["barcode"] == "FIRST-1"
+
+
+@pytest.mark.parametrize("patch", [{"u": -1}, {"u": 43}, {"u": 1.2}, {"u": True}, {"rack": "Missing"}, {"position": "x" * 81}, {"rack": "Storage-Main", "u": 17}, {"rack": "Storage-Main", "u": 42}, {"rack": "Storage-Main", "u": 0, "position": "shelf"}, {"rack": "Storage-Main", "u": 7, "position": "left"}])
 async def test_invalid_location_changes_nothing(inventory_client, patch):
     c = inventory_client
     before = store.ITEMS_FILE.read_bytes()
@@ -211,6 +341,37 @@ async def test_rack_and_main_storage_moves_preserve_identity_and_record_exact_sc
         saved = (await c.get("/api/rack-items")).json()
         assert sum(i["id"] == "ci-existing" for group in saved.values() for i in group) == 1
         assert saved[rack][0]["id"] == "ci-existing"
+
+
+@pytest.mark.parametrize("u", [0, 1, 7, 16])
+async def test_main_storage_takes_its_shelves_1_to_16(inventory_client, u):
+    c = inventory_client
+    result = await c.post("/api/inventory/ci-existing/location", json={"rack": "Storage-Main", "u": u, "position": ""}, headers=await headers(c))
+    assert result.status_code == 200, result.text
+    assert (result.json()["rack"], result.json()["u"]) == ("Storage-Main", u)
+    assert result.json()["tracking_history"][-1]["to"] == {"rack": "Storage-Main", "u": u, "position": ""}
+    assert [i["u"] for i in store.read_items()["Storage-Main"] if i["id"] == "ci-existing"] == [u]
+
+
+async def test_main_storage_refuses_a_shelf_above_16_with_a_clear_reason(inventory_client):
+    c = inventory_client
+    before = store.ITEMS_FILE.read_bytes()
+    moved = await c.post("/api/inventory/ci-existing/location", json={"rack": "Storage-Main", "u": 17}, headers=await headers(c))
+    added = await c.post("/api/inventory", json={"code": "SPARE-017", "name": "Spare", "rack": "Storage-Main", "u": 17}, headers=await headers(c))
+    for result in (moved, added):
+        assert result.status_code == 422
+        assert "Main storage has shelves 1-16" in str(result.json()["detail"])
+    assert store.ITEMS_FILE.read_bytes() == before
+    # A rack keeps its U slots 0-42.
+    rack = await c.post("/api/inventory/ci-existing/location", json={"rack": "Rack-01", "u": 42}, headers=await headers(c))
+    assert rack.status_code == 200
+
+
+async def test_register_on_a_main_storage_shelf(inventory_client):
+    c = inventory_client
+    result = await c.post("/api/inventory", json={"code": "SPARE-007", "name": "Spare NIC", "rack": "Storage-Main", "u": 7}, headers=await headers(c))
+    assert result.status_code == 201, result.text
+    assert [(i["barcode"], i["u"]) for i in store.read_items()["Storage-Main"]] == [("SPARE-007", 7)]
 
 
 async def test_register_directly_in_main_storage(inventory_client):
