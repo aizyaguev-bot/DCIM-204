@@ -2,6 +2,18 @@
 
 ---
 
+## v2.46.12 — 2026-11-10 — 3D twin: PDUs and KVMs stay in place
+
+### Fixed
+- **3D twin:** PDUs and KVMs are fixed infrastructure and always stay where the lab layout puts
+  them. Since v2.46.11 a PDU without its own Lab Manager device (the PDU that Rack-06 and Rack-07
+  share) was moved to Unplaced; it is back on Rack-07.
+- **webpe lookup tool:** text with spaces in a unit's serial field (for example "Portia tray") is
+  not sent to webpe, and a serial number webpe refuses is asked again only after 6 hours instead of
+  every 5 minutes.
+
+---
+
 ## v2.46.11 — 2026-11-09 — 3D twin shows what Lab Manager has; stale power readings are grey
 
 ### Changed

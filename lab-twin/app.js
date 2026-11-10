@@ -751,13 +751,14 @@
       const liveShelves = new Set(liveEq.map(i => i.shelf).filter(Boolean));
       items = items.filter(i => !(i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && (liveNames.has(norm(i.name)) || (i.shelf && liveShelves.has(i.shelf)))));
       items.forEach(i => { if (i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && i.setup && setups.find(x => x.id === i.setup)?.dcimRack) i.liveWarning = LIVE_WARN.notInRackItems; });
-      // Lab Manager is the inventory of a DCIM-mapped rack: a lab-data.json server, unit, PDU or KVM that Lab Manager
-      // does not know is not drawn there (it would take a floor's server / unit slot next to the real one); it is listed
-      // under Unplaced as "In lab-data.json, not in Lab Manager". lab-data.json keeps the geometry and the inventory of
-      // unmapped racks; offline nothing changes.
+      // Lab Manager is the inventory of a DCIM-mapped rack: a lab-data.json server or unit that Lab Manager does not know
+      // is not drawn there (it would take a floor's server / unit slot next to the real one); it is listed under Unplaced
+      // as "In lab-data.json, not in Lab Manager". PDUs and KVMs are fixed infrastructure: they always stay where
+      // lab-data.json puts them (a shared PDU, e.g. Rack-06/07, has no Lab Manager device of its own). lab-data.json keeps
+      // the geometry and the inventory of unmapped racks; offline nothing changes.
       const mapped = sid => !!(sid && setups.find(x => x.id === sid)?.dcimRack);
       const jsonOnly = i => !i.id.startsWith('LIVE-') && (
-        (i.type === 'opt' && i.live?.inDcim === false) || i.type.startsWith('equip-') || ((i.type === 'pdu' || i.type === 'kvm') && !i.live?.device));
+        (i.type === 'opt' && i.live?.inDcim === false) || i.type.startsWith('equip-'));
       items.forEach(i => {
         if (!jsonOnly(i) || !mapped(i.setup)) return;
         i.notInLm = true; i.jsonPlace = placeText(i); i.setup = null; i.shelf = null; i.placement = undefined; i.side = undefined; i.zone = null;
