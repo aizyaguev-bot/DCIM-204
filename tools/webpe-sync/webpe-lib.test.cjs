@@ -32,7 +32,7 @@ test('only units with a code and no P/N are looked up, and each result waits its
     ERR: { result: 'error', at: ago(4 * 60e3) }, ERR_OLD: { result: 'error', at: ago(6 * 60e3) } } };
   const items = [
     { serial: 'new1', part_number: '' }, { serial: 'NEW1', part_number: '' }, { serial: '', barcode: 'bc2' }, { serial: 'has', part_number: 'P' },
-    { serial: '', barcode: '' }, { serial: 'found' }, { serial: 'nf' }, { serial: 'nf_old' }, { serial: 'err' }, { serial: 'err_old' }];
+    { serial: '', barcode: '' }, { serial: 'found' }, { serial: 'nf' }, { serial: 'nf_old' }, { serial: 'err' }, { serial: 'err_old' }, { serial: 'Portia tray' }, { serial: '', barcode: 'two words' }];
   const { due, waiting } = lib.candidates(items, state, now);
   assert.deepEqual(due.map(c => c.key), ['NEW1', 'BC2', 'NF_OLD', 'ERR_OLD']);
   assert.equal(waiting, 3);
