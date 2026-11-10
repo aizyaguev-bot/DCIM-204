@@ -2,6 +2,7 @@
 import { deviceState } from "../../api/client.js";
 import { validShelf, floorLabel } from "./chillers.js";
 import { RACK_FLOORS, STORAGE_SHELVES, rackHasFloors, floorsFor } from "./floors.js";
+import { ownerOfUnit } from "../../unitOwner.js";
 
 export { RACK_FLOORS, STORAGE_SHELVES, floorsFor };
 
@@ -115,7 +116,8 @@ export function compactRows(rows, { editMode = false, showEmpty = false, cooling
 
 const normalize = text => String(text ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 
-// One entry per server, equipment item and cooling unit; text is what search looks in.
+// One entry per server, equipment item and cooling unit; text is what search looks in. optOwners: the owner map as the
+// page shows it (unitOwner.js withUnitOwners), so a unit is found by the owner of the server on its floor.
 export function buildSearchIndex({ rackStats = [], optOwners = {}, switchAssignments = {}, customItems = {}, coolingUnits = [], uMaps = {} }) {
   const index = [];
   for (const rs of rackStats) {
@@ -126,7 +128,7 @@ export function buildSearchIndex({ rackStats = [], optOwners = {}, switchAssignm
     }
     for (const item of customItems[rs.rack] || []) {
       index.push({ key: `e:${item.id}`, kind: "equipment", rack: rs.rack, u: Number.isInteger(item.u) ? item.u : null,
-        text: normalize([item.name, item.serial_number, item.barcode, optOwners[`item:${item.id}`], rs.rack].filter(Boolean).join(" ")) });
+        text: normalize([item.name, item.serial_number, item.barcode, ownerOfUnit(optOwners, item.id), rs.rack].filter(Boolean).join(" ")) });
     }
   }
   for (const unit of coolingUnits || []) {
