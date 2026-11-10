@@ -50,9 +50,12 @@ power confirmation, Viewer, and the phone bottom sheet with 44 px targets at 390
 selected rack's shelf cards always shown with full detail and the same cards for the same camera; no card through
 another rack's box or its drawn posts, shelves and equipment (mesh raycast, also on views grazing a corner post and
 56 views around the racks), none from behind over the selected one; the server power legend, also at 1440, 1024 and
-390 px; the 3D switch marking of generic units only). All default to port
+390 px; the 3D switch marking of generic units only) and `twin-nav.cjs` (read-only; navigation that never runs
+away: button / key zoom, rotate and North up keep the rack clearance, quick presses add up, the Pan / Rotate switch,
+keep-in-view after a canvas click, the hover tip, the camera cluster clear of every overlay on desktops and opened on
+phones down to 360 × 560). All default to port
 8770; `twin-v3.cjs` saves screenshots to `DCIM_QA_SHOTS` (default `C:/t/tv3-after`), `twin-shelves.cjs` too
-(default `C:/t/twin-shelves`).
+(default `C:/t/twin-shelves`) and `twin-nav.cjs` too (default `C:/t/twin-nav`).
 
 The KVM launch check covers a normal console tab, blocked/throwing popup APIs
 from both a device card and its details, per-port in-use cleanup, and explicit

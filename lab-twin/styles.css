@@ -312,6 +312,29 @@ body.show-power .lbl .lt:not(:empty) { display: flex; }
 .zoombar .zb { background: rgba(18,19,22,.95); }
 .zoombar .zb:hover:not(:disabled) { background: var(--line); }
 .zoombar .zb:not(.zb-text) { width: 28px; padding: 0; font-size: 16px; }
+/* camera cluster (one column at the right edge, vertically centred, clear of the legend / zoom bar row and the drawer;
+   frameSafe keeps flights and keepInView clear of it): Pan / Rotate drag mode, rotate left / right, tilt up / down.
+   placeNavPad (app.js) moves it off the other overlays (environment panel, save bar, move banner, legend) and uses two
+   columns (.two) when one column does not fit between them. Phones keep it behind a "Rotate" button. */
+.navpad { position: absolute; right: 16px; top: 50%; transform: translateY(-50%); z-index: 6; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.navpad .nav-more { display: none; }
+.navpad-b { display: grid; grid-template-columns: auto; gap: 4px; }
+.navpad.two .navpad-b { grid-template-columns: repeat(2, auto); }
+.navpad.off { display: none; }
+.navpad .zb { width: 28px; padding: 0; background: rgba(18,19,22,.95); color: var(--z-300); }
+.navpad .zb:hover:not(:disabled) { background: var(--line); }
+.navpad .zb svg { display: block; margin: auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.navpad .zb svg circle { fill: currentColor; stroke: none; }
+.navpad .zb[aria-pressed="true"] { background: #1f2a10; border-color: var(--brand); color: var(--nv-300); }
+body.front .navpad { display: none; }
+body.kiosk .navpad .zb { width: 44px; height: 44px; }
+/* hover tip (mouse only): name · ON / OFF / ? · Rack-03 › Shelf 2 */
+.hover-tip { position: absolute; left: 0; top: 0; z-index: 9; pointer-events: none; max-width: min(360px, calc(100% - 16px)); padding: 4px 8px; border-radius: 6px; background: rgba(18,19,22,.96); border: 1px solid var(--line-3); color: var(--text); font: 500 12px/1.35 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
+.hover-tip[hidden] { display: none; }
+.hover-tip b { font-weight: 700; color: #fafafa; }
+.hover-tip .ht-sep, .hover-tip .ht-w { color: var(--muted); }
+.hover-tip .ht-pw { font: 700 11px var(--mono); }
+.hover-tip .ht-on { color: #22c55e; } .hover-tip .ht-off { color: #f87171; } .hover-tip .ht-unknown { color: #9ca3af; }
 /* save bar (top right) */
 .savebar { position: absolute; top: 12px; right: 16px; z-index: 7; display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 12px; border-radius: 8px; background: rgba(18,19,22,.95); border: 1px solid #a16207; color: #fde68a; font-size: 12px; }
 .savebar .sb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); animation: pulse 1.4s infinite; }
@@ -664,6 +687,19 @@ body.moving .rackfront { padding-top: 120px; }
   .dq-footer.dq-inline { display: flex; }
   .zoombar .zb, .zoombar .zb:not(.zb-text) { width: 44px; height: 44px; border-radius: 8px; font-size: 20px; }
   .zoombar .zb-text { display: none; }
+  /* camera cluster: behind a "Rotate" button left of the zoom bar's top button (the compass); opened, its six buttons
+     sit to the left of it in three pairs (two rows, 92 px), level with the zoom bar, so every button is on screen
+     wherever the zoom bar is (a 640 px phone with the half sheet: 3D view 48–310 px). Hidden in Move mode (the move
+     banner needs that room; a drag pans and the destination list works there). */
+  .navpad { top: calc(100% - var(--sheet-h) - 12px - 3 * 44px - 2 * 6px); bottom: auto; transform: none; right: calc(12px + 44px + 6px); flex-direction: row-reverse; align-items: flex-start; }
+  .navpad .nav-more { display: inline-flex; width: auto; min-width: 44px; height: 44px; padding: 0 10px; font-size: 13px; }
+  .navpad .nav-more[aria-expanded="true"] { border-color: var(--brand); color: var(--nv-300); }
+  .navpad-b { grid-template-columns: none; grid-template-rows: repeat(2, auto); grid-auto-flow: column; }
+  .navpad:not(.open) .navpad-b { display: none; }
+  body.moving .navpad { display: none; }
+  .navpad .zb:not(.nav-more) { width: 44px; height: 44px; border-radius: 8px; }
+  .navpad .zb svg { width: 20px; height: 20px; }
+  .hover-tip { display: none !important; }
   body.front .zoombar #vBack { display: inline-flex; width: auto; padding: 0 12px; font-size: 13px; }
   .savebar { left: 8px; right: 8px; top: 8px; flex-wrap: wrap; }
   .savebar .kbtn { height: 44px; }
