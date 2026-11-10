@@ -2,6 +2,20 @@
 
 ---
 
+## v2.46.14 — 2026-11-10 — A unit's owner is the owner of the server on its floor
+
+### Changed
+- **Racks, unit owner:** a unit (product) on a floor or shelf that has a server shows that
+  server's owner, everywhere: on the floor, in its details, in its edit panel, in search and on
+  the shelf labels. Its Owner field there is read-only: "From OPT33, the server on this floor.
+  Change it on the server." Changing the server's owner, or moving the unit to another server's
+  floor, changes it at once.
+- A unit on a floor or shelf without a server (for example a storage shelf) keeps the owner set
+  on the unit itself, as before.
+- The AI assistant reports a unit's owner by the same rule.
+
+---
+
 ## v2.46.13 — 2026-11-10 — 3D twin: navigation buttons and a hover tip
 
 ### Added
