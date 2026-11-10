@@ -8,8 +8,8 @@ const FEED_STATE = s => (s === "on" ? "ON" : s === "off" ? "OFF" : "Unknown");
 // A server's details in view mode: place, owner, switch, power (whole server and per feed) and console.
 // Changing the shelf, outlet, switch or owner stays in Edit mode (ServerEditPanel). onScanUnit (Operator and up) opens
 // "Scan barcode": units scanned there are added to this server's floor.
-// onRemove (Admin only) opens "Remove from lab" (RemoveServerDialog).
-export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, watts, group, pending, waiting, onRequestPower, onClose, consoleButton, sshSlot, onScanUnit = null, onRemove = null }) {
+// onRemove (Admin only) opens "Remove from lab" (RemoveServerDialog). twinButton: "Show in 3D" beside SSH (every role).
+export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, watts, group, pending, waiting, onRequestPower, onClose, consoleButton, sshSlot, twinButton = null, onScanUnit = null, onRemove = null }) {
   const { canOperate, canAdmin } = useAccounts();
   const panelRef = useRef(null);
   const closeRef = useRef(null);
@@ -23,7 +23,7 @@ export default function ServerDetailsDialog({ server, visual, owner, sw, shelf, 
         <h2 id={titleId} dir="auto" className="racks-dialog-title">{server.name}</h2>
         <span className="server-state" data-state={visual.state} title={visual.title}>{visual.word}</span>
         {visual.maintenance && <span className="maint-badge">Maintenance</span>}
-        <span className="server-details-tools">{sshSlot}<button ref={closeRef} type="button" className="icon-btn" aria-label="Close" onClick={onClose}>×</button></span>
+        <span className="server-details-tools">{sshSlot}{twinButton}<button ref={closeRef} type="button" className="icon-btn" aria-label="Close" onClick={onClose}>×</button></span>
       </header>
       <dl className="racks-dl racks-dl-grid">
         <div><dt>Rack</dt><dd dir="auto">{server.rack}</dd></div>
