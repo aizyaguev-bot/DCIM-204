@@ -430,6 +430,9 @@ button.rf-free.dest:hover { background: rgba(34,211,238,.08); }
 .pw-menu [data-pw="off"]:not(:disabled), .pw-menu [data-pw="cycle"]:not(:disabled) { color: #fca5a5; }
 .menu.pw-menu [data-pw="off"]:hover:not(:disabled), .menu.pw-menu [data-pw="cycle"]:hover:not(:disabled), .menu.pw-menu [data-pw="off"]:focus-visible, .menu.pw-menu [data-pw="cycle"]:focus-visible { background: #2a1517; }
 .loc-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; }
+/* Show in 3D (Focus) and the Lab Manager links (Open in Racks, Full history in Scan & Track, Manage maintenance in Power) */
+.loc-acts { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 12px; flex-shrink: 0; }
+.lm-links { margin-top: 8px; font-size: 13px; }
 .crow { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line); font-size: 13px; }
 .crow + .crow { margin-top: -2px; }
 .crow a { color: var(--text); text-decoration: none; } .crow a:hover { color: var(--link-h); text-decoration: underline; }
@@ -744,7 +747,7 @@ body.moving .rackfront { padding-top: 120px; }
   .detail .in-lg { height: 44px; font-size: 16px; } .detail textarea.in-lg { height: auto; }
   .chip-lg, .stepper, .itm-lg, .detail .link { min-height: 44px; } .stepper { height: 44px; } .stepper button { width: 44px; } .stepper input { height: 42px !important; }
   details.more summary { min-height: 44px; }
-  .loc-row .link, .crow a { display: inline-flex; align-items: center; min-height: 44px; }
+  .loc-row .link, .crow a, .lm-links .link { display: inline-flex; align-items: center; min-height: 44px; }
   .ocell { min-height: 44px; }
   .confirm-card { padding: 20px; }
   .cf-actions .kbtn { flex: 1 1 auto; }

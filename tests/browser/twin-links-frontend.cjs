@@ -11,7 +11,8 @@
 // LINK-4 ?tab=twin&select=srv:opt12 opens the iframe on it (no or a malformed select: the plain embed URL);
 // LINK-5 every role (Viewer, Operator, Admin) sees Show in 3D; the rack card header does not grow or wrap;
 // LINK-6 Back / Forward onto a Show in 3D address the twin was not last given shows that ref again (a message);
-// LINK-7 the twin hidden for 20 s is removed (it would keep rendering and polling); the next Show in 3D loads it again;
+// LINK-7 the twin hidden for 10 min is removed (hidden it pauses itself; removing it frees its memory); the next Show in
+// 3D loads it again;
 // LINK-8 Edit mode: the server and unit edit panels have Show in 3D, blocked while the panel has unsaved changes.
 // Only fixture data; nothing is changed (edits in LINK-8 are typed and undone, never saved); no hardware.
 const {chromium}=require('playwright');
@@ -20,7 +21,7 @@ const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
 const PASSWORD='test-password-123';
 const RACK='Rack-03', OPT='OPT31', OPT_REF='srv:opt31', UNIT='Switch 03', UNIT_ID='ci-3';
 const FRAME='iframe[title="3D Digital Twin"]';
-const KEEP_MS=20000;   // TWIN_HIDDEN_KEEP_MS in frontend/src/twinLinks.js
+const KEEP_MS=10*60*1000;   // TWIN_HIDDEN_KEEP_MS in frontend/src/twinLinks.js
 (async()=>{
  const browser=await chromium.launch({headless:true,channel:'msedge'});
  const errors=[],passed=[];
@@ -194,7 +195,7 @@ const KEEP_MS=20000;   // TWIN_HIDDEN_KEEP_MS in frontend/src/twinLinks.js
    assert.equal(await marker(q),null,'a new twin document');
    await q.close();
   }
-  passed.push(`LINK-7 off the Twin tab the twin stays loaded ${KEEP_MS/1000} s (showing it again restarts that), then is removed; the next Show in 3D loads it on src ${twinUrl('rack:Rack-05')}`);
+  passed.push(`LINK-7 off the Twin tab the twin stays loaded ${KEEP_MS/60000} min (showing it again restarts that), then is removed; the next Show in 3D loads it on src ${twinUrl('rack:Rack-05')}`);
 
   // ── LINK-8: Edit mode: the server and unit edit panels, blocked while they have unsaved changes ──
   for(const viewport of [{width:1366,height:768},{width:390,height:844}]){
@@ -266,11 +267,14 @@ const KEEP_MS=20000;   // TWIN_HIDDEN_KEEP_MS in frontend/src/twinLinks.js
    const c=await session('viewer',viewport);const q=await open(c,'/?tab=racks');await q.locator('[data-rack-id]').first().waitFor();
    if(viewport.width<500&&await q.getByRole('button',{name:'Expand all'}).count())await q.getByRole('button',{name:'Expand all'}).click();
    const cards=await q.locator('.rack-card-header').evaluateAll(hs=>hs.map(h=>{const name=h.querySelector('.rack-card-name span');const b=h.querySelector('[data-action="show-in-3d"]');
-    return{rack:h.closest('[data-rack-id]').dataset.rackId,height:h.getBoundingClientRect().height,cut:name?name.scrollWidth>name.clientWidth+1:false,button:b?{label:b.getAttribute('aria-label'),ref:b.dataset.ref,h:b.getBoundingClientRect().height}:null,overflow:h.scrollWidth>h.clientWidth+1};}));
+    return{rack:h.closest('[data-rack-id]').dataset.rackId,storage:h.closest('[data-rack-id]').dataset.rackType==='storage',btnH:Math.max(0,...[...h.querySelectorAll('button')].map(x=>x.getBoundingClientRect().height)),height:h.getBoundingClientRect().height,cut:name?name.scrollWidth>name.clientWidth+1:false,button:b?{label:b.getAttribute('aria-label'),ref:b.dataset.ref,h:b.getBoundingClientRect().height}:null,overflow:h.scrollWidth>h.clientWidth+1};}));
    assert.ok(cards.length>=7,`${viewport.width}: all rack cards`);
+   assert.ok(cards.some(c=>c.storage)&&cards.some(c=>!c.storage),`${viewport.width}: storage and compute racks both checked`);
    for(const card of cards){
-    assert.deepEqual(card.button&&[card.button.label,card.button.ref],[`Show ${card.rack} in 3D`,`rack:${card.rack}`],`${viewport.width} ${card.rack}`);
-    assert.ok(card.height<=card.button.h+1,`${viewport.width} ${card.rack}: the header keeps one line (${card.height}px, its buttons ${card.button.h}px)`);
+    // a storage rack has no place in the 3D twin, so it has no Show in 3D (it could only end in "Not found")
+    if(card.storage)assert.equal(card.button,null,`${viewport.width} ${card.rack}: storage rack, no Show in 3D`);
+    else assert.deepEqual(card.button&&[card.button.label,card.button.ref],[`Show ${card.rack} in 3D`,`rack:${card.rack}`],`${viewport.width} ${card.rack}`);
+    assert.ok(card.height<=card.btnH+1,`${viewport.width} ${card.rack}: the header keeps one line (${card.height}px, its buttons ${card.btnH}px)`);
     assert.equal(card.cut,false,`${viewport.width} ${card.rack}: the rack name is whole`);
     assert.equal(card.overflow,false,`${viewport.width} ${card.rack}: nothing leaves the header`);
    }
@@ -282,7 +286,7 @@ const KEEP_MS=20000;   // TWIN_HIDDEN_KEEP_MS in frontend/src/twinLinks.js
    assert.equal(await q.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${viewport.width}: rack detail, no page scroll sideways`);
    await q.close();await c.close();
   }
-  passed.push('LINK-5 Viewer, Operator and Admin see Show in 3D in the rack detail and the server dialog; every rack card (storage racks too) has "Show <rack> in 3D" with its rack ref, its header one line with the whole rack name at 1366 and 390 px; the detail\'s "Show Rack-03 in 3D" stays on screen; no sideways page scroll');
+  passed.push('LINK-5 Viewer, Operator and Admin see Show in 3D in the rack detail and the server dialog; every rack card has "Show <rack> in 3D" with its rack ref (a storage rack, which the 3D does not draw, has none), its header one line with the whole rack name at 1366 and 390 px; the detail\'s "Show Rack-03 in 3D" stays on screen; no sideways page scroll');
 
   assert.deepEqual(errors,[],'no page errors');
   console.log(passed.map(x=>'PASS '+x).join('\n'));

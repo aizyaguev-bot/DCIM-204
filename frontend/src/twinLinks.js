@@ -1,11 +1,17 @@
 // "Show in 3D": the references Lab Manager hands to the embedded 3D twin (lab-twin/app.js), and the twin's URL.
 // The shared interface: ref = srv:<optKey> | item:<rack item id> | rack:<rack name>; the twin opens on it from
 // /twin/index.html?embed=1&select=<encoded ref>, or, once loaded, from postMessage({ type: "twin:select", ref }).
+// The twin answers every selection the user makes in it with postMessage({ type: "twin:selected", ref | null }) to this
+// page (same origin): Lab Manager puts it in its address (?select=, twinSelectedAddress). Change events go to the twin as
+// postMessage({ type: "twin:data-changed", domains }).
 export const TWIN_PATH = "/twin/index.html";
 export const TWIN_SELECT_MESSAGE = "twin:select";
-// How long the twin stays loaded, hidden, after leaving the Twin tab (a quick round trip or "Show in 3D" then needs no
-// reload). The hidden twin keeps rendering and polling on Lab Manager's main thread, so it is removed after this.
-export const TWIN_HIDDEN_KEEP_MS = 20000;
+export const TWIN_SELECTED_MESSAGE = "twin:selected";
+export const TWIN_DATA_CHANGED_MESSAGE = "twin:data-changed";
+// How long the twin stays loaded, hidden, after leaving the Twin tab (a round trip or "Show in 3D" then needs no
+// reload). A hidden twin pauses itself (no rendering, no polling: lab-twin/app.js pauseTwin), so it may stay 10 minutes;
+// then it is removed (its memory: the WebGL scene) and the next visit loads it again.
+export const TWIN_HIDDEN_KEEP_MS = 10 * 60 * 1000;
 
 // A server's identity key exactly as the twin computes it (lab-twin/app.js optKey): its label trimmed and lower-cased.
 export const optKey = s => (s || "").trim().toLowerCase();
@@ -47,4 +53,16 @@ export function twinRefToReplay(search, lastRef) {
 
 export function twinSelectMessage(ref) {
   return { type: TWIN_SELECT_MESSAGE, ref };
+}
+
+// Lab Manager's address after the twin reported a selection (twin:selected): the Twin tab's address with ?select=<ref>
+// (none for null or an invalid ref), or null when the address stays as it is (another tab, or the same ref already).
+export function twinSelectedAddress(href, ref) {
+  const url = new URL(href);
+  if (url.searchParams.get("tab") !== "twin") return null;
+  const next = isTwinRef(ref) ? ref : null;
+  if ((url.searchParams.get("select") || null) === next) return null;
+  if (next) url.searchParams.set("select", next);
+  else url.searchParams.delete("select");
+  return url.href;
 }

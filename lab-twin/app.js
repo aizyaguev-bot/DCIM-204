@@ -17,6 +17,13 @@
   // realistic body colours (photo-matched); status is shown by edge outline + LED + label dot
   const TYPE_BODY = { opt: '#2b2d33', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#1a1d24', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
   const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
+  // PDUs and KVMs are fixed infrastructure (owner, 2026-11-10): the twin never moves them, not with the Move tool, not
+  // as the other half of a swap, and never because a server moved or changed (their outlets / ports belong to the floor).
+  // A Lab Manager unit (rack item) of type PDU or KVM ('equip-pdu' / 'equip-kvm' here) is a PDU / KVM too: the 3D does not
+  // move it either (Lab Manager stays its authority: where Racks puts it, the 3D shows it).
+  const FIXED_INFRA = new Set(['pdu', 'kvm']);
+  const isFixedInfra = type => FIXED_INFRA.has(String(type || '').replace(/^equip-/, ''));
+  const FIXED_NOTE = 'PDUs and KVMs are fixed infrastructure: they stay where they are and never move with a server.';
   const CABLE_COLORS = ['#d92b2b', '#d92b2b', '#1a1a1a', '#d92b2b', '#22c1a6', '#d92b2b', '#f4f4f5'];
   const EQUIP_LABEL = { switch: 'Switch', computer: 'Computer', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
   const POLL_MS = 15000;
@@ -65,7 +72,10 @@
     heat: LS.get('heat', false), embed: /[?&]embed=1/.test(location.search), editMode: false, kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
+    stats: { frames: 0, ticks: 0, changePolls: 0 },   // work done: rendered frames, 1 s ticks, change-feed reads (pause checks)
   };
+  // Paused while hidden (see "Lab Manager links" near the end): no render loop, ticker or polling timers then.
+  let paused = false, pausedTimer = false, rafId = 0, ticker = 0;
   // When this page first noticed each issue (no server time for most of them); kept for the browser tab only.
   try { const seen = JSON.parse(sessionStorage.getItem('twin.attnSeen') || '[]'); if (Array.isArray(seen)) S.attnSeen = new Map(seen.filter(e => Array.isArray(e) && Number.isFinite(e[1]))); } catch { /* storage blocked */ }
 
@@ -654,6 +664,7 @@
     const shelfForU = (sid, u) => { const sh = shelvesOf(sid); const n = sh.length; if (!Number.isInteger(Number(u)) || u < 1 || u > n) return null; const idx = uTopDown ? n - Number(u) : Number(u) - 1; return sh[idx].id; };
 
     let items = d.items.map(it => ({ ...it, ...pickOv(it.id) }));
+    const slotRank = new Map();   // live server item → its place in its rack's slot order (rack-positions, then name)
 
     if (live.connected) {
       const pdus = live.devices.filter(x => x.kind === 'pdu');
@@ -688,6 +699,7 @@
       Object.entries(byRack).forEach(([rack, list]) => {
         const order = live.rackOrder[rack] || []; const slots = live.rackSlots[rack] || {};
         list.sort((a, b) => { const ai = order.indexOf(a.key), bi = order.indexOf(b.key); if (ai === -1 && bi === -1) return a.name.localeCompare(b.name); if (ai === -1) return 1; if (bi === -1) return -1; return ai - bi; });
+        list.forEach((s, i) => { s.rank = i; });
         const used = new Set(); list.forEach(s => { if (slots[s.key] != null) { s.u = Number(slots[s.key]); used.add(s.u); } });
         let next = 1; list.forEach(s => { if (s.u == null) { while (used.has(next)) next++; s.u = next; used.add(next); next++; } s.uExplicit = slots[s.key] != null; });
       });
@@ -703,14 +715,16 @@
           placementConfidence: s.uExplicit ? 'high' : 'low',
           dcim: { ...(base.dcim || {}), optKey: s.key, pdu: s.pduId, pduName: s.pduName, outlet: s.outlet, kvm: kvmIdx[s.key] || kvmIdx[s.key.split(' (')[0]] || [] },
           live: { state: s.state, watts: s.watts, rack: s.rack, u: s.u, sw: live.sw[s.key] || null, owner: live.owners[s.key] || null, inDcim: true } };
-        it.unmappedRack = !!s.rack && !sid;
+        it.unmappedRack = !!s.rack && !sid; slotRank.set(it, s.rank);
         items = items.filter(x => x !== jsonOpts.get(s.key)); items.push(it);
       });
       items = items.filter(i => !(i.type === 'opt' && !seen.has(i.dcim?.optKey || optKey(i.name)) && removedKeys.has(pingKey(i.name))));   // removed from the lab
       items.filter(i => i.type === 'opt' && !seen.has(i.dcim?.optKey || optKey(i.name))).forEach(i => { i.live = { inDcim: false }; i.liveWarning = LIVE_WARN.notInDcim; });
-      // 2) PDU / KVM devices
+      // 2) PDU / KVM devices: fixed infrastructure (owner, 2026-11-10). A lab-data.json PDU / KVM keeps the place the file
+      // gives it; only a PDU the file does not place takes its Lab Manager device's rack. Nothing a server does (a move,
+      // a swap, an owner change) touches them: servers are placed from rack-slots / rack-overrides, never PDUs or KVMs.
       items.forEach(i => {
-        if (i.type === 'pdu' && i.dcim?.deviceId) { const dev = pdus.find(p => p.id === i.dcim.deviceId); const st = live.pdu[i.dcim.deviceId]; if (dev) { i.live = { device: dev, status: st, reachable: st?.reachable ?? null }; if (dev.rack && setupByRack[dev.rack]) { i.setup = setupByRack[dev.rack]; i.zone = setups.find(x => x.id === i.setup)?.zone; } } }
+        if (i.type === 'pdu' && i.dcim?.deviceId) { const dev = pdus.find(p => p.id === i.dcim.deviceId); const st = live.pdu[i.dcim.deviceId]; if (dev) { i.live = { device: dev, status: st, reachable: st?.reachable ?? null }; if (!i.setup && dev.rack && setupByRack[dev.rack]) { i.setup = setupByRack[dev.rack]; i.zone = setups.find(x => x.id === i.setup)?.zone; } } }
         if (i.type === 'kvm' && i.dcim?.deviceId) { const dev = kvms.find(k => k.id === i.dcim.deviceId); const st = live.kvm[i.dcim.deviceId]; if (dev) i.live = { device: dev, status: st, reachable: st?.reachable ?? null }; }
       });
       // live-only PDUs (e.g. racks added in DCIM)
@@ -762,6 +776,26 @@
       items.forEach(i => {
         if (!jsonOnly(i) || !mapped(i.setup)) return;
         i.notInLm = true; i.jsonPlace = placeText(i); i.setup = null; i.shelf = null; i.placement = undefined; i.side = undefined; i.zone = null;
+      });
+    }
+    // Owner's rule (2026-11-10): a unit (a Lab Manager rack item) on a floor that has a server shows THAT server's owner,
+    // derived and never copied. Its own stored owner (opt-owners 'item:<id>', kept as ownOwner) applies only on a floor
+    // without a server (a storage shelf, a rack's bottom bay, Unplaced). The detail, inventory, search and the editor
+    // (read-only there, pointing to the server) all read it.owner / it.ownerFrom.
+    // Several servers on one floor: the first in slot order (rack-positions, then name: the U assignment's order above),
+    // exactly like Lab Manager (unitOwner.js floorServer over buildRackRows), so Racks and the 3D name the same owner.
+    // A storage rack's level is a shelf there ("the server on this shelf"), a rack's a floor.
+    if (live.connected) {
+      const serverOn = new Map();
+      const rankOf = i => (slotRank.has(i) ? slotRank.get(i) : Infinity);
+      const first = (a, b) => (!!a.live?.inDcim !== !!b.live?.inDcim ? !!a.live?.inDcim : rankOf(a) < rankOf(b));
+      items.forEach(i => { if (i.type === 'opt' && i.shelf && (!serverOn.has(i.shelf) || first(i, serverOn.get(i.shelf)))) serverOn.set(i.shelf, i); });
+      items.forEach(i => {
+        if (!i.id.startsWith('LIVE-') || !String(i.type).startsWith('equip-')) return;
+        const srv = i.shelf ? serverOn.get(i.shelf) : null; if (!srv) return;
+        const own = i.owner || null;
+        i.ownOwner = own; i.ownerFrom = { id: srv.id, name: srv.name || srv.id, place: isStorageRack(i.live?.rack, live) ? 'shelf' : 'floor' };
+        i.owner = srv.owner || null; i.live = { ...i.live, owner: i.owner, ownOwner: own };
       });
     }
     // DCIM racks without a physical setup
@@ -1506,6 +1540,7 @@
       else hideRackFront();
     }
     S.selected = id; $('#vFocus').disabled = !id;
+    noteSelection(rec, opts.via);   // sessionStorage, and Lab Manager's address for a selection the user made here
     clearSelectionHelper();   // dispose: a live refresh re-selects every 15 s
     if (rec.group) {
       scene.updateMatrixWorld(true);   // groups rebuilt a moment ago have not been rendered yet: their world matrices are stale
@@ -1523,8 +1558,9 @@
     if (rec.group && !opts.keepCamera && opts.fly !== false && !stayFront) flyTo(rec);
     else if (opts.fromCanvas && !refresh && !stayFront) keepInView(rec);   // a canvas click: no flight, but keep it on screen
   }
-  function closeDetail() {
+  function closeDetail(opts = {}) {
     S.selected = null; S.pwMenuOpen = false; $('#vFocus').disabled = true; clearSelectionHelper(); $('#detail').classList.add('hidden');
+    noteSelection(null, opts?.via);
     $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); renderRackBar(); renderCrumb();
     if (S.front) renderRackFront();
     if (S.sheet.tab === 'details') setSheet(null, S.sideTab === 'tree' ? 'racks' : 'issues'); else updateSheetTabs();
@@ -1582,7 +1618,7 @@
       ${it?.tracking?.count ? `<span class="k">Tracking</span><span class="v">${it.tracking.count} event${it.tracking.count === 1 ? '' : 's'}${it.tracking.last ? ` · last: ${esc(it.tracking.last.action || '?')}${it.tracking.last.at ? ' ' + esc(ago(it.tracking.last.at)) : ''}` : ''}</span>` : ''}
       <span class="k">Lifecycle</span><span class="v">${statusPill(rec.status)}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(def.dcimMappingConfidence)}` : ''}</span>
-      ${it?.type !== 'opt' ? `<span class="k">Owner</span><span class="v"><bdi>${esc(it?.owner || def.owner || '—')}</bdi>${it?.live?.owner ? ' <span class="muted small">(Lab Manager)</span>' : ''}</span>` : ''}
+      ${it?.type !== 'opt' ? `<span class="k">Owner</span><span class="v"><bdi>${esc(it?.owner || def.owner || '—')}</bdi>${it?.ownerFrom ? ` <span class="muted small">(from <bdi>${esc(it.ownerFrom.name)}</bdi>, the server on this ${it.ownerFrom.place || 'floor'})</span>` : it?.live?.owner ? ' <span class="muted small">(Lab Manager)</span>' : ''}</span>` : ''}
       <span class="k">Location</span><span class="v">${locationOf(rec)}</span>
     </div>`;
   }
@@ -1600,7 +1636,25 @@
       more('dq', `Data quality · ${dq.length} issue${dq.length === 1 ? '' : 's'}`, dq.length ? `<ul class="dq-ul">${dq.map(x => `<li>${x}</li>`).join('')}</ul>` : '<div class="muted small">Nothing to correct.</div>') +
       more('photos', 'Photos &amp; notes', `${notes ? `<div class="note" dir="auto">${esc(notes)}</div>` : ''}${photosHtml(rec.def.photos)}${rec.tpl?.source ? `<div class="muted small" style="margin-top:6px">Dimensions: ${esc(rec.tpl.source)}</div>` : ''}`) + '</div>';
   }
-  const locationSec = rec => section('Location', `<div class="loc-row"><span>${esc(placeLabel(rec))}</span>${rec.group ? '<button type="button" class="link" data-focus>Show in 3D</button>' : ''}</div>`);
+  // Lab Manager pages for this object (the twin may be embedded in Lab Manager: the links open in the whole window).
+  // Only Lab Manager records get them: a server or unit Lab Manager lists, a rack mapped to a DCIM rack, a live PDU.
+  function lmRackOf(rec) {
+    if (!rec || !S.live.connected) return '';
+    if (rec.cat === 'setup') return dcimRackOf(rec.def) || '';
+    const it = rec.item; if (rec.cat !== 'item' || !it) return '';
+    const lm = it.type === 'opt' ? it.live?.inDcim === true : rec.id.startsWith('LIVE-') && String(it.type).startsWith('equip-');
+    return lm ? it.live?.rack || dcimRackOf(S.data.setups.find(s => s.id === it.setup) || {}) || '' : '';
+  }
+  function lmHref(tab) { return `${(S.settings.url || '').replace(/\/$/, '')}/?tab=${tab}`; }
+  const lmLink = (href, text, key) => `<a class="link" href="${esc(href)}" target="_top" rel="noopener" data-lm="${key}">${text}</a>`;
+  const locationSec = rec => { const rack = lmRackOf(rec);
+    return section('Location', `<div class="loc-row"><span>${esc(placeLabel(rec))}</span><span class="loc-acts">${rec.group && rec.cat !== 'setup' ? '<button type="button" class="link" data-focus>Show in 3D</button>' : ''}${rack ? lmLink(racksHref(rack), 'Open in Racks', 'racks') : ''}</span></div>`); };
+  // A unit's barcode tracking (Lab Manager rack items): its last scan and how many events; the whole history is in Scan & Track.
+  function trackingSec(rec) {
+    const it = rec.item; if (!it?.tracking || !rec.id.startsWith('LIVE-')) return '';
+    const n = it.tracking.count || 0; const text = `${it.last_seen_at ? 'Last seen ' + ago(it.last_seen_at) : 'Never scanned'}${n ? ` · ${n} event${n === 1 ? '' : 's'}` : ''}`;
+    return section('Tracking', `<div class="loc-row"><span>${esc(text)}</span><span class="loc-acts">${lmLink(lmHref('scan'), 'Full history in Scan &amp; Track', 'scan')}</span></div>`);
+  }
 
   function renderDetail(rec) {
     const def = rec.def; const it = rec.item; const live = S.live.connected; const canOperate = !!window.DCIM_CAN_OPERATE;
@@ -1668,13 +1722,13 @@
         const st = it.live?.status; const dev = it.dcim?.deviceId || it.live?.device?.id; const m = dev && S.live.connected ? S.live.maintenance?.pdus?.[dev] : null;
         const reach = !live ? 'No live data' : !it.live ? 'Not in live DCIM' : st?.reachable === true ? 'Reachable' : st?.reachable === false ? 'Offline' : 'Loading…';
         const on = st?.reachable && st.outlets ? `${st.outlets.filter(o => o.state === 'on').length}/${st.outlets.length}` : '—';
-        html += section('Status', `<div class="sgrid">${cell('Reachable', reach, reach === 'Reachable' ? 'ok' : reach === 'Offline' ? 'bad' : '')}${cell('Load', st?.reachable && st.total_watts != null ? `${(st.total_watts / 1000).toFixed(2)} kW${st.watts_complete === false ? ' (partial)' : ''}` : '—')}${cell('Outlets on', on)}${cell('Maintenance', m ? (Number(m.started_at) ? `Since ${hhmm(Number(m.started_at) * 1000)}` : 'Yes') : live ? 'No' : '—', m ? 'maint' : '')}</div>`);
+        html += section('Status', `<div class="sgrid">${cell('Reachable', reach, reach === 'Reachable' ? 'ok' : reach === 'Offline' ? 'bad' : '')}${cell('Load', st?.reachable && st.total_watts != null ? `${(st.total_watts / 1000).toFixed(2)} kW${st.watts_complete === false ? ' (partial)' : ''}` : '—')}${cell('Outlets on', on)}${cell('Maintenance', m ? (Number(m.started_at) ? `Since ${hhmm(Number(m.started_at) * 1000)}` : 'Yes') : live ? 'No' : '—', m ? 'maint' : '')}</div>${live && it.live?.device ? `<div class="lm-links">${lmLink(lmHref('power'), 'Manage maintenance in Power', 'power')}</div>` : ''}`);
       } else if (it.type === 'kvm') {
         const st = it.live?.status; const ports = st?.ports || [];
         const reach = !live ? 'No live data' : !it.live ? 'Not in live DCIM' : st?.reachable === false ? 'Offline' : st?.reachable ? 'Reachable' : 'Loading…';
         html += section('Status', `<div class="sgrid">${cell('Reachable', reach, reach === 'Reachable' ? 'ok' : reach === 'Offline' ? 'bad' : '')}${cell('Sign-in', st?.reachable ? (st.error ? 'Failed' : 'OK') : '—', st?.error ? 'bad' : '')}${cell('Ports in use', ports.length && !st?.error ? `${ports.filter(p => p.in_use).length} of ${ports.length}` : '—')}${cell('Owner', it.owner || def.owner || '—')}</div>`);
       } else {
-        html += section('Status', `<div class="sgrid">${cell('Type', kindOf(rec))}${cell('Lifecycle', STATUS_LABEL[rec.status] || rec.status)}${cell('Owner', it.owner || def.owner || '—')}${cell(it.last_seen_at ? 'Last seen' : 'Placement', it.last_seen_at ? ago(it.last_seen_at) : (rec.pconf || rec.conf || 'medium') + ' confidence')}</div>`);
+        html += section('Status', `<div class="sgrid">${cell('Type', kindOf(rec))}${cell('Lifecycle', STATUS_LABEL[rec.status] || rec.status)}${cell('Owner', it.owner || def.owner || '—', '', it.ownerFrom ? `From ${it.ownerFrom.name}, the server on this ${it.ownerFrom.place || 'floor'}` : '')}${cell(it.last_seen_at ? 'Last seen' : 'Placement', it.last_seen_at ? ago(it.last_seen_at) : (rec.pconf || rec.conf || 'medium') + ' confidence')}</div>`);
       }
       // ── PDU outlets (unchanged contract: the first .note is the outlet-count note, the heading starts with "Outlets")
       if (it.type === 'pdu') {
@@ -1703,7 +1757,7 @@
           <div class="ogrid ${n <= 8 ? 'k8' : ''}">${ports.map(p => `<div class="ocell ${esc(p.status)}${p.in_use ? ' hl' : ''}" data-kport="${esc(p.number)}" title="${esc(p.label)}"><span class="n">p${esc(p.number)}</span><span class="l">${isDefaultOutletLabel(p.label) ? '—' : esc(p.label)}</span>${p.in_use ? '<span class="w">IN USE</span>' : ''}</div>`).join('')}</div>${failed ? `<div class="err-box" style="margin-top:8px">${esc(st.error)}</div>` : ''}</section>`;
       }
       if (it.liveWarning) html += `<div class="warn-box" role="status">${esc(it.liveWarning)}</div>`;
-      html += locationSec(rec) + moreSections(rec);
+      html += locationSec(rec) + trackingSec(rec) + moreSections(rec);
     } else if (rec.cat === 'setup') {
       // ── rack: power, PDU, issues, temperature; Rack front; DCIM mapping; shelves
       const t = rackTelemetry(def); const pdus = rackPdus(def); const m = pdus.map(p => S.live.maintenance?.pdus?.[p.id]).find(Boolean);
@@ -1712,6 +1766,7 @@
       const pduTxt = !live ? '—' : !pdus.length ? 'None' : m && live ? (Number(m.started_at) ? `Maintenance since ${hhmm(Number(m.started_at) * 1000)}` : 'Maintenance') : pdus.some(p => S.live.pdu?.[p.id]?.reachable === false) ? 'Offline' : pdus.every(p => S.live.pdu?.[p.id]?.reachable) ? 'Reachable' : 'Loading…';
       html += section('Status', `<div class="sgrid">${cell('Power', power)}${cell('PDU', pduTxt, pduTxt === 'Offline' ? 'bad' : pduTxt === 'Reachable' ? 'ok' : /^Maint/.test(pduTxt) ? 'maint' : '')}${cell('Issues', open ? `${open} open` : 'None', open ? 'bad' : '')}${cell('Temperature', t?.temp != null ? `${t.temp.toFixed(1)} °C` : '—')}</div>`);
       html += section('Actions', `<div class="act-row"><button type="button" class="kbtn primary md" data-front="${esc(rec.id)}">Rack front</button><button type="button" class="kbtn secondary md" data-focus>Show in 3D</button></div>`);
+      if (lmRackOf(rec)) html += locationSec(rec);   // a mapped rack: where it is, and "Open in Racks"
       // DCIM rack mapping is read-only here; it is changed only in Edit layout (same save / If-Match path as every layout edit)
       const conn = [`<div class="crow"><span>DCIM rack</span><span class="cst" dir="auto">${esc(dcimRackOf(def) || 'Not mapped')}</span></div>`];
       pdus.forEach(p => {
@@ -1955,7 +2010,7 @@
   function connectFailed(err, status, quiet) {
     S.live.connected = false; S.live.connecting = false; S.live.error = String(err?.message || err || 'no answer'); S.live.errorStatus = status || null;
     if (S.live.timer) clearInterval(S.live.timer);
-    S.live.retrying = S.settings.poll !== false; S.live.timer = S.live.retrying ? setInterval(() => connect({ retry: true }), POLL_MS) : null;
+    S.live.retrying = S.settings.poll !== false; if (S.live.retrying) startLiveTimer(retryConnect, POLL_MS); else S.live.timer = null;
     pill('error', 'Backend error'); $('#sStatus').textContent = 'Error: ' + S.live.error + (location.protocol === 'file:' ? ' — if you opened index.html from disk, make sure the URL includes http:// and the backend allows CORS (it does by default).' : '');
     if (!quiet) toast('Backend connection failed: ' + S.live.error, 'err');
   }
@@ -1975,16 +2030,16 @@
       const devices = S.live.devices;
       pill('online', `${window.LAB_DEMO ? 'DEMO (simulated)' : 'Live'} · ${devices.filter(d => d.kind === 'pdu').length} PDU · ${devices.filter(d => d.kind === 'kvm').length} KVM`);
       $('#sStatus').textContent = `Connected — ${devices.length} devices.`;
-      computeModel(); buildItems(); await refreshStatuses();
+      computeModel(); buildItems(); refsReadyNow(); await refreshStatuses();
       if (session !== liveSession) return;
       if (S.live.timer) clearInterval(S.live.timer);
-      if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, (window.DCIM_ACCOUNT_PREFS.refresh_seconds || 15) * 1000);
+      if (S.settings.poll) startLiveTimer(refreshStatuses, refreshMs());
       toast('Backend connected', 'ok');
     } catch (e) {
       if (session !== liveSession) return;
-      if (S.live.signedOut) { S.live.connecting = false; refreshAttention(); return; }   // 401: signedOut() took over
+      if (S.live.signedOut) { S.live.connecting = false; refreshAttention(); refsReadyNow(); return; }   // 401: signedOut() took over
       connectFailed(e, e.status, !!opts.retry);
-      computeModel(); buildItems();
+      computeModel(); buildItems(); refsReadyNow();
     }
   }
   function disconnect() { ++liveSession; S.live.connected = false; S.live.connecting = false; S.live.error = null; S.live.errorStatus = null; S.live.retrying = false; S.live.signedOut = false; S.live.updatedAt = null; S.live.ping = {}; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.pduAt = {}; S.live.pduErr = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
@@ -1998,7 +2053,7 @@
       toast('Signed out — live data paused until you sign in again', 'err');
       computeModel(); buildItems();
     }
-    if (!S.live.timer) S.live.timer = setInterval(resumeAfterSignIn, POLL_MS);
+    if (!S.live.timer) startLiveTimer(resumeAfterSignIn, POLL_MS);
   }
   async function resumeAfterSignIn() {
     if (!S.live.signedOut) return;
@@ -3442,7 +3497,8 @@
 
   // ───────────────────────────────────────────────────────────── render loop
   function animate() {
-    requestAnimationFrame(animate);
+    rafId = 0; if (paused) return;   // hidden: no frames (resumeTwin starts the loop again)
+    rafId = requestAnimationFrame(animate); S.stats.frames++;
     controls.autoRotate = false;
     const tw = S.tween, animating = !!tw, checked = !!(tw && tw.checked);
     if (S.tween) {
@@ -3476,6 +3532,7 @@
 
   function startMove(itemId) {
     if (!S.editMode || !window.DCIM_CAN_OPERATE) return;
+    if (isFixedInfra(S.recs.get(itemId)?.item?.type)) { toast(FIXED_NOTE, 'err'); return; }
     controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden');
     setLeftAction('pan', false); hideHoverTip();   // Move: a left drag pans, a tap picks the destination (not stored)
     $('#moveText').textContent = `Move ${S.recs.get(itemId)?.def.name || itemId}: tap a shelf in 3D, or`;
@@ -3502,7 +3559,7 @@
     select(id);
   }
   $('#moveGo').onclick = () => { const r = S.recs.get($('#moveTarget').value); if (r) requestMove(r); else toast('Choose a destination first', 'err'); };
-  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); setLeftAction(LS.get('leftAction', 'pan'), false); placeAttnDock(); highlightTargets(false); applyFilters(); if (S.front) renderRackFront(); }
+  function cancelMove() { controls.enableRotate = true; if (moveAsking && choiceOpen) choiceOpen('cancel'); if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); setLeftAction(LS.get('leftAction', 'pan'), false); placeAttnDock(); highlightTargets(false); applyFilters(); if (S.front) renderRackFront(); }
   $('#moveCancel').onclick = cancelMove;
   function highlightTargets(on) {
     for (const r of S.recs.values()) if (r.cat === 'shelf') {
@@ -3552,11 +3609,15 @@
   async function dcimMoveMany(moves, fresh) {
     const dest = moves.map(m => ({ ...m, ...dcimDestination(m.target) }));
     const opts = dest.filter(m => m.kind === 'opt'), equips = dest.filter(m => m.kind === 'rack-item');
+    // Only servers and units are written: never a PDU / KVM, and an outlet label such as "KVM Power" or "empty"
+    // (NON_SERVER_LABEL) never gets a rack slot, position or override from a move (nor from pinning the others).
+    if (dest.some(m => isFixedInfra(m.mit?.type))) throw new Error(FIXED_NOTE);
+    if (opts.some(m => !isServerLabel(m.mit.name || '') || NON_SERVER_LABEL.test(m.mit.dcim.optKey))) throw new Error('Only a server can take a rack slot');
     const clone = x => JSON.parse(JSON.stringify(x || {}));
     if (opts.length) {
       const keys = new Set(opts.map(m => m.mit.dcim.optKey));
       const racks = new Set(opts.flatMap(m => [m.rack, m.mit.live?.rack].filter(Boolean)));
-      const pins = (S.model?.items || []).filter(i => i.type === 'opt' && i.live?.inDcim && i.dcim?.optKey && !keys.has(i.dcim.optKey) && racks.has(i.live.rack) && i.placementConfidence === 'low' && Number.isInteger(i.live.u));
+      const pins = (S.model?.items || []).filter(i => i.type === 'opt' && i.live?.inDcim && i.dcim?.optKey && !keys.has(i.dcim.optKey) && racks.has(i.live.rack) && i.placementConfidence === 'low' && Number.isInteger(i.live.u) && isServerLabel(i.name || ''));
       const ov = clone(fresh.rackOverrides.data), slots = clone(fresh.rackSlots.data), order = clone(fresh.rackOrder.data);
       opts.forEach(m => {
         const key = m.mit.dcim.optKey; const pduRack = S.live.devices.find(d => d.id === m.mit.dcim.pdu)?.rack || null;
@@ -3624,6 +3685,7 @@
     // Lab Manager places a device dropped on a rack's bottom bay on its lowest shelf: say so, and check that shelf
     if (kind && target.cat === 'setup') { const low = recsOf(r => r.cat === 'shelf' && r.setup === target.id).sort((a, b) => a.level - b.level)[0]; if (low) target = low; }
     const plan = { id, rec, mit, def, name: it.name || id, kind, target, from: placeText(it), to: targetText(target, kind), occupant: null, swappable: false, swapWhy: '', source: null, error: null, same: false };
+    if (isFixedInfra(it.type)) { plan.error = FIXED_NOTE; return plan; }   // a PDU / KVM (device or unit) never moves
     if (kind) { try { dcimDestination(target); } catch (e) { plan.error = e.message; } }
     else if (S.live.connected && (it.type === 'opt' || it.type === 'pdu' || it.type === 'kvm' || String(it.type).startsWith('equip-'))) {
       const sid = target.cat === 'shelf' ? target.setup : target.cat === 'setup' ? target.id : null; const rack = sid ? dcimRackOf(S.data.setups.find(s => s.id === sid) || {}) : '';
@@ -3639,6 +3701,7 @@
       const src = it.shelf ? S.recs.get(it.shelf) : null; plan.source = src || null;
       const okind = movesViaDcim(plan.occupant.item); const odef = S.data.items.find(x => x.id === plan.occupant.id);
       if (!src) plan.swapWhy = `${plan.name} is not on a shelf now, so there is no place to swap to.`;
+      else if (isFixedInfra(plan.occupant.item?.type)) plan.swapWhy = `${plan.occupant.def.name || plan.occupant.id} is fixed infrastructure (PDU / KVM): it does not move.`;
       else if (!okind && !odef) plan.swapWhy = `${plan.occupant.def.name || plan.occupant.id} cannot be moved from the twin.`;
       else if (okind) { try { dcimDestination(src); } catch (e) { plan.swapWhy = e.message; } }
       plan.swappable = !plan.swapWhy;
@@ -3709,7 +3772,9 @@
         choice = await askChoice({ title: `Move ${plan.name}?`, html: `${fromTo}<div class="note">${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'move', label: 'Move here', cls: 'primary' }] });
       }
     } finally { moveAsking = false; }
+    // Move mode ended while the dialog was open (cancelMove closes the dialog with 'cancel'): nothing is written
     if (choice !== 'move' && choice !== 'swap') return false;
+    if (S.moveItem !== id) return false;
     cancelMove();
     return performMove(plan, choice === 'swap');
   }
@@ -3741,9 +3806,13 @@
     let html = `<div class="edit-hint">Edit mode · tap another object in the 3D view to switch</div>`;
     if (rec.cat === 'item' && isLive) {
       html += `<section class="sec big">${H('Where')}${where}
-          <div class="edit-note">Live from Lab Manager. Moving it writes the rack and U slot back into Lab Manager.</div>
-          ${movesViaDcim(it) ? `<div class="row-lg">${moveBtn}</div>` : ''}</section>
-        ${dcimOwnerKey(it) ? `<section class="sec big">${field('Owner (saved in Lab Manager)', 'eOwner')}${ownerPicker(it.owner)}</section>` : ''}
+          ${isFixedInfra(it.type) ? `<div class="edit-note">Live from Lab Manager.</div><div class="edit-note" id="eFixed">${esc(FIXED_NOTE)}</div>`
+            : `<div class="edit-note">Live from Lab Manager. Moving it writes the rack and U slot back into Lab Manager.</div>
+          ${movesViaDcim(it) ? `<div class="row-lg">${moveBtn}</div>` : ''}`}</section>
+        ${dcimOwnerKey(it) && it.ownerFrom ? `<section class="sec big">${H('Owner')}<div class="where" id="eOwnerFrom" dir="auto">${esc(it.owner || 'No owner')}</div>
+          <div class="edit-note" id="eOwnerNote">From ${esc(it.ownerFrom.name)}, the server on this ${it.ownerFrom.place || 'floor'}. Change it on the server.</div>
+          <div class="row-lg"><button type="button" class="kbtn secondary md" data-edit="${esc(it.ownerFrom.id)}">Open ${esc(it.ownerFrom.name)}</button></div></section>`
+        : dcimOwnerKey(it) ? `<section class="sec big">${field('Owner (saved in Lab Manager)', 'eOwner')}${ownerPicker(it.owner)}</section>` : ''}
         <section class="sec big"><div class="edit-note">Name, type, PDU and the other details are kept in Lab Manager.</div>
           <div class="row-lg">${racksLink('Edit details in Racks', 'eRacks', it.live?.rack || rackOfSetup(it.setup))}</div></section>`;
     } else if (rec.cat === 'item') {
@@ -3751,8 +3820,8 @@
       html += `<section class="sec big">${field('Name', 'eName')}<input class="in-lg" id="eName" dir="auto" value="${esc(it.name || '')}" />${status(it.status)}</section>
         <section class="sec big">${H('Where')}${where}
           ${it.notInLm ? `<div class="edit-note">Unplaced here because Lab Manager does not list it; lab-data.json keeps it on ${esc(it.jsonPlace || 'a mapped rack')}.</div>` : ''}
-          <div class="row-lg">${moveBtn}${it.notInLm ? '' : '<button type="button" class="kbtn secondary md" id="eUnplace">Unplace</button>'}</div>
-          ${it.setup ? `<div class="row-lg"><button type="button" class="kbtn secondary md" data-side="left">Hang on left side</button><button type="button" class="kbtn secondary md" data-side="right">Hang on right side</button><button type="button" class="kbtn secondary md" data-side="bay">Bottom bay</button></div>` : ''}</section>
+          ${isFixedInfra(it.type) ? `<div class="edit-note" id="eFixed">${esc(FIXED_NOTE)}</div>` : `<div class="row-lg">${moveBtn}${it.notInLm ? '' : '<button type="button" class="kbtn secondary md" id="eUnplace">Unplace</button>'}</div>
+          ${it.setup ? `<div class="row-lg"><button type="button" class="kbtn secondary md" data-side="left">Hang on left side</button><button type="button" class="kbtn secondary md" data-side="right">Hang on right side</button><button type="button" class="kbtn secondary md" data-side="bay">Bottom bay</button></div>` : ''}`}</section>
         <section class="sec big">${field('Type', 'eType')}<select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${esc(ITEM_KIND[t] ? `${ITEM_KIND[t]} (${t})` : t)}</option>`).join('')}</select>
           ${field('Owner', 'eOwner')}${ownerPicker(it.owner)}
           ${field('PDU · outlet', 'ePdu')}
@@ -3766,7 +3835,7 @@
     } else if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
       html += `<section class="sec big">${H('On this shelf')}${where}
-          ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>${esc(kindOf(i))}${i.item.dcim?.outlet ? ' · outlet ' + esc(i.item.dcim.outlet) : ''}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button><button type="button" class="kbtn secondary small" data-move="${esc(i.id)}">Move…</button></div>`).join('') : '<div class="edit-note">Nothing on this shelf.</div>'}
+          ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>${esc(kindOf(i))}${i.item.dcim?.outlet ? ' · outlet ' + esc(i.item.dcim.outlet) : ''}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button>${isFixedInfra(i.item.type) ? '' : `<button type="button" class="kbtn secondary small" data-move="${esc(i.id)}">Move…</button>`}</div>`).join('') : '<div class="edit-note">Nothing on this shelf.</div>'}
           <div class="row-lg">${def.derived || lmRack(def.setup) ? racksLink('Add in Racks…', 'eAddRacks', rackOfSetup(def.setup)) : '<button type="button" class="kbtn secondary md" id="eAddHere">Add a device on this shelf</button>'}</div></section>
         ${def.derived
           // a floor the twin adds from the app's floor model is not in lab-data.json, so its status / notes cannot be saved here
@@ -4034,6 +4103,190 @@
     else return; e.preventDefault();
   });
 
+  // ───────────────────────────────────────────────────────────── Lab Manager links: Show in 3D, live changes, pause
+  // Shared with Lab Manager (frontend/src/twinLinks.js). A ref names a server, a unit or a rack:
+  //   srv:<optKey>   a server: optKey() of its label (trimmed, lower-cased, inner spaces kept)
+  //   item:<id>      a Lab Manager rack item (unit): the twin's LIVE-<id>
+  //   rack:<name>    the rack (setup) whose DCIM rack (or name) it is, case-insensitive, trimmed
+  // In: /twin/index.html?embed=1&select=<encoded ref>, applied once the model is ready (after the first connected
+  // computeModel; offline after the connection attempt): select it, Focus (fly to it) and open its detail panel; and from
+  // the embedding page (same origin, its window only, checked on every message):
+  //   { type: 'twin:select', ref }            the same on the loaded twin (the latest one waits until the model is ready)
+  //   { type: 'twin:data-changed', domains }  data changed somewhere (Lab Manager's change feed): read the live
+  //                                           inventory again for layout / inventory / owners / devices / removed / twin
+  // An unknown ref only toasts "Not found in the 3D: <ref>" and changes nothing.
+  // Out: { type: 'twin:selected', ref | null } to the embedding page (its origin only) whenever what the twin shows differs
+  // from what the page's address names (parentRef): every selection the user makes here, a selection restored on load,
+  // and, after a ref the twin cannot find, what it still shows (null: nothing selected, or an object Lab Manager has no
+  // ref for: a shelf, a PDU …). Lab Manager puts it in its address (?select=), so a reload or a copied link opens on what
+  // the twin showed. The selection is kept in sessionStorage 'twin.sel' (its ref, else 'id:<twin id>', this browser tab
+  // only) and selected again, without a flight, on a load without ?select.
+  const EMBEDDED = (() => { try { return window.parent !== window; } catch { return true; } })();
+  const DATA_DOMAINS = new Set(['layout', 'inventory', 'owners', 'devices', 'removed', 'twin']);
+  const SEL_KEY = 'twin.sel';
+  let refsReady = false, pendingRef = null, restoreRef = null;
+  // The ref Lab Manager's address holds (?select=) as far as the twin knows: the one it opened the twin on or sent last
+  // (as the object found for it), else the last one the twin reported. null: none (a load without ?select).
+  let parentRef = null;
+  function refOf(rec) {
+    if (!rec) return null;
+    if (rec.cat === 'setup') { const rack = rackName(rec.def); return rack ? 'rack:' + rack : null; }
+    const it = rec.item; if (rec.cat !== 'item' || !it) return null;
+    if (it.type === 'opt') { const key = it.dcim?.optKey || optKey(it.name); return key ? 'srv:' + key : null; }
+    if (rec.id.startsWith('LIVE-') && String(it.type).startsWith('equip-') && it.dcimId != null) return 'item:' + it.dcimId;
+    return null;
+  }
+  function findByRef(ref) {
+    const m = /^(srv|item|rack|id):([\s\S]+)$/.exec(typeof ref === 'string' ? ref : ''); if (!m) return null;
+    const [, kind, value] = m; const recs = [...S.recs.values()];
+    if (kind === 'item') return S.recs.has('LIVE-' + value) ? 'LIVE-' + value : null;
+    if (kind === 'id') return S.recs.has(value) ? value : null;
+    if (kind === 'srv') {   // a Lab Manager server first, then one drawn in 3D
+      const key = optKey(value); const hits = recs.filter(r => r.cat === 'item' && r.item?.type === 'opt' && (r.item.dcim?.optKey || optKey(r.item.name)) === key);
+      return (hits.find(r => r.item.live?.inDcim) || hits.find(r => r.group) || hits[0])?.id || null;
+    }
+    const want = value.trim().toLowerCase(); const same = v => String(v || '').trim().toLowerCase() === want; const racks = recs.filter(r => r.cat === 'setup');
+    return (racks.find(r => same(r.def.dcimRack)) || racks.find(r => same(r.def.name) || same(rackName(r.def))))?.id || null;
+  }
+  function tellParent(ref) {
+    parentRef = ref;
+    if (EMBEDDED) { try { window.parent.postMessage({ type: 'twin:selected', ref }, location.origin); } catch { /* the page went away */ } }
+  }
+  // select() / closeDetail() call this. via: 'parent' (a twin:select) or 'link' (?select=): the page's address already
+  // names this object, nothing is posted. Anything else (the user's choice, 'restore' from sessionStorage, the twin
+  // itself) is posted when its ref differs from the address's; a refresh that re-selects the same object posts nothing.
+  function noteSelection(rec, via) {
+    const ref = rec ? refOf(rec) : null;
+    try { if (rec) sessionStorage.setItem(SEL_KEY, ref || 'id:' + rec.id); else sessionStorage.removeItem(SEL_KEY); } catch { /* storage blocked */ }
+    if (via === 'parent' || via === 'link') { parentRef = ref; return; }
+    if (ref !== parentRef) tellParent(ref);
+  }
+  function showRef(ref, via) {
+    const id = findByRef(ref);
+    if (!id) {
+      if (via === 'restore') return false;
+      toast(`Not found in the 3D: ${ref}`, 'err');
+      // the page's address now names a ref the twin cannot show: report what it does show, so the address follows the
+      // twin (a reload then opens on that, not on the same "Not found") and the next selection is compared with it
+      if (via === 'parent' || via === 'link') { const cur = S.selected ? S.recs.get(S.selected) : null; tellParent(cur ? refOf(cur) : null); }
+      return false;
+    }
+    if (S.moveItem) cancelMove();
+    select(id, { via, keepCamera: via === 'restore' });   // select flies to it (Focus) and opens the panel
+    return true;
+  }
+  function refsReadyNow() {
+    if (refsReady || !S.model) return; refsReady = true;
+    const ref = pendingRef, back = restoreRef; pendingRef = restoreRef = null;
+    if (ref) showRef(ref.ref, ref.via); else if (back) showRef(back, 'restore');
+  }
+  window.addEventListener('message', e => {
+    if (e.origin !== location.origin || e.source !== window.parent || !e.data || typeof e.data !== 'object') return;
+    const { type, ref, domains } = e.data;
+    if (type === 'twin:select' && typeof ref === 'string' && ref) {
+      if (refsReady) showRef(ref, 'parent'); else { pendingRef = { ref, via: 'parent' }; restoreRef = null; }
+    } else if (type === 'twin:data-changed') dataChanged(Array.isArray(domains) ? domains.map(String) : []);
+  });
+
+  // Live changes. Embedded, Lab Manager forwards its change feed (twin:data-changed above); opened on its own the twin
+  // reads GET /api/changes itself every 2 s while shown ({ rev, domains: { layout: n, … } }, frontend/src/api/changes.js;
+  // a backend without the feed answers 404: asked again a minute later, quietly). A change that matters reads the live
+  // inventory again (refreshSoon). It waits while the user is moving something or has unsaved editor input (the 1 s
+  // ticker applies it once they are done) and while the twin is hidden (shown again, it refreshes anyway).
+  const CHANGES_MS = 2000;
+  let refreshPending = false, changesTimer = 0, changesLast = null, changesBusy = false, changesQuietUntil = 0;
+  const refreshWaits = () => !!S.moveItem || moveAsking || (S.editMode && S.detailEdited);
+  function dataChanged(domains) {
+    if (!domains.some(d => DATA_DOMAINS.has(d)) || !S.live.connected) return false;
+    if (paused || refreshWaits()) refreshPending = true; else refreshSoon();
+    return true;
+  }
+  function flushPendingRefresh() {
+    if (!refreshPending || paused || refreshWaits()) return;
+    refreshPending = false; if (S.live.connected) refreshSoon();
+  }
+  // the domains whose counters differ between two answers (all of them when the server restarted with lower counters)
+  function changedDomains(before, after) {
+    if (!before || !after) return [];
+    if (!(Number(after.rev) >= Number(before.rev))) return [...DATA_DOMAINS, 'other'];
+    if (Number(after.rev) === Number(before.rev)) return [];
+    const a = after.domains || {}, b = before.domains || {};
+    const out = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(d => Number(a[d] || 0) !== Number(b[d] || 0));
+    return out.length ? out : ['other'];
+  }
+  async function pollChanges() {
+    if (EMBEDDED || paused || changesBusy || !S.live.connected || Date.now() < changesQuietUntil) return;
+    changesBusy = true; S.stats.changePolls++; const session = liveSession;
+    try {
+      const now = await api('/api/changes', { cache: 'no-store' });
+      if (session !== liveSession || !now || typeof now !== 'object' || !Number.isFinite(Number(now.rev))) return;
+      const domains = changedDomains(changesLast, now); changesLast = now;
+      if (domains.length) dataChanged(domains);
+    } catch (e) { if (e.status === 404) changesQuietUntil = Date.now() + 60000; }   // no change feed here: quietly later
+    finally { changesBusy = false; }
+  }
+  function startChangeFeed() { if (!EMBEDDED && !paused && !changesTimer) changesTimer = setInterval(pollChanges, CHANGES_MS); }
+  function stopChangeFeed() { clearInterval(changesTimer); changesTimer = 0; }
+
+  // Paused while hidden. Lab Manager keeps the twin loaded but hidden on its other tabs (the iframe's `hidden`; the
+  // no-build tab bridge, embed-tab.js, uses display: none), and a background browser tab is document.hidden. Then the
+  // twin does no work: no render loop, no 1 s ticker, no live poll / retry timer, no change feed. Shown again it renders
+  // at once and refreshes once. That is why Lab Manager can keep a hidden twin for TWIN_HIDDEN_KEEP_MS (10 min).
+  // Hidden: this tab in the background, the iframe `hidden` / display: none, or not rendered at all (no layout box: an
+  // ancestor of the iframe hidden or display: none, or the iframe taken out of the page).
+  const frameEl = (() => { try { return window.frameElement || null; } catch { return null; } })();
+  function isHiddenNow() {
+    if (document.hidden) return true;
+    try { return !!frameEl && (frameEl.hidden || frameEl.style.display === 'none' || !frameEl.isConnected || frameEl.getClientRects().length === 0); } catch { return false; }
+  }
+  function tick() { S.stats.ticks++; renderLive(); checkPduFreshness(); refreshHoverTip(); placeNavPad(); flushPendingRefresh(); }
+  function startTicker() { if (!paused && !ticker) ticker = setInterval(tick, 1000); }
+  function retryConnect() { connect({ retry: true }); }
+  // The one live timer (poll / reconnect / sign-in check): never started while paused; resumeTwin starts what is due.
+  function startLiveTimer(fn, ms) {
+    if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null;
+    if (paused) { pausedTimer = true; return; }
+    S.live.timer = setInterval(fn, ms);
+  }
+  function restartLiveTimer() {
+    if (S.live.signedOut) startLiveTimer(resumeAfterSignIn, POLL_MS);
+    else if (S.live.retrying) startLiveTimer(retryConnect, POLL_MS);
+    else if (S.live.connected && S.settings.poll) startLiveTimer(refreshStatuses, refreshMs());
+  }
+  function pauseTwin() {
+    if (paused) return; paused = true;
+    if (rafId) cancelAnimationFrame(rafId); rafId = 0;
+    clearInterval(ticker); ticker = 0; stopChangeFeed();
+    if (S.live.timer) { clearInterval(S.live.timer); S.live.timer = null; pausedTimer = true; }
+    cancelNavigation(); dropHoverTrail(); hideHoverTip();
+  }
+  function resumeTwin() {
+    if (!paused) return; paused = false;
+    startTicker(); if (!rafId) rafId = requestAnimationFrame(animate);
+    if (pausedTimer) { pausedTimer = false; restartLiveTimer(); }
+    // one refresh now: whatever changed while hidden shows at once (the change feed then starts from the new counters)
+    refreshPending = false; changesLast = null; startChangeFeed();
+    if (S.live.connected) { if (refreshWaits()) refreshPending = true; else refreshSoon(); }   // not during a Move / unsaved edit
+    else if (S.live.signedOut) resumeAfterSignIn();
+    else if (S.live.retrying && !S.live.connecting) retryConnect();
+  }
+  function checkShown() { if (!S.data) return; if (isHiddenNow()) pauseTwin(); else resumeTwin(); }
+  document.addEventListener('visibilitychange', checkShown);
+  if (frameEl) { try { new MutationObserver(checkShown).observe(frameEl, { attributes: true, attributeFilter: ['hidden', 'style'] }); } catch { /* not observable */ } }
+  // An ancestor of the iframe hidden or shown changes the iframe's box (0 × 0 while not rendered) without touching its
+  // attributes: a ResizeObserver of the embedding page (its realm: it runs with that page's rendering, which goes on
+  // while this frame is hidden) sees that. Disconnected when this page goes away.
+  if (frameEl) {
+    try {
+      const PageRO = frameEl.ownerDocument?.defaultView?.ResizeObserver;
+      if (PageRO) {
+        const ro = new PageRO(() => checkShown()); ro.observe(frameEl);
+        window.addEventListener('pagehide', () => ro.disconnect());
+        window.addEventListener('pageshow', e => { if (e.persisted) { ro.observe(frameEl); checkShown(); } });
+      }
+    } catch { /* not observable */ }
+  }
+
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }
   $$('.tab').forEach(b => b.onclick = () => showTab(b.dataset.tab === 'tree' ? 'racks' : b.dataset.tab));
@@ -4060,23 +4313,31 @@
     VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
     previousCamera.copy(camera.position); previousTarget.copy(controls.target); markView('orbit');
     const racksList = S.racksList; setSheet('half', 'issues'); showTab(LS.get('sideTab', 'attn')); setRacksList(racksList); placeAttnDock();
-    setInterval(() => { renderLive(); checkPduFreshness(); refreshHoverTip(); placeNavPad(); }, 1000);
+    startTicker();
     animate();
+    // Show in 3D: ?select=<ref> (unless a twin:select came first), else the selection this browser tab had before a
+    // reload; applied by refsReadyNow once the model is ready
+    const linked = new URLSearchParams(location.search).get('select');
+    if (linked && !pendingRef) pendingRef = { ref: linked, via: 'link' };
+    else if (!linked && !pendingRef) { try { restoreRef = sessionStorage.getItem(SEL_KEY) || null; } catch { restoreRef = null; } }
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
     if (S.settings.url) connect();
     else if (auto) {
       S.live.connecting = true; pill('connecting', 'Connecting…'); refreshAttention();
       api('/api/version').then(() => connect()).catch(e => {
         S.live.connecting = false;
-        if (S.live.signedOut) { refreshAttention(); return; }
+        if (S.live.signedOut) { refreshAttention(); refsReadyNow(); return; }
         if (e.status === 404 || location.protocol === 'file:') pill('offline', 'Offline · static data');   // static file server: no backend here
         else connectFailed(e, e.status, true);
-        refreshAttention();
+        refreshAttention(); refsReadyNow();
       });
     }
+    if (!auto) refsReadyNow();   // no backend to wait for (opened from disk)
+    startChangeFeed(); checkShown();   // the standalone change feed; paused at once when loaded hidden
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend, rackClearance, keepInView, setLeftAction, zoomBy, rotateView, panBy, frameSafe, placeNavPad };
+  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend, rackClearance, keepInView, setLeftAction, zoomBy, rotateView, panBy, frameSafe, placeNavPad,
+    findByRef, refOf, showRef, dataChanged, pollChanges, checkShown, isPaused: () => paused };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);

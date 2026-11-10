@@ -28,7 +28,7 @@ import AssistantPanel from "./components/assistant/AssistantPanel";
 import useAssistantUseful from "./components/assistant/useAssistantUseful";
 import SshAdmin from "./pages/SshAdmin";
 import RemovedServersView from "./pages/RemovedServersView";
-import { twinSrc, linkedTwinRef, isTwinRef, twinSelectMessage, twinRefToReplay, TWIN_HIDDEN_KEEP_MS } from "./twinLinks";
+import { twinSrc, linkedTwinRef, isTwinRef, twinSelectMessage, twinRefToReplay, twinSelectedAddress, TWIN_SELECTED_MESSAGE, TWIN_HIDDEN_KEEP_MS } from "./twinLinks";
 // The terminal page (and xterm) loads only when an SSH tab is opened.
 const SshTerminal = lazy(() => import("./pages/SshTerminal"));
 const ADMIN_SECTIONS = ["devices", "users", "engineers", "removed", "mapping", "locations", "connections", "assistant", "ssh", "help"];
@@ -80,8 +80,8 @@ function LabManagerApp() {
   // Admin sub-pages with their own shareable ?tab= link; the others open from ?tab=admin&section=<id>.
   const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[new URLSearchParams(location.search).get("tab")] || linkedAdminSection(location.search));
   // The 3D twin iframe: mounted when the Twin tab opens, then kept, hidden, for TWIN_HIDDEN_KEEP_MS on the other tabs,
-  // so a quick tab switch or "Show in 3D" does not reload it. Then it is removed (hidden, it would keep rendering and
-  // polling on this page's main thread) and the next visit loads it again, on the address's ?select=.
+  // so a tab switch or "Show in 3D" does not reload it (hidden, the twin pauses itself: no rendering, no polling). Then
+  // it is removed (its WebGL scene would keep the memory) and the next visit loads it again, on the address's ?select=.
   // "Show in 3D" (goTo("twin", { ref })) loads it with ?select=<ref> while it has not loaded, and posts
   // { type: "twin:select", ref } to the loaded twin (same origin only) once the Twin tab shows it again.
   const [twinFrameSrc, setTwinFrameSrc] = useState(() => (new URLSearchParams(location.search).get("tab") === "twin" ? twinSrc(linkedTwinRef(location.search)) : null));
@@ -199,6 +199,21 @@ function LabManagerApp() {
     twinFocusRef.current = false;
     twinFrameRef.current?.focus();
   }, [twinShown, twinFrameSrc]);
+  // The twin reports each selection the user makes in it ({ type: "twin:selected", ref | null }, from its frame, same
+  // origin only): the address follows (?select=, replacing the history entry, no new step), so a reload or a copied link
+  // opens the twin on it, and Back / Forward know the twin has that ref.
+  useEffect(() => {
+    const onMessage = event => {
+      const frame = twinFrameRef.current;
+      if (event.origin !== location.origin || !frame || event.source !== frame.contentWindow || event.data?.type !== TWIN_SELECTED_MESSAGE) return;
+      const ref = isTwinRef(event.data.ref) ? event.data.ref : null;
+      twinRefRef.current = ref;
+      const next = twinSelectedAddress(window.location.href, ref);
+      if (next) window.history.replaceState(window.history.state, "", next);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
   // A ref for the loaded twin is posted two frames after the Twin tab shows it, so the twin handles it laid out on
   // screen (hidden, it keeps its size and gets no resize). A newer ref before then replaces it.
   useEffect(() => {

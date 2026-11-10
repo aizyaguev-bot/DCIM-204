@@ -815,7 +815,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
         {!detail && summary.maintenancePdus.length > 0 && <span className="maint-badge" title={`In maintenance: ${summary.maintenancePdus.join(", ")}`}>Maintenance</span>}
         {!detail && view.onShelfLabels && <button type="button" className="icon-btn rack-labels" aria-label={`Shelf labels for ${r.rack}`} title="Shelf labels"
           onClick={() => view.onShelfLabels({ rack: r.rack })}>{Icon.tag}</button>}
-        {!detail && <ShowIn3dButton target={rackRef(r.rack)} name={r.rack}/>}
+        {!detail && floors && <ShowIn3dButton target={rackRef(r.rack)} name={r.rack}/>}
         {editMode && canAdmin && onEdit && <button type="button" className="icon-btn" aria-label={`Edit ${r.rack}`} title="Edit rack" onClick={onEdit}>{Icon.edit}</button>}
         {onToggleCollapse && <button type="button" className="icon-btn rack-collapse" aria-expanded={!collapsed} aria-controls={shelvesId}
           aria-label={`${collapsed ? "Show" : "Hide"} shelves of ${r.rack}`} onClick={onToggleCollapse}>
@@ -1500,7 +1500,8 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
         {summary.maintenancePdus.length > 0 && <span className="maint-badge" title={`In maintenance: ${summary.maintenancePdus.join(", ")}`}>Maintenance</span>}
         {editMode && canAdmin && <button type="button" className="racks-btn racks-btn-sm" onClick={onEdit}>{Icon.edit} Edit rack</button>}
         {view.onShelfLabels && <button type="button" className="racks-btn racks-btn-sm" data-action="shelf-labels" onClick={() => view.onShelfLabels({ rack: r.rack })}>{Icon.tag} Shelf labels</button>}
-        <ShowIn3dButton target={rackRef(r.rack)} name={r.rack} text className="racks-btn racks-btn-sm"/>
+        {/* A storage rack has no place in the 3D twin (lab-data.json maps only Rack-01..07): no button that can only fail. */}
+        {rackHasFloors(r.rack) && <ShowIn3dButton target={rackRef(r.rack)} name={r.rack} text className="racks-btn racks-btn-sm"/>}
       </div>
       <RackFigures r={r} summary={summary} equipment={equipment.length} itemsError={view.itemsError} detail/>
       <LoadBar r={r}/>

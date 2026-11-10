@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { optKey, serverRef, itemRef, rackRef, isTwinRef, twinSrc, linkedTwinRef, twinSelectMessage, twinRefToReplay, TWIN_PATH, TWIN_HIDDEN_KEEP_MS } from "../twinLinks.js";
+import { optKey, serverRef, itemRef, rackRef, isTwinRef, twinSrc, linkedTwinRef, twinSelectMessage, twinRefToReplay, twinSelectedAddress, TWIN_PATH, TWIN_HIDDEN_KEEP_MS, TWIN_SELECTED_MESSAGE, TWIN_DATA_CHANGED_MESSAGE } from "../twinLinks.js";
 
 // "Show in 3D": the refs and URL Lab Manager hands to the embedded twin (the shared interface with lab-twin/app.js).
 const read = rel => readFileSync(new URL(rel, import.meta.url), "utf8").replace(/\r\n/g, "\n");
@@ -127,7 +127,9 @@ test("a loaded twin gets a message; one still loading gets ?select= in its src",
 });
 
 test("the twin hidden for TWIN_HIDDEN_KEEP_MS is removed; showing it again first cancels that", () => {
-  assert.equal(TWIN_HIDDEN_KEEP_MS, 20000);
+  // hidden, the twin pauses itself (lab-twin/app.js pauseTwin: no rendering, no polling), so it is kept 10 minutes
+  assert.equal(TWIN_HIDDEN_KEEP_MS, 10 * 60 * 1000);
+  assert.match(read("../../../lab-twin/app.js"), /function pauseTwin\(\) \{/);
   const source = slice(app, "  // Hidden for TWIN_HIDDEN_KEEP_MS", "  // After \"Show in 3D\": focus");
   const run = (twinShown, twinFrameSrc) => {
     const calls = { effect: null, timers: [], cleared: [], post: [], src: [] };
@@ -150,6 +152,44 @@ test("the twin hidden for TWIN_HIDDEN_KEEP_MS is removed; showing it again first
   // the next visit mounts it on the address's ?select=, and "Show in 3D" focuses it
   assert.match(app, /if \(!twinShown \|\| twinFrameSrc\) return;\n\s*const ref = linkedTwinRef\(location\.search\);\n\s*twinRefRef\.current = ref;\n\s*setTwinFrameSrc\(twinSrc\(ref\)\);/);
   assert.match(app, /twinFocusRef\.current = false;\n\s*twinFrameRef\.current\?\.focus\(\);/);
+});
+
+test("twin:selected puts the twin's selection into the Twin tab's address (replaced; checked origin and frame)", () => {
+  assert.equal(TWIN_SELECTED_MESSAGE, "twin:selected");
+  assert.equal(TWIN_DATA_CHANGED_MESSAGE, "twin:data-changed");
+  const at = "https://lab.test/?tab=twin&select=rack%3ARack-03";
+  assert.equal(new URL(twinSelectedAddress(at, "srv:opt21")).searchParams.get("select"), "srv:opt21");
+  assert.equal(twinSelectedAddress(at, "rack:Rack-03"), null, "the same ref: nothing to replace");
+  assert.equal(new URL(twinSelectedAddress(at, null)).searchParams.has("select"), false, "nothing selected: no ?select=");
+  assert.equal(new URL(twinSelectedAddress(at, "junk")).searchParams.has("select"), false, "an invalid ref is not kept");
+  assert.equal(twinSelectedAddress("https://lab.test/?tab=twin", null), null);
+  assert.equal(twinSelectedAddress("https://lab.test/?tab=racks&rack=Rack-03", "srv:opt21"), null, "only on the Twin tab");
+  const kept = new URL(twinSelectedAddress("https://lab.test/?tab=twin&x=1#h", "item:ci-3"));
+  assert.deepEqual([kept.searchParams.get("tab"), kept.searchParams.get("x"), kept.searchParams.get("select"), kept.hash], ["twin", "1", "item:ci-3", "#h"]);
+  // App: only the twin frame's window on this origin; the entry is replaced (its state kept), never pushed
+  const source = slice(app, "    const onMessage = event => {", "    window.addEventListener(\"message\", onMessage);");
+  const href = "https://lab.test/?tab=twin&select=rack%3ARack-03";
+  const run = make => {
+    const calls = [], frame = { contentWindow: { name: "twin" } }, twinRefRef = { current: "rack:Rack-03" };
+    const win = { location: { href }, history: { state: { tab: "twin" }, replaceState: (...a) => calls.push(a), pushState: () => calls.push("push") } };
+    const onMessage = fn(["twinFrameRef", "location", "window", "TWIN_SELECTED_MESSAGE", "isTwinRef", "twinSelectedAddress", "twinRefRef"], source, "onMessage")(
+      { current: frame }, { origin: "https://lab.test" }, win, TWIN_SELECTED_MESSAGE, isTwinRef, twinSelectedAddress, twinRefRef);
+    onMessage(make(frame));
+    return { calls, ref: twinRefRef.current };
+  };
+  const ok = (frame, ref = "srv:opt21") => ({ origin: "https://lab.test", source: frame.contentWindow, data: { type: "twin:selected", ref } });
+  const done = run(frame => ok(frame));
+  assert.equal(done.calls.length, 1);
+  assert.deepEqual(done.calls[0][0], { tab: "twin" }, "the history state is kept");
+  assert.equal(new URL(done.calls[0][2]).searchParams.get("select"), "srv:opt21");
+  assert.equal(done.ref, "srv:opt21", "Back / Forward know the twin has it");
+  assert.deepEqual(run(frame => ({ ...ok(frame), origin: "https://evil.test" })).calls, [], "another origin is ignored");
+  assert.deepEqual(run(() => ({ origin: "https://lab.test", source: { name: "other" }, data: { type: "twin:selected", ref: "srv:opt21" } })).calls, [], "another window is ignored");
+  assert.deepEqual(run(frame => ({ ...ok(frame), data: { type: "twin:select", ref: "srv:opt21" } })).calls, [], "other messages are ignored");
+  const cleared = run(frame => ok(frame, null));
+  assert.equal(cleared.ref, null);
+  assert.equal(new URL(cleared.calls[0][2]).searchParams.has("select"), false);
+  assert.deepEqual(run(frame => ok(frame, "rack:Rack-03")).calls, [], "the address already says so");
 });
 
 test("Back / Forward onto a Show in 3D address shows its ref in the twin again", () => {
