@@ -33,6 +33,7 @@ import { buildShelfLabels } from "../shelfLabels.js";
 import useDialogFocus from "../components/racks/useDialogFocus.js";
 import { useStoredState, useMediaQuery, useDebounced, flash, prefersReducedMotion } from "../components/racks/hooks.js";
 import { mergeServerFeeds } from "../labDisplay.js";
+import { serverRef, itemRef, rackRef } from "../twinLinks.js";
 
 const EditContext = createContext(false);
 // Server actions in the rack views: the KVM port of each server (by server identity), the console opener and SSH
@@ -77,6 +78,32 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
+// "Show in 3D" (every role): opens the 3D Twin tab on this rack, server or unit (App's goTo("twin", { ref })).
+// Nothing when DcimView has no twin link. The text button shows its whole name, "Show Rack-03 in 3D" (label in name).
+// blocked: why it cannot leave Racks now (an edit panel with unsaved changes); it stays focusable, aria-disabled,
+// and a click calls onBlocked instead, so the panel can say why.
+const TwinLinkContext = createContext(null);
+const PANEL_ICON_BTN = "flex items-center justify-center w-7 h-7 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-100 transition border border-zinc-700/50 flex-shrink-0 aria-disabled:opacity-40 aria-disabled:cursor-not-allowed";
+function ShowIn3dButton({ target, name, text = false, className = "icon-btn show-3d", blocked = null, onBlocked = null }) {
+  const showIn3d = useContext(TwinLinkContext);
+  if (!showIn3d || !target) return null;
+  const label = `Show ${name} in 3D`;
+  const open = e => { e.stopPropagation(); if (blocked) onBlocked?.(); else showIn3d(target); };
+  const props = { type: "button", className, "data-action": "show-in-3d", "data-ref": target, "aria-disabled": blocked ? "true" : undefined, onClick: open };
+  return text
+    ? <button {...props} title={blocked || undefined}>{Icon.cube} Show <bdi>{name}</bdi> in 3D</button>
+    : <button {...props} aria-label={label} title={blocked ? `${label}: ${blocked}` : label}>{Icon.cube}</button>;
+}
+// An edit panel's Show in 3D: blocked while the panel has unsaved or saving changes. Returns the note to show after a
+// blocked click ("" otherwise; it goes once the changes are saved or undone) and the onBlocked handler.
+const TWIN_UNSAVED = "Save or undo your changes first: Show in 3D leaves Racks.";
+const TWIN_SAVING = "Your change is still being saved. Show in 3D when it is done.";
+function useTwinBlockedNote(blocked) {
+  const [asked, setAsked] = useState(false);
+  useEffect(() => { if (!blocked) setAsked(false); }, [blocked]);
+  return [asked && blocked ? blocked : "", () => setAsked(true)];
+}
+
 // ─── icons ───────────────────────────────────────────────────────────────────
 const I = ({ d, size = 14, sw = 1.8 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -97,6 +124,7 @@ const Icon = {
   edit:  <I d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" size={11}/>,
   trash: <I d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" size={11}/>,
   tag:   <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><path d="M7 7h.01"/></svg>,
+  cube:  <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5M12 12v10"/></svg>,
 };
 const Spinner = () => (
   <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -787,6 +815,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
         {!detail && summary.maintenancePdus.length > 0 && <span className="maint-badge" title={`In maintenance: ${summary.maintenancePdus.join(", ")}`}>Maintenance</span>}
         {!detail && view.onShelfLabels && <button type="button" className="icon-btn rack-labels" aria-label={`Shelf labels for ${r.rack}`} title="Shelf labels"
           onClick={() => view.onShelfLabels({ rack: r.rack })}>{Icon.tag}</button>}
+        {!detail && <ShowIn3dButton target={rackRef(r.rack)} name={r.rack}/>}
         {editMode && canAdmin && onEdit && <button type="button" className="icon-btn" aria-label={`Edit ${r.rack}`} title="Edit rack" onClick={onEdit}>{Icon.edit}</button>}
         {onToggleCollapse && <button type="button" className="icon-btn rack-collapse" aria-expanded={!collapsed} aria-controls={shelvesId}
           aria-label={`${collapsed ? "Show" : "Hide"} shelves of ${r.rack}`} onClick={onToggleCollapse}>
@@ -1007,6 +1036,9 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
   if (taken && details[taken.field] === taken.value) detailErrors[taken.field] = detailErrors[taken.field] || taken.message;
   const detailError = Object.keys(detailErrors).length > 0;
   const dirty = Object.keys(changes).length > 0;
+  // Show in 3D leaves Racks: blocked while this panel has unsaved changes or a save, move or delete is running.
+  const twinBlocked = busy || moving || deleting ? TWIN_SAVING : dirty ? TWIN_UNSAVED : null;
+  const [twinNote, twinBlockedClick] = useTwinBlockedNote(twinBlocked);
 
   async function submit() {
     if (busy || uError || detailError || !shownName.trim()) return;
@@ -1043,9 +1075,13 @@ function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, 
             <div className="text-sm font-bold text-zinc-100">{item.name}</div>
             <div className="text-[10px] text-zinc-600 mt-0.5">{(ITEM_TYPES[item.type]||ITEM_TYPES.other).label} · {rackName} · {storage ? (item.u ? `Shelf ${item.u}` : "Whole storage unit") : `U${item.u}`}</div>
           </div>
-          <CloseBtn onClose={onClose}/>
+          <div className="flex items-start gap-2 flex-shrink-0">
+            <ShowIn3dButton target={itemRef(item.id)} name={item.name} className={PANEL_ICON_BTN} blocked={twinBlocked} onBlocked={twinBlockedClick}/>
+            <CloseBtn onClose={onClose}/>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {twinNote && <div role="status" data-note="show-in-3d" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">{twinNote}</div>}
           {reloaded && <div role="status" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
             This equipment was changed in another session. The panel now shows the saved values{draft ? " with your edits kept" : ""}. Review them and save again.
           </div>}
@@ -1236,6 +1272,11 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
   const [doing,  setDoing]  = useState(null);
   const [saved,  setSaved]  = useState(null);
   const [error,  setError]  = useState("");
+  // Show in 3D leaves Racks: blocked while a field differs from its saved value (being saved, or not saved yet).
+  const unsaved = name.trim() !== server.name || outlet !== (server.outlet != null ? String(server.outlet) : "")
+    || uSlot !== (curU != null ? String(curU) : "") || swName.trim() !== (curSw.switch || "") || swPort !== (curSw.port != null ? String(curSw.port) : "");
+  const twinBlocked = unsaved ? (doing ? TWIN_SAVING : TWIN_UNSAVED) : null;
+  const [twinNote, twinBlockedClick] = useTwinBlockedNote(twinBlocked);
 
   const isOn = server.state==="on", isOff=server.state==="off";
   const led  = isOn?"bg-nv-400 shadow-[0_0_7px_#76b900]":isOff?"bg-red-700":"bg-zinc-700";
@@ -1279,7 +1320,9 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
                 </div>
               </div>
             </div>
-            <div className="flex items-center gap-2 flex-shrink-0"><SshSlot server={server} size="md"/><CloseBtn onClose={onClose}/></div>
+            <div className="flex items-center gap-2 flex-shrink-0"><SshSlot server={server} size="md"/>
+              <ShowIn3dButton target={serverRef(server.name)} name={server.name} className={PANEL_ICON_BTN} blocked={twinBlocked} onBlocked={twinBlockedClick}/>
+              <CloseBtn onClose={onClose}/></div>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1">
             {[["Rack",server.rack||"—"],["Outlet",server.outlet!=null?`#${server.outlet}`:"—"],storage?["Shelf",curU!=null?(curU>0?`Shelf ${curU}`:"Whole storage"):"Auto"]:["U",curU!=null?`U${curU}`:"auto"],["PDU",pdu?.name||"—"]].map(([k,v])=>(
@@ -1295,6 +1338,7 @@ function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignmen
 
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
           {error&&<div role="alert" className="rounded-lg border border-rose-900/60 bg-rose-950/30 px-3 py-2 text-xs text-rose-300 break-words">{error}</div>}
+          {twinNote&&<div role="status" data-note="show-in-3d" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">{twinNote}</div>}
           {powerGroup&&onRequestPower&&server.pduId&&server.outlet!=null&&(
             <div><SL>Power control · this outlet</SL>
               <PowerActionButtons group={powerGroup} actions={["on","off","cycle"]} scope="feed" feedId={feedId} pending={powerPending}
@@ -1456,6 +1500,7 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
         {summary.maintenancePdus.length > 0 && <span className="maint-badge" title={`In maintenance: ${summary.maintenancePdus.join(", ")}`}>Maintenance</span>}
         {editMode && canAdmin && <button type="button" className="racks-btn racks-btn-sm" onClick={onEdit}>{Icon.edit} Edit rack</button>}
         {view.onShelfLabels && <button type="button" className="racks-btn racks-btn-sm" data-action="shelf-labels" onClick={() => view.onShelfLabels({ rack: r.rack })}>{Icon.tag} Shelf labels</button>}
+        <ShowIn3dButton target={rackRef(r.rack)} name={r.rack} text className="racks-btn racks-btn-sm"/>
       </div>
       <RackFigures r={r} summary={summary} equipment={equipment.length} itemsError={view.itemsError} detail/>
       <LoadBar r={r}/>
@@ -2523,7 +2568,7 @@ function ReadOnlyAsset({ item, owner, onClose, sshName }) {
   useDialogFocus(panelRef, { onEscape: onClose });
   return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
     <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="asset-details-title" tabIndex={-1} onClick={e=>e.stopPropagation()} className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-      <div className="flex justify-between gap-3"><h2 id="asset-details-title" dir="auto" className="font-mono text-xl text-white break-all">{item.name}</h2><div className="flex items-start gap-2 flex-shrink-0">{sshName&&<SshButton name={sshName} size="md"/>}<CloseBtn onClose={onClose}/></div></div>
+      <div className="flex justify-between gap-3"><h2 id="asset-details-title" dir="auto" className="font-mono text-xl text-white break-all">{item.name}</h2><div className="flex items-start gap-2 flex-shrink-0">{sshName&&<SshButton name={sshName} size="md"/>}<ShowIn3dButton target={itemRef(item.id)} name={item.name} className={PANEL_ICON_BTN}/><CloseBtn onClose={onClose}/></div></div>
       <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, "Part number":item.part_number, Model:item.model, "MAC address":item.mac, Barcode:item.barcode, Shelf:item.u, Owner:owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words" dir="auto">{value}</dd></div>)}</dl>
       <p className="text-xs text-zinc-400">Turn on Edit to change this equipment.</p>
     </section>
@@ -2531,7 +2576,7 @@ function ReadOnlyAsset({ item, owner, onClose, sshName }) {
 }
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, onOpenConsole, section: controlledSection, editMode = false, onSummary, maintenance, onSwitchFeeds, onRequestEdit, rack, onRackChange}) {
+export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, onOpenConsole, section: controlledSection, editMode = false, onSummary, maintenance, onSwitchFeeds, onRequestEdit, onShowIn3d = null, rack, onRackChange}) {
   const {canOperate, canAdmin, preferences} = useAccounts();
   const {revision: engineerRevision} = useEngineers();
   const {hidden: removedHidden, refresh: refreshRemoved} = useRemovedServers();
@@ -3193,7 +3238,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     <span>{text} ({loadErrors[store]}).{more ? ` ${more}` : ""}</span> <button type="button" className="racks-link" onClick={() => reloadLayouts(false, true)}>Retry</button></div>;
 
   return (
-    <EditContext.Provider value={editMode}><ServerActionsContext.Provider value={serverActions}><main className={`flex-1 px-4 pb-5 w-full mx-auto ${section === "racks" ? "racks-main" : ""}`}>
+    <TwinLinkContext.Provider value={onShowIn3d}><EditContext.Provider value={editMode}><ServerActionsContext.Provider value={serverActions}><main className={`flex-1 px-4 pb-5 w-full mx-auto ${section === "racks" ? "racks-main" : ""}`}>
       {layoutError&&<div role="alert" className="mb-4 flex items-start gap-3 rounded-lg border border-rose-900 bg-rose-950/30 px-3 py-2 text-sm text-rose-300"><span className="flex-1 break-words">{layoutError}</span><button type="button" className="underline text-xs" onClick={()=>setLayoutError("")}>Dismiss</button></div>}
       {section !== "changelog" && <>
         {loadBanner("items", "Equipment could not load", "Shelves may be missing items.")}
@@ -3238,6 +3283,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onClose={()=>setSelectedServerId(null)}
           onScanUnit={canOperate ? () => openScanUnit({ server: selectedServer }) : null}
           consoleButton={canOperate && onOpenConsole && kvmByServer.get(serverIdentity(selectedServer.name)) ? <KvmButton server={selectedServer}/> : null} sshSlot={<SshSlot server={selectedServer} size="md"/>}
+          twinButton={<ShowIn3dButton target={serverRef(selectedServer.name)} name={selectedServer.name}/>}
           onRemove={canAdmin ? () => setRemoveTarget(selectedServer.name) : null}/>
       </Portal>}
       {selectedServer&&editMode&&(
@@ -3290,6 +3336,6 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
           onClose={() => setScanTarget(null)} onItemsChanged={scanItemsChanged} onToast={showToast}/>
       </Portal>}
       {section === "racks" && <UndoToast toast={toast} onDismiss={dismissToast}/>}
-    </main></ServerActionsContext.Provider></EditContext.Provider>
+    </main></ServerActionsContext.Provider></EditContext.Provider></TwinLinkContext.Provider>
   );
 }

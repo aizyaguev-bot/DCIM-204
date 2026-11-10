@@ -28,6 +28,7 @@ import AssistantPanel from "./components/assistant/AssistantPanel";
 import useAssistantUseful from "./components/assistant/useAssistantUseful";
 import SshAdmin from "./pages/SshAdmin";
 import RemovedServersView from "./pages/RemovedServersView";
+import { twinSrc, linkedTwinRef, isTwinRef, twinSelectMessage, twinRefToReplay, TWIN_HIDDEN_KEEP_MS } from "./twinLinks";
 // The terminal page (and xterm) loads only when an SSH tab is opened.
 const SshTerminal = lazy(() => import("./pages/SshTerminal"));
 const ADMIN_SECTIONS = ["devices", "users", "engineers", "removed", "mapping", "locations", "connections", "assistant", "ssh", "help"];
@@ -78,11 +79,36 @@ function LabManagerApp() {
   const maintenanceSeq = useRef(0);
   // Admin sub-pages with their own shareable ?tab= link; the others open from ?tab=admin&section=<id>.
   const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[new URLSearchParams(location.search).get("tab")] || linkedAdminSection(location.search));
-  function navigate(tab, rack) {
+  // The 3D twin iframe: mounted when the Twin tab opens, then kept, hidden, for TWIN_HIDDEN_KEEP_MS on the other tabs,
+  // so a quick tab switch or "Show in 3D" does not reload it. Then it is removed (hidden, it would keep rendering and
+  // polling on this page's main thread) and the next visit loads it again, on the address's ?select=.
+  // "Show in 3D" (goTo("twin", { ref })) loads it with ?select=<ref> while it has not loaded, and posts
+  // { type: "twin:select", ref } to the loaded twin (same origin only) once the Twin tab shows it again.
+  const [twinFrameSrc, setTwinFrameSrc] = useState(() => (new URLSearchParams(location.search).get("tab") === "twin" ? twinSrc(linkedTwinRef(location.search)) : null));
+  const [twinPost, setTwinPost] = useState(null);   // { ref } for the loaded twin, posted when the Twin tab shows it
+  const twinFrameRef = useRef(null);
+  const twinLoadedRef = useRef(false);
+  // The ref last handed to the twin (in its src or a message), so Back / Forward can tell whether the twin has it.
+  const twinRefRef = useRef(linkedTwinRef(location.search));
+  // "Show in 3D" moves keyboard focus to the twin once the Twin tab shows it (its button is gone with the Racks page).
+  const twinFocusRef = useRef(false);
+  function showInTwin(ref) {
+    twinRefRef.current = ref;
+    if (twinLoadedRef.current && twinFrameRef.current?.contentWindow) setTwinPost({ ref });
+    else { twinLoadedRef.current = false; setTwinFrameSrc(twinSrc(ref)); }
+  }
+  function twinFrameLoaded(event) {
+    twinLoadedRef.current = true;
+    // The twin loading again (a reload or a new src): a "Show in 3D" meanwhile goes into its address instead.
+    try { event.currentTarget.contentWindow.addEventListener("pagehide", () => { twinLoadedRef.current = false; }); } catch { /* not readable */ }
+  }
+  function navigate(tab, rack, select) {
     const url = new URL(window.location.href);
     url.searchParams.set("tab", tab);
     if (rack) url.searchParams.set("rack", rack);
     else url.searchParams.delete("rack");
+    if (select) url.searchParams.set("select", select);
+    else url.searchParams.delete("select");
     if (tab !== "ssh") url.searchParams.delete("server");
     url.searchParams.delete("section");
     const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
@@ -101,7 +127,16 @@ function LabManagerApp() {
   }
   // navigate() plus the rack it wrote to the URL (Header tabs, storage cards, What's new, the assistant).
   // Admin sub-pages keep navigateAdmin(): rackParam is only read on Racks, and every way back there sets it.
-  function goTo(tab, rack) {
+  // goTo("twin", { ref }) is "Show in 3D": the Twin tab (?select=<ref> in the address) opens on that rack, server or unit.
+  function goTo(tab, target) {
+    const { rack, ref } = target && typeof target === "object" ? target : { rack: target };
+    if (tab === "twin" && isTwinRef(ref)) {
+      navigate(tab, undefined, ref);
+      setRackParam(null);
+      twinFocusRef.current = true;
+      showInTwin(ref);
+      return;
+    }
     navigate(tab, rack);
     setRackParam(rack || null);
   }
@@ -130,10 +165,52 @@ function LabManagerApp() {
       setMainTab(nextTab);
       setAdminSection(event.state?.adminSection || section || linkedAdminSection(location.search));
       if (!sameRacks) setEditMode(false);
+      // Back / Forward onto a "Show in 3D" address whose ref the twin was not last given: show that one again, so the
+      // twin and the address agree (a twin that is not loaded opens on it from its src).
+      const replay = nextTab === "twin" && view.kind === "dashboard" ? twinRefToReplay(location.search, twinRefRef.current) : null;
+      if (replay) showInTwin(replay);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+
+  const twinShown = view.kind === "dashboard" && mainTab === "twin";
+  // On the Twin tab without a twin (the first visit, or after it was removed): mount it, on the address's ?select=.
+  useEffect(() => {
+    if (!twinShown || twinFrameSrc) return;
+    const ref = linkedTwinRef(location.search);
+    twinRefRef.current = ref;
+    setTwinFrameSrc(twinSrc(ref));
+  }, [twinShown, twinFrameSrc]);
+  // Hidden for TWIN_HIDDEN_KEEP_MS (another tab or a detail view): remove the twin; showing it again restarts the wait.
+  useEffect(() => {
+    if (twinShown || !twinFrameSrc) return;
+    const timer = setTimeout(() => {
+      twinLoadedRef.current = false;
+      twinRefRef.current = null;
+      setTwinPost(null);
+      setTwinFrameSrc(null);
+    }, TWIN_HIDDEN_KEEP_MS);
+    return () => clearTimeout(timer);
+  }, [twinShown, twinFrameSrc]);
+  // After "Show in 3D": focus the twin's frame on screen, so keyboard and screen reader users continue there.
+  useEffect(() => {
+    if (!twinShown || !twinFrameSrc || !twinFocusRef.current) return;
+    twinFocusRef.current = false;
+    twinFrameRef.current?.focus();
+  }, [twinShown, twinFrameSrc]);
+  // A ref for the loaded twin is posted two frames after the Twin tab shows it, so the twin handles it laid out on
+  // screen (hidden, it keeps its size and gets no resize). A newer ref before then replaces it.
+  useEffect(() => {
+    if (!twinShown || !twinPost) return;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        setTwinPost(null);
+        twinFrameRef.current?.contentWindow?.postMessage(twinSelectMessage(twinPost.ref), location.origin);
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [twinShown, twinPost]);
 
   const [filter, setFilter] = useState("all");
   const [rackFilter, setRackFilter] = useState("all");
@@ -542,6 +619,7 @@ function LabManagerApp() {
           maintenance={maintenance}
           onSwitchFeeds={switchFeeds}
           onRequestEdit={canOperate ? () => setEditMode(true) : null}
+          onShowIn3d={ref => goTo("twin", { ref })}
         />
       )}
 
@@ -569,9 +647,9 @@ function LabManagerApp() {
         </Suspense>
       )}
 
-      {view.kind === "dashboard" && mainTab === "twin" && (
-        <iframe title="3D Digital Twin" src="/twin/index.html?embed=1" className="w-full flex-1 border-0"
-          style={{ minHeight: "calc(100vh - 150px)" }} allow="fullscreen" />
+      {twinFrameSrc && (
+        <iframe ref={twinFrameRef} title="3D Digital Twin" src={twinFrameSrc} hidden={!twinShown} onLoad={twinFrameLoaded}
+          className="w-full flex-1 border-0" style={{ minHeight: "calc(100vh - 150px)" }} allow="fullscreen" />
       )}
 
       {view.kind === "dashboard" && mainTab === "admin" && adminSection === "mapping" && (
