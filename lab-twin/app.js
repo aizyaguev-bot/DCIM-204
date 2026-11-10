@@ -87,6 +87,7 @@
   controls.enableDamping = true;
   controls.minDistance = 0.8;
   controls.maxDistance = 35;
+  let MAX_DISTANCE_BASE = 35;                 // room-based zoom-out limit (init); fitLab lowers maxDistance to 1.6 × overview
   controls.minPolarAngle = 0.02;              // a hair off straight down: the compass heading stays defined
   controls.maxPolarAngle = 1.5;               // ~86°: never level with or under the floor
   canvas.style.touchAction = 'none';
@@ -178,7 +179,7 @@
   function resize() {
     const vp = $('#viewport'); const w = Math.max(1, vp.clientWidth), h = Math.max(1, vp.clientHeight);
     renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
-    placeAttnDock(); layoutLegend(); rackBarEdges(true);
+    placeAttnDock(); layoutLegend(); rackBarEdges(true); placeNavPad();
     const r = vp.getBoundingClientRect(); const root = document.documentElement.style;
     root.setProperty('--vp-cx', Math.round(r.left + r.width / 2) + 'px'); root.setProperty('--vp-bottom', Math.max(0, Math.round(innerHeight - r.bottom)) + 'px');
   }
@@ -1388,6 +1389,7 @@
       top = bTop + mb.offsetHeight + 8;
     }
     const dock = $('#attnDock'); if (dock) { dock.style.top = top + 'px'; dock.style.maxHeight = `max(72px, calc(100% - ${top + 72}px))`; }
+    placeNavPad();   // the camera cluster keeps clear of the banner / dock placed here
   }
   function renderAttention() {
     const list = S.attention || []; const indexed = list.map((e, i) => [e, i]);
@@ -1518,6 +1520,7 @@
     if (S.front && !opts.refresh) renderRackFront();
     // fly only after the detail panel is open: framing uses the final viewport size and overlays
     if (rec.group && !opts.keepCamera && opts.fly !== false && !stayFront) flyTo(rec);
+    else if (opts.fromCanvas && !refresh && !stayFront) keepInView(rec);   // a canvas click: no flight, but keep it on screen
   }
   function closeDetail() {
     S.selected = null; S.pwMenuOpen = false; $('#vFocus').disabled = true; clearSelectionHelper(); $('#detail').classList.add('hidden');
@@ -1814,7 +1817,7 @@
   // Edits are numbered: a save only clears the dirty state if nothing was edited while its request was in flight.
   let editSeq = 0, saveInFlight = false;
   function markDirty() { editSeq++; S.dirty = true; S.data.meta.modified = new Date().toISOString(); LS.set('draft', { savedAt: Date.now(), base: S.dataBase, data: S.data }); updateSaveBar(); }
-  function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = saveInFlight || !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; if (S.moveItem) placeAttnDock(); }
+  function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = saveInFlight || !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; if (S.moveItem) placeAttnDock(); else placeNavPad(); }
   // Content stamp of lab-data.json as this page last read or wrote it (FNV-1a over the canonical JSON text).
   function textStamp(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return str.length + ':' + h.toString(16); }
   const dataStamp = d => textStamp(JSON.stringify(d));
@@ -2328,8 +2331,9 @@
   const MIN_EYE = 0.2;
   const previousCamera = new THREE.Vector3(), previousTarget = new THREE.Vector3();
   const collisionRay = new THREE.Raycaster();
+  // Returns true when a collision or the rack clearance stopped the step short (a checked tween then ends there).
   function constrainNavigation(collisions = true) {
-    if (!S.data) return;
+    if (!S.data) return false; let clamped = false;
     const { width: W, depth: D, height: H } = S.data.room;
     const bounded = controls.target.clone().clamp(new THREE.Vector3(-W - 0.5, 0, -0.5), new THREE.Vector3(0.5, H, D + 0.5));
     camera.position.add(bounded.clone().sub(controls.target)); controls.target.copy(bounded);
@@ -2343,17 +2347,19 @@
         if (hit && hit.distance < distance + 0.18) {
           const fraction = Math.max(0, Math.min(1, (hit.distance - 0.18) / distance));
           camera.position.lerpVectors(previousCamera, camera.position.clone(), fraction);
-          controls.target.lerpVectors(previousTarget, controls.target.clone(), fraction);
+          controls.target.lerpVectors(previousTarget, controls.target.clone(), fraction); clamped = true;
         }
-        keepRackClearance();
+        if (keepRackClearance()) clamped = true;
       }
     }
     camera.lookAt(controls.target);
     previousCamera.copy(camera.position); previousTarget.copy(controls.target);
+    return clamped;
   }
   // The camera keeps RACK_CLEAR metres outside every rack's (and storage unit's) box, so wheel zoom towards the cursor,
   // orbit, pan and inertia never put it inside or against a rack (seen through its own shelves). Only user movement is
-  // checked (not tweens), and a step is judged against the clearance before it: a camera a preset left closer may still
+  // checked (and the button / keyboard zoom, pan, rotate and tilt tweens, `S.tween.checked`; not the Fit / Focus / view
+  // flights), and a step is judged against the clearance before it: a camera a preset left closer may still
   // move away, never nearer. A step that ends too close keeps only the part that stays clear (camera and target
   // together, from where they were, so there is no jump): the zoom / pan / orbit stops in front of the rack, and the
   // remaining inertia and wheel zoom are dropped. (Pulling the camera towards the target instead was tried: repeated
@@ -2383,30 +2389,41 @@
     return best;
   }
   function keepRackClearance() {
-    if (camera.position.distanceToSquared(previousCamera) < 1e-12 && controls.target.distanceToSquared(previousTarget) < 1e-12) return;
-    const obstacles = navObstacles(); if (!obstacles.length) return;
-    const now = rackClearance(camera.position, obstacles); if (now >= RACK_CLEAR) return;
+    if (camera.position.distanceToSquared(previousCamera) < 1e-12 && controls.target.distanceToSquared(previousTarget) < 1e-12) return false;
+    const obstacles = navObstacles(); if (!obstacles.length) return false;
+    const now = rackClearance(camera.position, obstacles); if (now >= RACK_CLEAR) return false;
     const need = Math.min(RACK_CLEAR, rackClearance(previousCamera, obstacles)) - 1e-6;
-    if (now >= need) return;                                   // not nearer than before: a preset left it there
+    if (now >= need) return false;                             // not nearer than before: a preset left it there
     const p1 = camera.position.clone(), t1 = controls.target.clone(); let lo = 0, hi = 1;
     for (let i = 0; i < 14; i++) { const f = (lo + hi) / 2; tmpP.lerpVectors(previousCamera, p1, f); if (rackClearance(tmpP, obstacles) >= need) lo = f; else hi = f; }
     camera.position.lerpVectors(previousCamera, p1, lo); controls.target.lerpVectors(previousTarget, t1, lo);
-    controls.halt();
+    controls.halt(); return true;
   }
-  // pan the whole view (camera + target together) along the floor, relative to where you look
-  function panBy(dx, dz) {
+  // pan the whole view (camera + target together) along the floor, relative to where you look. Quick presses add up: a
+  // step starts where the running pan step was heading; a held key's repeats (`add` false) start from the current view.
+  function panBy(dx, dz, add = true) {
     markView(null);
-    const fwd = controls.target.clone().sub(camera.position); fwd.y = 0; if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
+    const run = add && S.tween && S.tween.kind === 'pan' ? S.tween : null;
+    const P = run ? run.p1.clone() : camera.position.clone(), T = run ? run.t1v.clone() : controls.target.clone();
+    const fwd = T.clone().sub(P); fwd.y = 0; if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
     const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
-    const step = Math.max(0.35, camera.position.distanceTo(controls.target) * 0.25);
+    const step = Math.max(0.35, P.distanceTo(T) * 0.25);
     const d = right.multiplyScalar(dx * step).add(fwd.multiplyScalar(dz * step));
-    tweenCamera(camera.position.clone().add(d), controls.target.clone().add(d), 250);
+    tweenCamera(P.add(d), T.add(d), 250); S.tween.checked = true; S.tween.kind = 'pan';
+  }
+  // A button / key step that a rack stopped short (less than half of it done) says why, at most every 3 s, so the
+  // buttons never just look broken (the rack clearance itself is unchanged).
+  let blockedAt = 0;
+  function blockedHint(tw) {
+    const msg = { turn: 'A rack is in the way: zoom out (−) or pan first', zoom: 'A rack is in the way: the view cannot come closer', pan: 'A rack is in the way' }[tw && tw.kind]; if (!msg) return;
+    const planned = tw.p1.distanceTo(tw.p0); if (planned < 1e-6 || camera.position.distanceTo(tw.p0) >= planned * 0.5) return;
+    const now = performance.now(); if (now - blockedAt < 3000) return; blockedAt = now; toast(msg);
   }
 
   // ───────────────────────────────────────────────────────────── camera views
   function roomCenter() { const { width: W, depth: D, height: H } = S.data.room; return new THREE.Vector3(WX(W / 2), H * 0.35, D / 2); }
   function tweenCamera(pos, target, ms = 700) {
-    controls.cancel();
+    controls.cancel(); hideHoverTip();
     // reduced motion: a zero-length tween jumps in one frame (collision sweep is skipped for that frame, like any tween)
     S.tween = { t0: performance.now(), ms: reducedMotion() ? 0 : ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() };
   }
@@ -2414,16 +2431,42 @@
   // shortest way to azimuth `theta` and / or polar angle `phi`, at the same distance. North up = theta π: the camera
   // looks along +z (data depth, away from the entrance), so the wall opposite the entrance is at the top.
   const NORTH = Math.PI;
-  function orbitTo(theta, phi, ms = 450) {
-    markView(null); const T = controls.target.clone(); const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(T));
+  // `checked`: the tween keeps the rack clearance and stops where it would come too close (rotate / tilt buttons and keys).
+  function orbitTo(theta, phi, ms = 450, checked = true) {
+    const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
     let dt = theta == null ? 0 : theta - s0.theta; dt = Math.atan2(Math.sin(dt), Math.cos(dt));
-    const p1 = phi == null ? s0.phi : Math.max(controls.minPolarAngle, Math.min(controls.maxPolarAngle, phi));
-    const end = new THREE.Spherical(s0.radius, p1, s0.theta + dt).makeSafe();
-    tweenCamera(T.clone().add(new THREE.Vector3().setFromSpherical(end)), T, ms);
-    S.tween.orbit = { T, r: s0.radius, phi0: s0.phi, phi1: end.phi, th0: s0.theta, th1: end.theta };
+    orbitBy(dt, phi, ms, checked);
   }
-  const northUp = () => orbitTo(NORTH, null);
-  function rotateView(dTheta, dPhi) { const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target)); orbitTo(s0.theta + dTheta, s0.phi + dPhi, 250); }
+  // Turn by `dt` rad (not wrapped) to polar angle `phi` (null = keep; else inside the user range) at radius `r1`
+  // (default: the same distance). The frame loop records how far the turn got (`orbit.e`).
+  function orbitBy(dt, phi, ms, checked, kind = 'turn', r1 = null) {
+    markView(null); const T = controls.target.clone(); const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(T));
+    const p1 = phi == null ? s0.phi : Math.max(controls.minPolarAngle, Math.min(controls.maxPolarAngle, phi));
+    const end = new THREE.Spherical(r1 || s0.radius, p1, s0.theta + dt).makeSafe();
+    tweenCamera(T.clone().add(new THREE.Vector3().setFromSpherical(end)), T, ms);
+    S.tween.orbit = { T, r: s0.radius, r1: end.radius, phi0: s0.phi, phi1: end.phi, th0: s0.theta, th1: end.theta, e: 0 }; S.tween.checked = checked; S.tween.kind = kind;
+  }
+  // North up (compass, N) is a recovery like Fit / Focus: it always reaches its heading (unchecked). It never ends
+  // nearer a rack than the clearance allows: when the end pose at this distance would, the turn also backs out (a
+  // larger radius, up to the zoom-out limit) until it is clear.
+  function northUp() {
+    const T = controls.target.clone(), s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(T));
+    let dt = NORTH - s0.theta; dt = Math.atan2(Math.sin(dt), Math.cos(dt));
+    const obstacles = navObstacles(), need = Math.min(RACK_CLEAR, rackClearance(camera.position, obstacles)) - 1e-6;
+    const endAt = r => T.clone().add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(r, s0.phi, s0.theta + dt).makeSafe()));
+    let r = s0.radius;
+    for (let i = 0; i < 24 && obstacles.length && r < controls.maxDistance && rackClearance(endAt(r), obstacles) < need; i++) r = Math.min(controls.maxDistance, r + Math.max(0.1, r * 0.08));
+    orbitBy(dt, null, 450, false, 'north', r);
+  }
+  // Rotate / tilt one step (buttons, Shift + arrows). Quick presses add up: a step starts where the running turn was
+  // heading (at most half a turn ahead); a held key's repeats (`add` false) start from the current view, so holding
+  // a key keeps one pace.
+  function rotateView(dTheta, dPhi, add = true) {
+    const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
+    const o = add && S.tween && S.tween.kind === 'turn' && S.tween.orbit ? S.tween.orbit : null;
+    const left = o ? o.th1 - (o.th0 + (o.th1 - o.th0) * o.e) : 0;
+    orbitBy(Math.max(-Math.PI, Math.min(Math.PI, left + dTheta)), (o ? o.phi1 : s0.phi) + dPhi, 250, true);
+  }
   // compass needle: where north (+z) points on screen, clockwise from up
   let compassDeg = null;
   function updateCompass() {
@@ -2440,7 +2483,9 @@
     // the free part of the view (the phone sheet covers its lower third): fit the room's sphere into that rectangle
     const safe = safeArea(1.2, ['#sheet']); const fw = Math.max(0.35, (safe.r - safe.l) / 2), fh = Math.max(0.35, (safe.t - safe.b) / 2);
     const half = Math.atan(Math.min(Math.tan(vertical / 2) * fh, Math.tan(horizontal / 2) * fw));
-    const distance = Math.min(controls.maxDistance * 0.9, sphere.radius / Math.sin(half) * 1.12);
+    const distance = Math.min(MAX_DISTANCE_BASE * 0.9, sphere.radius / Math.sin(half) * 1.12);
+    // zoom-out limit: 1.6 × the overview distance for this view size (never more than the room-based limit)
+    controls.maxDistance = Math.min(MAX_DISTANCE_BASE, 1.6 * distance);
     const target = roomCenter();
     const direction = (top ? new THREE.Vector3(0, 1, -0.04) : new THREE.Vector3(0.45, 0.95, -1)).normalize();
     const P = target.clone().addScaledVector(direction, distance);
@@ -2570,12 +2615,13 @@
     return { l: s.l / W * 2 - 1, r: s.r / W * 2 - 1, t: 1 - s.t / H * 2, b: 1 - s.b / H * 2 };
   }
   // Where a flight frames its target (NDC): the 3D view below the breadcrumb (~80 px) and above the legend / zoom bar
-  // (~64 px), clear of the phone sheet and of any other overlay that reaches into it, with a 10 % margin (5 % a side).
+  // (~64 px), clear of the phone sheet, the camera cluster at the right edge (#navPadBody; collapsed on a phone) and of
+  // any other overlay that reaches into it, with a 10 % margin (5 % a side).
   function frameSafe() {
     const vp = canvas.getBoundingClientRect(); const W = vp.width, H = vp.height; if (!W || !H) return { l: -1, r: 1, t: 1, b: -1 };
     const shown = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     let l = 0, r = W, t = shown($('#crumb')) || shown($('#rfBar')) ? 80 : 16, b = H - (shown($('#legend')) || shown($('.zoombar')) ? 64 : 16);
-    for (const q of ['#crumb', '#rfBar', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend', '#sheet']) {
+    for (const q of ['#crumb', '#rfBar', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend', '#sheet', '#navPadBody']) {
       const el = $(q); if (!shown(el)) continue; const o = el.getBoundingClientRect(); if (!o.width || !o.height) continue;
       const x0 = o.left - vp.left - 6, x1 = o.right - vp.left + 6, y0 = o.top - vp.top - 6, y1 = o.bottom - vp.top + 6;
       if (x1 <= l || x0 >= r || y1 <= t || y0 >= b) continue;
@@ -2813,7 +2859,7 @@
     const el = $('#crumbPath'); if (!el || !S.data) return;
     const parts = crumbParts();
     el.innerHTML = parts.map((p, i) => `<span dir="auto"${i === parts.length - 1 ? ' class="cur"' : ''}>${esc(p)}</span>`).join('<span class="sep" aria-hidden="true">›</span>');
-    $('#rfNav').classList.toggle('hidden', !S.front);
+    $('#rfNav').classList.toggle('hidden', !S.front); placeNavPad();
     // phone: one 44 px row above the rack — previous rack · this rack · next rack · Overview
     const bar = $('#rfBar'); if (!bar) return;
     if (!S.front) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
@@ -2859,6 +2905,7 @@
       return false;
     };
     if (!fit((sameRow ? z.left - 12 : v.right - 16) - left) && sameRow) { lg.classList.add('lg-above'); fit(v.right - 16 - left); }
+    placeNavPad();
   }
 
   // ───────────────────────────────────────────────────────────── rack front view (one rack, shelf by shelf)
@@ -3002,16 +3049,104 @@
       if (target) requestMove(target); else toast('Choose a shelf, rack or storage destination, or Cancel', 'err');
       return;
     }
-    if (hit) select(hit.object.userData.id, { keepCamera: true });
+    if (hit) select(hit.object.userData.id, { keepCamera: true, fromCanvas: true });
   });
   ['pointerdown', 'wheel', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, () => { S.lastInput = performance.now(); }, { passive: true }));
-  let hoverT = 0;
-  canvas.addEventListener('pointermove', e => {
-    const now = performance.now(); if (now - hoverT < 40) return; hoverT = now; const hit = pickAt(e);
+  // Hover picks at most every 40 ms; the last move inside a 40 ms window is picked when the window ends, so the hover
+  // highlight and the tip never keep an object the pointer has already left.
+  let hoverT = 0, hoverTrail = 0, hoverEv = null;
+  function hoverPick(e) {
+    hoverT = performance.now(); const hit = pickAt(e);
     let id = hit ? hit.object.userData.id : null;
     if (S.moveItem) { const t = hit ? resolveMoveTarget(hit) : null; id = t ? t.id : null; }
     if (id !== S.hover) { setHover(id); }
+    showHoverTip(e, id);
+  }
+  function dropHoverTrail() { clearTimeout(hoverTrail); hoverTrail = 0; hoverEv = null; }
+  canvas.addEventListener('pointermove', e => {
+    const now = performance.now();
+    if (now - hoverT < 40) {
+      placeHoverTip(e); hoverEv = { clientX: e.clientX, clientY: e.clientY, pointerType: e.pointerType, buttons: e.buttons };
+      if (!hoverTrail) hoverTrail = setTimeout(() => { const ev = hoverEv; hoverTrail = 0; hoverEv = null; if (ev) hoverPick(ev); }, Math.max(1, 40 - (now - hoverT)));
+      return;
+    }
+    dropHoverTrail(); hoverPick(e);
   });
+  // Hover tip (mouse only): "name · ON / OFF / ? · Rack-03 › Shelf 2". Never on touch, while a button is held, during a
+  // gesture or a camera tween, or in Move mode (the cyan targets say where things go).
+  const anyHover = window.matchMedia ? window.matchMedia('(any-hover: hover)') : null;
+  let tipId = null, tipHtml = '';
+  function hideHoverTip() { const el = $('#hoverTip'); if (el && !el.hidden) el.hidden = true; tipId = null; tipHtml = ''; }
+  function hoverTipHtml(rec) {
+    const it = rec.item; const su = rackRecOf(rec);
+    const name = rec.cat === 'setup' ? rackName(rec.def) : rec.cat === 'shelf' ? placeLabel(rec) : rec.cat === 'storage' ? [storageName(rec.def), rec.def.name].filter(Boolean).join(' · ') : (rec.def.name || rec.id);
+    const parts = [`<b dir="auto">${esc(name)}</b>`];
+    if (it?.type === 'opt') { const p = powerOf(it); parts.push(`<span class="ht-pw ht-${p}" title="${POWER[p].title}">${POWER[p].t}</span>`); }
+    const where = rec.cat === 'item' ? (rec.shelf && su ? `${rackName(su.def)} › Shelf ${shelfToU(su.id, rec.shelf)}` : placeLabel(rec)) : rec.cat === 'setup' ? rowLabel(zoneRec(rec)) : '';
+    if (where && where !== '—' && where !== name) parts.push(`<span class="ht-w">${esc(where)}</span>`);
+    return parts.join('<span class="ht-sep" aria-hidden="true"> · </span>');
+  }
+  function placeHoverTip(e) {
+    const el = $('#hoverTip'); if (!el || el.hidden) return;
+    if (e.pointerType !== 'mouse' || e.buttons) { hideHoverTip(); return; }
+    const vp = $('#viewport').getBoundingClientRect(); const w = el.offsetWidth, h = el.offsetHeight;
+    let x = e.clientX - vp.left + 14, y = e.clientY - vp.top + 18;
+    if (x + w > vp.width - 8) x = Math.max(8, e.clientX - vp.left - w - 10);
+    if (y + h > vp.height - 8) y = Math.max(8, e.clientY - vp.top - h - 12);
+    el.style.left = Math.round(x) + 'px'; el.style.top = Math.round(y) + 'px';
+  }
+  function showHoverTip(e, id) {
+    const el = $('#hoverTip'); if (!el) return;
+    const rec = id ? S.recs.get(id) : null;
+    if (!rec || rec.cat === 'zone' || e.pointerType !== 'mouse' || e.buttons || activePointers.size || S.moveItem || S.front || S.tween || controls.moving || (anyHover && !anyHover.matches)) { hideHoverTip(); return; }
+    const html = hoverTipHtml(rec); if (tipId !== id || html !== tipHtml) { el.innerHTML = html; tipId = id; tipHtml = html; }
+    el.hidden = false; placeHoverTip(e);
+  }
+  // live data can change under a resting pointer (ON -> OFF, a stale reading): the 1 s ticker rewrites a shown tip
+  function refreshHoverTip() {
+    const el = $('#hoverTip'); if (!el || el.hidden || !tipId) return;
+    const rec = S.recs.get(tipId); if (!rec) { hideHoverTip(); return; }
+    const html = hoverTipHtml(rec); if (html !== tipHtml) { el.innerHTML = html; tipHtml = html; }
+  }
+  canvas.addEventListener('pointerleave', () => { dropHoverTrail(); hideHoverTip(); });
+  canvas.addEventListener('pointerdown', () => { dropHoverTrail(); hideHoverTip(); }, true);
+  controls.addEventListener('start', hideHoverTip);
+
+  // Canvas click: the object stays where it is (no flight), but when the drawer opening narrowed the 3D view (or it sat
+  // under an overlay) camera and target move together, just enough to bring its box inside the frame area (frameSafe):
+  // no turn, no zoom. A box larger than the frame area is centred instead. The target stays on the floor: when the shift
+  // would put it under the floor it slides back along the line of sight (same view; the target bound would otherwise
+  // lift camera and target and undo the vertical part), and the camera stays above MIN_EYE. A checked tween: it keeps
+  // the rack clearance and stops where a rack is in the way. 300 ms; instant with reduced motion.
+  function keepInView(rec) {
+    if (!rec || !rec.group || !S.data) return;
+    scene.updateMatrixWorld(true);
+    const box = rec.cat === 'item' || rec.cat === 'structure' ? meshesBox(rec.meshes) : frameBoxes(rec)[0]; if (!box || box.isEmpty()) return;
+    const safe = frameSafe();
+    fitCam.fov = camera.fov; fitCam.aspect = camera.aspect; fitCam.near = camera.near; fitCam.far = camera.far; fitCam.updateProjectionMatrix();
+    fitCam.quaternion.copy(camera.quaternion);
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+    const corners = []; for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) corners.push(new THREE.Vector3(x, y, z));
+    const centre = box.getCenter(new THREE.Vector3()); const tanH = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    const fix = (lo, hi, a, b) => hi - lo > b - a ? (lo + hi) / 2 - (a + b) / 2 : lo < a ? lo - a : hi > b ? hi - b : 0;
+    let sR = 0, sU = 0;   // along the camera's right (horizontal: no roll) and up vectors
+    for (let i = 0; i < 4; i++) {
+      fitCam.position.copy(camera.position).addScaledVector(right, sR).addScaledVector(up, sU); fitCam.updateMatrixWorld(true);
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const c of corners) {
+        const v = c.clone().applyMatrix4(fitCam.matrixWorldInverse); if (v.z > -fitCam.near * 2) return;   // around the camera: leave it
+        v.applyMatrix4(fitCam.projectionMatrix); x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
+      }
+      const dx = fix(x0, x1, safe.l, safe.r), dy = fix(y0, y1, safe.b, safe.t); if (Math.abs(dx) < 1e-3 && Math.abs(dy) < 1e-3) break;
+      const depth = -centre.clone().applyMatrix4(fitCam.matrixWorldInverse).z;
+      sR += dx * depth * tanH * camera.aspect; sU += dy * depth * tanH;
+    }
+    if (up.y > 1e-6) sU = Math.max(sU, Math.min(0, (MIN_EYE + 0.05 - camera.position.y) / up.y));   // never under the eye floor
+    const shift = new THREE.Vector3().addScaledVector(right, sR).addScaledVector(up, sU); if (shift.lengthSq() < 1e-8) return;
+    const P1 = camera.position.clone().add(shift); let T1 = controls.target.clone().add(shift);
+    if (T1.y < 0) { const d = T1.clone().sub(P1); if (d.y < -1e-6 && P1.y > 0) { T1 = P1.clone().addScaledVector(d, P1.y / -d.y); T1.y = 0; } }
+    markView(null); tweenCamera(P1, T1, 300); S.tween.checked = true; S.tween.kind = 'keep';
+  }
   function pickAt(e) {
     // A live refresh rebuilds item meshes; until the next frame is drawn their world matrices are stale, so a tap
     // right after a refresh would miss them (and in Move mode say "Choose a shelf").
@@ -3308,15 +3443,20 @@
   function animate() {
     requestAnimationFrame(animate);
     controls.autoRotate = false;
-    const animating = !!S.tween;
+    const tw = S.tween, animating = !!tw, checked = !!(tw && tw.checked);
     if (S.tween) {
       const k = S.tween.ms > 0 ? Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms) : 1; const e = 1 - Math.pow(1 - k, 3); const o = S.tween.orbit;
-      if (o) { controls.target.copy(o.T); camera.position.copy(o.T).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(o.r, o.phi0 + (o.phi1 - o.phi0) * e, o.th0 + (o.th1 - o.th0) * e))); }
+      if (o) { o.e = e; controls.target.copy(o.T); camera.position.copy(o.T).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(o.r + (o.r1 - o.r) * e, o.phi0 + (o.phi1 - o.phi0) * e, o.th0 + (o.th1 - o.th0) * e))); }
       else { camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); }
       if (k >= 1) S.tween = null;
     }
     const pulse = reducedMotion() ? 0.85 : 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
-    controls.update(); constrainNavigation(!animating); renderer.render(scene, camera); updateLabels(); updateCompass();
+    // checked tweens (button / keyboard zoom, pan, rotate, tilt) keep the rack clearance like user movement and end
+    // where it stops them; flights (Fit, Focus, views) are not checked
+    // (a step stopped short tells why: blockedHint)
+    controls.update(); const clamped = constrainNavigation(!animating || checked);
+    if (clamped && checked) { if (S.tween === tw) S.tween = null; blockedHint(tw); }
+    renderer.render(scene, camera); updateLabels(); updateCompass();
   }
 
 
@@ -3336,6 +3476,7 @@
   function startMove(itemId) {
     if (!S.editMode || !window.DCIM_CAN_OPERATE) return;
     controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden');
+    setLeftAction('pan', false); hideHoverTip();   // Move: a left drag pans, a tap picks the destination (not stored)
     $('#moveText').textContent = `Move ${S.recs.get(itemId)?.def.name || itemId}: tap a shelf in 3D, or`;
     fillMoveTargets(itemId); applyFilters(); highlightTargets(true); placeAttnDock(); if (S.front) renderRackFront();
     $('#moveTarget').focus({ preventScroll: true });   // keyboard users can choose a destination without the 3D view
@@ -3360,7 +3501,7 @@
     select(id);
   }
   $('#moveGo').onclick = () => { const r = S.recs.get($('#moveTarget').value); if (r) requestMove(r); else toast('Choose a destination first', 'err'); };
-  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); placeAttnDock(); highlightTargets(false); applyFilters(); if (S.front) renderRackFront(); }
+  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); setLeftAction(LS.get('leftAction', 'pan'), false); placeAttnDock(); highlightTargets(false); applyFilters(); if (S.front) renderRackFront(); }
   $('#moveCancel').onclick = cancelMove;
   function highlightTargets(on) {
     for (const r of S.recs.values()) if (r.cat === 'shelf') {
@@ -3761,7 +3902,7 @@
     }
     // one environment window for the whole lab (average of all PDU sensors)
     const env = $('#envPanel'); if (!env) return;
-    if (!S.envPanel || !S.live.connected || (tN === 0 && hN === 0 && !leaks.length)) { env.classList.add('hidden'); return; }
+    if (!S.envPanel || !S.live.connected || (tN === 0 && hN === 0 && !leaks.length)) { if (!env.classList.contains('hidden')) { env.classList.add('hidden'); placeNavPad(); } return; }
     const tAvg = tN ? tSum / tN : null, hAvg = hN ? hSum / hN : null;
     const tCls = tAvg == null ? '' : tAvg > 35 ? 'bad' : tAvg > 24 ? 'warn' : 'ok';
     env.className = 'envpanel' + (leaks.length ? ' leak' : tCls === 'bad' ? ' bad' : tCls === 'warn' ? ' warn' : '');
@@ -3770,6 +3911,7 @@
       <div class="e-row"><span class="e-ic">💧</span><b>${hAvg == null ? '—' : hAvg.toFixed(0) + '%'}</b><small>humidity</small></div>
       <div class="e-row"><span class="e-ic">${leaks.length ? '⚠' : '●'}</span><b class="${leaks.length ? 'e-bad' : 'e-ok'}">${leaks.length ? 'LEAK · ' + esc(leaks.join(', ')) : 'no leaks'}</b></div>
       <div class="e-row e-foot"><small>${kwKnown ? (kwTot / 1000).toFixed(2) + ' kW total' + (kwPartial ? ' (partial)' : '') : '\u2014'}</small></div>`;
+    placeNavPad();
   }
   $('#tHeat').onclick = () => { S.heat = !S.heat; LS.set('heat', S.heat); setPressed($('#tHeat'), S.heat); updateTelemetry(); };
 
@@ -3815,17 +3957,78 @@
   }
   $('#rackBar').addEventListener('scroll', () => rackBarEdges(), { passive: true });
   ['rbPrev', 'rbNext'].forEach((id, i) => { $('#' + id).onclick = () => { const bar = $('#rackBar'); bar.scrollBy({ left: (i ? 1 : -1) * Math.max(120, bar.clientWidth * 0.6), behavior: reducedMotion() ? 'auto' : 'smooth' }); }; });
-  function zoomBy(f) { markView(null); const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
+  // Zoom one step (buttons, + / −). Quick presses add up: a step starts from the distance the running zoom step was
+  // heading to; a held key's repeats (`add` false) start from the current distance.
+  function zoomBy(f, add = true) {
+    markView(null); const dir = camera.position.clone().sub(controls.target);
+    const run = add && S.tween && S.tween.kind === 'zoom' && S.tween.t1v.distanceToSquared(controls.target) < 1e-10 ? S.tween : null;
+    const base = run ? run.p1.distanceTo(run.t1v) : dir.length();
+    const len = Math.min(Math.max(controls.maxDistance, f < 1 ? 0 : base), Math.max(controls.minDistance, base * f)); dir.setLength(len);
+    tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); S.tween.checked = true; S.tween.kind = 'zoom';
+  }
   $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4);   // pan with a drag or the arrow keys, rotate with a right drag
+  // Pan / Rotate switch: what a left drag / one-finger drag does (remembered per browser). Move mode uses Pan without
+  // storing it; leaving Move mode restores the stored choice.
+  // Rotate / tilt buttons turn the view around its target like Shift + arrow keys (15° / 0.12 rad steps).
+  function setLeftAction(mode, save = true) {
+    mode = mode === 'rotate' ? 'rotate' : 'pan'; controls.leftAction = mode;
+    for (const [q, m] of [['#mPan', 'pan'], ['#mRotate', 'rotate']]) { const b = $(q); if (b) { b.setAttribute('aria-pressed', String(m === mode)); b.classList.toggle('on', m === mode); } }
+    if (save) LS.set('leftAction', mode);   // LS wraps localStorage in try / catch
+  }
+  setLeftAction(LS.get('leftAction', 'pan'), false);
+  $('#mPan').onclick = () => setLeftAction('pan');
+  $('#mRotate').onclick = () => { if (S.moveItem) { toast('Move mode: a drag pans; the rotate buttons turn the view', 'err'); return; } setLeftAction('rotate'); };
+  $('#rotL').onclick = () => rotateView(Math.PI / 12, 0); $('#rotR').onclick = () => rotateView(-Math.PI / 12, 0);
+  $('#tiltU').onclick = () => rotateView(0, 0.12); $('#tiltD').onclick = () => rotateView(0, -0.12);
+  function setNavOpen(open) { $('#navPad').classList.toggle('open', open); $('#navMore').setAttribute('aria-expanded', String(open)); }
+  $('#navMore').onclick = () => setNavOpen(!$('#navPad').classList.contains('open'));
+  // phone: Escape inside the opened cluster closes it and gives the focus back to its "Rotate" button
+  $('#navPad').addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || !isPhone() || !$('#navPad').classList.contains('open')) return;
+    e.preventDefault(); e.stopPropagation(); setNavOpen(false); $('#navMore').focus({ preventScroll: true });
+  });
+  // Desktop placement of the camera cluster: one column at the right edge, as near the vertical centre as the other
+  // overlays allow (breadcrumb, save bar, environment panel, move banner, Issues dock above; legend, zoom bar below);
+  // else two columns there; else just left of an overlay (e.g. beside the environment panel in a short window). When
+  // nothing is free (a tiny 3D view): hidden in Move mode (the banner and its destination list come first), otherwise
+  // the place that covers least. Called on resize, by placeAttnDock / layoutLegend / the save bar / the environment
+  // panel / the breadcrumb, and by the 1 s ticker. Phones: styles.css puts the "Rotate" button beside the zoom bar's
+  // compass and hides the cluster in Move mode.
+  function placeNavPad() {
+    const pad = $('#navPad'), vp = $('#viewport'); if (!pad || !vp) return;
+    const reset = () => { pad.classList.remove('two', 'off'); pad.style.left = pad.style.top = pad.style.right = pad.style.transform = ''; };
+    reset(); if (isPhone()) return;
+    const V = vp.getBoundingClientRect(); if (!V.width || !V.height || !pad.offsetParent) return;
+    const shown = el => !!el && !el.classList.contains('hidden') && el.getClientRects().length > 0 && el.offsetWidth > 0;
+    const obst = ['#crumb', '#rfBar', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend'].map(q => $(q)).filter(shown)
+      .map(el => el.getBoundingClientRect()).map(o => ({ l: o.left - V.left - 6, r: o.right - V.left + 6, t: o.top - V.top - 6, b: o.bottom - V.top + 6 }));
+    const cands = [];
+    for (const two of [false, true]) {
+      pad.classList.toggle('two', two); const w = pad.offsetWidth, h = pad.offsetHeight; if (!w || !h) continue;
+      const edge = V.width - 16 - w, lo = 8, hi = V.height - 8 - h, mid = (V.height - h) / 2; if (hi < lo) continue;
+      for (const x0 of [edge, ...obst.map(o => o.l - w).filter(x => x >= 8 && x < edge)]) {
+        const x1 = x0 + w, near = obst.filter(o => o.r > x0 && o.l < x1);
+        const cover = y => near.reduce((s, o) => s + Math.max(0, Math.min(y + h, o.b) - Math.max(y, o.t)) * (Math.min(x1, o.r) - Math.max(x0, o.l)), 0);
+        for (const y of [mid, ...near.flatMap(o => [o.b, o.t - h])].map(y => Math.max(lo, Math.min(hi, y))))
+          cands.push({ two, x: x0, y, c: cover(y), rank: (x0 === edge ? 0 : 2) + (two ? 1 : 0), d: Math.abs(y - mid) + (edge - x0) });
+      }
+    }
+    pad.classList.remove('two'); if (!cands.length) return;
+    const free = cands.filter(p => p.c < 1);
+    if (!free.length && S.moveItem) { pad.classList.add('off'); return; }
+    const p = free.length ? free.sort((a, b) => (a.rank - b.rank) || (a.d - b.d))[0] : cands.sort((a, b) => (a.c - b.c) || (a.rank - b.rank) || (a.d - b.d))[0];
+    pad.classList.toggle('two', p.two); pad.style.top = Math.round(p.y) + 'px'; pad.style.transform = 'none';
+    pad.style.right = Math.round(V.width - (p.x + pad.offsetWidth)) + 'px';
+  }
   $('#vCompass').onclick = () => { hideRackFront(); northUp(); };
   // Arrow keys pan along the floor; Shift + arrows rotate / tilt; + / − zoom; N turns north up.
   window.addEventListener('keydown', e => {
     if (e.target !== canvas && e.target !== document.body) return; if (e.ctrlKey || e.metaKey || e.altKey || S.front) return;
-    const k = e.key; const turn = Math.PI / 12, tilt = 0.12;
-    if (e.shiftKey && k === 'ArrowLeft') rotateView(turn, 0); else if (e.shiftKey && k === 'ArrowRight') rotateView(-turn, 0);
-    else if (e.shiftKey && k === 'ArrowUp') rotateView(0, tilt); else if (e.shiftKey && k === 'ArrowDown') rotateView(0, -tilt);
-    else if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1);
-    else if (k === '+' || k === '=') zoomBy(0.7); else if (k === '-' || k === '_') zoomBy(1.4);
+    const k = e.key; const turn = Math.PI / 12, tilt = 0.12, add = !e.repeat;   // a held key keeps one pace
+    if (e.shiftKey && k === 'ArrowLeft') rotateView(turn, 0, add); else if (e.shiftKey && k === 'ArrowRight') rotateView(-turn, 0, add);
+    else if (e.shiftKey && k === 'ArrowUp') rotateView(0, tilt, add); else if (e.shiftKey && k === 'ArrowDown') rotateView(0, -tilt, add);
+    else if (k === 'ArrowLeft') panBy(-1, 0, add); else if (k === 'ArrowRight') panBy(1, 0, add); else if (k === 'ArrowUp') panBy(0, 1, add); else if (k === 'ArrowDown') panBy(0, -1, add);
+    else if (k === '+' || k === '=') zoomBy(0.7, add); else if (k === '-' || k === '_') zoomBy(1.4, add);
     else if (k === 'n' || k === 'N') northUp();
     else return; e.preventDefault();
   });
@@ -3849,14 +4052,14 @@
     setupFilterUI(); buildStatic(); computeModel(); buildItems();
     setLabelMode(LS.get('labelMode', 'setups'), true); updateSaveBar();
     document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); if (S.kiosk) $('#btnKiosk').textContent = 'Leave lab screen mode'; document.body.classList.toggle('editmode', S.editMode); markEdit(); applyLook(); renderLegend();
-    resize(); controls.maxDistance = Math.max(25, Math.hypot(S.data.room.width, S.data.room.depth, S.data.room.height) * 5);
-    camera.far = controls.maxDistance + 50; camera.updateProjectionMatrix();
+    resize(); MAX_DISTANCE_BASE = Math.max(25, Math.hypot(S.data.room.width, S.data.room.depth, S.data.room.height) * 5); controls.maxDistance = MAX_DISTANCE_BASE;
+    camera.far = MAX_DISTANCE_BASE + 50; camera.updateProjectionMatrix();
     // a target slid down to the floor must land on the room's floor (world x is mirrored: data x → −x)
     controls.groundBounds = new THREE.Box3(new THREE.Vector3(-S.data.room.width - 0.5, -0.01, -0.5), new THREE.Vector3(0.5, 0.01, S.data.room.depth + 0.5));
     VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
     previousCamera.copy(camera.position); previousTarget.copy(controls.target); markView('orbit');
     const racksList = S.racksList; setSheet('half', 'issues'); showTab(LS.get('sideTab', 'attn')); setRacksList(racksList); placeAttnDock();
-    setInterval(() => { renderLive(); checkPduFreshness(); }, 1000);
+    setInterval(() => { renderLive(); checkPduFreshness(); refreshHoverTip(); placeNavPad(); }, 1000);
     animate();
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
     if (S.settings.url) connect();
@@ -3872,7 +4075,7 @@
     }
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend, rackClearance };
+  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend, rackClearance, keepInView, setLeftAction, zoomBy, rotateView, panBy, frameSafe, placeNavPad };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);
