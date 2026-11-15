@@ -711,7 +711,8 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    passed.push('9 the assistant launcher covers no server name or switch at the bottom (1440, 375)');
   }
 
-  // ── 11. dragging in Edit mode: a cooling unit (pointer only) and, unchanged, an OPT within its rack ──
+  // ── 11. dragging in Edit mode: a cooling unit (pointer only) and an OPT onto another OPT of its rack: a swap (asked
+  //       first; the outlet and KVM port stay with the floor, so each server takes the other's) ──
   if(run(11)){
    const p=await open(admin,{width:1440,height:1300});await setEdit(p,true);
    async function drag(from,to){
@@ -740,19 +741,31 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    }finally{
     await putChillers(d=>{Object.assign(d.units.find(u=>u.id==='ch-free'),{rack:keptFree?.rack??null,u:keptFree?.u??null});return d;});
    }
-   const positions=async()=>(await(await admin.c.request.get(origin+'/api/rack-positions')).json());
-   const kept=await positions();
+   const layoutOf=async path=>{const g=await admin.c.request.get(origin+path);return {data:await g.json(),etag:g.headers()['etag']};};
+   const keptLayout={};for(const path of ['/api/rack-positions','/api/rack-slots','/api/rack-overrides'])keptLayout[path]=(await layoutOf(path)).data;
+   const pduLabels=async()=>((await(await admin.c.request.get(origin+'/api/devices/')).json()).find(d=>d.id==='pdu1')||{}).labels||{};
+   const keptLabels=await pduLabels();
+   let swapped=false;
    try{
     await drag(card(p,'Rack-01').locator('[data-u-slot="4"] .shelf-grip'),card(p,'Rack-01').locator('.server-cell[data-server="OPT11"]'));
-    let order;for(let i=0;i<30;i++){order=(await positions())['Rack-01'];if(order?.[0]==='opt14')break;await sleep(150);}
-    assert.equal(order?.[0],'opt14',`OPT14 dragged to the top of Rack-01 (${JSON.stringify(order)})`);
+    const dlg=p.locator('[data-dialog="server-move"]');await dlg.waitFor();
+    assert.match(await dlg.locator('h2').innerText(),/^Swap OPT14 and OPT11$/);
+    await dlg.locator('[data-action="confirm-move"]:not([disabled])').waitFor({timeout:15000});
+    assert.match(await dlg.locator('[data-move-preview]').innerText(),/PDU 01 outlet 1: OPT11 → OPT14/);
+    const done=p.waitForResponse(r=>r.url().endsWith('/api/devices/move-server')&&!JSON.parse(r.request().postData()||'{}').dry_run);
+    await dlg.locator('[data-action="confirm-move"]').click();
+    assert.equal((await done).status(),200);swapped=true;
+    await dlg.waitFor({state:'detached'});
+    await card(p,'Rack-01').locator('[data-u-slot="1"] .server-cell[data-server="OPT14"]').waitFor();
+    const labels=await pduLabels();
+    assert.deepEqual([labels['1'],labels['4']],['OPT14','OPT11'],'OPT14 takes floor 1\'s outlet, OPT11 floor 4\'s');
    }finally{
-    const g=await admin.c.request.get(origin+'/api/rack-positions');const d=await g.json();
-    if(kept['Rack-01']===undefined)delete d['Rack-01'];else d['Rack-01']=kept['Rack-01'];
-    await admin.c.request.put(origin+'/api/rack-positions',{data:d,headers:H(admin,g.headers()['etag'])});
+    if(swapped){const r=await admin.c.request.post(origin+'/api/devices/move-server',{data:{server:'OPT14',target_server:'OPT11',swap:true},headers:H(admin)});assert.equal(r.status(),200,await r.text());}
+    for(const path of Object.keys(keptLayout)){const {etag}=await layoutOf(path);const r=await admin.c.request.put(origin+path,{data:keptLayout[path],headers:H(admin,etag)});assert.equal(r.status(),200,await r.text());}
+    assert.deepEqual(await pduLabels(),keptLabels,'PDU 01 labels restored');
    }
    await setEdit(p,false);await p.close();
-   passed.push('11 Edit-mode drag: a cooling unit onto Rack-05 floor 2 (saved, Undo), not onto a U17 row under Other (nothing saved), an OPT to the top of its rack (order saved; restored)');
+   passed.push('11 Edit-mode drag: a cooling unit onto Rack-05 floor 2 (saved, Undo), not onto a U17 row under Other (nothing saved), OPT14 onto OPT11 in its rack: the swap dialog previews PDU 01 outlet 1 -> OPT14, and the swap gives each the other\'s floor and outlet (restored)');
   }
 
   // ── 12. Operator outside Edit mode: Place… / Move… turn Edit on; in Edit mode cooling units keep reloading, so Undo

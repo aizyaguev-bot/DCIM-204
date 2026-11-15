@@ -94,7 +94,8 @@ export function groupByDevice(ports) {
 export function buildMoveRequest(server, draft, dryRun) {
   if (!server?.key) return { error: "Choose a server to move." };
   const swap = (draft?.mode === "server" ? draft?.swap : (draft?.slotSwap ?? draft?.swap)) !== false;
-  const base = { server: server.key, target_server: null, target_ports: null, target_rack: null, target_slot: null, swap, dry_run: !!dryRun };
+  // units_follow: the units on the floor a server leaves go with it to its new floor (the owner's rule, as on Racks).
+  const base = { server: server.key, target_server: null, target_ports: null, target_rack: null, target_slot: null, swap, dry_run: !!dryRun, units_follow: true };
   if (draft?.mode === "server") {
     if (!draft.target) return { error: "Choose the server whose location this server takes." };
     if (draft.target === server.key) return { error: "Choose a different server." };
@@ -136,6 +137,11 @@ export function normalizeMoveResult(result) {
     positions: asArray(result?.positions).filter(p => !sameLocation(p?.before, p?.after))
       .map(p => ({ server: String(p?.server ?? ""), before: formatLocation(p?.before), after: formatLocation(p?.after) })),
     unplaced: asArray(result?.unplaced).map(String),
+    // The units (rack items) that move with their servers (units_follow), each server's from its old floor to its new.
+    units: asArray(result?.units).map(m => ({ server: String(m?.server ?? ""), from: formatLocation(m?.from), to: formatLocation(m?.to),
+      names: asArray(m?.units).map(u => String(u?.name || u?.id || "Unit")) })),
+    // PDUs/KVMs whose own port names the server does not know now: those ports were not checked.
+    unchecked: asArray(result?.unchecked).filter(d => d && typeof d === "object"),
     // The preview's token: Apply sends it back and the server refuses (409) if the plan changed since.
     planRevision: typeof result?.plan_revision === "string" ? result.plan_revision : null,
   };

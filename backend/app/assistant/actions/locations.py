@@ -30,6 +30,11 @@ from .contracts import DATA_KINDS, ActionError, Impact
 log = logging.getLogger(__name__)
 
 PLAN_KEYS = ("changes", "positions", "unplaced")
+UNITS_KEY = "units"   # the units that move with their servers: in a plan only when there are any
+# PDUs/KVMs whose own port names are unknown now (move-server "unchecked"; a KVM that does not answer, or one nothing
+# read since the backend started): their ports do not follow the move, so the proposal and the summary say so. Not part
+# of the plan (or its revision), as in move-server: a page or card shows it as a warning.
+UNCHECKED_KEY = "unchecked"
 DRIFT_HE = "המיקומים השתנו מאז ההצעה"
 MISSING_HE = "חסרה תמונת מצב פרטית של השינוי; יש ליצור הצעה חדשה."
 _CODES = {400: "invalid", 404: "not_resolved", 409: "invalid", 503: "invalid"}
@@ -59,10 +64,12 @@ def _error(exc: HTTPException) -> ActionError:
 
 
 def plan_of(response) -> dict:
-    """{changes, positions, unplaced} of a planner answer, as plain JSON (exactly what a stored pin reads back as)."""
+    """{changes, positions, unplaced} of a planner answer, plus "units" when units move with the servers (it is part of
+    the plan's revision), as plain JSON (exactly what a stored pin reads back as)."""
     if not isinstance(response, dict) or not all(isinstance(response.get(key), list) for key in PLAN_KEYS):
         raise ActionError(503, "invalid", "The location planner returned no plan")
-    return json.loads(json.dumps({key: response[key] for key in PLAN_KEYS}))
+    keys = PLAN_KEYS + ((UNITS_KEY,) if isinstance(response.get(UNITS_KEY), list) and response[UNITS_KEY] else ())
+    return json.loads(json.dumps({key: response[key] for key in keys}))
 
 
 def _server_text(value) -> str:
@@ -97,8 +104,10 @@ async def request_body(db, req) -> dict:
     server = _server_text(req.server)
     if req.kind == "server_clear":
         return {"server": server}
+    # The units on a floor move with its server (owner, 2026-11-10), as on the Racks and Locations pages.
     if req.target_server is not None:
-        return {"server": server, "target_server": _server_text(req.target_server), "swap": req.kind == "server_swap"}
+        return {"server": server, "target_server": _server_text(req.target_server), "swap": req.kind == "server_swap",
+                "units_follow": True}
     devices = await _port_devices(db)
     ports = []
     for item in req.target_ports or []:
@@ -106,7 +115,7 @@ async def request_body(db, req) -> dict:
         if entry not in ports:
             ports.append(entry)
     # server_move never swaps: an occupied slot or port is refused by the planner instead.
-    body = {"server": server, "target_ports": ports, "swap": False}
+    body = {"server": server, "target_ports": ports, "swap": False, "units_follow": True}
     if req.target_rack is not None:
         body["target_rack"] = req.target_rack
     if req.target_slot is not None:
@@ -115,6 +124,11 @@ async def request_body(db, req) -> dict:
 
 
 async def plan(db, kind: str, body: dict) -> dict:
+    return plan_of(await _plan_response(db, kind, body))
+
+
+async def _plan_response(db, kind: str, body: dict) -> dict:
+    """The planner's whole dry-run answer (the plan, plus notes such as "unchecked")."""
     devices = _planner()
     try:
         if kind == "server_clear":
@@ -123,7 +137,7 @@ async def plan(db, kind: str, body: dict) -> dict:
             response = await devices.plan_move(db, dict(body))
     except HTTPException as exc:
         raise _error(exc) from None
-    return plan_of(response)
+    return response
 
 
 async def _candidates(db, body: dict) -> list[str]:
@@ -148,8 +162,9 @@ def _shown_place(value) -> dict:
     return {"rack": _clean(value.get("rack")), "slot": slot if type(slot) is int else None}
 
 
-def _shown(plan_: dict) -> dict:
-    """Display copy of a plan: device ids must already be safe; names and labels lose control/bidi characters."""
+def _shown(plan_: dict, unchecked_devices=None) -> dict:
+    """Display copy of a plan: device ids must already be safe; names and labels lose control/bidi characters.
+    unchecked_devices: the planner answer's "unchecked" list (not part of the plan), shown as a warning."""
     changes = []
     for item in plan_["changes"]:
         if not isinstance(item, dict) or not isinstance(item.get("device_id"), str) or \
@@ -162,7 +177,18 @@ def _shown(plan_: dict) -> dict:
                   "after": _shown_place(item.get("after"))}
                  for item in plan_["positions"] if isinstance(item, dict)]
     unplaced = [_clean(name) for name in plan_["unplaced"] if isinstance(name, str)]
-    return {"changes": changes, "positions": positions, "unplaced": unplaced}
+    shown = {"changes": changes, "positions": positions, "unplaced": unplaced}
+    units = [{"server": _clean(item.get("server")),
+              "units": [_clean(unit.get("name")) for unit in item.get("units") or [] if isinstance(unit, dict)]}
+             for item in plan_.get(UNITS_KEY) or [] if isinstance(item, dict)]
+    if units:
+        shown[UNITS_KEY] = units
+    unchecked = [{"device_name": _clean(item.get("device_name")) or _clean(item.get("device_id")),
+                  "ports": [_clean(port) for port in item.get("ports") or [] if isinstance(port, (str, int))]}
+                 for item in (unchecked_devices or []) if isinstance(item, dict)]
+    if unchecked:
+        shown[UNCHECKED_KEY] = unchecked
+    return shown
 
 
 def _moved(positions: list[dict]) -> list[dict]:
@@ -176,6 +202,11 @@ def _warnings(kind: str, shown: dict) -> list[str]:
             warnings.append(f"{item['server']} יישאר בלי ארון.")
     if kind == "server_clear":
         warnings.append("המיקום בארון נשמר; רק שמות השקעים והיציאות של השרת יחזרו לשם ברירת המחדל.")
+    for item in shown.get(UNITS_KEY) or []:
+        warnings.append(f"היחידות שבקומה של {item['server']} עוברות איתו: {', '.join(item['units'])}.")
+    for item in shown.get(UNCHECKED_KEY) or []:
+        warnings.append(f"שמות היציאות של {item['device_name']} לא ידועים כרגע (יציאות {', '.join(item['ports'])}): "
+                        "היציאות האלה לא יעודכנו בהעברה. פתח את המכשיר כדי שייקרא, ואז בקש שוב.")
     return list(dict.fromkeys(warnings))
 
 
@@ -188,12 +219,13 @@ async def build_impact(db, req) -> Impact:
         raise ActionError(400, "invalid", "Not a location change")
     body = await request_body(db, req)
     try:
-        planned = await plan(db, req.kind, body)
+        response = await _plan_response(db, req.kind, body)
     except ActionError as exc:
         if exc.status == 404 and not exc.details:
             exc.details = await _candidates(db, body)
         raise
-    shown = _shown(planned)
+    planned = plan_of(response)
+    shown = _shown(planned, response.get(UNCHECKED_KEY))
     if not shown["changes"] and not _moved(shown["positions"]):
         raise ActionError(409, "no_targets", "Nothing would change: the server is already in that location")
     servers = list(dict.fromkeys(item["server"] for item in shown["positions"] if item["server"]))
@@ -221,8 +253,14 @@ def _done_summary(shown: dict) -> str:
     moved = len(_moved(shown["positions"]))
     text = f"השינוי נשמר: {len(shown['changes'])} שינויי תוויות"
     text += f" ו-{moved} שינויי מיקום בארון." if moved else "."
+    units = sum(len(item["units"]) for item in shown.get(UNITS_KEY) or [])
+    if units:
+        text += f" {units} יחידות עברו עם השרתים."
     if shown["unplaced"]:
         text += " נשארו בלי מיקום: " + ", ".join(shown["unplaced"]) + "."
+    unchecked = [item["device_name"] for item in shown.get(UNCHECKED_KEY) or []]
+    if unchecked:
+        text += " היציאות של " + ", ".join(unchecked) + " לא עודכנו: שמות היציאות שם לא היו ידועים."
     return text + " לא בוצע שום שינוי חשמל."
 
 
@@ -278,7 +316,7 @@ async def execute(proposal_id: str, by: str, *, session_factory, settings=None) 
                         status, refused, result["summary_he"] = "refused", "drift", _SUMMARY_REFUSED
                 else:
                     saved = True
-                    result.update(_shown(plan_of(applied)))
+                    result.update(_shown(plan_of(applied), applied.get(UNCHECKED_KEY)))
                     result["summary_he"] = _done_summary(result)
                     status = "succeeded"
     except (Exception, asyncio.CancelledError) as exc:

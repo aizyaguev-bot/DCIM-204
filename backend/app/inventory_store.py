@@ -277,6 +277,10 @@ def _same_u(old, item):
     return type(a) is type(b) and a == b
 
 
+EDITED_NOTE = "Edited in DCIM or 3D Twin"
+MOVED_WITH_SERVER_NOTE = "Moved with its server in DCIM or 3D Twin"
+
+
 def replace_items(payload, expected):
     """Existing DCIM/Twin editors participate in version checks and movement history.
 
@@ -286,61 +290,69 @@ def replace_items(payload, expected):
     reject_non_finite(payload)
     with locked_items() as current:
         check_revision(current, expected)
-        incoming = deepcopy(payload)
-        previous = {item["id"]: (rack, item) for rack, items in current.items() for item in items}
-        seen = set()
-        # Validate the complete shape before uniqueness checks inspect other racks.
-        for rack, items in incoming.items():
-            if not isinstance(rack, str) or not rack.strip() or not isinstance(items, list):
-                raise HTTPException(422, "Expected racks containing equipment lists.")
-            for item in items:
-                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"] or item["id"] in seen:
-                    raise HTTPException(422, "Every equipment item needs a unique ID.")
-                seen.add(item["id"])
-                # New items and changed U values must be valid; an untouched legacy value is kept as it is.
-                _, old = previous.get(item["id"], (None, None))
-                if not valid_u(item.get("u")) and (old is None or not _same_u(old, item)):
-                    raise HTTPException(422, U_SLOT_INVALID)
-                # Like the scanner's link step, a whole-list save never drops or replaces a linked barcode:
-                # a stale DCIM/Twin copy that omits, blanks or changes it keeps the stored one. Restored here,
-                # before any uniqueness check, so a new item cannot take that barcode in the same save.
-                if old is not None and old.get("barcode") and item.get("barcode") != old["barcode"]:
-                    item["barcode"] = old["barcode"]
-                # Serial, part number, model and MAC: a new or changed value is cleaned (trimmed, MAC as 00:1A:...,
-                # blank = absent); an untouched legacy value is kept exactly as it is.
-                for field in DETAIL_FIELDS:
-                    if old is None or item.get(field) != old.get(field):
-                        try:
-                            value = clean_detail(field, item.get(field))
-                        except ValueError as exc:
-                            raise HTTPException(422, str(exc)) from exc
-                        if value:
-                            item[field] = value
-                        else:
-                            item.pop(field, None)
-        # Identity keys are final from here on (only tracking fields change below), so one index of the whole
-        # list serves every changed unit's check: O(n) instead of a rescan of every unit per changed value.
-        # Only changed values are checked, so a legacy collision does not block an unrelated edit.
-        index = None
-        for rack, items in incoming.items():
-            for item in items:
-                old_rack, old = previous.get(item["id"], (None, {}))
-                for field in TRACKING_FIELDS:
-                    item.pop(field, None)
-                    if field in old:
-                        item[field] = deepcopy(old[field])
-                checks = [(str(item[field]), DUPLICATE_CODE) for field in ("barcode", "serial_number")
-                          if item.get(field) != old.get(field) and item.get(field)]
-                if item.get("mac") != old.get("mac") and item.get("mac"):
-                    checks.append((mac_key(item["mac"]), DUPLICATE_MAC))
-                for code, detail in checks:
-                    if index is None:
-                        index = identity_index(incoming)
-                    ensure_unique(incoming, code, item["id"], detail, index)
-                if old and location(old_rack, old) != location(rack, item):
-                    record(item, "moved", location(old_rack, old), location(rack, item), "Edited in DCIM or 3D Twin")
+        incoming = checked_items(current, payload)
         write_items(incoming)
         return incoming
+
+
+def checked_items(current, payload, note=EDITED_NOTE):
+    """`payload`, a whole equipment list, as it is saved over `current`: shape, U slot and unit details (422), then
+    barcode/serial/MAC uniqueness (409); a linked barcode and the tracking fields are kept, a changed place is recorded
+    as "moved" with `note`. Writes nothing (replace_items and save_layouts_with_items write the result)."""
+    incoming = deepcopy(payload)
+    previous = {item["id"]: (rack, item) for rack, items in current.items() for item in items}
+    seen = set()
+    # Validate the complete shape before uniqueness checks inspect other racks.
+    for rack, items in incoming.items():
+        if not isinstance(rack, str) or not rack.strip() or not isinstance(items, list):
+            raise HTTPException(422, "Expected racks containing equipment lists.")
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"] or item["id"] in seen:
+                raise HTTPException(422, "Every equipment item needs a unique ID.")
+            seen.add(item["id"])
+            # New items and changed U values must be valid; an untouched legacy value is kept as it is.
+            _, old = previous.get(item["id"], (None, None))
+            if not valid_u(item.get("u")) and (old is None or not _same_u(old, item)):
+                raise HTTPException(422, U_SLOT_INVALID)
+            # Like the scanner's link step, a whole-list save never drops or replaces a linked barcode:
+            # a stale DCIM/Twin copy that omits, blanks or changes it keeps the stored one. Restored here,
+            # before any uniqueness check, so a new item cannot take that barcode in the same save.
+            if old is not None and old.get("barcode") and item.get("barcode") != old["barcode"]:
+                item["barcode"] = old["barcode"]
+            # Serial, part number, model and MAC: a new or changed value is cleaned (trimmed, MAC as 00:1A:...,
+            # blank = absent); an untouched legacy value is kept exactly as it is.
+            for field in DETAIL_FIELDS:
+                if old is None or item.get(field) != old.get(field):
+                    try:
+                        value = clean_detail(field, item.get(field))
+                    except ValueError as exc:
+                        raise HTTPException(422, str(exc)) from exc
+                    if value:
+                        item[field] = value
+                    else:
+                        item.pop(field, None)
+    # Identity keys are final from here on (only tracking fields change below), so one index of the whole
+    # list serves every changed unit's check: O(n) instead of a rescan of every unit per changed value.
+    # Only changed values are checked, so a legacy collision does not block an unrelated edit.
+    index = None
+    for rack, items in incoming.items():
+        for item in items:
+            old_rack, old = previous.get(item["id"], (None, {}))
+            for field in TRACKING_FIELDS:
+                item.pop(field, None)
+                if field in old:
+                    item[field] = deepcopy(old[field])
+            checks = [(str(item[field]), DUPLICATE_CODE) for field in ("barcode", "serial_number")
+                      if item.get(field) != old.get(field) and item.get(field)]
+            if item.get("mac") != old.get("mac") and item.get("mac"):
+                checks.append((mac_key(item["mac"]), DUPLICATE_MAC))
+            for code, detail in checks:
+                if index is None:
+                    index = identity_index(incoming)
+                ensure_unique(incoming, code, item["id"], detail, index)
+            if old and location(old_rack, old) != location(rack, item):
+                record(item, "moved", location(old_rack, old), location(rack, item), note)
+    return incoming
 
 
 # ─── several layout stores in one step (server moves from the Digital Twin) ───────────────────────────────────────
@@ -375,19 +387,40 @@ def _holds_bytes(path, raw):
         return False
 
 
+ITEMS_STORE = "rack_items"
+ITEMS_SAVE_FAILED = "Equipment inventory could not be saved. Please retry."
+
+
 def save_layouts(entries):
     """Write several layout stores together or not at all. `entries`: [(name, path, payload, expected, default)].
+    Returns {name: new revision}. See save_layouts_with_items."""
+    return save_layouts_with_items(entries)[0]
+
+
+def save_layouts_with_items(entries, items=None, check_only=False):
+    """Write several layout stores, and optionally the equipment list, together or not at all.
+    `entries`: [(name, path, payload, expected, default)]. `items`: None, or (payload, expected) for ITEMS_FILE (the
+    units that move with a server), checked exactly as PUT /api/rack-items checks it (checked_items).
 
     Every file lock is taken first, always in one order (by path). Every If-Match revision is then checked before
-    anything is written: one stale or missing revision means nothing is written (409 / 428). If a write fails, each
-    file already written is put back to its exact previous bytes while the locks are still held, so no other writer
-    can see or save the half-written layout. Synchronous on purpose: nothing awaits while the locks are held."""
+    anything is written: one stale or missing revision means nothing is written (409 / 428). The equipment list is
+    then read (503 when unreadable) and checked (422 / 409) before any write. If a write fails, each file already
+    written is put back to its exact previous bytes while the locks are still held, so no other writer can see or save
+    the half-written layout. Synchronous on purpose: nothing awaits while the locks are held.
+    Returns ({name: new revision, plus "rack_items" when items were saved}, the saved equipment list or None).
+    check_only: every check above, then (None, None) with nothing written (a move that also saves port labels checks
+    its layout part before it commits them)."""
     from contextlib import ExitStack
     for _, _, payload, _, _ in entries:
         reject_non_finite(payload)
+    if items is not None:
+        reject_non_finite(items[0])
+    files = [(path, LAYOUT_SAVE_FAILED) for _, path, *_ in entries]
+    if items is not None:
+        files.append((ITEMS_FILE, ITEMS_SAVE_FAILED))
     with ExitStack() as locks:
-        for _, path, *_ in sorted(entries, key=lambda e: str(e[1])):
-            locks.enter_context(locked_file(path, LAYOUT_SAVE_FAILED))
+        for path, detail in sorted(files, key=lambda f: str(f[0])):
+            locks.enter_context(locked_file(path, detail))
         previous = {}
         for name, path, _, expected, default in entries:
             if not expected:
@@ -400,11 +433,31 @@ def save_layouts(entries):
                 previous[name] = None
             except OSError as exc:
                 raise HTTPException(503, LAYOUT_SAVE_FAILED) from exc
+        saved_items = None
+        if items is not None:
+            payload, expected = items
+            if not expected:
+                raise HTTPException(428, "Reload the rack layout before saving.")
+            current = read_items()
+            if expected != revision(current):
+                raise HTTPException(409, LAYOUT_CONFLICT)
+            saved_items = checked_items(current, payload, MOVED_WITH_SERVER_NOTE)
+            try:
+                previous[ITEMS_STORE] = ITEMS_FILE.read_bytes()
+            except FileNotFoundError:
+                previous[ITEMS_STORE] = None
+            except OSError as exc:
+                raise HTTPException(503, ITEMS_SAVE_FAILED) from exc
+        if check_only:
+            return None, None
         written = []
         try:
             for name, path, payload, _, _ in entries:
                 written.append((name, path))
                 write_json(path, payload)
+            if saved_items is not None:
+                written.append((ITEMS_STORE, ITEMS_FILE))
+                write_items(saved_items)
         except BaseException as exc:
             unrestored = []
             for name, path in written:
@@ -419,7 +472,10 @@ def save_layouts(entries):
             if unrestored:
                 raise HTTPException(503, LAYOUT_NOT_RESTORED.format(files=", ".join(unrestored))) from exc
             raise HTTPException(503, LAYOUT_SAVE_FAILED) from exc
-    return {name: revision(payload) for name, _, payload, _, _ in entries}
+    revisions = {name: revision(payload) for name, _, payload, _, _ in entries}
+    if saved_items is not None:
+        revisions[ITEMS_STORE] = revision(saved_items)
+    return revisions, saved_items
 
 
 # ─── versioned layout store: cooling units keep their previous documents (history + restore) ──────────────────────

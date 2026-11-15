@@ -11,7 +11,7 @@ from sqlalchemy import event, select
 from sqlalchemy.orm.util import identity_key
 
 from ...models import Device, PduMaintenance
-from ... import power_protection
+from ... import changes as change_feed, power_protection
 from .contracts import ActionError, KIND_SPECS, PduResult, Target, TargetResult
 from .models import AssistantActionEvent, AssistantActionProposal
 
@@ -310,7 +310,17 @@ async def execute(proposal_id: str, by: str, *, session_factory, settings, sleep
 
     Returns the stored result; the HTTP handler reloads the row for public JSON.
     Confirmation, ownership, drift and batch admission are checked by the router.
+    Once the action has ended (also as a background job), the live sync counters of what it may have changed are
+    bumped (changes.ACTION_DOMAINS), so every open page shows the new power state or server places.
     """
+    touched = []
+    result = await _execute(proposal_id, by, session_factory=session_factory, settings=settings, sleep=sleep,
+                            touched=touched)
+    await change_feed.record(touched)
+    return result
+
+
+async def _execute(proposal_id: str, by: str, *, session_factory, settings, sleep, touched: list) -> dict:
     result = {"targets": [], "pdus": [], "consoles": [], "summary_he": _SUMMARIES["failed"]}
     try:
         from . import store
@@ -323,6 +333,7 @@ async def execute(proposal_id: str, by: str, *, session_factory, settings, sleep
             request = json.loads(row.request_json or "{}")
             impact = json.loads(row.impact_json or "{}")
             spec = KIND_SPECS[kind]
+            touched.extend(change_feed.ACTION_DOMAINS.get(spec.switch, ()))
             targets = [Target(**item) for item in impact.get("targets", [])]
             pdu_ids = list(dict.fromkeys(impact.get("pdus", [])))
             names = {item["pdu_id"]: item["pdu_name"]
@@ -431,7 +442,10 @@ async def execute(proposal_id: str, by: str, *, session_factory, settings, sleep
             # power. locations.execute applies the pinned plan only if unchanged and records "finished" itself.
             from . import locations
 
-            return await locations.execute(proposal_id, by, session_factory=session_factory, settings=settings)
+            done = await locations.execute(proposal_id, by, session_factory=session_factory, settings=settings)
+            if done.get(locations.UNITS_KEY):
+                touched.append("inventory")   # the units on the floors moved with their servers
+            return done
 
         status = "succeeded" if spec.switch == "none" else _status(result["targets"], result["pdus"])
         if result.get("aborted"):

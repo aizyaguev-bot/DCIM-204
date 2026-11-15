@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { hiddenSet, loadRemoved } from "./api/removedServers.js";
 import { useAccounts } from "./accounts.jsx";
+import { useLiveReload } from "./api/useLiveReload.js";
 
 // Servers an Admin removed from the lab, shared by every page (Racks, monitoring, lab display, owners, SSH, Locations).
 // Pages filter with api/removedServers.js (withoutRemoved / isRemovedServer) against `hidden`. The list is read on
@@ -39,6 +40,8 @@ export function RemovedServersProvider({ children }) {
     window.addEventListener("dcim-removed-servers", quiet);
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); window.removeEventListener("dcim-removed-servers", quiet); };
   }, [refresh, user?.id]);   // read again after a sign-in (the first read may have been refused)
+  // Live sync: a server removed or restored anywhere is hidden or shown on every page at once.
+  useLiveReload(["removed"], () => refresh().catch(() => {}));
   const value = useMemo(() => ({ ...state, refresh }), [state, refresh]);
   return <Removed.Provider value={value}>{children}</Removed.Provider>;
 }

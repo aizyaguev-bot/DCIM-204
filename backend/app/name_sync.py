@@ -24,7 +24,7 @@ import httpx
 from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from . import confirm
+from . import changes as change_feed, confirm
 from .config import get_settings
 from .database import AsyncSessionLocal
 from .models import Device, DeviceNameSync, DeviceNameSyncLease
@@ -484,6 +484,8 @@ async def _worker(device_id: str) -> None:
                         outcome = await _run_batch(device_id, None)
                     finally:
                         await _release(device_id)
+                    if outcome:
+                        await change_feed.record(("devices",))   # live sync: the Sync page shows the written names now
                     if any(r["status"] != "pending" for r in outcome.values()):
                         stalled = 0
                         continue

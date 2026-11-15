@@ -1,4 +1,5 @@
 import { cloneElement, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useLiveReload } from "../api/useLiveReload";
 import { createPortal } from "react-dom";
 import JsBarcode from "jsbarcode";
 import { loadInventory, updateInventory, labelCode, parseLocationCode, MAIN_STORAGE, UNIT_DETAILS, detailText } from "../api/inventory";
@@ -222,6 +223,7 @@ export default function ScanView() {
     finally {
       inFlight.current = false;
       if (mounted.current) { setBusy(false); if (pending.current.length) setDrainTick(t => t + 1); }
+      live.flush();   // a change that came during the scan or save is read now
     }
   }
 
@@ -320,7 +322,7 @@ export default function ScanView() {
   // (unless a destination label was scanned), so a save never moves back a unit another session moved meanwhile.
   // The page state is read through a ref: this runs after the import's request, from an older render.
   const latest = useRef({});
-  latest.current = { selected, destination, destinationChosen };
+  latest.current = { selected, destination, destinationChosen, revision: snapshot?.revision };
   async function refreshQuietly() {
     if (inFlight.current) return;
     try {
@@ -336,6 +338,30 @@ export default function ScanView() {
       setMessage("Inventory refreshed after the import. Review the current location before saving.");
     } catch { /* the next scan or Refresh loads it again */ }
   }
+
+  // Live sync: equipment (and racks) saved elsewhere (another browser, Racks, the 3D twin, the webpe tool) shows here at once. The
+  // list and the revision of the next save become current; a selected unit is taken again from the new list and keeps
+  // the destination chosen here. If that unit itself changed meanwhile, the page says so before anything is saved.
+  // Never while a scan or save runs (it reads the inventory itself); the change is read right after it.
+  async function liveRefresh() {
+    if (inFlight.current || !mounted.current) return;
+    try {
+      const result = await loadInventory();
+      if (!mounted.current || inFlight.current) return;
+      // The same revision as this page already has (its own save, or nothing new): nothing to take in.
+      if (result.revision && result.revision === latest.current.revision) return;
+      const shown = latest.current.selected;
+      setSnapshot(result); setEditRevision(result.revision);
+      if (!shown) return;
+      const current = result.data.items.find(i => i.id === shown.id);
+      if (!current) { setSelected(null); setMessage("The selected equipment was removed in another session."); }
+      else if (JSON.stringify(current) !== JSON.stringify(shown)) {
+        setSelected(current);
+        setMessage("This equipment was changed in another session. Review its current location before saving.");
+      }
+    } catch { /* the next change, scan or Refresh reads it again */ }
+  }
+  const live = useLiveReload(["inventory", "devices"], liveRefresh, { blocked: () => inFlight.current });
 
   function scanKey(e) {
     // A wedge scanner ends each code with Enter or Tab; both submit here and never move focus away.

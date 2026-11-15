@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import {useAccounts} from "../accounts";
 import { useRemovedServers } from "../removedServers.jsx";
 import { withoutRemovedTargets } from "../api/removedServers.js";
+import { useLiveReload } from "../api/useLiveReload";
 
 const input = "w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:border-nv-400";
 const button = "rounded-lg border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800 disabled:opacity-40";
@@ -306,6 +307,10 @@ export default function MonitoringView() {
     load(); const timer = setInterval(load, preferences.refresh_seconds * 1000);
     return () => { controller.abort(); clearInterval(timer); };
   }, [preferences.refresh_seconds]);
+
+  // Live sync: a server moved, swapped, renamed or relabelled anywhere, or a monitor changed, shows here at once (the Rack
+  // column follows the rack layout). An open settings form keeps what is typed in it (TargetSettings).
+  useLiveReload(["monitoring", "layout", "devices", "removed", "power"], () => refresh().catch(e => setError(e.message)));
 
   async function check() {
     setBusy(true); setError(""); setNotice("");

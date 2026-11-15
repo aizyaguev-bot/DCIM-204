@@ -10,7 +10,6 @@ export const STALE_MS = 60_000;          // older data than this: the page is "N
 export const STALE_ALARM_MS = 5 * 60_000; // not live for this long: the banner turns from warning to alarm
 export const ROTATE_MS = 10_000;         // long lists and the rack grid turn a page this often
 export const REQUEST_TIMEOUT_MS = 12_000; // a request that hangs longer counts as failed; the next cycle retries
-export const OVERRIDES_EVERY = 4;        // rack overrides (servers moved between racks) change rarely: every 4th cycle
 export const TICKER_MAX = 12;            // recent changes kept (never an unbounded list)
 export const INCIDENT_LIMIT = 8;
 // Same thresholds as the Dashboard stats bar (components/StatsBar.jsx).

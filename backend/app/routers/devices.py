@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import asyncio, uuid, json, logging, math, pathlib, re, unicodedata
 
-from .. import inventory_store, name_sync
+from .. import changes as change_feed, inventory_store, name_sync
 from ..database import get_db
 from ..models import Device, PduMaintenance
 from ..pdu_locks import maintenance_lock
@@ -262,6 +262,19 @@ async def update_labels(
     dev = await _get_or_404(device_id, db)
     if if_match and if_match != inventory_store.revision(dev.labels):
         raise HTTPException(409, "Port labels on this device were changed in another session. Reload and try again.")
+    new_labels, changed = _labels_after_patch(dev, labels)
+    # Only this device's ports change: no cascade to other PDUs/KVMs, monitors, owners or rack layout files.
+    # A move goes through /move-server and a deliberate global rename through /rename-opt.
+    dev.labels_json = json.dumps(new_labels)
+    await db.commit()
+    # Only now, with the save committed: the ports whose saved label changed go to the PDU/KVM itself.
+    names = await name_sync.queue({device_id: changed})
+    return {"ok": True, "synced": [], "labels_revision": inventory_store.revision(new_labels), **names}
+
+
+def _labels_after_patch(dev, labels: dict) -> tuple[dict, set]:
+    """The rules of PATCH /{id}/labels for a device's whole label map: (the labels to store, the ports whose saved
+    label changes). Raises 422. Reads the status cache only (never a device); writes nothing."""
     old_labels = json.loads(dev.labels_json) if dev.labels_json else {}
     if any(not isinstance(v, str) for v in labels.values()):
         raise HTTPException(422, "Label values must be text")
@@ -280,14 +293,7 @@ async def update_labels(
     for port in (str(k) for k, v in labels.items() if not v):
         if port not in new_labels and _identity(reported.get(port)):
             _clear_port(new_labels, dev, port)
-    # Only this device's ports change: no cascade to other PDUs/KVMs, monitors, owners or rack layout files.
-    # A move goes through /move-server and a deliberate global rename through /rename-opt.
-    dev.labels_json = json.dumps(new_labels)
-    await db.commit()
-    # Only now, with the save committed: the ports whose saved label changed go to the PDU/KVM itself.
-    changed = {p for p in set(old_labels) | set(new_labels) if old_labels.get(p) != new_labels.get(p)}
-    names = await name_sync.queue({device_id: changed})
-    return {"ok": True, "synced": [], "labels_revision": inventory_store.revision(new_labels), **names}
+    return new_labels, {p for p in set(old_labels) | set(new_labels) if old_labels.get(p) != new_labels.get(p)}
 
 
 @router.get("/sync-map")
@@ -340,20 +346,81 @@ def _shown_labels(dev, labels: dict, port: str) -> set:
     return shown
 
 
-def _live_labels(dev) -> dict:
-    """Port names the PDU/KVM itself reported, from the in-memory status cache only (never contacts a device)."""
+def _cached_ports(dev):
+    """The port list of the PDU/KVM's in-memory status cache, or None when the cache has none (the device did not
+    answer its last read, so its status lists no ports, or nothing read it since the backend started)."""
     from . import kvms, pdus
     cached = (pdus._cache if dev.kind == "pdu" else kvms._cache if dev.kind == "kvm" else {}).get(dev.id)
-    entries = (getattr(cached[1], "outlets" if dev.kind == "pdu" else "ports", None) if cached else None) or []
+    entries = getattr(cached[1], "outlets" if dev.kind == "pdu" else "ports", None) if cached else None
+    return list(entries) if entries else None
+
+
+def _live_labels(dev, observed=None) -> dict:
+    """Port names the PDU/KVM itself reported, from the in-memory status cache only (never contacts a device). When
+    the cache has no port list, `observed` ({device id: {port: name}}, from _observed_labels) gives the names it
+    reported at its last scheduled check instead."""
+    entries = _cached_ports(dev)
+    if entries is None:
+        return dict((observed or {}).get(dev.id) or {})
     return {str(e.number): e.label for e in entries if isinstance(getattr(e, "label", None), str) and e.label.strip()}
 
 
-def _effective_labels(dev, saved: dict) -> dict:
+def _effective_labels(dev, saved: dict, observed=None) -> dict:
     """What the pages show: saved labels, and for a port with nothing saved, the name the device reports."""
     labels = dict(saved)
-    for port, label in _live_labels(dev).items():
+    for port, label in _live_labels(dev, observed).items():
         labels.setdefault(port, label)
     return labels
+
+
+async def _observed_labels(db, devices) -> dict:
+    """{device id: {port: name}}: the port names each PDU/KVM reported at its last scheduled device check (the monitor's
+    MonitorDeviceSnapshot, which keeps them across failures and restarts), for a device whose status cache has no port
+    list now (unreachable, or not read since the backend started). A snapshot of another address or kind is ignored.
+    Reads the database only; never contacts a device. Without it a move could not see a server named only on the
+    KVM/PDU itself while that device is down, and would leave that port on the floor the server left (QA 2026-11-10)."""
+    from ..models import MonitorDeviceSnapshot
+    wanted = {dev.id: dev for dev in devices if dev.kind in _PORT_KINDS and _cached_ports(dev) is None}
+    if not wanted:
+        return {}
+    rows = (await db.scalars(select(MonitorDeviceSnapshot).where(MonitorDeviceSnapshot.device_id.in_(list(wanted)))
+                             .execution_options(populate_existing=True))).all()
+    observed = {}
+    for snap in rows:
+        dev = wanted.get(snap.device_id)
+        if dev is None or (snap.kind, snap.ip) != (dev.kind, dev.ip):
+            continue
+        try:
+            ports = json.loads(snap.ports_json or "[]")
+        except ValueError:
+            continue
+        names = {}
+        for entry in ports if isinstance(ports, list) else []:
+            number = entry.get("number") if isinstance(entry, dict) else None
+            label = entry.get("label") if isinstance(entry, dict) else None
+            if isinstance(number, int) and not isinstance(number, bool) and isinstance(label, str) and label.strip():
+                names[str(number)] = label
+        if names:
+            observed[dev.id] = names
+    return observed
+
+
+def _unchecked_ports(devices, saved: dict, observed: dict, racks) -> list:
+    """The PDUs/KVMs of `racks` (and those with no rack) whose own port names are not known now: the status cache has
+    no port list for them, and some port has neither a saved label nor a name from the last scheduled check. A server
+    named only on such a device cannot be seen by a move, so its port would not follow (the answer says so).
+    [{device_id, device_name, kind, ports: [port numbers as text]}]."""
+    out = []
+    for dev in devices:
+        if dev.kind not in _PORT_KINDS or (dev.rack and dev.rack not in racks) or _cached_ports(dev) is not None:
+            continue
+        known = {_number_key(port) for port, label in (saved.get(dev.id) or {}).items()
+                 if isinstance(label, str) and label.strip()}
+        known |= set((observed.get(dev.id) or {}))
+        missing = [str(n) for n in range(1, min(dev.port_count or 0, _MAX_LISTED_PORTS) + 1) if str(n) not in known]
+        if missing:
+            out.append({"device_id": dev.id, "device_name": dev.name, "kind": dev.kind, "ports": missing})
+    return out
 
 
 @router.patch("/direct-label", status_code=200)
@@ -524,6 +591,7 @@ async def rename_opt(body: dict, db: AsyncSession = Depends(get_db), _writer: No
 
     plan, devices, new_saved, id_renames, pins = await _plan_rename(db, old_name, new_name)
     if dry_run:
+        change_feed.unchanged()   # a preview writes nothing: open pages need not reload
         return {"ok": True, "dry_run": True, **plan}
     if expected_plan is not None and expected_plan != plan["plan_revision"]:
         raise HTTPException(409, _RENAME_CHANGED)
@@ -998,8 +1066,10 @@ async def server_locations(db) -> dict:
     connections export reuses it so its Rack / U slot columns and server list match the Locations page."""
     all_devices = (await db.execute(select(Device))).scalars().all()
     devices = sorted((d for d in all_devices if d.kind in _PORT_KINDS), key=_device_order)
-    # As the pages show them: saved labels, else the name the PDU/KVM reports (status cache, no device contact).
-    labels = {dev.id: _effective_labels(dev, _saved_labels(dev)[0]) for dev in devices}
+    # As the pages show them: saved labels, else the name the PDU/KVM reports (status cache, else its last scheduled
+    # check; no device contact). The same names as a move sees, so a move built from this list never clears a port.
+    observed = await _observed_labels(db, devices)
+    labels = {dev.id: _effective_labels(dev, _saved_labels(dev)[0], observed) for dev in devices}
     layouts, _ = _read_layouts(strict=False)
     index = _layout_ids(layouts)
     rows = []
@@ -1035,8 +1105,11 @@ def _choice(body, name):
     return value
 
 
-def _plan_move(body, devices, labels, unreadable, layouts, names):
-    """Everything a move changes, computed in memory: (new labels, new layouts, response). Raises 400/404/409."""
+def _plan_move(body, devices, labels, unreadable, layouts, names, items=None):
+    """Everything a move changes, computed in memory: (new labels, new layouts, response, new equipment list).
+    Raises 400/404/409. items: the equipment list now (units_follow), else None; the plan then also lists the units
+    that move with their servers ("units", only when there are any) and the 4th value is the list after the move
+    (None when no unit moves)."""
     if not isinstance(body.get("server"), str) or len(body["server"]) > _MAX_NAME or not _key_of(body["server"]):
         raise HTTPException(400, "Choose the server to move")
     target_server, target_ports = _choice(body, "target_server"), body.get("target_ports")
@@ -1203,9 +1276,67 @@ def _plan_move(body, devices, labels, unreadable, layouts, names):
                           "after": _position(after_servers.get(k) or {"name": name, "ports": []},
                                              after_index.get(k, set()), new_layouts)})
     plan = {"changes": changes, "positions": positions, "unplaced": unplaced}
+    units, items_after = _units_following(servers, index, layouts, positions, items) if items is not None else ([], None)
+    if units:
+        plan["units"] = units
     # The preview's token: Apply sends it back and is refused if a fresh plan differs from what was previewed.
     plan["plan_revision"] = inventory_store.revision(plan)
-    return new_labels, new_layouts, {"ok": True, **plan}
+    return new_labels, new_layouts, {"ok": True, **plan}, items_after
+
+
+_UNIT_FLOORS = range(1, 43)   # the floors / shelves a unit can be on (serverMove.unitFloor: 0 is the rack level)
+
+
+def _unit_floor(item) -> int:
+    """A unit's floor as the Racks page reads it (serverMove.unitFloor): a whole number 0-42 (also as text), else 0."""
+    value = item.get("u") if isinstance(item, dict) else None
+    if isinstance(value, str):
+        value = _js_number(value) if value.strip() else math.nan
+    elif isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float):
+        if not value.is_integer():
+            return 0
+        value = int(value)
+    return value if 0 <= value <= 42 else 0
+
+
+def _units_following(servers, index, layouts, positions, items):
+    """The units (rack items) that move with the servers of a move (owner, 2026-11-10: everything on the floor moves
+    with its server), worked out as the Racks page does (serverMove.unitsMovingWith): every unit on the floor a moving
+    server leaves goes to the floor it lands on, unless another server is on that floor too (then the units belong to
+    that one as well). Worked out on the floors as they are now, so a swap swaps both floors' units. Returns (plan
+    entries [{server, from, to, units: [{id, name}]}], the equipment list after the move, or None when no unit moves)."""
+    def floor(place):
+        return isinstance(place, dict) and isinstance(place.get("rack"), str) and type(place.get("slot")) is int \
+            and place["slot"] in _UNIT_FLOORS
+
+    before = {k: _position(s, index.get(k, set()), layouts) for k, s in servers.items()}
+    moves = []
+    for entry in positions:
+        src, dst, key = entry["before"], entry["after"], _key_of(entry["server"])
+        if src == dst or not floor(src) or not floor(dst):
+            continue
+        if any(other != key and place == src for other, place in before.items()):
+            continue
+        units = [item for item in items.get(src["rack"]) or [] if _unit_floor(item) == src["slot"]]
+        if units:
+            moves.append((entry["server"], src, dst, units))
+    if not moves:
+        return [], None
+    after = {rack: list(entries) for rack, entries in items.items()}
+    pulled = []
+    for _, src, dst, units in moves:
+        ids = {unit["id"] for unit in units}
+        after[src["rack"]] = [item for item in after[src["rack"]] if item.get("id") not in ids]
+        pulled.extend((dst["rack"], {**unit, "u": dst["slot"]}) for unit in units)
+    for rack, unit in pulled:
+        after.setdefault(rack, []).append(unit)
+    plan = [{"server": name, "from": dict(src), "to": dict(dst),
+             "units": [{"id": unit["id"], "name": unit["name"] if isinstance(unit.get("name"), str) and unit["name"]
+                        else unit["id"]} for unit in units]}
+            for name, src, dst, units in moves]
+    return plan, after
 
 
 @router.post("/move-server", status_code=200)
@@ -1213,6 +1344,14 @@ async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: N
     """Move a server to another server's location (swap, or take it over) or to empty ports, with its rack position.
     dry_run returns the same answer without writing, plus plan_revision; an Apply that sends it back is refused if
     anything changed since. Monitors and owners follow the server and are not touched.
+
+    PDU outlets and KVM ports belong to the floor (owner, 2026-11-10): the server that lands on a floor takes over its
+    outlet and port, so the labels are rewritten and the PDU/KVM devices themselves never move. "rack_items"
+    (optional, Apply only): {"data": the whole equipment list, "if_match": the ETag of GET /api/rack-items}, so the
+    units on the floors move with their servers in the same all-or-nothing step (checked as PUT /api/rack-items checks
+    it; a stale revision is 409 _ITEMS_CHANGED and nothing is written). The answer then carries the saved list as
+    "rack_items" and its new ETag in "revisions". Placeholder outlet labels ("Empty", "KVM Power", "Outlet 3") are
+    never kept as servers in rack_slots / rack_positions / rack_overrides: a move that writes the layout leaves them out.
 
     Order, so that a failure never leaves half a move behind: plan everything in memory; commit the port labels;
     then, holding the layout file locks with no await inside, write the changed layout files and put back the ones
@@ -1223,23 +1362,47 @@ async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: N
         raise HTTPException(400, "dry_run must be true or false")
     if expected_plan is not None and not isinstance(expected_plan, str):
         raise HTTPException(400, "plan_revision must be the token from the preview")
+    units_follow = body.get("units_follow", False)
+    if not isinstance(units_follow, bool):
+        raise HTTPException(400, "units_follow must be true or false")
+    if units_follow and body.get("rack_items") is not None:
+        raise HTTPException(400, "Send either rack_items or units_follow, not both.")
+    items = None if dry_run else _move_items_part(body.get("rack_items"))
     devices, names = await _port_devices(db), await _monitor_names(db)
+    observed = await _observed_labels(db, devices)
     saved, labels, unreadable = {}, {}, set()
     for dev in devices:
         saved[dev.id], readable = _saved_labels(dev)
         if not readable:
             unreadable.add(dev.id)
-        # Names the PDU/KVM reports itself count as occupied ports and as the mover's own ports.
-        labels[dev.id] = _effective_labels(dev, saved[dev.id])
+        # Names the PDU/KVM reports itself count as occupied ports and as the mover's own ports (status cache, else
+        # the names of its last scheduled check: a KVM that is down now still has its ports follow the servers).
+        labels[dev.id] = _effective_labels(dev, saved[dev.id], observed)
     original = {dev.id: dev.labels_json for dev in devices}
     # Layout files are replaced atomically, so this read needs no lock; the write below checks them again locked.
     layouts, present = _read_layouts(strict=True)
-    new_labels, new_layouts, result = _plan_move(body, devices, labels, unreadable, layouts, names)
+    # units_follow: the units on the floors move with their servers, worked out here (the Racks page sends its own
+    # list in rack_items instead). The list is read without a lock; its ETag is checked again under the lock.
+    items_now = inventory_store.read_items() if units_follow else None
+    new_labels, new_layouts, result, items_after = _plan_move(body, devices, labels, unreadable, layouts, names,
+                                                              items_now)
     result = {"ok": True, "dry_run": dry_run, **{k: v for k, v in result.items() if k != "ok"}}
+    # The PDUs/KVMs of the racks this move touches whose own port names are not known now: their ports were not
+    # checked (a server named only on such a device keeps its port). Not part of the plan; pages show a warning.
+    racks = {place["rack"] for entry in result["positions"] for place in (entry["before"], entry["after"])
+             if place.get("rack")}
+    unchecked = _unchecked_ports(devices, saved, observed, racks)
+    if unchecked:
+        result["unchecked"] = unchecked
     if dry_run:
+        change_feed.unchanged()   # a preview writes nothing: open pages need not reload
         return result
     if expected_plan is not None and expected_plan != result["plan_revision"]:
         raise HTTPException(409, "Changed since the preview. Preview again.")
+    if items_after is not None:
+        items = (items_after, inventory_store.revision(items_now))
+    if items is not None:
+        _checked_move_items(items)   # 409 / 422 / 503 now, before anything is written (checked again when written)
 
     # 1. The port labels. Nothing else has been written yet, so a failed commit needs only a rollback.
     changed = {}
@@ -1256,9 +1419,10 @@ async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: N
             raise asyncio.CancelledError()
         raise HTTPException(503, _MOVE_FAILED)
 
-    # 2. The layout files, all-or-nothing (see _write_layouts).
+    # 2. The layout files and the units, all-or-nothing (see _write_layouts).
     try:
-        _write_layouts((body, devices, labels, unreadable, names), layouts, present, new_labels, new_layouts, result)
+        saved_items = _write_layouts((body, devices, labels, unreadable, names, items_now), layouts, present,
+                                     new_labels, new_layouts, result, items)
     except BaseException as failure:
         # 3. Put the labels back as well. The files are as they were before the move, unless restoring one of them
         # failed too (_LayoutNotRestored): then the answer says so. A write or lock error otherwise reaches here as
@@ -1284,6 +1448,10 @@ async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: N
         if refused:
             raise failure  # 409 layout changed, or 503 unreadable layout file: nothing was written
         raise HTTPException(503, _MOVE_FAILED) from None
+    if saved_items is not None:
+        result["rack_items"] = saved_items
+        result["revisions"] = {inventory_store.ITEMS_STORE: inventory_store.revision(saved_items)}
+        change_feed.note("inventory")   # the units moved with their servers
     # Labels and layout files are both saved (also when only the caller went away): now the device names follow.
     result.update(await name_sync.queue(changed))
     if cancelled:
@@ -1343,46 +1511,130 @@ async def _revert_labels(db, devices, original):
     return True, cancelled
 
 
-def _lock_layouts(stack):
-    """The same per-file locks as the layout PUT endpoints, always taken in one order."""
-    for fname in sorted(_LAYOUT_FILES):
-        stack.enter_context(inventory_store.locked_file(_BACKEND_DIR / fname, inventory_store.LAYOUT_SAVE_FAILED))
+def _lock_layouts(stack, with_items=False):
+    """The same per-file locks as the layout PUT endpoints (and the equipment list's with_items), always taken in one
+    order: by path, as inventory_store.save_layouts_with_items takes them for PUT /api/rack-layout."""
+    files = [(_BACKEND_DIR / fname, inventory_store.LAYOUT_SAVE_FAILED) for fname in _LAYOUT_FILES]
+    if with_items:
+        files.append((inventory_store.ITEMS_FILE, inventory_store.ITEMS_SAVE_FAILED))
+    for path, detail in sorted(files, key=lambda f: str(f[0])):
+        stack.enter_context(inventory_store.locked_file(path, detail))
 
 
-def _write_layouts(plan_inputs, layouts, present, new_labels, new_layouts, result):
-    """Write a move's layout changes under the layout file locks. The locks are synchronous (they also serialize
-    uvicorn workers), so nothing here awaits: a layout save waiting on one of them only waits for this function.
+# ── the units that move with a server (POST /move-server "rack_items") ──
+_ITEMS_NEED = "rack_items needs the whole equipment list and the ETag of GET /api/rack-items."
+_ITEMS_CHANGED = ("The units on these floors were changed in another session. Nothing was moved; check the move and "
+                  "confirm again.")
+
+
+def _move_items_part(part):
+    """None, or {"data": {rack: [unit, ...]}, "if_match": "<ETag>"} -> (data, if_match). 400 for any other shape."""
+    if part is None:
+        return None
+    if (not isinstance(part, dict) or not isinstance(part.get("data"), dict) or not isinstance(part.get("if_match"), str)
+            or not part["if_match"]):
+        raise HTTPException(400, _ITEMS_NEED)
+    inventory_store.reject_non_finite(part["data"])
+    return part["data"], part["if_match"]
+
+
+def _checked_move_items(items):
+    """The equipment list as a move saves it (the PUT /api/rack-items checks: 422 shape / U / details, 409 duplicate
+    barcode, serial or MAC; each moved unit gets a "moved" history entry). 409 when it changed since its ETag."""
+    payload, expected = items
+    current = inventory_store.read_items()
+    if expected != inventory_store.revision(current):
+        raise HTTPException(409, _ITEMS_CHANGED)
+    return inventory_store.checked_items(current, payload, inventory_store.MOVED_WITH_SERVER_NOTE)
+
+
+_POSITION_STORES = {"rack_slots.json": "rack_slots", "rack_positions.json": "rack_positions",
+                    "rack_overrides.json": "rack_overrides"}
+
+
+def servers_only(name, data):
+    """A placeholder outlet label ("Empty", "KVM Power", "Spare", "Outlet 3", ...) is never a server (owner,
+    2026-11-10): a move leaves such keys out of rack_slots, rack_positions and rack_overrides (store names), also ones
+    saved there before. Everything else, and any value of an unexpected shape, is kept as it is."""
+    def server(key):
+        return not isinstance(key, str) or _identity(key) is not None
+    if name == "rack_overrides":
+        return {key: value for key, value in data.items() if server(key)}
+    if name == "rack_slots":
+        return {rack: {key: u for key, u in ids.items() if server(key)} if isinstance(ids, dict) else ids
+                for rack, ids in data.items()}
+    if name == "rack_positions":
+        return {rack: [key for key in ids if server(key)] if isinstance(ids, list) else ids
+                for rack, ids in data.items()}
+    return data
+
+
+def _write_layouts(plan_inputs, layouts, present, new_labels, new_layouts, result, items=None):
+    """Write a move's layout changes, and the units that move with it (items: (equipment list, ETag) or None), under
+    the layout file locks (and the equipment list's). The locks are synchronous (they also serialize uvicorn workers),
+    so nothing here awaits: a layout save waiting on one of them only waits for this function. Returns the saved
+    equipment list (None without items).
 
     If another session saved a layout file since the plan was made, the move is planned again on the current files
     and goes ahead only when it changes exactly the same labels and positions (that other edit is kept); otherwise
-    409 and nothing is written. Any failure while writing, including KeyboardInterrupt or cancellation, puts back
-    every file already written before the locks are released, then propagates; if a file cannot be put back, an
-    Exception becomes _LayoutNotRestored naming the files (a BaseException still propagates as it is)."""
-    body, devices, labels, unreadable, names = plan_inputs
+    409 and nothing is written. The units are checked again here (409 _ITEMS_CHANGED when the list changed since its
+    ETag). Any failure while writing, including KeyboardInterrupt or cancellation, puts back every file already
+    written before the locks are released, then propagates; if a file cannot be put back, an Exception becomes
+    _LayoutNotRestored naming the files (a BaseException still propagates as it is)."""
+    body, devices, labels, unreadable, names, items_now = plan_inputs
     with ExitStack() as locks:
-        _lock_layouts(locks)
+        _lock_layouts(locks, with_items=items is not None)
         current, current_present = _read_layouts(strict=True)
         if current != layouts or current_present != present:
             try:
-                replanned_labels, new_layouts, replanned = _plan_move(body, devices, labels, unreadable, current, names)
+                replanned_labels, new_layouts, replanned, _ = _plan_move(body, devices, labels, unreadable, current,
+                                                                         names, items_now)
             except HTTPException as exc:
                 raise HTTPException(409, _LAYOUT_CHANGED) from exc
             if replanned_labels != new_labels or replanned["plan_revision"] != result["plan_revision"]:
                 raise HTTPException(409, _LAYOUT_CHANGED)
             layouts, present = current, current_present
-        written = []
+        new_layouts = {fname: servers_only(_POSITION_STORES[fname], data) if fname in _POSITION_STORES else data
+                       for fname, data in new_layouts.items()}
+        saved_items = previous_items = None
+        if items is not None:
+            saved_items = _checked_move_items(items)
+            try:
+                previous_items = inventory_store.ITEMS_FILE.read_bytes()
+            except FileNotFoundError:
+                previous_items = None
+            except OSError as exc:
+                raise HTTPException(503, inventory_store.ITEMS_SAVE_FAILED) from exc
+        written, items_written = [], False
         try:
             for fname in _LAYOUT_FILES:
                 if new_layouts[fname] != layouts[fname]:
                     written.append(fname)
                     inventory_store.write_json(_BACKEND_DIR / fname, new_layouts[fname])
+            if saved_items is not None:
+                items_written = True
+                inventory_store.write_items(saved_items)
         except BaseException as exc:
             unrestored = _restore_layouts(written, layouts, present)
+            if items_written and not _restore_items(previous_items):
+                unrestored.append(inventory_store.ITEMS_FILE.name)
             if unrestored:
                 if isinstance(exc, Exception):
                     raise _LayoutNotRestored(unrestored) from exc
                 log.error("Server move interrupted; rack layout files not restored: %s", ", ".join(unrestored))
             raise
+    return saved_items
+
+
+def _restore_items(previous):
+    """Still under the locks: the equipment list's exact bytes from before the move (None: it did not exist).
+    True when the file holds them afterwards."""
+    path = inventory_store.ITEMS_FILE
+    try:
+        inventory_store._put_back(path, previous)
+    except Exception as exc:  # noqa: BLE001 - checked below
+        log.error("Could not restore the equipment list after a failed server move (%s)", type(exc).__name__)
+    return inventory_store._holds_bytes(path, previous)
 
 
 def _restore_layouts(written, layouts, present):
@@ -1412,6 +1664,74 @@ def _holds(path, expected):
         return expected is None
     except (OSError, ValueError):
         return False
+
+
+# ── PUT /api/rack-layout with "port_labels": a server move on the Racks page, with the floors' outlets and ports ──
+MAX_LAYOUT_LABEL_DEVICES = 64
+LAYOUT_LABELS_CHANGED = ("The PDU outlet or KVM port labels were changed in another session. Nothing was moved; "
+                         "reload and try again.")
+_LAYOUT_LABELS_FAILED = "The move could not be saved. Nothing was moved; please retry."
+_LAYOUT_LABELS_HALF_SAVED = ("The move was only partly saved: the PDU outlet and KVM port labels changed but the rack "
+                             "layout did not. Check Locations and fix the port labels there.")
+
+
+async def save_labels_with_layout(db, parts: dict, check, write):
+    """The outlet and port labels of a server move, saved all or nothing with its rack layout part.
+
+    PDU outlets and KVM ports belong to the floor, not to the server (owner, 2026-11-10): when servers swap floors
+    or move, each one takes over the outlet and port of the floor it lands on, so the move rewrites those labels.
+    `parts`: {device_id: (labels, if_match)}: each PDU/KVM's whole label map under the rules of PATCH /{id}/labels,
+    with the labels_revision of GET /api/devices (Lab Manager's saved labels, never what the device reports).
+    `check()` checks the layout part without writing anything; `write()` writes it all or nothing and returns its
+    result. Both are synchronous: they hold the layout file locks and never await.
+
+    Order, so that a refusal or failure never leaves half a move (as /move-server): every label revision and rule and
+    the layout part are checked first (one stale revision: 409, nothing written); then the labels are committed and
+    the layout part written; if that write fails, the labels are put back in a second commit. Only once both are
+    saved do the changed names go to the PDUs/KVMs (device name sync). Returns (write()'s result,
+    {device_id: new labels_revision}, the name sync answer fields)."""
+    async with _labels_lock:
+        devices, planned, changed = [], {}, {}
+        for device_id, (labels, expected) in parts.items():
+            dev = await db.scalar(select(Device).where(Device.id == device_id).execution_options(populate_existing=True))
+            if dev is None:
+                raise HTTPException(404, "PDU or KVM not found")
+            if dev.kind not in _PORT_KINDS:
+                raise HTTPException(422, "Only PDU outlet and KVM port labels move with a server.")
+            if not _saved_labels(dev)[1]:
+                raise HTTPException(503, f"The saved port labels of {dev.name} cannot be read, so nothing was moved.")
+            if expected != inventory_store.revision(dev.labels):
+                raise HTTPException(409, LAYOUT_LABELS_CHANGED)
+            planned[dev.id], changed[dev.id] = _labels_after_patch(dev, labels)
+            devices.append(dev)
+        check()
+        original = {dev.id: dev.labels_json for dev in devices}
+        for dev in devices:
+            dev.labels_json = json.dumps(planned[dev.id])
+        error, cancelled = await _finish_commit(db)
+        if error is not None:
+            log.error("Rack layout save: the port labels were not saved (%s); nothing was written", type(error).__name__)
+            await _rollback(db)
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise HTTPException(503, _LAYOUT_LABELS_FAILED)
+        try:
+            result = write()
+        except BaseException as failure:
+            reverted, cancelled_again = await _revert_labels(db, devices, original)
+            # Pages that read the labels in between reload them: a refused answer counts nothing for live sync.
+            await change_feed.record(("devices", "monitoring"))
+            if not isinstance(failure, Exception):
+                raise failure  # KeyboardInterrupt, SystemExit, CancelledError: undone as far as possible, then passed on
+            if not reverted:
+                raise HTTPException(503, _LAYOUT_LABELS_HALF_SAVED) from None
+            if cancelled or cancelled_again:
+                raise asyncio.CancelledError() from None
+            raise failure  # 409 / 422 / 428 / 503 of the layout part: the labels are as they were
+        names = await name_sync.queue({device_id: ports for device_id, ports in changed.items() if ports})
+    if cancelled:
+        raise asyncio.CancelledError()  # saved; only the caller went away
+    return result, {dev.id: inventory_store.revision(planned[dev.id]) for dev in devices}, names
 
 
 # ── Assistant location changes (assistant/actions/locations.py): the same planner and writer as the endpoints ──
@@ -1454,12 +1774,13 @@ async def _clear(db, server, dry_run: bool, expected: dict | None = None) -> dic
     if not isinstance(server, str) or len(server) > _MAX_NAME or not _key_of(server):
         raise HTTPException(400, "Choose the server to clear")
     devices = await _port_devices(db)
+    observed = await _observed_labels(db, devices)
     saved, labels, unreadable = {}, {}, set()
     for dev in devices:
         saved[dev.id], readable = _saved_labels(dev)
         if not readable:
             unreadable.add(dev.id)
-        labels[dev.id] = _effective_labels(dev, saved[dev.id])
+        labels[dev.id] = _effective_labels(dev, saved[dev.id], observed)
     found = _servers(devices, labels).get(_key_of(server))
     if found is None:
         raise HTTPException(404, "Server not found on any PDU or KVM port")

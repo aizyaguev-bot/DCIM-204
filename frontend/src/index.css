@@ -739,6 +739,18 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .racks-field select:disabled { color: #a7a7a7; }
 .racks-field-error { font-size: 12px; color: #ff8181; }
 .racks-field-hint { margin-top: 4px; font-size: 12px; color: #a7a7a7; }
+/* "Moves with it: …" (ServerMoveDialog and the server's edit panel): the units that go with a moving server. */
+.units-follow { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; padding: 10px 12px; border: 1px solid #3c5c10; border-radius: 2px; background: #76b9000f; font-size: 13px; color: #eee; overflow-wrap: anywhere; }
+.units-follow-label { color: #9fe040; font-weight: 600; }
+.units-follow-check { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; font-size: 13px; color: #eee; cursor: pointer; }
+.units-follow .units-follow-check { margin-top: 2px; }
+.units-follow-check input { width: 16px; height: 16px; margin-top: 2px; flex: none; accent-color: #76b900; }
+.units-follow-check input:focus-visible { outline: 2px solid #76b900; outline-offset: 2px; }
+/* The move dialog's preview (POST /api/devices/move-server dry run): every port label and every server's place. */
+.move-preview { margin-top: 12px; }
+.move-preview .racks-dialog-subtitle { margin: 12px 0 4px; }
+.move-preview-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding-left: 18px; list-style: disc; font-size: 13px; color: #ddd; overflow-wrap: anywhere; }
+.move-preview-warning { margin-top: 10px; padding: 8px 10px; border: 1px solid #7a5c12; border-radius: 2px; background: #f0b4000f; font-size: 13px; color: #ffd27a; overflow-wrap: anywhere; }
 .power-feeds { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 13px; color: #eee; }
 .power-skipped, .power-feed-rack { color: #a7a7a7; }
 .power-feed[data-ok] { color: #9fe040; }

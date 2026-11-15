@@ -26,6 +26,9 @@ backend/removed_servers.json
 backend/removed_servers.lock
 backend/rack_items.json
 backend/rack_items.lock
+backend/changes.json
+backend/changes.lock
+backend/.changes-*.tmp
 backend/.rack-items-*.tmp
 backend/pxe_screens/
 .barcode-backups/

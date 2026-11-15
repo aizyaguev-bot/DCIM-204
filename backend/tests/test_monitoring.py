@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient, BasicAuth
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app import ping_monitor as monitor
+from app import changes, ping_monitor as monitor
 from app.database import Base, get_db
 from app.models import Device, PingIncident, PingMonitorState, PingSample, PingTarget
 from app.routers import monitoring
@@ -310,6 +310,66 @@ async def test_background_loop_records_completion_and_releases_lease(monitor_db,
         assert state.last_completed_at is not None and state.lease_until == 0
         assert state.next_run_at > state.last_started_at
         assert not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_a_lab_servers_monitor_shows_the_rack_the_server_is_in_now(monitor_client, monitor_db, tmp_path, monkeypatch):
+    """Targets and incidents (list and CSV) show a lab server's current rack: its rack override, else its PDU's rack,
+    else its equipment unit's rack. A monitor of a server that is not in the lab keeps its stored rack. The stored copy
+    is never rewritten by a read."""
+    from app.routers import devices
+    monkeypatch.setattr(devices, "_BACKEND_DIR", tmp_path)
+    client = monitor_client
+    monitor.inventory_store.ITEMS_FILE.write_text(json.dumps({"Rack-05": [{"id": "s23", "type": "server", "name": "OPT23"}]}))
+    async with monitor_db() as db:
+        db.add(Device(id="pdu1", name="PDU-1", kind="pdu", ip="192.0.2.10", rack="Rack-01", port_count=8,
+                      labels_json=json.dumps({"1": "OPT21 (PSU1)", "2": "OPT22"})))
+        db.add_all([PingTarget(id="t21", source_key="server:opt21", name="OPT21", host="opt21", rack="Rack-01"),
+                    PingTarget(id="t22", source_key="server:opt22", name="OPT22", host="opt22", rack="Old", source="manual"),
+                    PingTarget(id="t23", source_key="server:opt23", name="OPT23", host="opt23", rack="Rack-01"),
+                    PingTarget(id="t99", source_key="server:bench-box", name="bench-box", host="10.0.0.9", rack="Bench",
+                               source="manual")])
+        db.add(PingIncident(target_id="t21", host="opt21", first_failed_at=time.time() - 60, last_failed_at=time.time()))
+        await db.commit()
+
+    async def shown():
+        targets = {t["id"]: t["rack"] for t in (await client.get("/api/monitoring")).json()["targets"]}
+        incidents = {i["target_id"]: i["rack"] for i in (await client.get("/api/monitoring/incidents")).json()}
+        return targets, incidents
+
+    assert await shown() == ({"t21": "Rack-01", "t22": "Rack-01", "t23": "Rack-05", "t99": "Bench"}, {"t21": "Rack-01"})
+    # The Racks page moves OPT21 (DCIM keys it by the lower-cased port label): every list follows at once.
+    (tmp_path / "rack_overrides.json").write_text(json.dumps({"opt21 (psu1)": "Rack-07"}))
+    assert await shown() == ({"t21": "Rack-07", "t22": "Rack-01", "t23": "Rack-05", "t99": "Bench"}, {"t21": "Rack-07"})
+    assert "OPT21,opt21,Rack-07" in (await client.get("/api/monitoring/incidents.csv")).text
+    edited = await client.put("/api/monitoring/targets/t21", json={"host": "opt21", "enabled": True, "revision": 0})
+    assert edited.status_code == 200 and edited.json()["rack"] == "Rack-07"
+    async with monitor_db() as db:
+        assert (await db.get(PingTarget, "t21")).rack == "Rack-01"
+    # The PDU moves to another rack: its servers (without an override) follow it.
+    (tmp_path / "rack_overrides.json").write_text("{}")
+    async with monitor_db() as db:
+        (await db.get(Device, "pdu1")).rack = "Rack-09"
+        await db.commit()
+    assert (await shown())[0] == {"t21": "Rack-09", "t22": "Rack-09", "t23": "Rack-05", "t99": "Bench"}
+
+
+async def test_a_finished_round_counts_for_live_sync(monitor_db, monkeypatch):
+    ran = asyncio.Event()
+
+    async def round(owner, factory):
+        ran.set()
+    monkeypatch.setattr(monitor, "run_round", round)
+    task = asyncio.create_task(monitor.monitor_loop(monitor_db))
+    try:
+        await asyncio.wait_for(ran.wait(), 2)
+        for _ in range(200):
+            if changes.current()["domains"]["monitoring"]:
+                break
+            await asyncio.sleep(0.01)
+        assert changes.current()["domains"]["monitoring"] == changes.current()["rev"] == 1
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

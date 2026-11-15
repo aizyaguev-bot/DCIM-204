@@ -6,6 +6,9 @@ import PduCard from "./components/PduCard";
 import KvmCard from "./components/KvmCard";
 import InventoryRackCard from "./components/InventoryRackCard";
 import { loadRackItems, MAIN_STORAGE } from "./api/inventory";
+import { startChangeFeed } from "./api/changes";
+import { useDataChanged } from "./api/useDataChanged";
+import { useLiveReload } from "./api/useLiveReload";
 import PduDetail from "./pages/PduDetail";
 import KvmDetail from "./pages/KvmDetail";
 import DcimView from "./pages/DcimView";
@@ -268,6 +271,7 @@ function LabManagerApp() {
   const racks = useMemo(() => [...new Set(devices.map(d => d.rack).filter(Boolean))].sort(), [devices]);
   const inventoryRacks = useMemo(() => [...new Map(devices.filter(d => d.kind === "rack" && d.rack && (d.model === "Storage" || d.rack === MAIN_STORAGE)).map(d => [d.rack, d])).values()], [devices]);
 
+  const refreshRackItems = useRef(null);   // the dashboard's storage cards: reload their units now (live sync)
   useEffect(() => {
     if (mainTab !== "dashboard" || inventoryRacks.length === 0) return;
     let active = true;
@@ -280,9 +284,32 @@ function LabManagerApp() {
       }
     };
     refresh();
+    refreshRackItems.current = refresh;
     const timer = setInterval(refresh, preferences.refresh_seconds * 1000);
-    return () => { active = false; clearInterval(timer); };
+    return () => { active = false; clearInterval(timer); if (refreshRackItems.current === refresh) refreshRackItems.current = null; };
   }, [mainTab, inventoryRacks, preferences.refresh_seconds]);
+
+  // Live sync (the owner's rule, 2026-11-10): a change saved anywhere (another browser, the 3D twin, Locations, Scan &
+  // Track, the assistant) shows here within seconds, without a reload. The change feed (./api/changes.js) runs once per
+  // page; this page reloads the device list and its labels on "devices", every PDU / KVM reading and maintenance on
+  // "devices" and "power" (a saved outlet label shows in the readings), and the storage cards' units on "inventory".
+  // Each page reloads its own stores (Racks, Ping Monitor, Scan & Track, Locations, Connections). The polls stay as a
+  // fallback.
+  useEffect(() => { startChangeFeed(); }, []);
+  useLiveReload(["devices", "power", "inventory"], async domains => {
+    const has = domain => domains.includes(domain);
+    const jobs = [];
+    if (has("devices")) jobs.push(loadDevices());
+    if (has("devices") || has("power")) jobs.push(refreshAllStatuses(), pdus.length ? loadMaintenance() : null);
+    if (has("inventory")) jobs.push(refreshRackItems.current?.());
+    await Promise.all(jobs);
+  });
+  // The 3D twin (its own page in the Twin tab's iframe) gets every change too, to reload what it shows.
+  const twinFrame = useRef(null);
+  useDataChanged("*", domains => {
+    const frame = twinFrame.current?.contentWindow;
+    if (frame) frame.postMessage({ type: "twin:data-changed", domains }, location.origin);
+  });
 
   // Load devices on mount, then poll statuses every 15s
   useEffect(() => {
@@ -570,7 +597,7 @@ function LabManagerApp() {
       )}
 
       {view.kind === "dashboard" && mainTab === "twin" && (
-        <iframe title="3D Digital Twin" src="/twin/index.html?embed=1" className="w-full flex-1 border-0"
+        <iframe ref={twinFrame} title="3D Digital Twin" src="/twin/index.html?embed=1" className="w-full flex-1 border-0"
           style={{ minHeight: "calc(100vh - 150px)" }} allow="fullscreen" />
       )}
 

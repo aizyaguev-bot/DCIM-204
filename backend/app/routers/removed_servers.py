@@ -44,7 +44,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import inventory_store
+from .. import changes as change_feed, inventory_store
 from ..config import get_settings
 from ..confirm import SHARED_BY
 from ..database import get_db
@@ -401,6 +401,7 @@ async def remove_server(body: dict, request: Request, response: Response, db: As
             raise HTTPException(409, ALREADY.format(existing.get("name") or plan["name"]))
         public_plan = {k: v for k, v in plan.items() if k != "ports_ids"}
         if dry_run:
+            change_feed.unchanged()   # a preview writes nothing: open pages need not reload
             response.headers["Cache-Control"] = "no-store"
             return {"ok": True, "dry_run": True, **public_plan}
         _require_if_match(if_match)

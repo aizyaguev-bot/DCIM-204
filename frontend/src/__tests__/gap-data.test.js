@@ -271,7 +271,7 @@ test("locations: change and position text fall back gracefully when the server o
   assert.deepEqual(describeChange({ device_id: "pa", kind: "pdu", port: 3 }), { where: "pa outlet 3", before: "(empty)", after: "(empty)" });
   assert.deepEqual(describeChange(undefined), { where: "Device port ?", before: "(empty)", after: "(empty)" });
   const result = normalizeMoveResult({ dry_run: 1, plan_revision: 42, changes: "x", positions: [{ before: { rack: "R1", slot: 3 } }], unplaced: [7] });
-  assert.deepEqual(result, { dryRun: true, changes: [], positions: [{ server: "", before: "R1 · U3", after: "Unplaced" }], unplaced: ["7"], planRevision: null });
+  assert.deepEqual(result, { dryRun: true, changes: [], positions: [{ server: "", before: "R1 · U3", after: "Unplaced" }], unplaced: ["7"], units: [], unchecked: [], planRevision: null });
 });
 
 test("locations: the move form trims rack and slot, accepts U99, refuses U100 and catches a port chosen twice", () => {
@@ -279,6 +279,7 @@ test("locations: the move form trims rack and slot, accepts U99, refuses U100 an
   const pdu = [{ device_id: "pa", port: 7 }];
   assert.deepEqual(buildMoveRequest(server, { pdu, rack: "  R3 ", slot: " 99 " }, false).body, {
     server: "opt1", target_server: null, target_ports: [{ device_id: "pa", port: "7" }], target_rack: "R3", target_slot: 99, swap: true, dry_run: false,
+    units_follow: true,
   });
   assert.match(buildMoveRequest(server, { pdu, slot: "100" }, true).error, /1 to 99/);
   assert.match(buildMoveRequest(server, { pdu, slot: "-1" }, true).error, /1 to 99/);

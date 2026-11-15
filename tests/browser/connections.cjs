@@ -22,7 +22,10 @@ const HEBREW = 'שרת בדיקה QA';
       const request = route.request();
       if (!request.url().startsWith(origin + '/')) return route.abort();
       const path = new URL(request.url()).pathname;
-      if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method()) && !allowedWrites.some(rule => rule.test(path))) {
+      // The label editor previews a rename (a dry run writes nothing) before it asks "Rename everywhere?".
+      let preview = false;
+      try { preview = path === '/api/devices/rename-opt' && JSON.parse(request.postData() || '{}').dry_run === true; } catch {}
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method()) && !preview && !allowedWrites.some(rule => rule.test(path))) {
         unexpectedWrites.push(`${request.method()} ${path}`); return route.abort();
       }
       return route.continue();
@@ -112,6 +115,8 @@ const HEBREW = 'שרת בדיקה QA';
     await other.page.getByLabel('OPT label for PDU 02 outlet 3', { exact: true }).fill(HEBREW);
     const saved = other.page.waitForResponse(response => new URL(response.url()).pathname === '/api/devices/direct-label' && response.status() === 200);
     await other.page.getByRole('button', { name: 'Save', exact: true }).click();
+    // A new name on a server's outlet asks whether to rename that server everywhere; this check changes this outlet only.
+    await other.page.getByRole('button', { name: 'Only this outlet', exact: true }).click();
     await saved;
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
     const header = page.getByRole('rowheader', { name: headerName(HEBREW) });

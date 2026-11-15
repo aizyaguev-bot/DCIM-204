@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.routers.kvms as kvms_module
 import app.routers.pdus as pdus_module
-from app import name_sync
+from app import changes, name_sync
 from app.database import Base, get_db
 from app.routers import devices, kvms, pdus
 
@@ -71,6 +71,23 @@ def clear_module_caches():
     kvms_module._refreshing.clear()
     pdus_module._cache.clear()
     pdus_module._refreshing.clear()
+
+
+@pytest.fixture(autouse=True)
+def change_counter_in_a_temporary_folder(tmp_path_factory, monkeypatch):
+    """The live sync change counter (app/changes.py) that every successful write bumps: in a folder of its own per
+    test, never backend/changes.json and never the test's own tmp_path (tests that list that folder stay exact)."""
+    monkeypatch.setattr(changes, "FILE", tmp_path_factory.mktemp("changes") / "changes.json")
+    monkeypatch.setattr(changes, "_cache", None)
+    monkeypatch.setattr(changes, "_warned", False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def layout_files_stay_in_tests(tmp_path_factory, monkeypatch):
+    """Server locations (also behind GET /api/monitoring's rack), renames and moves read and write the rack layout files
+    in devices._BACKEND_DIR: an empty temporary folder unless the test sets its own, never the real backend/*.json."""
+    monkeypatch.setattr(devices, "_BACKEND_DIR", tmp_path_factory.mktemp("backend"))
 
 
 def _no_name_sync_database():

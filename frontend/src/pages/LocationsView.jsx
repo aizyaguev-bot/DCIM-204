@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLiveReload } from "../api/useLiveReload";
+import { uncheckedText } from "../components/racks/serverMove.js";
 import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
 import { useRemovedServers } from "../removedServers.jsx";
@@ -34,10 +36,11 @@ export default function LocationsView({ devices, onChanged }) {
   const [exportError, setExportError] = useState("");
   const seq = useRef(0);
 
-  // Only the newest request may update the table; an older reply arriving late is ignored.
-  const load = useCallback(async () => {
+  // Only the newest request may update the table; an older reply arriving late is ignored. quiet: a live reload, which
+  // does not turn the Refresh button into "Refreshing…".
+  const load = useCallback(async ({ quiet = false } = {}) => {
     const mine = ++seq.current;
-    setLoading(true);
+    if (!quiet) setLoading(true);
     try {
       const raw = await api.getLocations();
       if (mine !== seq.current) return;
@@ -52,6 +55,9 @@ export default function LocationsView({ devices, onChanged }) {
 
   // Device labels changed elsewhere (devices reloaded): read locations again.
   useEffect(() => { load(); }, [load, devices]);
+  // Live sync: a move, swap or rack position saved anywhere shows here at once. An open Move dialog stays open on its
+  // server; its Apply is refused (409) if what it previewed changed, and asks to preview again.
+  useLiveReload(["layout", "devices", "removed"], () => load({ quiet: true }));
   useEffect(() => () => { seq.current++; }, []);
 
   const servers = data?.servers || [];
@@ -314,8 +320,27 @@ function ChangeList({ result }) {
           </ul>
         </div>
       )}
+      {result.units?.length > 0 && (
+        <div data-list="units">
+          <div className="text-xs text-zinc-500 mb-1">Units that move with their servers</div>
+          <ul className="rounded border border-zinc-800 divide-y divide-zinc-800/60">
+            {result.units.map((m, i) => (
+              <li key={`${m.server}:${i}`} className="px-2 py-1.5 text-xs flex flex-wrap gap-x-2" dir="auto">
+                <span className="font-mono text-zinc-200">{m.server}</span>
+                <span className="text-zinc-100"><bdi>{m.names.join(", ")}</bdi></span>
+                <span className="text-zinc-400">{m.from} <span aria-hidden="true">→</span><span className="sr-only">to</span> <span className="text-zinc-100">{m.to}</span></span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {result.unplaced.length > 0 && (
         <p className="text-xs text-amber-300">Becomes unplaced (no ports, no rack position): {result.unplaced.join(", ")}</p>
+      )}
+      {result.unchecked?.length > 0 && (
+        <p className="text-xs text-amber-300" role="note" dir="auto" data-unchecked="">
+          Not checked: {uncheckedText(result.unchecked)}. Their own port names are unknown right now (the device does not answer, or it was not read since the server started), so those ports keep their names. Open the device under Consoles or Power and preview again, or check those ports afterwards.
+        </p>
       )}
     </div>
   );

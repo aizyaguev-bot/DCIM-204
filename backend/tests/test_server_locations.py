@@ -437,7 +437,7 @@ async def test_a_layout_save_while_the_move_commits_is_not_blocked(lab, monkeypa
     path = lab.folder / "rack_slots.json"
 
     async def commit():
-        payload = {**json.loads(path.read_text()), "Rack-07": {"spare": 1}}
+        payload = {**json.loads(path.read_text()), "Rack-07": {"opt70": 1}}
         seen["etag"] = await asyncio.wait_for(
             asyncio.to_thread(inventory_store.save_layout, path, payload, None, {}), timeout=5)
         await real_commit()
@@ -445,7 +445,7 @@ async def test_a_layout_save_while_the_move_commits_is_not_blocked(lab, monkeypa
     r = await move(lab, server="optn45", target_server="optn44")
     assert r.status_code == 200, r.text
     slots = json.loads(path.read_text())
-    assert seen["etag"] and slots["Rack-07"] == {"spare": 1}
+    assert seen["etag"] and slots["Rack-07"] == {"opt70": 1}
     assert slots["Rack-01"] == SWAPPED_SLOTS
 
 
@@ -782,13 +782,13 @@ async def test_a_failed_label_commit_writes_no_layout_file_and_keeps_a_concurren
     path = lab.folder / "rack_slots.json"
 
     async def commit():
-        payload = {**json.loads(path.read_text()), "Rack-07": {"spare": 1}}
+        payload = {**json.loads(path.read_text()), "Rack-07": {"opt70": 1}}
         await asyncio.wait_for(asyncio.to_thread(inventory_store.save_layout, path, payload, None, {}), timeout=5)
         raise RuntimeError("disk I/O error")
     monkeypatch.setattr(lab.db, "commit", commit)
     r = await move(lab, server="optn45", target_server="optn44")
     assert r.status_code == 503 and r.json()["detail"] == devices._MOVE_FAILED
-    assert json.loads(path.read_text()) == {**LAYOUT["rack_slots.json"], "Rack-07": {"spare": 1}}
+    assert json.loads(path.read_text()) == {**LAYOUT["rack_slots.json"], "Rack-07": {"opt70": 1}}
     assert {k: v for k, v in read_layout(lab.folder).items() if k != "rack_slots.json"} == {
         k: v for k, v in LAYOUT.items() if k != "rack_slots.json"}
     assert await saved_labels(lab.db) == LABELS
@@ -806,14 +806,14 @@ async def test_a_layout_put_during_the_move_completes_and_is_kept(lab, monkeypat
             slots = json.loads((lab.folder / "rack_slots.json").read_text())
             async with AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test") as other:
                 seen["put"] = await asyncio.wait_for(
-                    other.put("/api/rack-slots", json={**slots, "Rack-07": {"spare": 1}}), timeout=5)
+                    other.put("/api/rack-slots", json={**slots, "Rack-07": {"opt70": 1}}), timeout=5)
         await real_commit()
     monkeypatch.setattr(lab.db, "commit", commit)
     r = await move(lab, server="optn45", target_server="optn44")
     assert r.status_code == 200, r.text
     assert seen["put"].status_code == 200, seen["put"].text
     slots = json.loads((lab.folder / "rack_slots.json").read_text())
-    assert slots["Rack-07"] == {"spare": 1} and slots["Rack-01"] == SWAPPED_SLOTS   # both saves are there
+    assert slots["Rack-07"] == {"opt70": 1} and slots["Rack-01"] == SWAPPED_SLOTS   # both saves are there
     assert (await saved_labels(lab.db))["pdu-a"]["1"] == "OPTN45"
 
 
@@ -1097,3 +1097,250 @@ async def test_kept_position_is_where_a_cleared_server_stays(lab):
         assert {"rack": after[key]["rack"], "slot": after[key]["slot"]} == position, key
         assert after[key]["kept_position"] == position, key
         assert (after[key]["pdu"], after[key]["kvm"]) == ([], []), key
+
+
+# ── 8. The units on a floor move with its server in the same step (POST /move-server "rack_items") ──────────────────
+
+UNITS = {"Rack-01": [{"id": "u1", "name": "Switch 01", "u": 3}, {"id": "u2", "name": "Disk shelf", "u": 7},
+                     {"id": "u3", "name": "Spare", "u": 5}]}
+SWAPPED_UNITS = {"Rack-01": [{"id": "u1", "name": "Switch 01", "u": 7}, {"id": "u2", "name": "Disk shelf", "u": 3},
+                             {"id": "u3", "name": "Spare", "u": 5}]}
+
+
+def write_units(lab, data=UNITS):
+    (lab.folder / "rack_items.json").write_text(json.dumps(data))
+    return inventory_store.revision(data)
+
+
+async def test_a_swap_moves_the_floor_units_with_the_servers_in_the_same_step(lab):
+    etag = write_units(lab)
+    r = await move(lab, server="optn45", target_server="OPTN44", swap=True,
+                   rack_items={"data": SWAPPED_UNITS, "if_match": etag})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    saved = json.loads((lab.folder / "rack_items.json").read_text(encoding="utf-8"))
+    assert [(i["id"], i["u"]) for i in saved["Rack-01"]] == [("u1", 7), ("u2", 3), ("u3", 5)]
+    history = {i["id"]: i.get("tracking_history", []) for i in saved["Rack-01"]}
+    assert [(e["action"], e["from"]["u"], e["to"]["u"], e["note"]) for e in history["u1"]] == [
+        ("moved", 3, 7, inventory_store.MOVED_WITH_SERVER_NOTE)]
+    assert history["u3"] == []   # a unit that stays has no new history
+    assert body["rack_items"] == saved
+    assert body["revisions"] == {"rack_items": inventory_store.revision(saved)}
+    # The outlets and ports stayed with the floors: each server took over the other's.
+    labels = await saved_labels(lab.db)
+    assert labels["pdu-a"]["1"] == "OPTN45" and labels["kvm-a"] == {"1": "OPTN45", "2": "OPTN44"}
+    assert read_layout(lab.folder)["rack_slots.json"]["Rack-01"]["optn45"] == 3
+    # A dry run ignores the units (and their shape): it writes nothing.
+    files = snapshot(lab.folder)
+    r = await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True, rack_items="not checked")
+    assert r.status_code == 200 and "rack_items" not in r.json() and snapshot(lab.folder) == files
+
+
+async def test_stale_or_invalid_units_refuse_the_whole_move_and_write_nothing(lab):
+    etag = write_units(lab)
+    files, labels = snapshot(lab.folder), await saved_labels(lab.db)
+    stale = await move(lab, server="optn45", target_server="OPTN44", swap=True,
+                       rack_items={"data": SWAPPED_UNITS, "if_match": inventory_store.revision({"other": []})})
+    assert stale.status_code == 409 and stale.json()["detail"] == devices._ITEMS_CHANGED
+    bad_u = {"Rack-01": [{**UNITS["Rack-01"][0], "u": 99}, *UNITS["Rack-01"][1:]]}
+    invalid = await move(lab, server="optn45", target_server="OPTN44", swap=True,
+                         rack_items={"data": bad_u, "if_match": etag})
+    assert invalid.status_code == 422, invalid.text
+    for shape in ({"data": SWAPPED_UNITS}, {"data": [], "if_match": etag}, "units"):
+        r = await move(lab, server="optn45", target_server="OPTN44", swap=True, rack_items=shape)
+        assert r.status_code == 400 and r.json()["detail"] == devices._ITEMS_NEED
+    assert snapshot(lab.folder) == files
+    assert await saved_labels(lab.db) == labels
+
+
+async def test_units_changed_while_the_labels_commit_undo_the_labels(lab, monkeypatch):
+    etag = write_units(lab)
+    files, labels = read_layout(lab.folder), await saved_labels(lab.db)
+    real_read, real_write = devices._read_layouts, devices._write_layouts
+
+    def another_session_moves_a_unit(strict):
+        # Read again under the locks by _write_layouts, after the labels were committed.
+        (lab.folder / "rack_items.json").write_text(json.dumps({"Rack-01": UNITS["Rack-01"][:2]}))
+        return real_read(strict)
+
+    def write(*args, **kwargs):
+        monkeypatch.setattr(devices, "_read_layouts", another_session_moves_a_unit)
+        try:
+            return real_write(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(devices, "_read_layouts", real_read)
+    monkeypatch.setattr(devices, "_write_layouts", write)
+    r = await move(lab, server="optn45", target_server="OPTN44", swap=True,
+                   rack_items={"data": SWAPPED_UNITS, "if_match": etag})
+    assert r.status_code == 409 and r.json()["detail"] == devices._ITEMS_CHANGED
+    assert await saved_labels(lab.db) == labels
+    assert read_layout(lab.folder) == files
+
+
+async def test_a_failed_unit_write_puts_back_the_layout_and_the_labels(lab, monkeypatch):
+    etag = write_units(lab)
+    units_before = (lab.folder / "rack_items.json").read_bytes()
+    files, labels = read_layout(lab.folder), await saved_labels(lab.db)
+
+    def broken(data):
+        (lab.folder / "rack_items.json").write_text("{half")
+        raise OSError("disk full")
+    monkeypatch.setattr(inventory_store, "write_items", broken)
+    r = await move(lab, server="optn45", target_server="OPTN44", swap=True,
+                   rack_items={"data": SWAPPED_UNITS, "if_match": etag})
+    assert r.status_code == 503, r.text
+    assert (lab.folder / "rack_items.json").read_bytes() == units_before
+    assert read_layout(lab.folder) == files
+    assert await saved_labels(lab.db) == labels
+    assert not list(lab.folder.glob("*.tmp"))
+
+
+async def test_a_move_leaves_placeholder_outlet_labels_out_of_the_position_stores(lab):
+    layout = {**LAYOUT,
+              "rack_slots.json": {"Rack-01": {**LAYOUT["rack_slots.json"]["Rack-01"], "empty": 2, "kvm power": 4},
+                                  "Rack-02": LAYOUT["rack_slots.json"]["Rack-02"]},
+              "rack_positions.json": {"Rack-01": [*LAYOUT["rack_positions.json"]["Rack-01"], "Outlet 4", "spare"]},
+              "rack_overrides.json": {**LAYOUT["rack_overrides.json"], "Empty": "Rack-01"}}
+    write_layout(lab.folder, layout)
+    r = await move(lab, server="optn45", target_server="OPTN44", swap=True)
+    assert r.status_code == 200, r.text
+    saved = read_layout(lab.folder)
+    assert not {"empty", "kvm power"} & set(saved["rack_slots.json"]["Rack-01"])
+    assert saved["rack_slots.json"]["Rack-01"]["optn45"] == 3
+    assert saved["rack_positions.json"]["Rack-01"] == ["optn44 (psu1)", "optn45", "web-1"]
+    assert saved["rack_overrides.json"] == {"optn44 (psu1)": "Rack-01", "other": "Rack-09"}
+
+
+# ── 9. Ports named only on the KVM/PDU itself, and the units that follow without rack_items (QA 2026-11-10) ──────────
+
+from app.models import MonitorDeviceSnapshot  # noqa: E402
+from app.routers import kvms as kvms_module  # noqa: E402
+from app.schemas import KvmPort, KvmStatus  # noqa: E402
+
+
+async def kvm_names_only_on_the_device(lab, observed=True, cache="down"):
+    """kvm-a keeps only port 1 saved; OPTN45's port 2 is named on the KVM itself. cache: "down" (its last read failed:
+    no port list), "up" (it answers with its own names) or None (nothing read it since the start)."""
+    kvm = await lab.db.get(Device, "kvm-a")
+    kvm.labels_json = json.dumps({"1": "optn44"})
+    ports = [{"number": 1, "label": "optn44"}, {"number": 2, "label": "OPTN45"}, {"number": 3, "label": "Port 3"},
+             {"number": 4, "label": "Port 4"}]
+    if observed:
+        lab.db.add(MonitorDeviceSnapshot(device_id="kvm-a", kind="kvm", ip="192.0.2.13", checked_at=time.time(),
+                                         reachable=cache == "up", ports_json=json.dumps(ports)))
+    await lab.db.commit()
+    if cache == "down":
+        kvms_module._cache["kvm-a"] = (time.monotonic(), KvmStatus(device_id="kvm-a", reachable=False, error="timeout"))
+    elif cache == "up":
+        kvms_module._cache["kvm-a"] = (time.monotonic(), KvmStatus(device_id="kvm-a", reachable=True, ports=[
+            KvmPort(number=p["number"], label=p["label"], status="idle") for p in ports]))
+    # The PDUs answer (their outlets are known), so only the KVM can be unchecked here.
+    for pdu in ("pdu-a", "pdu-b"):
+        pdus_module._cache[pdu] = (time.monotonic(), PduStatus(device_id=pdu, reachable=True, outlets=[
+            OutletState(number=n, label=f"Outlet {n}", state="on") for n in range(1, 9)]))
+
+
+@pytest.mark.parametrize("cache", ["down", None])
+async def test_a_kvm_that_does_not_answer_still_moves_its_ports_from_its_last_check(lab, cache):
+    await kvm_names_only_on_the_device(lab, cache=cache)
+    row = next(s for s in (await lab.client.get("/api/devices/locations")).json()["servers"] if s["key"] == "optn45")
+    assert [(p["device_id"], p["port"]) for p in row["kvm"]] == [("kvm-a", "2")]   # Locations sees the same port
+    dry = await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True)
+    assert dry.status_code == 200, dry.text
+    assert "unchecked" not in dry.json()
+    kvm_changes = [(c["port"], c["before"], c["after"]) for c in dry.json()["changes"] if c["device_id"] == "kvm-a"]
+    assert kvm_changes == [("1", "optn44", "OPTN45"), ("2", "OPTN45", "OPTN44")]
+    r = await move(lab, server="optn45", target_server="OPTN44", swap=True, plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 200, r.text
+    # Saved in Lab Manager, so the KVM's own (old) names never put a server back on the floor it left.
+    assert (await saved_labels(lab.db))["kvm-a"] == {"1": "OPTN45", "2": "OPTN44"}
+
+
+async def test_unknown_kvm_port_names_are_reported_as_unchecked(lab):
+    await kvm_names_only_on_the_device(lab, observed=False, cache=None)
+    dry = await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True)
+    assert dry.status_code == 200, dry.text
+    assert dry.json()["unchecked"] == [{"device_id": "kvm-a", "device_name": "KVM-A", "kind": "kvm", "ports": ["2", "3", "4"]}]
+    assert [c["device_id"] for c in dry.json()["changes"]].count("kvm-a") == 1   # only its saved port 1 is known
+    # Once the KVM answers, its names count and nothing is unchecked any more; a preview made before is refused.
+    kvms_module._cache["kvm-a"] = (time.monotonic(), KvmStatus(device_id="kvm-a", reachable=True, ports=[
+        KvmPort(number=1, label="optn44", status="idle"), KvmPort(number=2, label="OPTN45", status="idle"),
+        KvmPort(number=3, label="Port 3", status="idle"), KvmPort(number=4, label="Port 4", status="idle")]))
+    stale = await move(lab, server="optn45", target_server="OPTN44", swap=True, plan_revision=dry.json()["plan_revision"])
+    assert stale.status_code == 409
+    fresh = await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True)
+    assert "unchecked" not in fresh.json()
+    assert [(c["port"], c["after"]) for c in fresh.json()["changes"] if c["device_id"] == "kvm-a"] == [
+        ("1", "OPTN45"), ("2", "OPTN44")]
+    # A device of another rack is not this move's concern; a fully labelled one is never unchecked.
+    kvms_module._cache.clear()
+    kvm = await lab.db.get(Device, "kvm-a")
+    kvm.rack = "Rack-05"
+    await lab.db.commit()
+    assert "unchecked" not in (await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True)).json()
+    kvm.rack, kvm.labels_json = "Rack-01", json.dumps({"1": "optn44", "2": "OPTN45", "3": "Port 3", "4": "Port 4"})
+    await lab.db.commit()
+    assert "unchecked" not in (await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True)).json()
+
+
+async def test_a_snapshot_of_another_address_is_not_used(lab):
+    await kvm_names_only_on_the_device(lab, cache="down")
+    kvm = await lab.db.get(Device, "kvm-a")
+    kvm.ip = "192.0.2.99"
+    await lab.db.commit()
+    dry = (await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True)).json()
+    assert dry["unchecked"][0]["device_id"] == "kvm-a"
+
+
+async def test_units_follow_moves_the_floor_units_without_rack_items(lab):
+    etag = write_units(lab)
+    dry = await move(lab, server="optn45", target_server="OPTN44", swap=True, units_follow=True, dry_run=True)
+    assert dry.status_code == 200, dry.text
+    assert dry.json()["units"] == [
+        {"server": "OPTN45", "from": {"rack": "Rack-01", "slot": 7}, "to": {"rack": "Rack-01", "slot": 3},
+         "units": [{"id": "u2", "name": "Disk shelf"}]},
+        {"server": "OPTN44", "from": {"rack": "Rack-01", "slot": 3}, "to": {"rack": "Rack-01", "slot": 7},
+         "units": [{"id": "u1", "name": "Switch 01"}]}]
+    assert (lab.folder / "rack_items.json").read_text() == json.dumps(UNITS)   # a preview writes nothing
+    r = await move(lab, server="optn45", target_server="OPTN44", swap=True, units_follow=True,
+                   plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 200, r.text
+    saved = json.loads((lab.folder / "rack_items.json").read_text(encoding="utf-8"))
+    assert sorted((i["id"], i["u"]) for i in saved["Rack-01"]) == [("u1", 7), ("u2", 3), ("u3", 5)]
+    moved = {i["id"]: i.get("tracking_history", []) for i in saved["Rack-01"]}
+    assert [(e["action"], e["note"]) for e in moved["u1"]] == [("moved", inventory_store.MOVED_WITH_SERVER_NOTE)]
+    assert moved["u3"] == []
+    assert r.json()["revisions"] == {"rack_items": inventory_store.revision(saved)} != {"rack_items": etag}
+    assert (await saved_labels(lab.db))["kvm-a"] == {"1": "OPTN45", "2": "OPTN44"}
+
+
+async def test_units_follow_refusals_and_a_unit_changed_since_the_preview(lab):
+    write_units(lab)
+    files, labels = snapshot(lab.folder), await saved_labels(lab.db)
+    for body in ({"units_follow": "yes"}, {"units_follow": True, "rack_items": {"data": UNITS, "if_match": '"x"'}}):
+        r = await move(lab, server="optn45", target_server="OPTN44", swap=True, **body)
+        assert r.status_code == 400, r.text
+    dry = await move(lab, server="optn45", target_server="OPTN44", swap=True, units_follow=True, dry_run=True)
+    # Another session moves a unit onto floor 7 after the preview: the plan changed, nothing is written.
+    write_units(lab, {"Rack-01": [*UNITS["Rack-01"], {"id": "u4", "name": "New", "u": 7}]})
+    files = snapshot(lab.folder)
+    r = await move(lab, server="optn45", target_server="OPTN44", swap=True, units_follow=True,
+                   plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 409
+    assert snapshot(lab.folder) == files and await saved_labels(lab.db) == labels
+
+
+async def test_units_follow_keeps_the_units_of_a_shared_floor_and_moves_none_without_a_floor(lab):
+    write_units(lab)
+    layout = {**LAYOUT, "rack_slots.json": {**LAYOUT["rack_slots.json"],
+                                            "Rack-01": {**LAYOUT["rack_slots.json"]["Rack-01"], "web-1": 7}}}
+    write_layout(lab.folder, layout)
+    dry = await move(lab, server="optn45", target_server="OPTN44", swap=True, units_follow=True, dry_run=True)
+    assert dry.status_code == 200, dry.text
+    # web-1 stays on floor 7, so floor 7's units stay too; floor 3's units go with OPTN44.
+    assert [(m["server"], [u["id"] for u in m["units"]]) for m in dry.json()["units"]] == [("OPTN44", ["u1"])]
+    # Ports only: nobody changes floor, so no unit moves (and the plan has no "units").
+    ports = await move(lab, server="optn45", target_ports=[{"device_id": "pdu-a", "port": "6"}], swap=False,
+                       units_follow=True, dry_run=True)
+    assert ports.status_code == 200, ports.text
+    assert "units" not in ports.json()

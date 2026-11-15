@@ -27,6 +27,14 @@ export async function loadRackItems() {
   return data;
 }
 
+// An equipment list another request saved and returned with its revision (PUT /api/rack-layout moving units with a
+// server): the next saveRackItems(…, data) sends that revision. Returns data, or null without a revision.
+export function rememberRackItems(data, revision) {
+  if (!data || typeof data !== "object" || !revision) return null;
+  versions.set(data, revision);
+  return data;
+}
+
 // The server's 409 when a barcode, serial number or MAC address already names another unit (inventory_store.py
 // DUPLICATE_CODE / DUPLICATE_MAC). It is not a stale revision: nothing changed elsewhere, the value is taken.
 const DUPLICATE_IDENTITY = /already belongs to another item\.$/;

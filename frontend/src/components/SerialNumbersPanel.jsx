@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useAccounts } from "../accounts";
+import { useLiveReload } from "../api/useLiveReload";
 import { applyDetails, CHANGE_LABELS, COLUMN_LABELS, downloadSerialsCsv, loadSerials, parseDetails, previewDetails, requestItems, serialsText } from "../api/serialDetails";
 import { webpeStatusText } from "../api/webpeStatus.js";
 import { useWebpeStatus } from "../api/useWebpeStatus.js";
@@ -78,6 +79,8 @@ export default function SerialNumbersPanel({ onChanged }) {
     } catch (e) { if (mounted.current) setListError(failure(e)); }
   }
   useEffect(() => { mounted.current = true; refresh(); return () => { mounted.current = false; }; }, []);
+  // Live sync: serial numbers saved anywhere (Racks, a scan, the webpe tool) show here at once.
+  useLiveReload(["inventory"], refresh);
 
   // Any edit of the import makes the shown preview stale: it is dropped, so Apply always sends what was previewed.
   function edited(value) { setText(value); setPreview(null); setParsed(null); setResult(null); setError(""); }

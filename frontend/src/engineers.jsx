@@ -1,5 +1,6 @@
 import {createContext, useContext, useEffect, useState} from "react";
 import {accountRequest, useAccounts} from "./accounts";
+import {useLiveReload} from "./api/useLiveReload";
 
 const Directory = createContext(null);
 export const useEngineers = () => useContext(Directory);
@@ -13,6 +14,9 @@ export function EngineersProvider({children}) {
     catch(e){setError(e.message);throw e;}
   }
   useEffect(()=>{refresh().catch(()=>{});},[]);
+  // Live sync: an engineer added, renamed or deactivated anywhere is in every owner list at once (and Racks reads the
+  // owners again through `revision`).
+  useLiveReload(["owners"], () => refresh().catch(()=>{}));
   return <Directory.Provider value={{engineers,error,refresh,revision}}>{children}</Directory.Provider>;
 }
 

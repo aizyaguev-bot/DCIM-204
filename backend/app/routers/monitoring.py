@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import inventory_store
 from ..config import get_settings
 from ..database import get_db
 from ..models import PingIncident, PingMonitorState, PingSample, PingTarget, PingTargetName
@@ -61,7 +62,34 @@ def zone():
         raise HTTPException(503, "Invalid monitoring timezone or missing tzdata. Check server configuration.") from exc
 
 
-def target_view(target, tz, *, name_override="", inventory_name=None):
+async def current_racks(db):
+    """identity key -> the rack a lab server is in now: where Locations and the Racks page show it (its rack override,
+    else its PDU's rack, then its rack U / order entries, then its KVM's rack; devices.server_locations), else the rack
+    of its equipment unit (rack items of type computer/server, as monitor discovery reads them). Read-only."""
+    from .devices import server_locations
+    racks = {}
+    try:
+        for rack, items in inventory_store.read_items().items():
+            for item in items:
+                identity = server_identity(item.get("name")) if item.get("type") in ("computer", "server") else None
+                if identity:
+                    racks.setdefault(identity[0], rack)
+    except HTTPException:
+        pass  # an unreadable equipment list only leaves those servers at their stored rack
+    for row in (await server_locations(db))["servers"]:
+        if row.get("rack"):
+            racks[row["key"]] = row["rack"]
+    return racks
+
+
+def shown_rack(target, racks):
+    """A monitor of a lab server shows the server's current rack (a move or swap shows at once, not after the next
+    discovery round); a monitor of a server that is not in the lab (a manual address) keeps its stored rack."""
+    key = target.source_key.removeprefix("server:") if target.source_key.startswith("server:") else None
+    return (racks.get(key) or target.rack) if key else target.rack
+
+
+def target_view(target, tz, *, name_override="", inventory_name=None, racks=None):
     status = target.status
     if not target.enabled:
         status = "paused"
@@ -70,7 +98,8 @@ def target_view(target, tz, *, name_override="", inventory_name=None):
     elif target.checked_at and time.time() > next_slot(target.checked_at, tz) + 120:
         status = "stale"
     return {
-        "id": target.id, "name": name_override or inventory_name or target.name, "host": target.host, "rack": target.rack,
+        "id": target.id, "name": name_override or inventory_name or target.name, "host": target.host,
+        "rack": shown_rack(target, racks or {}),
         "inventory_name": inventory_name or target.name, "name_synced": not bool(name_override),
         "source": target.source, "enabled": target.enabled, "revision": target.revision,
         # The server identity this monitor belongs to (pages hide the monitors of servers removed from the lab).
@@ -97,6 +126,7 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
             service = "error"
     response.headers["Cache-Control"] = "no-store"
     connections = await connection_index(db, tz, now)
+    racks = await current_racks(db)
     from ..alerts import overview as alert_overview
     return {
         "email_alerts": await alert_overview(db, settings),
@@ -107,7 +137,8 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
         "last_completed_at": iso(state.last_completed_at) if state else None,
         "error": state.error if state else "",
         "targets": [{**target_view(t, tz, name_override=overrides.get(t.id,""),
-                     inventory_name=sources.get(t.source_key.removeprefix("server:"), (None,))[0] if t.source=="inventory" else None),
+                     inventory_name=sources.get(t.source_key.removeprefix("server:"), (None,))[0] if t.source=="inventory" else None,
+                     racks=racks),
                      **connections.get(t.source_key, {"pdu": [], "kvm": []})} for t in targets],
     }
 
@@ -144,7 +175,7 @@ async def create_target(body: TargetCreate, db: AsyncSession = Depends(get_db)):
         await db.rollback()
         raise HTTPException(409, "This server already exists. Edit its address in the list.") from exc
     await db.refresh(target)
-    return target_view(target, zone())
+    return target_view(target, zone(), racks=await current_racks(db))
 
 
 @router.put("/targets/{target_id}")
@@ -176,12 +207,13 @@ async def edit_target(target_id: str, body: TargetEdit, db: AsyncSession = Depen
                 db.add(name_record)
             name_record.override = "" if body.sync_name else (body.name or target.name)
     await db.commit()
-    return target_view(target, zone(), name_override=name_record.override if name_record else "")
+    return target_view(target, zone(), name_override=name_record.override if name_record else "",
+                       racks=await current_racks(db))
 
 
-def incident_view(incident, target, name=None):
+def incident_view(incident, target, name=None, racks=None):
     return {
-        "id": incident.id, "target_id": target.id, "name": name or target.name, "rack": target.rack,
+        "id": incident.id, "target_id": target.id, "name": name or target.name, "rack": shown_rack(target, racks or {}),
         "host": incident.host, "previous_up_at": iso(incident.previous_up_at),
         "first_failed_at": iso(incident.first_failed_at), "last_failed_at": iso(incident.last_failed_at),
         "ended_at": iso(incident.ended_at), "end_reason": incident.end_reason,
@@ -205,8 +237,10 @@ async def display_names(db):
 
 async def named_incidents(db, target_id, limit):
     sources, overrides = await display_names(db)
+    racks = await current_racks(db)
     return [incident_view(i, t, overrides.get(t.id) or
-            (sources.get(t.source_key.removeprefix("server:"), (t.name,))[0] if t.source == "inventory" else t.name))
+            (sources.get(t.source_key.removeprefix("server:"), (t.name,))[0] if t.source == "inventory" else t.name),
+            racks)
             for i, t in await incident_rows(db, target_id, limit)]
 
 

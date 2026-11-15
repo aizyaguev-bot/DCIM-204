@@ -21,7 +21,7 @@ from .accounts import AccountAccess, bootstrap_admin, router as accounts_router
 from .assistant.router import router as assistant_router
 from .assistant.actions import runner as action_runner
 from .assistant.actions.router import router as assistant_actions_router
-from . import confirm, inventory_store, name_sync
+from . import changes, confirm, inventory_store, name_sync
 from .config import get_settings
 from sqlalchemy import select
 
@@ -161,6 +161,8 @@ app.add_middleware(
     expose_headers=["ETag"],
 )
 app.add_middleware(AccountAccess)
+# Live sync: added last, so it is the outermost of these and counts only writes that every check let through (2xx).
+app.add_middleware(changes.ChangeFeed)
 
 # Before devices: its /name-sync/... and /{id}/device-names paths must never be read as a device id.
 app.include_router(device_names.router)
@@ -181,6 +183,7 @@ app.include_router(assistant_actions_router)
 app.include_router(accounts_router)
 from . import engineers
 app.include_router(engineers.router)
+app.include_router(changes.router)
 
 
 @app.get("/api/version")
@@ -264,25 +267,80 @@ async def save_rack_overrides(payload: dict, response: Response, if_match: str |
     return _save_layout(_RACK_OVERRIDES_FILE, {}, payload, if_match, response)
 
 
+_PORT_LABELS = "port_labels"
+_PORT_LABELS_NEED = "port_labels needs each PDU/KVM's labels and the labels_revision from GET /api/devices."
+
+
+# A placeholder outlet label ("Empty", "KVM Power", "Spare", "Outlet 3", ...) is never a server (owner, 2026-11-10):
+# every rack-layout save, like a move-server write, leaves such keys out of rack_slots, rack_positions and
+# rack_overrides. One rule for both (devices.servers_only).
+_servers_only = devices.servers_only
+
+
+def _port_label_parts(part):
+    """{device_id: {"data": {port: label}, "if_match": labels_revision}} -> {device_id: (labels, if_match)}."""
+    if not isinstance(part, dict) or not part:
+        raise HTTPException(422, _PORT_LABELS_NEED)
+    if len(part) > devices.MAX_LAYOUT_LABEL_DEVICES:
+        raise HTTPException(422, f"A move changes the labels of at most {devices.MAX_LAYOUT_LABEL_DEVICES} PDUs and KVMs.")
+    parts = {}
+    for device_id, entry in part.items():
+        if (not device_id or not isinstance(entry, dict) or not isinstance(entry.get("data"), dict)
+                or not isinstance(entry.get("if_match"), str) or not entry["if_match"]):
+            raise HTTPException(422, _PORT_LABELS_NEED)
+        parts[device_id] = (entry["data"], entry["if_match"])
+    return parts
+
+
 @app.put("/api/rack-layout")
-async def save_rack_layout(payload: dict):
-    """Move servers (Digital Twin Move / swap): rack_slots, rack_positions and rack_overrides change together or not
-    at all. Body: {"rack_slots": {"data": {...}, "if_match": "<ETag of GET /api/rack-slots>"}, "rack_positions": ...,
-    "rack_overrides": ...} (any non-empty subset). A stale revision is 409 and nothing is written; a failed write puts
-    back the files already written. Returns the new ETag of every store."""
+async def save_rack_layout(payload: dict, db=Depends(get_db)):
+    """Move servers (Racks page, Digital Twin Move / swap): rack_slots, rack_positions and rack_overrides change
+    together or not at all. Body: {"rack_slots": {"data": {...}, "if_match": "<ETag of GET /api/rack-slots>"},
+    "rack_positions": ..., "rack_overrides": ..., "rack_items": ..., "port_labels": ...} (any non-empty subset).
+    "rack_items" (optional) is the whole equipment list with the ETag of GET /api/rack-items, so the units on a
+    server's floor move with it in the same step; it is checked as PUT /api/rack-items checks it (422 shape / U /
+    details, 409 duplicate barcode, serial or MAC; linked barcodes and tracking history kept, each moved unit gets a
+    "moved" history entry). Placeholder outlet labels ("Empty", "KVM Power", ...) are never stored as servers in the
+    three layout stores (_servers_only); the revisions answered are those of what was stored.
+    "port_labels" (optional): {"<PDU/KVM id>": {"data": {port: label}, "if_match": "<its labels_revision from GET
+    /api/devices>"}}. Outlets and ports stay with their floors, so a swap or move rewrites their labels: each
+    device's whole map under the rules of PATCH /api/devices/{id}/labels (Lab Manager's saved labels, never what a
+    device reports), saved in the same all-or-nothing step (devices.save_labels_with_layout). PDU and KVM devices
+    themselves (rack, side, position) are never changed here.
+    A stale revision of any part is 409 and nothing is written; a failed write puts back what was already written.
+    Returns the new ETag of every store, the saved equipment list as "rack_items" when it was part of the save, and
+    "labels_revisions" ({device id: new labels_revision}) with the device name sync fields when port_labels was."""
     stores = {"rack_slots": (_RACK_SLOTS_FILE, {}), "rack_positions": (_RACK_POSITIONS_FILE, {}),
               "rack_overrides": (_RACK_OVERRIDES_FILE, {})}
-    entries = []
+    entries, items, labels = [], None, None
     for name, part in payload.items():
-        if name not in stores:
+        if name == _PORT_LABELS:
+            labels = _port_label_parts(part)
+            continue
+        if name not in stores and name != inventory_store.ITEMS_STORE:
             raise HTTPException(422, f"Unknown rack layout store: {name}")
         if not isinstance(part, dict) or not isinstance(part.get("data"), dict) or not isinstance(part.get("if_match"), str):
             raise HTTPException(422, "Each rack layout store needs its data and the if_match revision from its GET.")
+        if name == inventory_store.ITEMS_STORE:
+            items = (part["data"], part["if_match"])
+            continue
         path, default = stores[name]
-        entries.append((name, path, part["data"], part["if_match"], default))
-    if not entries:
+        entries.append((name, path, _servers_only(name, part["data"]), part["if_match"], default))
+    if not entries and items is None and labels is None:
         raise HTTPException(422, "Nothing to save.")
-    return {"ok": True, "revisions": inventory_store.save_layouts(entries)}
+    answer = {"ok": True}
+    if labels is None:
+        answer["revisions"], saved_items = inventory_store.save_layouts_with_items(entries, items)
+    else:
+        (answer["revisions"], saved_items), answer["labels_revisions"], names = await devices.save_labels_with_layout(
+            db, labels, check=lambda: inventory_store.save_layouts_with_items(entries, items, check_only=True),
+            write=lambda: inventory_store.save_layouts_with_items(entries, items))
+        answer.update(names)
+        changes.note("devices", "monitoring")   # the outlets and ports name other servers now; monitors follow
+    if items is not None:
+        changes.note("inventory")
+        answer["rack_items"] = saved_items
+    return answer
 
 
 @app.get("/api/opt-owners")

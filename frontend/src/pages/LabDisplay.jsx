@@ -10,9 +10,11 @@ import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
 import { useRemovedServers } from "../removedServers.jsx";
 import { withoutRemoved, withoutRemovedMonitoring } from "../api/removedServers.js";
+import { startChangeFeed } from "../api/changes";
+import { useDataChanged } from "../api/useDataChanged";
 import nvidiaLogo from "../assets/nvidia-logo.svg";
 import {
-  REFRESH_MS, STALE_MS, STALE_ALARM_MS, ROTATE_MS, REQUEST_TIMEOUT_MS, OVERRIDES_EVERY, INCIDENT_LIMIT, ROW_EM,
+  REFRESH_MS, STALE_MS, STALE_ALARM_MS, ROTATE_MS, REQUEST_TIMEOUT_MS, INCIDENT_LIMIT, ROW_EM,
   LIST_GAP_EM, STRIP_ITEM_EM,
   buildServers, buildRacks, environment, kpis, attentionItems, consolesInUse, recentChanges, maintenanceEntries,
   rackGrid, fillRows, pageOf, pinnedPage, labStatus, sourceAfter, relativeAge, formatKw, formatRange,
@@ -47,10 +49,16 @@ const asObject = value => (value && typeof value === "object" && !Array.isArray(
 // and is then "unknown" (sources[name].state), never an old copy shown as current. Every request is aborted when it
 // takes longer than REQUEST_TIMEOUT_MS and when the page goes away (withTimeout), so a hung server never piles up
 // open connections.
+// Live sync: a change saved anywhere (the change feed, ../api/changes.js) runs a cycle at once; one that comes during a
+// cycle runs one more right after it, so a move shows on the wall within seconds and never waits for the next cycle.
+// What the display shows: servers by rack (device labels, rack overrides), readings, maintenance, Ping Monitor, removals.
+const DISPLAY_DOMAINS = ["devices", "layout", "power", "monitoring", "removed"];
 function useLabFeed() {
   const [feed, setFeed] = useState({ data: EMPTY, sources: {}, loaded: false, state: "connecting", lastSuccess: 0, error: "" });
+  const kick = useRef(null);
+  useDataChanged(DISPLAY_DOMAINS, () => kick.current?.());
   useEffect(() => {
-    let alive = true, busy = false, timer = null, cycle = 0;
+    let alive = true, busy = false, again = false, timer = null;
     const stop = new AbortController();
     const timed = request => withTimeout(request, { ms: REQUEST_TIMEOUT_MS, stop: stop.signal });
     let data = EMPTY;
@@ -62,21 +70,20 @@ function useLabFeed() {
       clearTimeout(timer);
       if (document.hidden) { schedule(); return; }
       busy = true;
-      const n = cycle++;
+      again = false;
       try {
         const list = await timed(signal => api.getDevices({ signal }));
         if (!alive) return;
         const devices = Array.isArray(list) ? list : [];
         const pdus = devices.filter(d => d.kind === "pdu");
         const kvms = devices.filter(d => d.kind === "kvm");
-        const readOverrides = n % OVERRIDES_EVERY === 0 || !sources.overrides;
         const [pduRes, kvmRes, maintenance, monitoring, incidents, overrides] = await Promise.all([
           Promise.allSettled(pdus.map(p => timed(signal => api.getPduStatus(p.id, { signal })))),
           Promise.allSettled(kvms.map(k => timed(signal => api.getKvmStatus(k.id, { signal })))),
           settle(timed(signal => api.maintenanceList({ signal }))),
           settle(timed(signal => getJson("/api/monitoring", signal))),
           settle(timed(signal => getJson(`/api/monitoring/incidents?limit=${INCIDENT_LIMIT}`, signal))),
-          readOverrides ? settle(timed(signal => getJson("/api/rack-overrides", signal))) : Promise.resolve(null),
+          settle(timed(signal => getJson("/api/rack-overrides", signal))),
         ]);
         if (!alive) return;
         const now = Date.now();
@@ -100,8 +107,8 @@ function useLabFeed() {
           maintenance: sourceAfter(sources.maintenance, maintenance, now),
           monitoring: sourceAfter(sources.monitoring, monitoring, now),
           incidents: sourceAfter(sources.incidents, incidents, now),
-          // Read every OVERRIDES_EVERY cycles, so it may be that much older before it counts as unknown.
-          overrides: overrides ? sourceAfter(sources.overrides, overrides, now, STALE_MS + OVERRIDES_EVERY * REFRESH_MS) : sources.overrides,
+          // Read every cycle: a server moved to another rack shows there at the next cycle (at once on a live change).
+          overrides: sourceAfter(sources.overrides, overrides, now),
         };
         data = {
           devices,
@@ -119,16 +126,18 @@ function useLabFeed() {
         setFeed(f => ({ ...f, state: error?.status === 401 ? "signed-out" : "offline", error: errorMessage(error) }));
       } finally {
         busy = false;
-        if (alive) schedule();
+        if (alive) { if (again) run(); else schedule(); }
       }
     }
     const runNow = () => { if (!busy) run(); };
+    kick.current = () => { if (busy) again = true; else run(); };
     const onVisible = () => { if (document.visibilityState === "visible") runNow(); };
     window.addEventListener("online", runNow);
     document.addEventListener("visibilitychange", onVisible);
     run();
     return () => {
       alive = false;
+      kick.current = null;
       clearTimeout(timer);
       stop.abort();
       window.removeEventListener("online", runNow);
@@ -262,6 +271,7 @@ function Parts({ parts }) {
 
 export default function LabDisplay() {
   const narrow = useNarrowScreen();
+  useEffect(() => { startChangeFeed(); }, []);   // live sync: one change feed per page (App starts it on the site)
   return narrow ? <NarrowNotice /> : <DisplayScreen />;
 }
 

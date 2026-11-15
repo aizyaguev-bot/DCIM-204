@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useLiveReload } from "../api/useLiveReload";
 import { api, errorMessage } from "../api/client";
 import { useAccounts } from "../accounts";
 import ExportCsvButton from "../components/ExportCsvButton";
@@ -31,12 +32,15 @@ export function filterConnections(servers = [], { search = "", rack = "all", con
 
 // One load cycle of the page: load(false) is a visible load, load(true) a background refresh that is skipped while
 // the browser tab is hidden or another load is still running. A 403 stops the cycle; after stop() no late response
-// is reported, so a slow old request never overwrites a newer one.
+// is reported, so a slow old request never overwrites a newer one. load(true, { queue: true }) (a live change) that
+// meets a running load runs once more right after it, so the change is never lost.
 export function connectionsLoader(fetchConnections, { onStart, onData, onError, onDenied, onDone, isHidden = () => false } = {}) {
   let stopped = false;
   let denied = false;
   let pending = false;
-  async function load(background = false) {
+  let queued = false;
+  async function load(background = false, { queue = false } = {}) {
+    if (pending && queue && !stopped && !denied) queued = true;
     if (stopped || denied || pending || (background && isHidden())) return false;
     pending = true;
     if (!background) onStart?.();
@@ -49,6 +53,7 @@ export function connectionsLoader(fetchConnections, { onStart, onData, onError, 
     } finally {
       pending = false;
       if (!stopped && !background) onDone?.();
+      if (queued && !stopped) { queued = false; load(true); }
     }
     return true;
   }
@@ -82,6 +87,7 @@ export default function ConnectionsView() {
   const [search, setSearch] = useState("");
   const [rack, setRack] = useState("all");
   const [connection, setConnection] = useState("all");
+  const loaderRef = useRef(null);
 
   // Load now, then refresh in the background like the rest of the app (Account settings > Auto-refresh), so power
   // states, labels and owners changed elsewhere appear without a Refresh click. A failed background refresh keeps
@@ -97,12 +103,15 @@ export default function ConnectionsView() {
       onDone: () => setLoading(false),
       isHidden: () => document.hidden,
     });
+    loaderRef.current = loader;
     loader.load(false);
     const timer = setInterval(() => loader.load(true), preferences.refresh_seconds * 1000);
     const onVisible = () => { if (!document.hidden) loader.load(true); };
     document.addEventListener("visibilitychange", onVisible);
-    return () => { loader.stop(); clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+    return () => { loader.stop(); if (loaderRef.current === loader) loaderRef.current = null; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   }, [canOperate, refresh, preferences.refresh_seconds]);
+  // Live sync: a server moved, relabelled, given an owner or a new address anywhere shows here at once.
+  useLiveReload(["devices", "layout", "owners", "monitoring", "removed", "power"], () => loaderRef.current?.load(true, { queue: true }));
 
   const servers = data?.servers || [];
   const racks = useMemo(() => connectionRacks(servers), [servers]);

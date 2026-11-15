@@ -76,7 +76,12 @@ async def pdu_status(device_id, dev):
     return PduStatus(device_id=device_id, reachable=online, inlet_voltage=230 if online else 0, total_watts=sum(o.watts for o in outlets), outlets=outlets,
                      inlet_readings=[InletReading(number=1, voltage=230, current=sum(o.watts for o in outlets)/230, watts=sum(o.watts for o in outlets))] if online else [], error=None if online else 'Fixture: PDU unavailable')
 
+# DCIM_FIXTURE_KVM_DOWN=1: KVM 01 does not answer (its status lists no ports), as a KVM that is down or unreachable.
+kvm_down = os.environ.get('DCIM_FIXTURE_KVM_DOWN') == '1'
+
 async def kvm_status(device_id, dev):
+    if kvm_down:
+        return KvmStatus(device_id=device_id, reachable=False, error='Fixture: KVM unavailable')
     return KvmStatus(device_id=device_id, reachable=True, ports=[KvmPort(number=i,label=f'OPT1{i}',status='active' if i==1 else 'idle',status_source='live') for i in range(1,5)])
 
 async def fake_power(self, number, action):

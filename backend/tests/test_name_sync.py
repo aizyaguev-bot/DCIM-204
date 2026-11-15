@@ -763,3 +763,12 @@ async def test_an_older_read_never_settles_a_newer_save(env):
     assert summary(await rows(env)) == {("2", "failed", name_sync.UNREACHABLE)}
     fixed = await name_sync._settle("pdu-a", {"2": "n2"}, "2026-07-01T00:00:00.000000+00:00")
     assert fixed["2"]["status"] == "synced"
+
+
+async def test_a_written_batch_counts_for_live_sync(env):
+    """The Sync page shows the names written to the devices without a reload (this app has no HTTP change feed)."""
+    from app import changes
+    assert changes.current()["rev"] == 0
+    await patch_labels(env, "pdu-a", {"1": "optn44", "2": "optn46", "3": ""})
+    now = changes.current()
+    assert now["rev"] >= 1 and {name for name, value in now["domains"].items() if value} == {"devices"}

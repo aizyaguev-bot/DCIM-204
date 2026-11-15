@@ -26,7 +26,9 @@ const isInventory = url => url.pathname === '/api/inventory' || url.pathname.sta
       if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method()) && !ALLOWED_WRITE.test(url.pathname)) {
         unexpectedWrites.push(request.method() + ' ' + url.pathname); return route.abort();
       }
-      return route.continue();
+      // A delayed inventory read (backToBack) may still be waiting when its page route is removed: Playwright then
+      // finishes it itself, and continuing it here as well is not an error of the page under test.
+      return route.continue().catch(error => { if (!/already handled/i.test(error.message)) throw error; });
     });
     const version = await (await context.request.get(origin + '/api/version')).json();
     assert.equal(version.version, 'LOCAL PREVIEW - TEST DATA', 'Refuse any real lab environment');

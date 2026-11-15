@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
-from . import inventory_store
+from . import changes as change_feed, inventory_store
 from .config import get_settings
 from .database import AsyncSessionLocal
 from .models import Device, PingIncident, PingMonitorState, PingSample, PingTarget
@@ -353,6 +353,7 @@ async def monitor_loop(session_factory=AsyncSessionLocal):
                         PingMonitorState.id == 1, PingMonitorState.lease_owner == owner,
                     ).values(last_completed_at=time.time(), error=""))
                     await db.commit()
+                await change_feed.record(("monitoring",))   # live sync: open pages show the round's results now
         except asyncio.CancelledError:
             raise
         except Exception as exc:

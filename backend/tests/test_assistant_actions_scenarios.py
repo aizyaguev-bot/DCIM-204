@@ -2034,7 +2034,8 @@ async def test_n2_move_to_empty_ports_with_a_new_rack_slot(env, real_planner):
                "target_rack": "R2", "target_slot": 5}
     async with user(env, "operator") as c:
         p = await created(propose(c, **request))
-        assert changes_of(p) == [("pdu1", "3", "OPT13", "Outlet 3"), ("pdu3", "4", None, "OPT13")]
+        # Before: the name PDU 03 reported for outlet 4 at its last scheduled check (nothing saved, no status cache).
+        assert changes_of(p) == [("pdu1", "3", "OPT13", "Outlet 3"), ("pdu3", "4", "Outlet 4", "OPT13")]
         assert positions_of(p) == {"OPT13": (("R1", 12), ("R2", 5))}
         r = await confirm_data(c, p["id"])
         assert r.status_code == 200 and r.json()["status"] == "succeeded", r.text

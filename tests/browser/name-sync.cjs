@@ -86,7 +86,12 @@ const KVM_UNSUPPORTED = 'Port names cannot be written to this KVM yet';
     for (const [n, value] of Object.entries(changes)) await page.getByLabel(`Label for outlet ${n}`, { exact: true }).fill(value);
     const saved = page.waitForResponse(r => /\/api\/devices\/[^/]+\/labels$/.test(new URL(r.url()).pathname) && r.request().method() === 'PATCH');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
+    // A new name on a server's outlet asks "Rename … everywhere?" first; these checks change the outlet label only.
+    const only = page.getByRole('button', { name: 'Only this outlet', exact: true });
+    let answered = false;
+    const answering = (async () => { while (!answered) { try { await only.waitFor({ timeout: 500 }); await only.click(); } catch {} } })();
     const response = await saved;
+    answered = true; await answering;
     assert.equal(response.status(), 200, 'label save');
     return response.json();
   }
@@ -313,6 +318,7 @@ const KVM_UNSUPPORTED = 'Port names cannot be written to this KVM yet';
     await page.getByLabel('Label for port 2', { exact: true }).fill('kvm-qa-2');
     const kvmSaved = page.waitForResponse(r => new URL(r.url()).pathname === '/api/devices/kvm1/labels');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.getByRole('button', { name: 'Only this port', exact: true }).click();   // a server's port: "Rename … everywhere?"
     assert.equal((await kvmSaved).status(), 200);
     const kvmBody = await (await kvmSaved).json();
     assert.deepEqual([kvmBody.device_names, kvmBody.device_names_reason], ['not_sent', KVM_UNSUPPORTED]);

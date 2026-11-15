@@ -17,7 +17,7 @@ from app.assistant.actions.models import AssistantActionEvent, AssistantActionPr
 from app.models import Device, PduMaintenance, PduMaintenanceLog
 from app.routers import pdu_maintenance
 from app import power_protection
-from app import inventory_store
+from app import changes, inventory_store
 
 SECRET = "synthetic-private-error-value"
 
@@ -1146,3 +1146,23 @@ async def test_cycle_keeps_pending_after_attempted_off_pins_failure(sessions, pr
     result = await run(pid, sessions, settings, fake)
     assert result["aborted"]["reason"] == "drift"
     assert [item["pdu_id"] for item in result["pending_on"]] == ["pdu-one"]
+
+
+@pytest.mark.parametrize("kind,domains", [("server_off", {"power"}), ("outlet_on", {"power"}),
+                                          ("pdu_shutdown", {"power"}), ("open_console", set())])
+async def test_a_finished_action_counts_for_live_sync(kind, domains, sessions, proposal, settings, fake):
+    """Also a background run: every open page shows the power state the action changed, without a reload."""
+    snapshot = impact(() if kind == "open_console" else ("pdu-one", "pdu-two"))
+    if kind == "open_console":
+        snapshot["consoles"] = [{"kvm_id": "kvm", "port": 1, "console_url": "/api/kvms/kvm/autologin?port=1"}]
+    pid = await proposal(kind, snapshot=snapshot)
+    await run(pid, sessions, settings, fake)
+    now = changes.current()
+    assert {name for name, value in now["domains"].items() if value} == domains
+    assert now["rev"] == (1 if domains else 0)
+
+
+async def test_an_action_that_never_ran_counts_nothing(sessions, proposal, settings, fake):
+    pid = await proposal("server_off", status="cancelled")
+    await run(pid, sessions, settings, fake)
+    assert changes.current()["rev"] == 0

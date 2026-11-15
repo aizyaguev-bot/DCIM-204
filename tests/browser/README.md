@@ -31,6 +31,16 @@ The device name sync check `name-sync.cjs` needs its own fixture, started fresh 
 labels and the in-memory fake devices): `DCIM_TEST_ACCOUNTS=1 DCIM_FAKE_NAME_DEVICES=1 python tests/browser/preview-server.py 8840`,
 then `node tests/browser/name-sync.cjs` (default port 8840). No real PDU or KVM is contacted.
 
+The live sync check `live-sync.cjs` (two browser contexts: Admin changes, Operator watches Racks, Dashboard, Server
+health and the lab display) needs a fresh fixture with `DCIM_TEST_ACCOUNTS=1` and the backend change feed
+(`GET /api/changes`); it swaps and moves servers on Racks (outlet and KVM port labels follow the floor, units move
+with their server), undoes everything and checks the fixture is restored. Default port 8930.
+
+`move-unchecked.cjs` needs a fresh fixture with `DCIM_TEST_ACCOUNTS=1 DCIM_FIXTURE_KVM_DOWN=1` (KVM 01 does not
+answer): a Racks swap warns that the KVM ports were not checked instead of claiming them, an empty floor without a
+free-labelled outlet of its number asks which outlet feeds it, and a Locations move takes the floor units along
+(`units_follow`). It changes fixture data without undoing it, so start a new fixture for each run. Default port 8930.
+
 To check frontend source changes without rebuilding `frontend/dist`, build into a
 temporary folder (`npx vite build --outDir <folder> --emptyOutDir` from `frontend/`)
 and start the fixture with `DCIM_PREVIEW_DIST=<folder>`.

@@ -33,6 +33,12 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
   const deviceRef = useRef(device);
   deviceRef.current = device;
   useEffect(() => { editSession.current++; setEditMode(false); setLabelNote(""); setSaveError(""); setNeedsRebase(false); }, [device?.id]);
+  // Live sync: labels saved elsewhere while the editor is open (the device list reloads on every change) are taken in at
+  // once: the typed text stays, their other changes show, and the note says so (as after a refused save).
+  useEffect(() => {
+    if (!device || !editMode || saving || !draftRevision || !device.labels_revision || device.labels_revision === draftRevision) return;
+    applyRebase(device, draftLabels, draftOriginal);
+  }, [device?.labels_revision, editMode, saving]);
   if (!device) return null;
   const outlets = status?.outlets || [];
   const on = outlets.filter(o => o.state === "on").length;

@@ -12,6 +12,7 @@ import re
 from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .. import changes as change_feed
 from .. import inventory_store as store
 from .inventory import set_headers
 
@@ -255,6 +256,8 @@ async def apply_serial_details(body: SerialDetailsRequest, response: Response, i
             for rack, item, row, changes, entry in plans:
                 entry["unit"] = unit_view(rack, by_id[item["id"]])
         set_headers(response, data)
+    if body.dry_run or not plans:
+        change_feed.unchanged()   # nothing was written: open pages need not reload
     counts = {status: sum(entry["status"] == status for entry in report) for status in ("updated", "unchanged", "not_found", "ambiguous")}
     return {"dry_run": body.dry_run, "overwrite": body.overwrite, "mark_switch": body.mark_switch, "counts": counts, "results": report}
 

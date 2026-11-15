@@ -90,6 +90,7 @@ test("move body: target server with swap on by default", () => {
   const server = normalizeLocations(sample).servers[1];
   assert.deepEqual(buildMoveRequest(server, { mode: "server", target: "optn44" }, true).body, {
     server: "optn45", target_server: "optn44", target_ports: null, target_rack: null, target_slot: null, swap: true, dry_run: true,
+    units_follow: true,
   });
   assert.equal(buildMoveRequest(server, { mode: "server", target: "optn44", swap: false }, false).body.swap, false);
   assert.equal(buildMoveRequest(server, { mode: "server", target: "optn44", swap: false }, false).body.dry_run, false);
@@ -107,7 +108,7 @@ test("move body: target ports with optional rack and slot, validated before any 
   const pdu = [loc.empty_ports.pdu[0]], kvm = [loc.empty_ports.kvm[0]];
   assert.deepEqual(buildMoveRequest(server, { mode: "ports", pdu, kvm, rack: "", slot: "" }, true).body, {
     server: "optn44", target_server: null, target_rack: null, target_slot: null, swap: true, dry_run: true,
-    target_ports: [{ device_id: "pa", port: "2" }, { device_id: "k1", port: "3" }],
+    target_ports: [{ device_id: "pa", port: "2" }, { device_id: "k1", port: "3" }], units_follow: true,
   });
   const placed = buildMoveRequest(server, { mode: "ports", pdu, kvm: [], rack: "R1", slot: "14", swap: false }, false).body;
   assert.equal(placed.target_rack, "R1");
@@ -146,6 +147,19 @@ test("move results list before -> after per port and per position, and flag unpl
   assert.equal(moveResultIsEmpty(result), false);
   assert.equal(moveResultIsEmpty(normalizeMoveResult({ ok: true })), true);
   assert.equal(formatLocation({ rack: "R1", slot: null }), "R1");
+});
+
+test("move results list the units that go with their servers and the ports that could not be checked", () => {
+  const result = normalizeMoveResult({
+    ok: true, dry_run: true, changes: [], unplaced: [],
+    positions: [{ server: "OPT12", before: { rack: "Rack-01", slot: 2 }, after: { rack: "Rack-01", slot: 4 } }],
+    units: [{ server: "OPT12", from: { rack: "Rack-01", slot: 2 }, to: { rack: "Rack-01", slot: 4 }, units: [{ id: "u1", name: "Switch A" }, { id: "u2" }] }],
+    unchecked: [{ device_id: "kvm1", device_name: "KVM 01", kind: "kvm", ports: ["2", "4"] }, null],
+  });
+  assert.deepEqual(result.units, [{ server: "OPT12", from: "Rack-01 · U2", to: "Rack-01 · U4", names: ["Switch A", "u2"] }]);
+  assert.deepEqual(result.unchecked, [{ device_id: "kvm1", device_name: "KVM 01", kind: "kvm", ports: ["2", "4"] }]);
+  assert.deepEqual(normalizeMoveResult({}).units, []);
+  assert.deepEqual(normalizeMoveResult({ units: "x", unchecked: {} }).unchecked, []);
 });
 
 test("move results drop positions that do not change, so a no-op move is empty", () => {

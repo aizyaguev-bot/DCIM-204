@@ -132,6 +132,8 @@ ROUTE_ROLES = {
     "GET /api/assistant/work-items": "Viewer", "POST /api/assistant/work-items": "Operator",
     "PATCH /api/assistant/work-items/{item_id}": "Operator",
     "GET /api/changelog": "Viewer",
+    # Live sync: every open page polls the change counters (not public: they tell when the lab data changed).
+    "GET /api/changes": "Viewer",
     # Layout stores: read by anyone signed in, written by Operators.
     "GET /api/chillers": "Viewer", "PUT /api/chillers": "Operator", "GET /api/rack-items": "Viewer", "PUT /api/rack-items": "Operator",
     "PUT /api/rack-layout": "Operator", "GET /api/rack-overrides": "Viewer", "PUT /api/rack-overrides": "Operator",

@@ -19,7 +19,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app import accounts, confirm, inventory_store
+from app import accounts, changes, confirm, inventory_store
 from app.assistant import demo, engine
 from app.assistant.actions import locations, resolve, runner, store, tools
 from app.assistant.actions import router as actions
@@ -194,13 +194,13 @@ async def test_swap_preview_is_the_planner_dry_run_with_pins(sessions, planner):
     async with sessions() as db:
         impact = await resolve.build_impact(db, req("server_swap", server="optn45", target_server="optn44"),
                                             SimpleNamespace(power_protected_outlets=""), NOW)
-    assert planner.calls == [("plan_move", {"server": "optn45", "target_server": "optn44", "swap": True})]
+    assert planner.calls == [("plan_move", {"server": "optn45", "target_server": "optn44", "swap": True, "units_follow": True})]
     data = impact.to_dict()
     assert data["changes"] == SWAP_PLAN["changes"] and data["positions"] == SWAP_PLAN["positions"]
     assert data["unplaced"] == [] and data["servers"] == ["OPTN45", "OPTN44"]
     assert data["targets"] == [] and data["pdus"] == [] and "pins" not in data
     assert impact.pins == {"plan": {k: SWAP_PLAN[k] for k in locations.PLAN_KEYS},
-                           "body": {"server": "optn45", "target_server": "optn44", "swap": True}}
+                           "body": {"server": "optn45", "target_server": "optn44", "swap": True, "units_follow": True}}
 
 
 async def test_move_without_swap_warns_about_the_unplaced_server(sessions, planner):
@@ -208,7 +208,7 @@ async def test_move_without_swap_warns_about_the_unplaced_server(sessions, plann
     async with sessions() as db:
         impact = await resolve.build_impact(db, req("server_move", server="server:optn45", target_server="optn44"),
                                             None, NOW)
-    assert planner.calls[0][1] == {"server": "optn45", "target_server": "optn44", "swap": False}
+    assert planner.calls[0][1] == {"server": "optn45", "target_server": "optn44", "swap": False, "units_follow": True}
     assert impact.unplaced == ["OPTN44"]
     assert "OPTN44 יישאר בלי מיקום: בלי שקעי PDU, בלי יציאות KVM ובלי מקום בארון." in impact.warnings_he
 
@@ -219,7 +219,7 @@ async def test_move_to_ports_resolves_device_names_and_never_swaps(sessions, pla
                   target_rack="Rack-02", target_slot=7)
     async with sessions() as db:
         await resolve.build_impact(db, request, None, NOW)
-    assert planner.calls[0][1] == {"server": "optn45", "swap": False, "target_rack": "Rack-02", "target_slot": 7,
+    assert planner.calls[0][1] == {"server": "optn45", "swap": False, "target_rack": "Rack-02", "target_slot": 7, "units_follow": True,
                                    "target_ports": [{"device_id": "pdu-05", "port": "7"},
                                                     {"device_id": "kvm-2", "port": "12"}]}
 
@@ -384,7 +384,8 @@ async def test_swap_is_proposed_then_applied_with_an_empty_body_and_no_password(
     assert done["status"] == "succeeded"
     assert done["result"]["changes"] == SWAP_PLAN["changes"] and done["result"]["positions"] == SWAP_PLAN["positions"]
     assert done["result"]["summary_he"].startswith("השינוי נשמר: 3 שינויי תוויות ו-2 שינויי מיקום בארון.")
-    assert app.state.planner.applied == [("move", {"server": "optn45", "target_server": "optn44", "swap": True})]
+    assert app.state.planner.applied == [("move", {"server": "optn45", "target_server": "optn44", "swap": True,
+                                                     "units_follow": True})]
     assert app.state.verified == []
     assert await events_of(app, proposal["id"]) == ["proposed", "confirmed", "executing", "finished"]
 
@@ -804,15 +805,17 @@ needs_planner = pytest.mark.skipif(not REAL_PLANNER, reason="routers/devices.py 
 @needs_planner
 @pytest.mark.parametrize("request_body,endpoint_body", [
     ({"kind": "server_swap", "server": "optn45", "target_server": "optn44"},
-     {"server": "optn45", "target_server": "optn44", "swap": True}),
+     {"server": "optn45", "target_server": "optn44", "swap": True, "units_follow": True}),
     ({"kind": "server_move", "server": "optn45", "target_server": "optn44"},
-     {"server": "optn45", "target_server": "optn44", "swap": False}),
+     {"server": "optn45", "target_server": "optn44", "swap": False, "units_follow": True}),
     ({"kind": "server_move", "server": "optn45", "target_ports": [{"device": "PDU-B", "port": "6"},
                                                                   {"device": "KVM-A", "port": "4"}]},
      {"server": "optn45", "target_ports": [{"device_id": "pdu-b", "port": "6"}, {"device_id": "kvm-a", "port": "4"}],
-      "swap": False}),
+      "swap": False, "units_follow": True}),
 ])
 async def test_real_planner_moves_match_the_locations_endpoint_exactly(lab, request_body, endpoint_body):
+    # Units on the floors: the assistant moves them with their servers exactly as the Locations page does.
+    (lab.folder / "rack_items.json").write_text(json.dumps(UNITS))
     initial = await lab_state(lab)
     async with signed_in(lab.app, "admin") as admin:
         dry = await admin.post("/api/devices/move-server", json={**endpoint_body, "dry_run": True})
@@ -829,7 +832,38 @@ async def test_real_planner_moves_match_the_locations_endpoint_exactly(lab, requ
         response = await client.post(f"{PROPOSALS}/{proposal['id']}/execute", json={})
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "succeeded"
-    assert await lab_state(lab) == by_endpoint
+    assert timeless(await lab_state(lab)) == timeless(by_endpoint)
+
+
+def timeless(state):
+    """lab_state with the time of each unit's "moved" history entry left out (two runs move it at different times)."""
+    labels, files = state
+    files = dict(files)
+    if "rack_items.json" in files:
+        items = json.loads(files["rack_items.json"])
+        for unit in (unit for units in items.values() for unit in units):
+            for entry in unit.get("tracking_history", []):
+                entry.pop("at", None)
+        files["rack_items.json"] = items
+    return labels, files
+
+
+UNITS = {"Rack-01": [{"id": "u1", "name": "Switch 01", "u": 3}, {"id": "u2", "name": "Disk shelf", "u": 7}]}
+
+
+@needs_planner
+async def test_an_assistant_swap_moves_the_floor_units_with_the_servers(lab):
+    (lab.folder / "rack_items.json").write_text(json.dumps(UNITS))
+    async with signed_in(lab.app) as client:
+        proposal = await propose(client, {"kind": "server_swap", "server": "optn45", "target_server": "optn44"})
+        warnings = proposal["impact"]["warnings_he"]
+        assert any("Disk shelf" in text for text in warnings) and any("Switch 01" in text for text in warnings)
+        response = await client.post(f"{PROPOSALS}/{proposal['id']}/execute", json={})
+        assert response.status_code == 200 and response.json()["status"] == "succeeded", response.text
+    saved = json.loads((lab.folder / "rack_items.json").read_text(encoding="utf-8"))
+    assert sorted((item["id"], item["u"]) for item in saved["Rack-01"]) == [("u1", 7), ("u2", 3)]
+    assert changes.current()["domains"]["inventory"] > 0, "open pages reload the units too"
+    assert saved["Rack-01"][0]["tracking_history"][0]["note"] == inventory_store.MOVED_WITH_SERVER_NOTE
 
 
 @needs_planner
@@ -886,3 +920,29 @@ async def test_real_planner_apply_refuses_a_plan_other_than_the_confirmed_one(la
     async with lab.sessions() as db:
         applied = await devices.apply_clear(db, "optn44", expected=cleared)
     assert locations.plan_of(applied) == cleared and await lab_state(lab) != initial
+
+
+async def test_an_applied_location_change_counts_server_places_for_live_sync(app):
+    async with signed_in(app) as client:
+        proposal = await propose(client)
+        assert changes.current()["rev"] == 0, "a proposal (the planner's dry run) changes nothing"
+        response = await client.post(f"{PROPOSALS}/{proposal['id']}/execute", json={})
+        assert response.status_code == 200 and response.json()["status"] == "succeeded"
+    now = changes.current()
+    assert now["rev"] == 1
+    assert {name for name, value in now["domains"].items() if value} == {"devices", "layout", "monitoring"}
+
+def test_an_assistant_move_says_which_kvm_ports_it_could_not_check():
+    """A KVM whose own port names are unknown (it does not answer, or nothing read it yet): the planner lists it as
+    "unchecked" and its ports do not follow the move. The proposal and the done summary say so instead of a silent
+    PDU-only swap; a plan without unchecked devices keeps its old shape."""
+    answer = {"changes": [], "positions": [], "unplaced": [], "unchecked": [
+        {"device_id": "kvm-a", "device_name": "KVM 01", "kind": "kvm", "ports": ["2", "3"]}]}
+    planned = locations.plan_of(answer)
+    assert "unchecked" not in planned, "not part of the plan or its revision (as in move-server)"
+    shown = locations._shown(planned, answer["unchecked"])
+    assert shown["unchecked"] == [{"device_name": "KVM 01", "ports": ["2", "3"]}]
+    assert any("KVM 01" in text and "2, 3" in text for text in locations._warnings("server_swap", shown))
+    assert "KVM 01" in locations._done_summary(shown)
+    plain = locations.plan_of({"changes": [], "positions": [], "unplaced": [], "unchecked": []})
+    assert "unchecked" not in plain and "unchecked" not in locations._shown(plain)
