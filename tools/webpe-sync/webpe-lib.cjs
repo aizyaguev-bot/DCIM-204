@@ -66,7 +66,8 @@ function candidates(items, state, now) {
   let waiting = 0;
   for (const item of items || []) {
     const sn = String(item.serial || item.barcode || '').trim();
-    if (!sn || String(item.part_number || '').trim()) continue;
+    // A serial number has no spaces: a name typed in the serial field ("Portia tray") is not looked up.
+    if (!sn || /\s/.test(sn) || String(item.part_number || '').trim()) continue;
     const key = snKey(sn);
     if (seen.has(key)) continue;
     seen.add(key);

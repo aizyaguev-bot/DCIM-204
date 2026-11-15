@@ -127,6 +127,18 @@
         <button type="button" class="kbtn secondary small zb zb-text" id="vReset" title="Close the selection and return to the overview (Home)">Reset view</button>
         <button type="button" class="kbtn secondary small zb zb-text hidden" id="vBack" title="Leave the rack front (Escape)">Back to overview</button>
       </div>
+      <div class="navpad" id="navPad" role="group" aria-label="Camera: drag mode, rotate and tilt">
+        <button type="button" class="kbtn secondary small zb nav-more" id="navMore" aria-expanded="false" aria-controls="navPadBody" title="Show the drag mode, rotate and tilt buttons">Rotate</button>
+        <div class="navpad-b" id="navPadBody">
+          <button type="button" class="kbtn secondary small zb" id="mPan" aria-pressed="true" aria-label="Drag pans" title="Pan: a left drag or one finger moves across the floor"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg></button>
+          <button type="button" class="kbtn secondary small zb" id="mRotate" aria-pressed="false" aria-label="Drag rotates" title="Rotate: a left drag or one finger rotates and tilts the view (a right drag always rotates)"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 4v4h-4"/><circle cx="12" cy="12" r="1.6"/></svg></button>
+          <button type="button" class="kbtn secondary small zb" id="rotL" aria-label="Rotate left" title="Rotate left 15° (Shift + ←)"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M5 12a7 7 0 1 0 2.05-4.95"/><path d="M5 4v4h4"/></svg></button>
+          <button type="button" class="kbtn secondary small zb" id="rotR" aria-label="Rotate right" title="Rotate right 15° (Shift + →)"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 4v4h-4"/></svg></button>
+          <button type="button" class="kbtn secondary small zb" id="tiltU" aria-label="Tilt up" title="Tilt up: look more level (Shift + ↑)"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6"/></svg></button>
+          <button type="button" class="kbtn secondary small zb" id="tiltD" aria-label="Tilt down" title="Tilt down: look more from above (Shift + ↓)"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button>
+        </div>
+      </div>
+      <div class="hover-tip" id="hoverTip" role="tooltip" hidden></div>
     </section>
 
     <div class="sheet" id="sheet">

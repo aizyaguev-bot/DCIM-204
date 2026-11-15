@@ -43,6 +43,8 @@ async function webpeLookup(sn) {
     return { kind: 'signin' };
   }
   if (r.status === 401 || r.status === 403 || (r.redirected && new URL(r.url).origin !== location.origin)) return { kind: 'signin' };
+  // 400: webpe refuses this text as a serial number; treat it like "not found" (asked again after 6 hours).
+  if (r.status === 400) return { kind: 'ok', records: [] };
   if (r.status !== 200) return { kind: 'error', detail: `webpe answered ${r.status}` };
   if (/html/i.test(r.headers.get('content-type') || '')) return { kind: 'signin' };
   let body;

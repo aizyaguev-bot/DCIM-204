@@ -17,6 +17,13 @@
   // realistic body colours (photo-matched); status is shown by edge outline + LED + label dot
   const TYPE_BODY = { opt: '#2b2d33', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#1a1d24', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
   const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
+  // PDUs and KVMs are fixed infrastructure (owner, 2026-11-10): the twin never moves them, not with the Move tool, not
+  // as the other half of a swap, and never because a server moved or changed (their outlets / ports belong to the floor).
+  // A Lab Manager unit (rack item) of type PDU or KVM ('equip-pdu' / 'equip-kvm' here) is a PDU / KVM too: the 3D does not
+  // move it either (Lab Manager stays its authority: where Racks puts it, the 3D shows it).
+  const FIXED_INFRA = new Set(['pdu', 'kvm']);
+  const isFixedInfra = type => FIXED_INFRA.has(String(type || '').replace(/^equip-/, ''));
+  const FIXED_NOTE = 'PDUs and KVMs are fixed infrastructure: they stay where they are and never move with a server.';
   const CABLE_COLORS = ['#d92b2b', '#d92b2b', '#1a1a1a', '#d92b2b', '#22c1a6', '#d92b2b', '#f4f4f5'];
   const EQUIP_LABEL = { switch: 'Switch', computer: 'Computer', patchpanel: 'Patch Panel', cable: 'Cable Mgmt', pdu: 'PDU', kvm: 'KVM', ups: 'UPS', blank: 'Blank Panel', other: 'Other' };
   const POLL_MS = 15000;
@@ -65,7 +72,10 @@
     heat: LS.get('heat', false), embed: /[?&]embed=1/.test(location.search), editMode: false, kiosk: LS.get('kiosk', false) || /[?&]kiosk=1/.test(location.search), moveItem: null, lastInput: performance.now(),
     model: null,              // computed effective model (setups, shelves, items)
     tween: null,
+    stats: { frames: 0, ticks: 0, changePolls: 0 },   // work done: rendered frames, 1 s ticks, change-feed reads (pause checks)
   };
+  // Paused while hidden (see "Lab Manager links" near the end): no render loop, ticker or polling timers then.
+  let paused = false, pausedTimer = false, rafId = 0, ticker = 0;
   // When this page first noticed each issue (no server time for most of them); kept for the browser tab only.
   try { const seen = JSON.parse(sessionStorage.getItem('twin.attnSeen') || '[]'); if (Array.isArray(seen)) S.attnSeen = new Map(seen.filter(e => Array.isArray(e) && Number.isFinite(e[1]))); } catch { /* storage blocked */ }
 
@@ -87,6 +97,7 @@
   controls.enableDamping = true;
   controls.minDistance = 0.8;
   controls.maxDistance = 35;
+  let MAX_DISTANCE_BASE = 35;                 // room-based zoom-out limit (init); fitLab lowers maxDistance to 1.6 × overview
   controls.minPolarAngle = 0.02;              // a hair off straight down: the compass heading stays defined
   controls.maxPolarAngle = 1.5;               // ~86°: never level with or under the floor
   canvas.style.touchAction = 'none';
@@ -178,7 +189,7 @@
   function resize() {
     const vp = $('#viewport'); const w = Math.max(1, vp.clientWidth), h = Math.max(1, vp.clientHeight);
     renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
-    placeAttnDock(); layoutLegend(); rackBarEdges(true);
+    placeAttnDock(); layoutLegend(); rackBarEdges(true); placeNavPad();
     const r = vp.getBoundingClientRect(); const root = document.documentElement.style;
     root.setProperty('--vp-cx', Math.round(r.left + r.width / 2) + 'px'); root.setProperty('--vp-bottom', Math.max(0, Math.round(innerHeight - r.bottom)) + 'px');
   }
@@ -653,6 +664,7 @@
     const shelfForU = (sid, u) => { const sh = shelvesOf(sid); const n = sh.length; if (!Number.isInteger(Number(u)) || u < 1 || u > n) return null; const idx = uTopDown ? n - Number(u) : Number(u) - 1; return sh[idx].id; };
 
     let items = d.items.map(it => ({ ...it, ...pickOv(it.id) }));
+    const slotRank = new Map();   // live server item → its place in its rack's slot order (rack-positions, then name)
 
     if (live.connected) {
       const pdus = live.devices.filter(x => x.kind === 'pdu');
@@ -687,6 +699,7 @@
       Object.entries(byRack).forEach(([rack, list]) => {
         const order = live.rackOrder[rack] || []; const slots = live.rackSlots[rack] || {};
         list.sort((a, b) => { const ai = order.indexOf(a.key), bi = order.indexOf(b.key); if (ai === -1 && bi === -1) return a.name.localeCompare(b.name); if (ai === -1) return 1; if (bi === -1) return -1; return ai - bi; });
+        list.forEach((s, i) => { s.rank = i; });
         const used = new Set(); list.forEach(s => { if (slots[s.key] != null) { s.u = Number(slots[s.key]); used.add(s.u); } });
         let next = 1; list.forEach(s => { if (s.u == null) { while (used.has(next)) next++; s.u = next; used.add(next); next++; } s.uExplicit = slots[s.key] != null; });
       });
@@ -702,14 +715,16 @@
           placementConfidence: s.uExplicit ? 'high' : 'low',
           dcim: { ...(base.dcim || {}), optKey: s.key, pdu: s.pduId, pduName: s.pduName, outlet: s.outlet, kvm: kvmIdx[s.key] || kvmIdx[s.key.split(' (')[0]] || [] },
           live: { state: s.state, watts: s.watts, rack: s.rack, u: s.u, sw: live.sw[s.key] || null, owner: live.owners[s.key] || null, inDcim: true } };
-        it.unmappedRack = !!s.rack && !sid;
+        it.unmappedRack = !!s.rack && !sid; slotRank.set(it, s.rank);
         items = items.filter(x => x !== jsonOpts.get(s.key)); items.push(it);
       });
       items = items.filter(i => !(i.type === 'opt' && !seen.has(i.dcim?.optKey || optKey(i.name)) && removedKeys.has(pingKey(i.name))));   // removed from the lab
       items.filter(i => i.type === 'opt' && !seen.has(i.dcim?.optKey || optKey(i.name))).forEach(i => { i.live = { inDcim: false }; i.liveWarning = LIVE_WARN.notInDcim; });
-      // 2) PDU / KVM devices
+      // 2) PDU / KVM devices: fixed infrastructure (owner, 2026-11-10). A lab-data.json PDU / KVM keeps the place the file
+      // gives it; only a PDU the file does not place takes its Lab Manager device's rack. Nothing a server does (a move,
+      // a swap, an owner change) touches them: servers are placed from rack-slots / rack-overrides, never PDUs or KVMs.
       items.forEach(i => {
-        if (i.type === 'pdu' && i.dcim?.deviceId) { const dev = pdus.find(p => p.id === i.dcim.deviceId); const st = live.pdu[i.dcim.deviceId]; if (dev) { i.live = { device: dev, status: st, reachable: st?.reachable ?? null }; if (dev.rack && setupByRack[dev.rack]) { i.setup = setupByRack[dev.rack]; i.zone = setups.find(x => x.id === i.setup)?.zone; } } }
+        if (i.type === 'pdu' && i.dcim?.deviceId) { const dev = pdus.find(p => p.id === i.dcim.deviceId); const st = live.pdu[i.dcim.deviceId]; if (dev) { i.live = { device: dev, status: st, reachable: st?.reachable ?? null }; if (!i.setup && dev.rack && setupByRack[dev.rack]) { i.setup = setupByRack[dev.rack]; i.zone = setups.find(x => x.id === i.setup)?.zone; } } }
         if (i.type === 'kvm' && i.dcim?.deviceId) { const dev = kvms.find(k => k.id === i.dcim.deviceId); const st = live.kvm[i.dcim.deviceId]; if (dev) i.live = { device: dev, status: st, reachable: st?.reachable ?? null }; }
       });
       // live-only PDUs (e.g. racks added in DCIM)
@@ -750,16 +765,37 @@
       const liveShelves = new Set(liveEq.map(i => i.shelf).filter(Boolean));
       items = items.filter(i => !(i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && (liveNames.has(norm(i.name)) || (i.shelf && liveShelves.has(i.shelf)))));
       items.forEach(i => { if (i.type.startsWith('equip-') && !i.id.startsWith('LIVE-') && i.setup && setups.find(x => x.id === i.setup)?.dcimRack) i.liveWarning = LIVE_WARN.notInRackItems; });
-      // Lab Manager is the inventory of a DCIM-mapped rack: a lab-data.json server, unit, PDU or KVM that Lab Manager
-      // does not know is not drawn there (it would take a floor's server / unit slot next to the real one); it is listed
-      // under Unplaced as "In lab-data.json, not in Lab Manager". lab-data.json keeps the geometry and the inventory of
-      // unmapped racks; offline nothing changes.
+      // Lab Manager is the inventory of a DCIM-mapped rack: a lab-data.json server or unit that Lab Manager does not know
+      // is not drawn there (it would take a floor's server / unit slot next to the real one); it is listed under Unplaced
+      // as "In lab-data.json, not in Lab Manager". PDUs and KVMs are fixed infrastructure: they always stay where
+      // lab-data.json puts them (a shared PDU, e.g. Rack-06/07, has no Lab Manager device of its own). lab-data.json keeps
+      // the geometry and the inventory of unmapped racks; offline nothing changes.
       const mapped = sid => !!(sid && setups.find(x => x.id === sid)?.dcimRack);
       const jsonOnly = i => !i.id.startsWith('LIVE-') && (
-        (i.type === 'opt' && i.live?.inDcim === false) || i.type.startsWith('equip-') || ((i.type === 'pdu' || i.type === 'kvm') && !i.live?.device));
+        (i.type === 'opt' && i.live?.inDcim === false) || i.type.startsWith('equip-'));
       items.forEach(i => {
         if (!jsonOnly(i) || !mapped(i.setup)) return;
         i.notInLm = true; i.jsonPlace = placeText(i); i.setup = null; i.shelf = null; i.placement = undefined; i.side = undefined; i.zone = null;
+      });
+    }
+    // Owner's rule (2026-11-10): a unit (a Lab Manager rack item) on a floor that has a server shows THAT server's owner,
+    // derived and never copied. Its own stored owner (opt-owners 'item:<id>', kept as ownOwner) applies only on a floor
+    // without a server (a storage shelf, a rack's bottom bay, Unplaced). The detail, inventory, search and the editor
+    // (read-only there, pointing to the server) all read it.owner / it.ownerFrom.
+    // Several servers on one floor: the first in slot order (rack-positions, then name: the U assignment's order above),
+    // exactly like Lab Manager (unitOwner.js floorServer over buildRackRows), so Racks and the 3D name the same owner.
+    // A storage rack's level is a shelf there ("the server on this shelf"), a rack's a floor.
+    if (live.connected) {
+      const serverOn = new Map();
+      const rankOf = i => (slotRank.has(i) ? slotRank.get(i) : Infinity);
+      const first = (a, b) => (!!a.live?.inDcim !== !!b.live?.inDcim ? !!a.live?.inDcim : rankOf(a) < rankOf(b));
+      items.forEach(i => { if (i.type === 'opt' && i.shelf && (!serverOn.has(i.shelf) || first(i, serverOn.get(i.shelf)))) serverOn.set(i.shelf, i); });
+      items.forEach(i => {
+        if (!i.id.startsWith('LIVE-') || !String(i.type).startsWith('equip-')) return;
+        const srv = i.shelf ? serverOn.get(i.shelf) : null; if (!srv) return;
+        const own = i.owner || null;
+        i.ownOwner = own; i.ownerFrom = { id: srv.id, name: srv.name || srv.id, place: isStorageRack(i.live?.rack, live) ? 'shelf' : 'floor' };
+        i.owner = srv.owner || null; i.live = { ...i.live, owner: i.owner, ownOwner: own };
       });
     }
     // DCIM racks without a physical setup
@@ -1388,6 +1424,7 @@
       top = bTop + mb.offsetHeight + 8;
     }
     const dock = $('#attnDock'); if (dock) { dock.style.top = top + 'px'; dock.style.maxHeight = `max(72px, calc(100% - ${top + 72}px))`; }
+    placeNavPad();   // the camera cluster keeps clear of the banner / dock placed here
   }
   function renderAttention() {
     const list = S.attention || []; const indexed = list.map((e, i) => [e, i]);
@@ -1503,6 +1540,7 @@
       else hideRackFront();
     }
     S.selected = id; $('#vFocus').disabled = !id;
+    noteSelection(rec, opts.via);   // sessionStorage, and Lab Manager's address for a selection the user made here
     clearSelectionHelper();   // dispose: a live refresh re-selects every 15 s
     if (rec.group) {
       scene.updateMatrixWorld(true);   // groups rebuilt a moment ago have not been rendered yet: their world matrices are stale
@@ -1518,9 +1556,11 @@
     if (S.front && !opts.refresh) renderRackFront();
     // fly only after the detail panel is open: framing uses the final viewport size and overlays
     if (rec.group && !opts.keepCamera && opts.fly !== false && !stayFront) flyTo(rec);
+    else if (opts.fromCanvas && !refresh && !stayFront) keepInView(rec);   // a canvas click: no flight, but keep it on screen
   }
-  function closeDetail() {
+  function closeDetail(opts = {}) {
     S.selected = null; S.pwMenuOpen = false; $('#vFocus').disabled = true; clearSelectionHelper(); $('#detail').classList.add('hidden');
+    noteSelection(null, opts?.via);
     $$('.lbl.sel').forEach(l => l.classList.remove('sel')); renderTree(); renderRackBar(); renderCrumb();
     if (S.front) renderRackFront();
     if (S.sheet.tab === 'details') setSheet(null, S.sideTab === 'tree' ? 'racks' : 'issues'); else updateSheetTabs();
@@ -1578,7 +1618,7 @@
       ${it?.tracking?.count ? `<span class="k">Tracking</span><span class="v">${it.tracking.count} event${it.tracking.count === 1 ? '' : 's'}${it.tracking.last ? ` · last: ${esc(it.tracking.last.action || '?')}${it.tracking.last.at ? ' ' + esc(ago(it.tracking.last.at)) : ''}` : ''}</span>` : ''}
       <span class="k">Lifecycle</span><span class="v">${statusPill(rec.status)}</span>
       <span class="k">Confidence</span><span class="v">${confPill(rec.conf || 'medium')}${rec.pconf && rec.pconf !== rec.conf ? ` <span class="muted small">placement:</span> ${confPill(rec.pconf)}` : ''}${rec.cat === 'setup' && def.dcimMappingConfidence ? ` <span class="muted small">DCIM mapping:</span> ${confPill(def.dcimMappingConfidence)}` : ''}</span>
-      ${it?.type !== 'opt' ? `<span class="k">Owner</span><span class="v"><bdi>${esc(it?.owner || def.owner || '—')}</bdi>${it?.live?.owner ? ' <span class="muted small">(Lab Manager)</span>' : ''}</span>` : ''}
+      ${it?.type !== 'opt' ? `<span class="k">Owner</span><span class="v"><bdi>${esc(it?.owner || def.owner || '—')}</bdi>${it?.ownerFrom ? ` <span class="muted small">(from <bdi>${esc(it.ownerFrom.name)}</bdi>, the server on this ${it.ownerFrom.place || 'floor'})</span>` : it?.live?.owner ? ' <span class="muted small">(Lab Manager)</span>' : ''}</span>` : ''}
       <span class="k">Location</span><span class="v">${locationOf(rec)}</span>
     </div>`;
   }
@@ -1596,7 +1636,25 @@
       more('dq', `Data quality · ${dq.length} issue${dq.length === 1 ? '' : 's'}`, dq.length ? `<ul class="dq-ul">${dq.map(x => `<li>${x}</li>`).join('')}</ul>` : '<div class="muted small">Nothing to correct.</div>') +
       more('photos', 'Photos &amp; notes', `${notes ? `<div class="note" dir="auto">${esc(notes)}</div>` : ''}${photosHtml(rec.def.photos)}${rec.tpl?.source ? `<div class="muted small" style="margin-top:6px">Dimensions: ${esc(rec.tpl.source)}</div>` : ''}`) + '</div>';
   }
-  const locationSec = rec => section('Location', `<div class="loc-row"><span>${esc(placeLabel(rec))}</span>${rec.group ? '<button type="button" class="link" data-focus>Show in 3D</button>' : ''}</div>`);
+  // Lab Manager pages for this object (the twin may be embedded in Lab Manager: the links open in the whole window).
+  // Only Lab Manager records get them: a server or unit Lab Manager lists, a rack mapped to a DCIM rack, a live PDU.
+  function lmRackOf(rec) {
+    if (!rec || !S.live.connected) return '';
+    if (rec.cat === 'setup') return dcimRackOf(rec.def) || '';
+    const it = rec.item; if (rec.cat !== 'item' || !it) return '';
+    const lm = it.type === 'opt' ? it.live?.inDcim === true : rec.id.startsWith('LIVE-') && String(it.type).startsWith('equip-');
+    return lm ? it.live?.rack || dcimRackOf(S.data.setups.find(s => s.id === it.setup) || {}) || '' : '';
+  }
+  function lmHref(tab) { return `${(S.settings.url || '').replace(/\/$/, '')}/?tab=${tab}`; }
+  const lmLink = (href, text, key) => `<a class="link" href="${esc(href)}" target="_top" rel="noopener" data-lm="${key}">${text}</a>`;
+  const locationSec = rec => { const rack = lmRackOf(rec);
+    return section('Location', `<div class="loc-row"><span>${esc(placeLabel(rec))}</span><span class="loc-acts">${rec.group && rec.cat !== 'setup' ? '<button type="button" class="link" data-focus>Show in 3D</button>' : ''}${rack ? lmLink(racksHref(rack), 'Open in Racks', 'racks') : ''}</span></div>`); };
+  // A unit's barcode tracking (Lab Manager rack items): its last scan and how many events; the whole history is in Scan & Track.
+  function trackingSec(rec) {
+    const it = rec.item; if (!it?.tracking || !rec.id.startsWith('LIVE-')) return '';
+    const n = it.tracking.count || 0; const text = `${it.last_seen_at ? 'Last seen ' + ago(it.last_seen_at) : 'Never scanned'}${n ? ` · ${n} event${n === 1 ? '' : 's'}` : ''}`;
+    return section('Tracking', `<div class="loc-row"><span>${esc(text)}</span><span class="loc-acts">${lmLink(lmHref('scan'), 'Full history in Scan &amp; Track', 'scan')}</span></div>`);
+  }
 
   function renderDetail(rec) {
     const def = rec.def; const it = rec.item; const live = S.live.connected; const canOperate = !!window.DCIM_CAN_OPERATE;
@@ -1664,13 +1722,13 @@
         const st = it.live?.status; const dev = it.dcim?.deviceId || it.live?.device?.id; const m = dev && S.live.connected ? S.live.maintenance?.pdus?.[dev] : null;
         const reach = !live ? 'No live data' : !it.live ? 'Not in live DCIM' : st?.reachable === true ? 'Reachable' : st?.reachable === false ? 'Offline' : 'Loading…';
         const on = st?.reachable && st.outlets ? `${st.outlets.filter(o => o.state === 'on').length}/${st.outlets.length}` : '—';
-        html += section('Status', `<div class="sgrid">${cell('Reachable', reach, reach === 'Reachable' ? 'ok' : reach === 'Offline' ? 'bad' : '')}${cell('Load', st?.reachable && st.total_watts != null ? `${(st.total_watts / 1000).toFixed(2)} kW${st.watts_complete === false ? ' (partial)' : ''}` : '—')}${cell('Outlets on', on)}${cell('Maintenance', m ? (Number(m.started_at) ? `Since ${hhmm(Number(m.started_at) * 1000)}` : 'Yes') : live ? 'No' : '—', m ? 'maint' : '')}</div>`);
+        html += section('Status', `<div class="sgrid">${cell('Reachable', reach, reach === 'Reachable' ? 'ok' : reach === 'Offline' ? 'bad' : '')}${cell('Load', st?.reachable && st.total_watts != null ? `${(st.total_watts / 1000).toFixed(2)} kW${st.watts_complete === false ? ' (partial)' : ''}` : '—')}${cell('Outlets on', on)}${cell('Maintenance', m ? (Number(m.started_at) ? `Since ${hhmm(Number(m.started_at) * 1000)}` : 'Yes') : live ? 'No' : '—', m ? 'maint' : '')}</div>${live && it.live?.device ? `<div class="lm-links">${lmLink(lmHref('power'), 'Manage maintenance in Power', 'power')}</div>` : ''}`);
       } else if (it.type === 'kvm') {
         const st = it.live?.status; const ports = st?.ports || [];
         const reach = !live ? 'No live data' : !it.live ? 'Not in live DCIM' : st?.reachable === false ? 'Offline' : st?.reachable ? 'Reachable' : 'Loading…';
         html += section('Status', `<div class="sgrid">${cell('Reachable', reach, reach === 'Reachable' ? 'ok' : reach === 'Offline' ? 'bad' : '')}${cell('Sign-in', st?.reachable ? (st.error ? 'Failed' : 'OK') : '—', st?.error ? 'bad' : '')}${cell('Ports in use', ports.length && !st?.error ? `${ports.filter(p => p.in_use).length} of ${ports.length}` : '—')}${cell('Owner', it.owner || def.owner || '—')}</div>`);
       } else {
-        html += section('Status', `<div class="sgrid">${cell('Type', kindOf(rec))}${cell('Lifecycle', STATUS_LABEL[rec.status] || rec.status)}${cell('Owner', it.owner || def.owner || '—')}${cell(it.last_seen_at ? 'Last seen' : 'Placement', it.last_seen_at ? ago(it.last_seen_at) : (rec.pconf || rec.conf || 'medium') + ' confidence')}</div>`);
+        html += section('Status', `<div class="sgrid">${cell('Type', kindOf(rec))}${cell('Lifecycle', STATUS_LABEL[rec.status] || rec.status)}${cell('Owner', it.owner || def.owner || '—', '', it.ownerFrom ? `From ${it.ownerFrom.name}, the server on this ${it.ownerFrom.place || 'floor'}` : '')}${cell(it.last_seen_at ? 'Last seen' : 'Placement', it.last_seen_at ? ago(it.last_seen_at) : (rec.pconf || rec.conf || 'medium') + ' confidence')}</div>`);
       }
       // ── PDU outlets (unchanged contract: the first .note is the outlet-count note, the heading starts with "Outlets")
       if (it.type === 'pdu') {
@@ -1699,7 +1757,7 @@
           <div class="ogrid ${n <= 8 ? 'k8' : ''}">${ports.map(p => `<div class="ocell ${esc(p.status)}${p.in_use ? ' hl' : ''}" data-kport="${esc(p.number)}" title="${esc(p.label)}"><span class="n">p${esc(p.number)}</span><span class="l">${isDefaultOutletLabel(p.label) ? '—' : esc(p.label)}</span>${p.in_use ? '<span class="w">IN USE</span>' : ''}</div>`).join('')}</div>${failed ? `<div class="err-box" style="margin-top:8px">${esc(st.error)}</div>` : ''}</section>`;
       }
       if (it.liveWarning) html += `<div class="warn-box" role="status">${esc(it.liveWarning)}</div>`;
-      html += locationSec(rec) + moreSections(rec);
+      html += locationSec(rec) + trackingSec(rec) + moreSections(rec);
     } else if (rec.cat === 'setup') {
       // ── rack: power, PDU, issues, temperature; Rack front; DCIM mapping; shelves
       const t = rackTelemetry(def); const pdus = rackPdus(def); const m = pdus.map(p => S.live.maintenance?.pdus?.[p.id]).find(Boolean);
@@ -1708,6 +1766,7 @@
       const pduTxt = !live ? '—' : !pdus.length ? 'None' : m && live ? (Number(m.started_at) ? `Maintenance since ${hhmm(Number(m.started_at) * 1000)}` : 'Maintenance') : pdus.some(p => S.live.pdu?.[p.id]?.reachable === false) ? 'Offline' : pdus.every(p => S.live.pdu?.[p.id]?.reachable) ? 'Reachable' : 'Loading…';
       html += section('Status', `<div class="sgrid">${cell('Power', power)}${cell('PDU', pduTxt, pduTxt === 'Offline' ? 'bad' : pduTxt === 'Reachable' ? 'ok' : /^Maint/.test(pduTxt) ? 'maint' : '')}${cell('Issues', open ? `${open} open` : 'None', open ? 'bad' : '')}${cell('Temperature', t?.temp != null ? `${t.temp.toFixed(1)} °C` : '—')}</div>`);
       html += section('Actions', `<div class="act-row"><button type="button" class="kbtn primary md" data-front="${esc(rec.id)}">Rack front</button><button type="button" class="kbtn secondary md" data-focus>Show in 3D</button></div>`);
+      if (lmRackOf(rec)) html += locationSec(rec);   // a mapped rack: where it is, and "Open in Racks"
       // DCIM rack mapping is read-only here; it is changed only in Edit layout (same save / If-Match path as every layout edit)
       const conn = [`<div class="crow"><span>DCIM rack</span><span class="cst" dir="auto">${esc(dcimRackOf(def) || 'Not mapped')}</span></div>`];
       pdus.forEach(p => {
@@ -1814,7 +1873,7 @@
   // Edits are numbered: a save only clears the dirty state if nothing was edited while its request was in flight.
   let editSeq = 0, saveInFlight = false;
   function markDirty() { editSeq++; S.dirty = true; S.data.meta.modified = new Date().toISOString(); LS.set('draft', { savedAt: Date.now(), base: S.dataBase, data: S.data }); updateSaveBar(); }
-  function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = saveInFlight || !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; if (S.moveItem) placeAttnDock(); }
+  function updateSaveBar() { const bar = $('#saveBar'); if (!bar) return; bar.classList.toggle('hidden', !S.dirty); $('#sbSave').disabled = saveInFlight || !location.protocol.startsWith('http'); $('#sbSave').title = location.protocol.startsWith('http') ? 'PUT /api/twin-data (writes lab-twin/lab-data.json on the server)' : 'Only available when served from the Lab Manager backend'; if (S.moveItem) placeAttnDock(); else placeNavPad(); }
   // Content stamp of lab-data.json as this page last read or wrote it (FNV-1a over the canonical JSON text).
   function textStamp(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return str.length + ':' + h.toString(16); }
   const dataStamp = d => textStamp(JSON.stringify(d));
@@ -1951,7 +2010,7 @@
   function connectFailed(err, status, quiet) {
     S.live.connected = false; S.live.connecting = false; S.live.error = String(err?.message || err || 'no answer'); S.live.errorStatus = status || null;
     if (S.live.timer) clearInterval(S.live.timer);
-    S.live.retrying = S.settings.poll !== false; S.live.timer = S.live.retrying ? setInterval(() => connect({ retry: true }), POLL_MS) : null;
+    S.live.retrying = S.settings.poll !== false; if (S.live.retrying) startLiveTimer(retryConnect, POLL_MS); else S.live.timer = null;
     pill('error', 'Backend error'); $('#sStatus').textContent = 'Error: ' + S.live.error + (location.protocol === 'file:' ? ' — if you opened index.html from disk, make sure the URL includes http:// and the backend allows CORS (it does by default).' : '');
     if (!quiet) toast('Backend connection failed: ' + S.live.error, 'err');
   }
@@ -1971,16 +2030,16 @@
       const devices = S.live.devices;
       pill('online', `${window.LAB_DEMO ? 'DEMO (simulated)' : 'Live'} · ${devices.filter(d => d.kind === 'pdu').length} PDU · ${devices.filter(d => d.kind === 'kvm').length} KVM`);
       $('#sStatus').textContent = `Connected — ${devices.length} devices.`;
-      computeModel(); buildItems(); await refreshStatuses();
+      computeModel(); buildItems(); refsReadyNow(); await refreshStatuses();
       if (session !== liveSession) return;
       if (S.live.timer) clearInterval(S.live.timer);
-      if (S.settings.poll) S.live.timer = setInterval(refreshStatuses, (window.DCIM_ACCOUNT_PREFS.refresh_seconds || 15) * 1000);
+      if (S.settings.poll) startLiveTimer(refreshStatuses, refreshMs());
       toast('Backend connected', 'ok');
     } catch (e) {
       if (session !== liveSession) return;
-      if (S.live.signedOut) { S.live.connecting = false; refreshAttention(); return; }   // 401: signedOut() took over
+      if (S.live.signedOut) { S.live.connecting = false; refreshAttention(); refsReadyNow(); return; }   // 401: signedOut() took over
       connectFailed(e, e.status, !!opts.retry);
-      computeModel(); buildItems();
+      computeModel(); buildItems(); refsReadyNow();
     }
   }
   function disconnect() { ++liveSession; S.live.connected = false; S.live.connecting = false; S.live.error = null; S.live.errorStatus = null; S.live.retrying = false; S.live.signedOut = false; S.live.updatedAt = null; S.live.ping = {}; if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null; S.live.pdu = {}; S.live.pduAt = {}; S.live.pduErr = {}; S.live.kvm = {}; pill('offline', 'Offline · static data'); computeModel(); buildItems(); $('#sStatus').textContent = 'Disconnected.'; }
@@ -1994,7 +2053,7 @@
       toast('Signed out — live data paused until you sign in again', 'err');
       computeModel(); buildItems();
     }
-    if (!S.live.timer) S.live.timer = setInterval(resumeAfterSignIn, POLL_MS);
+    if (!S.live.timer) startLiveTimer(resumeAfterSignIn, POLL_MS);
   }
   async function resumeAfterSignIn() {
     if (!S.live.signedOut) return;
@@ -2328,8 +2387,9 @@
   const MIN_EYE = 0.2;
   const previousCamera = new THREE.Vector3(), previousTarget = new THREE.Vector3();
   const collisionRay = new THREE.Raycaster();
+  // Returns true when a collision or the rack clearance stopped the step short (a checked tween then ends there).
   function constrainNavigation(collisions = true) {
-    if (!S.data) return;
+    if (!S.data) return false; let clamped = false;
     const { width: W, depth: D, height: H } = S.data.room;
     const bounded = controls.target.clone().clamp(new THREE.Vector3(-W - 0.5, 0, -0.5), new THREE.Vector3(0.5, H, D + 0.5));
     camera.position.add(bounded.clone().sub(controls.target)); controls.target.copy(bounded);
@@ -2343,17 +2403,19 @@
         if (hit && hit.distance < distance + 0.18) {
           const fraction = Math.max(0, Math.min(1, (hit.distance - 0.18) / distance));
           camera.position.lerpVectors(previousCamera, camera.position.clone(), fraction);
-          controls.target.lerpVectors(previousTarget, controls.target.clone(), fraction);
+          controls.target.lerpVectors(previousTarget, controls.target.clone(), fraction); clamped = true;
         }
-        keepRackClearance();
+        if (keepRackClearance()) clamped = true;
       }
     }
     camera.lookAt(controls.target);
     previousCamera.copy(camera.position); previousTarget.copy(controls.target);
+    return clamped;
   }
   // The camera keeps RACK_CLEAR metres outside every rack's (and storage unit's) box, so wheel zoom towards the cursor,
   // orbit, pan and inertia never put it inside or against a rack (seen through its own shelves). Only user movement is
-  // checked (not tweens), and a step is judged against the clearance before it: a camera a preset left closer may still
+  // checked (and the button / keyboard zoom, pan, rotate and tilt tweens, `S.tween.checked`; not the Fit / Focus / view
+  // flights), and a step is judged against the clearance before it: a camera a preset left closer may still
   // move away, never nearer. A step that ends too close keeps only the part that stays clear (camera and target
   // together, from where they were, so there is no jump): the zoom / pan / orbit stops in front of the rack, and the
   // remaining inertia and wheel zoom are dropped. (Pulling the camera towards the target instead was tried: repeated
@@ -2383,30 +2445,41 @@
     return best;
   }
   function keepRackClearance() {
-    if (camera.position.distanceToSquared(previousCamera) < 1e-12 && controls.target.distanceToSquared(previousTarget) < 1e-12) return;
-    const obstacles = navObstacles(); if (!obstacles.length) return;
-    const now = rackClearance(camera.position, obstacles); if (now >= RACK_CLEAR) return;
+    if (camera.position.distanceToSquared(previousCamera) < 1e-12 && controls.target.distanceToSquared(previousTarget) < 1e-12) return false;
+    const obstacles = navObstacles(); if (!obstacles.length) return false;
+    const now = rackClearance(camera.position, obstacles); if (now >= RACK_CLEAR) return false;
     const need = Math.min(RACK_CLEAR, rackClearance(previousCamera, obstacles)) - 1e-6;
-    if (now >= need) return;                                   // not nearer than before: a preset left it there
+    if (now >= need) return false;                             // not nearer than before: a preset left it there
     const p1 = camera.position.clone(), t1 = controls.target.clone(); let lo = 0, hi = 1;
     for (let i = 0; i < 14; i++) { const f = (lo + hi) / 2; tmpP.lerpVectors(previousCamera, p1, f); if (rackClearance(tmpP, obstacles) >= need) lo = f; else hi = f; }
     camera.position.lerpVectors(previousCamera, p1, lo); controls.target.lerpVectors(previousTarget, t1, lo);
-    controls.halt();
+    controls.halt(); return true;
   }
-  // pan the whole view (camera + target together) along the floor, relative to where you look
-  function panBy(dx, dz) {
+  // pan the whole view (camera + target together) along the floor, relative to where you look. Quick presses add up: a
+  // step starts where the running pan step was heading; a held key's repeats (`add` false) start from the current view.
+  function panBy(dx, dz, add = true) {
     markView(null);
-    const fwd = controls.target.clone().sub(camera.position); fwd.y = 0; if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
+    const run = add && S.tween && S.tween.kind === 'pan' ? S.tween : null;
+    const P = run ? run.p1.clone() : camera.position.clone(), T = run ? run.t1v.clone() : controls.target.clone();
+    const fwd = T.clone().sub(P); fwd.y = 0; if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
     const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
-    const step = Math.max(0.35, camera.position.distanceTo(controls.target) * 0.25);
+    const step = Math.max(0.35, P.distanceTo(T) * 0.25);
     const d = right.multiplyScalar(dx * step).add(fwd.multiplyScalar(dz * step));
-    tweenCamera(camera.position.clone().add(d), controls.target.clone().add(d), 250);
+    tweenCamera(P.add(d), T.add(d), 250); S.tween.checked = true; S.tween.kind = 'pan';
+  }
+  // A button / key step that a rack stopped short (less than half of it done) says why, at most every 3 s, so the
+  // buttons never just look broken (the rack clearance itself is unchanged).
+  let blockedAt = 0;
+  function blockedHint(tw) {
+    const msg = { turn: 'A rack is in the way: zoom out (−) or pan first', zoom: 'A rack is in the way: the view cannot come closer', pan: 'A rack is in the way' }[tw && tw.kind]; if (!msg) return;
+    const planned = tw.p1.distanceTo(tw.p0); if (planned < 1e-6 || camera.position.distanceTo(tw.p0) >= planned * 0.5) return;
+    const now = performance.now(); if (now - blockedAt < 3000) return; blockedAt = now; toast(msg);
   }
 
   // ───────────────────────────────────────────────────────────── camera views
   function roomCenter() { const { width: W, depth: D, height: H } = S.data.room; return new THREE.Vector3(WX(W / 2), H * 0.35, D / 2); }
   function tweenCamera(pos, target, ms = 700) {
-    controls.cancel();
+    controls.cancel(); hideHoverTip();
     // reduced motion: a zero-length tween jumps in one frame (collision sweep is skipped for that frame, like any tween)
     S.tween = { t0: performance.now(), ms: reducedMotion() ? 0 : ms, p0: camera.position.clone(), p1: pos.clone(), t0v: controls.target.clone(), t1v: target.clone() };
   }
@@ -2414,16 +2487,42 @@
   // shortest way to azimuth `theta` and / or polar angle `phi`, at the same distance. North up = theta π: the camera
   // looks along +z (data depth, away from the entrance), so the wall opposite the entrance is at the top.
   const NORTH = Math.PI;
-  function orbitTo(theta, phi, ms = 450) {
-    markView(null); const T = controls.target.clone(); const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(T));
+  // `checked`: the tween keeps the rack clearance and stops where it would come too close (rotate / tilt buttons and keys).
+  function orbitTo(theta, phi, ms = 450, checked = true) {
+    const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
     let dt = theta == null ? 0 : theta - s0.theta; dt = Math.atan2(Math.sin(dt), Math.cos(dt));
-    const p1 = phi == null ? s0.phi : Math.max(controls.minPolarAngle, Math.min(controls.maxPolarAngle, phi));
-    const end = new THREE.Spherical(s0.radius, p1, s0.theta + dt).makeSafe();
-    tweenCamera(T.clone().add(new THREE.Vector3().setFromSpherical(end)), T, ms);
-    S.tween.orbit = { T, r: s0.radius, phi0: s0.phi, phi1: end.phi, th0: s0.theta, th1: end.theta };
+    orbitBy(dt, phi, ms, checked);
   }
-  const northUp = () => orbitTo(NORTH, null);
-  function rotateView(dTheta, dPhi) { const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target)); orbitTo(s0.theta + dTheta, s0.phi + dPhi, 250); }
+  // Turn by `dt` rad (not wrapped) to polar angle `phi` (null = keep; else inside the user range) at radius `r1`
+  // (default: the same distance). The frame loop records how far the turn got (`orbit.e`).
+  function orbitBy(dt, phi, ms, checked, kind = 'turn', r1 = null) {
+    markView(null); const T = controls.target.clone(); const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(T));
+    const p1 = phi == null ? s0.phi : Math.max(controls.minPolarAngle, Math.min(controls.maxPolarAngle, phi));
+    const end = new THREE.Spherical(r1 || s0.radius, p1, s0.theta + dt).makeSafe();
+    tweenCamera(T.clone().add(new THREE.Vector3().setFromSpherical(end)), T, ms);
+    S.tween.orbit = { T, r: s0.radius, r1: end.radius, phi0: s0.phi, phi1: end.phi, th0: s0.theta, th1: end.theta, e: 0 }; S.tween.checked = checked; S.tween.kind = kind;
+  }
+  // North up (compass, N) is a recovery like Fit / Focus: it always reaches its heading (unchecked). It never ends
+  // nearer a rack than the clearance allows: when the end pose at this distance would, the turn also backs out (a
+  // larger radius, up to the zoom-out limit) until it is clear.
+  function northUp() {
+    const T = controls.target.clone(), s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(T));
+    let dt = NORTH - s0.theta; dt = Math.atan2(Math.sin(dt), Math.cos(dt));
+    const obstacles = navObstacles(), need = Math.min(RACK_CLEAR, rackClearance(camera.position, obstacles)) - 1e-6;
+    const endAt = r => T.clone().add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(r, s0.phi, s0.theta + dt).makeSafe()));
+    let r = s0.radius;
+    for (let i = 0; i < 24 && obstacles.length && r < controls.maxDistance && rackClearance(endAt(r), obstacles) < need; i++) r = Math.min(controls.maxDistance, r + Math.max(0.1, r * 0.08));
+    orbitBy(dt, null, 450, false, 'north', r);
+  }
+  // Rotate / tilt one step (buttons, Shift + arrows). Quick presses add up: a step starts where the running turn was
+  // heading (at most half a turn ahead); a held key's repeats (`add` false) start from the current view, so holding
+  // a key keeps one pace.
+  function rotateView(dTheta, dPhi, add = true) {
+    const s0 = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
+    const o = add && S.tween && S.tween.kind === 'turn' && S.tween.orbit ? S.tween.orbit : null;
+    const left = o ? o.th1 - (o.th0 + (o.th1 - o.th0) * o.e) : 0;
+    orbitBy(Math.max(-Math.PI, Math.min(Math.PI, left + dTheta)), (o ? o.phi1 : s0.phi) + dPhi, 250, true);
+  }
   // compass needle: where north (+z) points on screen, clockwise from up
   let compassDeg = null;
   function updateCompass() {
@@ -2440,7 +2539,9 @@
     // the free part of the view (the phone sheet covers its lower third): fit the room's sphere into that rectangle
     const safe = safeArea(1.2, ['#sheet']); const fw = Math.max(0.35, (safe.r - safe.l) / 2), fh = Math.max(0.35, (safe.t - safe.b) / 2);
     const half = Math.atan(Math.min(Math.tan(vertical / 2) * fh, Math.tan(horizontal / 2) * fw));
-    const distance = Math.min(controls.maxDistance * 0.9, sphere.radius / Math.sin(half) * 1.12);
+    const distance = Math.min(MAX_DISTANCE_BASE * 0.9, sphere.radius / Math.sin(half) * 1.12);
+    // zoom-out limit: 1.6 × the overview distance for this view size (never more than the room-based limit)
+    controls.maxDistance = Math.min(MAX_DISTANCE_BASE, 1.6 * distance);
     const target = roomCenter();
     const direction = (top ? new THREE.Vector3(0, 1, -0.04) : new THREE.Vector3(0.45, 0.95, -1)).normalize();
     const P = target.clone().addScaledVector(direction, distance);
@@ -2570,12 +2671,13 @@
     return { l: s.l / W * 2 - 1, r: s.r / W * 2 - 1, t: 1 - s.t / H * 2, b: 1 - s.b / H * 2 };
   }
   // Where a flight frames its target (NDC): the 3D view below the breadcrumb (~80 px) and above the legend / zoom bar
-  // (~64 px), clear of the phone sheet and of any other overlay that reaches into it, with a 10 % margin (5 % a side).
+  // (~64 px), clear of the phone sheet, the camera cluster at the right edge (#navPadBody; collapsed on a phone) and of
+  // any other overlay that reaches into it, with a 10 % margin (5 % a side).
   function frameSafe() {
     const vp = canvas.getBoundingClientRect(); const W = vp.width, H = vp.height; if (!W || !H) return { l: -1, r: 1, t: 1, b: -1 };
     const shown = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     let l = 0, r = W, t = shown($('#crumb')) || shown($('#rfBar')) ? 80 : 16, b = H - (shown($('#legend')) || shown($('.zoombar')) ? 64 : 16);
-    for (const q of ['#crumb', '#rfBar', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend', '#sheet']) {
+    for (const q of ['#crumb', '#rfBar', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend', '#sheet', '#navPadBody']) {
       const el = $(q); if (!shown(el)) continue; const o = el.getBoundingClientRect(); if (!o.width || !o.height) continue;
       const x0 = o.left - vp.left - 6, x1 = o.right - vp.left + 6, y0 = o.top - vp.top - 6, y1 = o.bottom - vp.top + 6;
       if (x1 <= l || x0 >= r || y1 <= t || y0 >= b) continue;
@@ -2813,7 +2915,7 @@
     const el = $('#crumbPath'); if (!el || !S.data) return;
     const parts = crumbParts();
     el.innerHTML = parts.map((p, i) => `<span dir="auto"${i === parts.length - 1 ? ' class="cur"' : ''}>${esc(p)}</span>`).join('<span class="sep" aria-hidden="true">›</span>');
-    $('#rfNav').classList.toggle('hidden', !S.front);
+    $('#rfNav').classList.toggle('hidden', !S.front); placeNavPad();
     // phone: one 44 px row above the rack — previous rack · this rack · next rack · Overview
     const bar = $('#rfBar'); if (!bar) return;
     if (!S.front) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
@@ -2859,6 +2961,7 @@
       return false;
     };
     if (!fit((sameRow ? z.left - 12 : v.right - 16) - left) && sameRow) { lg.classList.add('lg-above'); fit(v.right - 16 - left); }
+    placeNavPad();
   }
 
   // ───────────────────────────────────────────────────────────── rack front view (one rack, shelf by shelf)
@@ -3002,16 +3105,104 @@
       if (target) requestMove(target); else toast('Choose a shelf, rack or storage destination, or Cancel', 'err');
       return;
     }
-    if (hit) select(hit.object.userData.id, { keepCamera: true });
+    if (hit) select(hit.object.userData.id, { keepCamera: true, fromCanvas: true });
   });
   ['pointerdown', 'wheel', 'keydown', 'touchstart'].forEach(t => window.addEventListener(t, () => { S.lastInput = performance.now(); }, { passive: true }));
-  let hoverT = 0;
-  canvas.addEventListener('pointermove', e => {
-    const now = performance.now(); if (now - hoverT < 40) return; hoverT = now; const hit = pickAt(e);
+  // Hover picks at most every 40 ms; the last move inside a 40 ms window is picked when the window ends, so the hover
+  // highlight and the tip never keep an object the pointer has already left.
+  let hoverT = 0, hoverTrail = 0, hoverEv = null;
+  function hoverPick(e) {
+    hoverT = performance.now(); const hit = pickAt(e);
     let id = hit ? hit.object.userData.id : null;
     if (S.moveItem) { const t = hit ? resolveMoveTarget(hit) : null; id = t ? t.id : null; }
     if (id !== S.hover) { setHover(id); }
+    showHoverTip(e, id);
+  }
+  function dropHoverTrail() { clearTimeout(hoverTrail); hoverTrail = 0; hoverEv = null; }
+  canvas.addEventListener('pointermove', e => {
+    const now = performance.now();
+    if (now - hoverT < 40) {
+      placeHoverTip(e); hoverEv = { clientX: e.clientX, clientY: e.clientY, pointerType: e.pointerType, buttons: e.buttons };
+      if (!hoverTrail) hoverTrail = setTimeout(() => { const ev = hoverEv; hoverTrail = 0; hoverEv = null; if (ev) hoverPick(ev); }, Math.max(1, 40 - (now - hoverT)));
+      return;
+    }
+    dropHoverTrail(); hoverPick(e);
   });
+  // Hover tip (mouse only): "name · ON / OFF / ? · Rack-03 › Shelf 2". Never on touch, while a button is held, during a
+  // gesture or a camera tween, or in Move mode (the cyan targets say where things go).
+  const anyHover = window.matchMedia ? window.matchMedia('(any-hover: hover)') : null;
+  let tipId = null, tipHtml = '';
+  function hideHoverTip() { const el = $('#hoverTip'); if (el && !el.hidden) el.hidden = true; tipId = null; tipHtml = ''; }
+  function hoverTipHtml(rec) {
+    const it = rec.item; const su = rackRecOf(rec);
+    const name = rec.cat === 'setup' ? rackName(rec.def) : rec.cat === 'shelf' ? placeLabel(rec) : rec.cat === 'storage' ? [storageName(rec.def), rec.def.name].filter(Boolean).join(' · ') : (rec.def.name || rec.id);
+    const parts = [`<b dir="auto">${esc(name)}</b>`];
+    if (it?.type === 'opt') { const p = powerOf(it); parts.push(`<span class="ht-pw ht-${p}" title="${POWER[p].title}">${POWER[p].t}</span>`); }
+    const where = rec.cat === 'item' ? (rec.shelf && su ? `${rackName(su.def)} › Shelf ${shelfToU(su.id, rec.shelf)}` : placeLabel(rec)) : rec.cat === 'setup' ? rowLabel(zoneRec(rec)) : '';
+    if (where && where !== '—' && where !== name) parts.push(`<span class="ht-w">${esc(where)}</span>`);
+    return parts.join('<span class="ht-sep" aria-hidden="true"> · </span>');
+  }
+  function placeHoverTip(e) {
+    const el = $('#hoverTip'); if (!el || el.hidden) return;
+    if (e.pointerType !== 'mouse' || e.buttons) { hideHoverTip(); return; }
+    const vp = $('#viewport').getBoundingClientRect(); const w = el.offsetWidth, h = el.offsetHeight;
+    let x = e.clientX - vp.left + 14, y = e.clientY - vp.top + 18;
+    if (x + w > vp.width - 8) x = Math.max(8, e.clientX - vp.left - w - 10);
+    if (y + h > vp.height - 8) y = Math.max(8, e.clientY - vp.top - h - 12);
+    el.style.left = Math.round(x) + 'px'; el.style.top = Math.round(y) + 'px';
+  }
+  function showHoverTip(e, id) {
+    const el = $('#hoverTip'); if (!el) return;
+    const rec = id ? S.recs.get(id) : null;
+    if (!rec || rec.cat === 'zone' || e.pointerType !== 'mouse' || e.buttons || activePointers.size || S.moveItem || S.front || S.tween || controls.moving || (anyHover && !anyHover.matches)) { hideHoverTip(); return; }
+    const html = hoverTipHtml(rec); if (tipId !== id || html !== tipHtml) { el.innerHTML = html; tipId = id; tipHtml = html; }
+    el.hidden = false; placeHoverTip(e);
+  }
+  // live data can change under a resting pointer (ON -> OFF, a stale reading): the 1 s ticker rewrites a shown tip
+  function refreshHoverTip() {
+    const el = $('#hoverTip'); if (!el || el.hidden || !tipId) return;
+    const rec = S.recs.get(tipId); if (!rec) { hideHoverTip(); return; }
+    const html = hoverTipHtml(rec); if (html !== tipHtml) { el.innerHTML = html; tipHtml = html; }
+  }
+  canvas.addEventListener('pointerleave', () => { dropHoverTrail(); hideHoverTip(); });
+  canvas.addEventListener('pointerdown', () => { dropHoverTrail(); hideHoverTip(); }, true);
+  controls.addEventListener('start', hideHoverTip);
+
+  // Canvas click: the object stays where it is (no flight), but when the drawer opening narrowed the 3D view (or it sat
+  // under an overlay) camera and target move together, just enough to bring its box inside the frame area (frameSafe):
+  // no turn, no zoom. A box larger than the frame area is centred instead. The target stays on the floor: when the shift
+  // would put it under the floor it slides back along the line of sight (same view; the target bound would otherwise
+  // lift camera and target and undo the vertical part), and the camera stays above MIN_EYE. A checked tween: it keeps
+  // the rack clearance and stops where a rack is in the way. 300 ms; instant with reduced motion.
+  function keepInView(rec) {
+    if (!rec || !rec.group || !S.data) return;
+    scene.updateMatrixWorld(true);
+    const box = rec.cat === 'item' || rec.cat === 'structure' ? meshesBox(rec.meshes) : frameBoxes(rec)[0]; if (!box || box.isEmpty()) return;
+    const safe = frameSafe();
+    fitCam.fov = camera.fov; fitCam.aspect = camera.aspect; fitCam.near = camera.near; fitCam.far = camera.far; fitCam.updateProjectionMatrix();
+    fitCam.quaternion.copy(camera.quaternion);
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+    const corners = []; for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) corners.push(new THREE.Vector3(x, y, z));
+    const centre = box.getCenter(new THREE.Vector3()); const tanH = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    const fix = (lo, hi, a, b) => hi - lo > b - a ? (lo + hi) / 2 - (a + b) / 2 : lo < a ? lo - a : hi > b ? hi - b : 0;
+    let sR = 0, sU = 0;   // along the camera's right (horizontal: no roll) and up vectors
+    for (let i = 0; i < 4; i++) {
+      fitCam.position.copy(camera.position).addScaledVector(right, sR).addScaledVector(up, sU); fitCam.updateMatrixWorld(true);
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const c of corners) {
+        const v = c.clone().applyMatrix4(fitCam.matrixWorldInverse); if (v.z > -fitCam.near * 2) return;   // around the camera: leave it
+        v.applyMatrix4(fitCam.projectionMatrix); x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
+      }
+      const dx = fix(x0, x1, safe.l, safe.r), dy = fix(y0, y1, safe.b, safe.t); if (Math.abs(dx) < 1e-3 && Math.abs(dy) < 1e-3) break;
+      const depth = -centre.clone().applyMatrix4(fitCam.matrixWorldInverse).z;
+      sR += dx * depth * tanH * camera.aspect; sU += dy * depth * tanH;
+    }
+    if (up.y > 1e-6) sU = Math.max(sU, Math.min(0, (MIN_EYE + 0.05 - camera.position.y) / up.y));   // never under the eye floor
+    const shift = new THREE.Vector3().addScaledVector(right, sR).addScaledVector(up, sU); if (shift.lengthSq() < 1e-8) return;
+    const P1 = camera.position.clone().add(shift); let T1 = controls.target.clone().add(shift);
+    if (T1.y < 0) { const d = T1.clone().sub(P1); if (d.y < -1e-6 && P1.y > 0) { T1 = P1.clone().addScaledVector(d, P1.y / -d.y); T1.y = 0; } }
+    markView(null); tweenCamera(P1, T1, 300); S.tween.checked = true; S.tween.kind = 'keep';
+  }
   function pickAt(e) {
     // A live refresh rebuilds item meshes; until the next frame is drawn their world matrices are stale, so a tap
     // right after a refresh would miss them (and in Move mode say "Choose a shelf").
@@ -3306,17 +3497,23 @@
 
   // ───────────────────────────────────────────────────────────── render loop
   function animate() {
-    requestAnimationFrame(animate);
+    rafId = 0; if (paused) return;   // hidden: no frames (resumeTwin starts the loop again)
+    rafId = requestAnimationFrame(animate); S.stats.frames++;
     controls.autoRotate = false;
-    const animating = !!S.tween;
+    const tw = S.tween, animating = !!tw, checked = !!(tw && tw.checked);
     if (S.tween) {
       const k = S.tween.ms > 0 ? Math.min(1, (performance.now() - S.tween.t0) / S.tween.ms) : 1; const e = 1 - Math.pow(1 - k, 3); const o = S.tween.orbit;
-      if (o) { controls.target.copy(o.T); camera.position.copy(o.T).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(o.r, o.phi0 + (o.phi1 - o.phi0) * e, o.th0 + (o.th1 - o.th0) * e))); }
+      if (o) { o.e = e; controls.target.copy(o.T); camera.position.copy(o.T).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(o.r + (o.r1 - o.r) * e, o.phi0 + (o.phi1 - o.phi0) * e, o.th0 + (o.th1 - o.th0) * e))); }
       else { camera.position.lerpVectors(S.tween.p0, S.tween.p1, e); controls.target.lerpVectors(S.tween.t0v, S.tween.t1v, e); }
       if (k >= 1) S.tween = null;
     }
     const pulse = reducedMotion() ? 0.85 : 0.55 + 0.45 * Math.sin(performance.now() / 250); for (const r of S.recs.values()) if (r.leakRing && r.leakRing.visible) r.leakRing.material.opacity = pulse;
-    controls.update(); constrainNavigation(!animating); renderer.render(scene, camera); updateLabels(); updateCompass();
+    // checked tweens (button / keyboard zoom, pan, rotate, tilt) keep the rack clearance like user movement and end
+    // where it stops them; flights (Fit, Focus, views) are not checked
+    // (a step stopped short tells why: blockedHint)
+    controls.update(); const clamped = constrainNavigation(!animating || checked);
+    if (clamped && checked) { if (S.tween === tw) S.tween = null; blockedHint(tw); }
+    renderer.render(scene, camera); updateLabels(); updateCompass();
   }
 
 
@@ -3335,7 +3532,9 @@
 
   function startMove(itemId) {
     if (!S.editMode || !window.DCIM_CAN_OPERATE) return;
+    if (isFixedInfra(S.recs.get(itemId)?.item?.type)) { toast(FIXED_NOTE, 'err'); return; }
     controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden');
+    setLeftAction('pan', false); hideHoverTip();   // Move: a left drag pans, a tap picks the destination (not stored)
     $('#moveText').textContent = `Move ${S.recs.get(itemId)?.def.name || itemId}: tap a shelf in 3D, or`;
     fillMoveTargets(itemId); applyFilters(); highlightTargets(true); placeAttnDock(); if (S.front) renderRackFront();
     $('#moveTarget').focus({ preventScroll: true });   // keyboard users can choose a destination without the 3D view
@@ -3360,7 +3559,7 @@
     select(id);
   }
   $('#moveGo').onclick = () => { const r = S.recs.get($('#moveTarget').value); if (r) requestMove(r); else toast('Choose a destination first', 'err'); };
-  function cancelMove() { controls.enableRotate = true; if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); placeAttnDock(); highlightTargets(false); applyFilters(); if (S.front) renderRackFront(); }
+  function cancelMove() { controls.enableRotate = true; if (moveAsking && choiceOpen) choiceOpen('cancel'); if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); setLeftAction(LS.get('leftAction', 'pan'), false); placeAttnDock(); highlightTargets(false); applyFilters(); if (S.front) renderRackFront(); }
   $('#moveCancel').onclick = cancelMove;
   function highlightTargets(on) {
     for (const r of S.recs.values()) if (r.cat === 'shelf') {
@@ -3410,11 +3609,15 @@
   async function dcimMoveMany(moves, fresh) {
     const dest = moves.map(m => ({ ...m, ...dcimDestination(m.target) }));
     const opts = dest.filter(m => m.kind === 'opt'), equips = dest.filter(m => m.kind === 'rack-item');
+    // Only servers and units are written: never a PDU / KVM, and an outlet label such as "KVM Power" or "empty"
+    // (NON_SERVER_LABEL) never gets a rack slot, position or override from a move (nor from pinning the others).
+    if (dest.some(m => isFixedInfra(m.mit?.type))) throw new Error(FIXED_NOTE);
+    if (opts.some(m => !isServerLabel(m.mit.name || '') || NON_SERVER_LABEL.test(m.mit.dcim.optKey))) throw new Error('Only a server can take a rack slot');
     const clone = x => JSON.parse(JSON.stringify(x || {}));
     if (opts.length) {
       const keys = new Set(opts.map(m => m.mit.dcim.optKey));
       const racks = new Set(opts.flatMap(m => [m.rack, m.mit.live?.rack].filter(Boolean)));
-      const pins = (S.model?.items || []).filter(i => i.type === 'opt' && i.live?.inDcim && i.dcim?.optKey && !keys.has(i.dcim.optKey) && racks.has(i.live.rack) && i.placementConfidence === 'low' && Number.isInteger(i.live.u));
+      const pins = (S.model?.items || []).filter(i => i.type === 'opt' && i.live?.inDcim && i.dcim?.optKey && !keys.has(i.dcim.optKey) && racks.has(i.live.rack) && i.placementConfidence === 'low' && Number.isInteger(i.live.u) && isServerLabel(i.name || ''));
       const ov = clone(fresh.rackOverrides.data), slots = clone(fresh.rackSlots.data), order = clone(fresh.rackOrder.data);
       opts.forEach(m => {
         const key = m.mit.dcim.optKey; const pduRack = S.live.devices.find(d => d.id === m.mit.dcim.pdu)?.rack || null;
@@ -3482,6 +3685,7 @@
     // Lab Manager places a device dropped on a rack's bottom bay on its lowest shelf: say so, and check that shelf
     if (kind && target.cat === 'setup') { const low = recsOf(r => r.cat === 'shelf' && r.setup === target.id).sort((a, b) => a.level - b.level)[0]; if (low) target = low; }
     const plan = { id, rec, mit, def, name: it.name || id, kind, target, from: placeText(it), to: targetText(target, kind), occupant: null, swappable: false, swapWhy: '', source: null, error: null, same: false };
+    if (isFixedInfra(it.type)) { plan.error = FIXED_NOTE; return plan; }   // a PDU / KVM (device or unit) never moves
     if (kind) { try { dcimDestination(target); } catch (e) { plan.error = e.message; } }
     else if (S.live.connected && (it.type === 'opt' || it.type === 'pdu' || it.type === 'kvm' || String(it.type).startsWith('equip-'))) {
       const sid = target.cat === 'shelf' ? target.setup : target.cat === 'setup' ? target.id : null; const rack = sid ? dcimRackOf(S.data.setups.find(s => s.id === sid) || {}) : '';
@@ -3497,6 +3701,7 @@
       const src = it.shelf ? S.recs.get(it.shelf) : null; plan.source = src || null;
       const okind = movesViaDcim(plan.occupant.item); const odef = S.data.items.find(x => x.id === plan.occupant.id);
       if (!src) plan.swapWhy = `${plan.name} is not on a shelf now, so there is no place to swap to.`;
+      else if (isFixedInfra(plan.occupant.item?.type)) plan.swapWhy = `${plan.occupant.def.name || plan.occupant.id} is fixed infrastructure (PDU / KVM): it does not move.`;
       else if (!okind && !odef) plan.swapWhy = `${plan.occupant.def.name || plan.occupant.id} cannot be moved from the twin.`;
       else if (okind) { try { dcimDestination(src); } catch (e) { plan.swapWhy = e.message; } }
       plan.swappable = !plan.swapWhy;
@@ -3567,7 +3772,9 @@
         choice = await askChoice({ title: `Move ${plan.name}?`, html: `${fromTo}<div class="note">${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'move', label: 'Move here', cls: 'primary' }] });
       }
     } finally { moveAsking = false; }
+    // Move mode ended while the dialog was open (cancelMove closes the dialog with 'cancel'): nothing is written
     if (choice !== 'move' && choice !== 'swap') return false;
+    if (S.moveItem !== id) return false;
     cancelMove();
     return performMove(plan, choice === 'swap');
   }
@@ -3599,9 +3806,13 @@
     let html = `<div class="edit-hint">Edit mode · tap another object in the 3D view to switch</div>`;
     if (rec.cat === 'item' && isLive) {
       html += `<section class="sec big">${H('Where')}${where}
-          <div class="edit-note">Live from Lab Manager. Moving it writes the rack and U slot back into Lab Manager.</div>
-          ${movesViaDcim(it) ? `<div class="row-lg">${moveBtn}</div>` : ''}</section>
-        ${dcimOwnerKey(it) ? `<section class="sec big">${field('Owner (saved in Lab Manager)', 'eOwner')}${ownerPicker(it.owner)}</section>` : ''}
+          ${isFixedInfra(it.type) ? `<div class="edit-note">Live from Lab Manager.</div><div class="edit-note" id="eFixed">${esc(FIXED_NOTE)}</div>`
+            : `<div class="edit-note">Live from Lab Manager. Moving it writes the rack and U slot back into Lab Manager.</div>
+          ${movesViaDcim(it) ? `<div class="row-lg">${moveBtn}</div>` : ''}`}</section>
+        ${dcimOwnerKey(it) && it.ownerFrom ? `<section class="sec big">${H('Owner')}<div class="where" id="eOwnerFrom" dir="auto">${esc(it.owner || 'No owner')}</div>
+          <div class="edit-note" id="eOwnerNote">From ${esc(it.ownerFrom.name)}, the server on this ${it.ownerFrom.place || 'floor'}. Change it on the server.</div>
+          <div class="row-lg"><button type="button" class="kbtn secondary md" data-edit="${esc(it.ownerFrom.id)}">Open ${esc(it.ownerFrom.name)}</button></div></section>`
+        : dcimOwnerKey(it) ? `<section class="sec big">${field('Owner (saved in Lab Manager)', 'eOwner')}${ownerPicker(it.owner)}</section>` : ''}
         <section class="sec big"><div class="edit-note">Name, type, PDU and the other details are kept in Lab Manager.</div>
           <div class="row-lg">${racksLink('Edit details in Racks', 'eRacks', it.live?.rack || rackOfSetup(it.setup))}</div></section>`;
     } else if (rec.cat === 'item') {
@@ -3609,8 +3820,8 @@
       html += `<section class="sec big">${field('Name', 'eName')}<input class="in-lg" id="eName" dir="auto" value="${esc(it.name || '')}" />${status(it.status)}</section>
         <section class="sec big">${H('Where')}${where}
           ${it.notInLm ? `<div class="edit-note">Unplaced here because Lab Manager does not list it; lab-data.json keeps it on ${esc(it.jsonPlace || 'a mapped rack')}.</div>` : ''}
-          <div class="row-lg">${moveBtn}${it.notInLm ? '' : '<button type="button" class="kbtn secondary md" id="eUnplace">Unplace</button>'}</div>
-          ${it.setup ? `<div class="row-lg"><button type="button" class="kbtn secondary md" data-side="left">Hang on left side</button><button type="button" class="kbtn secondary md" data-side="right">Hang on right side</button><button type="button" class="kbtn secondary md" data-side="bay">Bottom bay</button></div>` : ''}</section>
+          ${isFixedInfra(it.type) ? `<div class="edit-note" id="eFixed">${esc(FIXED_NOTE)}</div>` : `<div class="row-lg">${moveBtn}${it.notInLm ? '' : '<button type="button" class="kbtn secondary md" id="eUnplace">Unplace</button>'}</div>
+          ${it.setup ? `<div class="row-lg"><button type="button" class="kbtn secondary md" data-side="left">Hang on left side</button><button type="button" class="kbtn secondary md" data-side="right">Hang on right side</button><button type="button" class="kbtn secondary md" data-side="bay">Bottom bay</button></div>` : ''}`}</section>
         <section class="sec big">${field('Type', 'eType')}<select class="in-lg" id="eType">${['opt', 'kvm', 'pdu', 'chiller', 'equip-switch', 'equip-patchpanel', 'equip-ups', 'equip-other', 'spare-chassis', 'cart', 'ladder', 'toolbox', 'misc', 'other'].map(t => `<option value="${t}" ${it.type === t ? 'selected' : ''}>${esc(ITEM_KIND[t] ? `${ITEM_KIND[t]} (${t})` : t)}</option>`).join('')}</select>
           ${field('Owner', 'eOwner')}${ownerPicker(it.owner)}
           ${field('PDU · outlet', 'ePdu')}
@@ -3624,7 +3835,7 @@
     } else if (rec.cat === 'shelf') {
       const its = recsOf(r => r.cat === 'item' && r.shelf === rec.id);
       html += `<section class="sec big">${H('On this shelf')}${where}
-          ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>${esc(kindOf(i))}${i.item.dcim?.outlet ? ' · outlet ' + esc(i.item.dcim.outlet) : ''}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button><button type="button" class="kbtn secondary small" data-move="${esc(i.id)}">Move…</button></div>`).join('') : '<div class="edit-note">Nothing on this shelf.</div>'}
+          ${its.length ? its.map(i => `<div class="itm-lg"><span class="dot-lg" style="background:${STATUS_COLOR[i.status]}"></span><span class="itm-name" dir="auto">${esc(i.item.name)}<small>${esc(kindOf(i))}${i.item.dcim?.outlet ? ' · outlet ' + esc(i.item.dcim.outlet) : ''}</small></span><button type="button" class="kbtn secondary small" data-edit="${esc(i.id)}">Edit</button>${isFixedInfra(i.item.type) ? '' : `<button type="button" class="kbtn secondary small" data-move="${esc(i.id)}">Move…</button>`}</div>`).join('') : '<div class="edit-note">Nothing on this shelf.</div>'}
           <div class="row-lg">${def.derived || lmRack(def.setup) ? racksLink('Add in Racks…', 'eAddRacks', rackOfSetup(def.setup)) : '<button type="button" class="kbtn secondary md" id="eAddHere">Add a device on this shelf</button>'}</div></section>
         ${def.derived
           // a floor the twin adds from the app's floor model is not in lab-data.json, so its status / notes cannot be saved here
@@ -3761,7 +3972,7 @@
     }
     // one environment window for the whole lab (average of all PDU sensors)
     const env = $('#envPanel'); if (!env) return;
-    if (!S.envPanel || !S.live.connected || (tN === 0 && hN === 0 && !leaks.length)) { env.classList.add('hidden'); return; }
+    if (!S.envPanel || !S.live.connected || (tN === 0 && hN === 0 && !leaks.length)) { if (!env.classList.contains('hidden')) { env.classList.add('hidden'); placeNavPad(); } return; }
     const tAvg = tN ? tSum / tN : null, hAvg = hN ? hSum / hN : null;
     const tCls = tAvg == null ? '' : tAvg > 35 ? 'bad' : tAvg > 24 ? 'warn' : 'ok';
     env.className = 'envpanel' + (leaks.length ? ' leak' : tCls === 'bad' ? ' bad' : tCls === 'warn' ? ' warn' : '');
@@ -3770,6 +3981,7 @@
       <div class="e-row"><span class="e-ic">💧</span><b>${hAvg == null ? '—' : hAvg.toFixed(0) + '%'}</b><small>humidity</small></div>
       <div class="e-row"><span class="e-ic">${leaks.length ? '⚠' : '●'}</span><b class="${leaks.length ? 'e-bad' : 'e-ok'}">${leaks.length ? 'LEAK · ' + esc(leaks.join(', ')) : 'no leaks'}</b></div>
       <div class="e-row e-foot"><small>${kwKnown ? (kwTot / 1000).toFixed(2) + ' kW total' + (kwPartial ? ' (partial)' : '') : '\u2014'}</small></div>`;
+    placeNavPad();
   }
   $('#tHeat').onclick = () => { S.heat = !S.heat; LS.set('heat', S.heat); setPressed($('#tHeat'), S.heat); updateTelemetry(); };
 
@@ -3815,20 +4027,265 @@
   }
   $('#rackBar').addEventListener('scroll', () => rackBarEdges(), { passive: true });
   ['rbPrev', 'rbNext'].forEach((id, i) => { $('#' + id).onclick = () => { const bar = $('#rackBar'); bar.scrollBy({ left: (i ? 1 : -1) * Math.max(120, bar.clientWidth * 0.6), behavior: reducedMotion() ? 'auto' : 'smooth' }); }; });
-  function zoomBy(f) { markView(null); const dir = camera.position.clone().sub(controls.target); const len = Math.min(controls.maxDistance, Math.max(controls.minDistance, dir.length() * f)); dir.setLength(len); tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); }
+  // Zoom one step (buttons, + / −). Quick presses add up: a step starts from the distance the running zoom step was
+  // heading to; a held key's repeats (`add` false) start from the current distance.
+  function zoomBy(f, add = true) {
+    markView(null); const dir = camera.position.clone().sub(controls.target);
+    const run = add && S.tween && S.tween.kind === 'zoom' && S.tween.t1v.distanceToSquared(controls.target) < 1e-10 ? S.tween : null;
+    const base = run ? run.p1.distanceTo(run.t1v) : dir.length();
+    const len = Math.min(Math.max(controls.maxDistance, f < 1 ? 0 : base), Math.max(controls.minDistance, base * f)); dir.setLength(len);
+    tweenCamera(controls.target.clone().add(dir), controls.target.clone(), 250); S.tween.checked = true; S.tween.kind = 'zoom';
+  }
   $('#zIn').onclick = () => zoomBy(0.7); $('#zOut').onclick = () => zoomBy(1.4);   // pan with a drag or the arrow keys, rotate with a right drag
+  // Pan / Rotate switch: what a left drag / one-finger drag does (remembered per browser). Move mode uses Pan without
+  // storing it; leaving Move mode restores the stored choice.
+  // Rotate / tilt buttons turn the view around its target like Shift + arrow keys (15° / 0.12 rad steps).
+  function setLeftAction(mode, save = true) {
+    mode = mode === 'rotate' ? 'rotate' : 'pan'; controls.leftAction = mode;
+    for (const [q, m] of [['#mPan', 'pan'], ['#mRotate', 'rotate']]) { const b = $(q); if (b) { b.setAttribute('aria-pressed', String(m === mode)); b.classList.toggle('on', m === mode); } }
+    if (save) LS.set('leftAction', mode);   // LS wraps localStorage in try / catch
+  }
+  setLeftAction(LS.get('leftAction', 'pan'), false);
+  $('#mPan').onclick = () => setLeftAction('pan');
+  $('#mRotate').onclick = () => { if (S.moveItem) { toast('Move mode: a drag pans; the rotate buttons turn the view', 'err'); return; } setLeftAction('rotate'); };
+  $('#rotL').onclick = () => rotateView(Math.PI / 12, 0); $('#rotR').onclick = () => rotateView(-Math.PI / 12, 0);
+  $('#tiltU').onclick = () => rotateView(0, 0.12); $('#tiltD').onclick = () => rotateView(0, -0.12);
+  function setNavOpen(open) { $('#navPad').classList.toggle('open', open); $('#navMore').setAttribute('aria-expanded', String(open)); }
+  $('#navMore').onclick = () => setNavOpen(!$('#navPad').classList.contains('open'));
+  // phone: Escape inside the opened cluster closes it and gives the focus back to its "Rotate" button
+  $('#navPad').addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || !isPhone() || !$('#navPad').classList.contains('open')) return;
+    e.preventDefault(); e.stopPropagation(); setNavOpen(false); $('#navMore').focus({ preventScroll: true });
+  });
+  // Desktop placement of the camera cluster: one column at the right edge, as near the vertical centre as the other
+  // overlays allow (breadcrumb, save bar, environment panel, move banner, Issues dock above; legend, zoom bar below);
+  // else two columns there; else just left of an overlay (e.g. beside the environment panel in a short window). When
+  // nothing is free (a tiny 3D view): hidden in Move mode (the banner and its destination list come first), otherwise
+  // the place that covers least. Called on resize, by placeAttnDock / layoutLegend / the save bar / the environment
+  // panel / the breadcrumb, and by the 1 s ticker. Phones: styles.css puts the "Rotate" button beside the zoom bar's
+  // compass and hides the cluster in Move mode.
+  function placeNavPad() {
+    const pad = $('#navPad'), vp = $('#viewport'); if (!pad || !vp) return;
+    const reset = () => { pad.classList.remove('two', 'off'); pad.style.left = pad.style.top = pad.style.right = pad.style.transform = ''; };
+    reset(); if (isPhone()) return;
+    const V = vp.getBoundingClientRect(); if (!V.width || !V.height || !pad.offsetParent) return;
+    const shown = el => !!el && !el.classList.contains('hidden') && el.getClientRects().length > 0 && el.offsetWidth > 0;
+    const obst = ['#crumb', '#rfBar', '#attnDock', '#saveBar', '#moveBanner', '#envPanel', '.zoombar', '#legend'].map(q => $(q)).filter(shown)
+      .map(el => el.getBoundingClientRect()).map(o => ({ l: o.left - V.left - 6, r: o.right - V.left + 6, t: o.top - V.top - 6, b: o.bottom - V.top + 6 }));
+    const cands = [];
+    for (const two of [false, true]) {
+      pad.classList.toggle('two', two); const w = pad.offsetWidth, h = pad.offsetHeight; if (!w || !h) continue;
+      const edge = V.width - 16 - w, lo = 8, hi = V.height - 8 - h, mid = (V.height - h) / 2; if (hi < lo) continue;
+      for (const x0 of [edge, ...obst.map(o => o.l - w).filter(x => x >= 8 && x < edge)]) {
+        const x1 = x0 + w, near = obst.filter(o => o.r > x0 && o.l < x1);
+        const cover = y => near.reduce((s, o) => s + Math.max(0, Math.min(y + h, o.b) - Math.max(y, o.t)) * (Math.min(x1, o.r) - Math.max(x0, o.l)), 0);
+        for (const y of [mid, ...near.flatMap(o => [o.b, o.t - h])].map(y => Math.max(lo, Math.min(hi, y))))
+          cands.push({ two, x: x0, y, c: cover(y), rank: (x0 === edge ? 0 : 2) + (two ? 1 : 0), d: Math.abs(y - mid) + (edge - x0) });
+      }
+    }
+    pad.classList.remove('two'); if (!cands.length) return;
+    const free = cands.filter(p => p.c < 1);
+    if (!free.length && S.moveItem) { pad.classList.add('off'); return; }
+    const p = free.length ? free.sort((a, b) => (a.rank - b.rank) || (a.d - b.d))[0] : cands.sort((a, b) => (a.c - b.c) || (a.rank - b.rank) || (a.d - b.d))[0];
+    pad.classList.toggle('two', p.two); pad.style.top = Math.round(p.y) + 'px'; pad.style.transform = 'none';
+    pad.style.right = Math.round(V.width - (p.x + pad.offsetWidth)) + 'px';
+  }
   $('#vCompass').onclick = () => { hideRackFront(); northUp(); };
   // Arrow keys pan along the floor; Shift + arrows rotate / tilt; + / − zoom; N turns north up.
   window.addEventListener('keydown', e => {
     if (e.target !== canvas && e.target !== document.body) return; if (e.ctrlKey || e.metaKey || e.altKey || S.front) return;
-    const k = e.key; const turn = Math.PI / 12, tilt = 0.12;
-    if (e.shiftKey && k === 'ArrowLeft') rotateView(turn, 0); else if (e.shiftKey && k === 'ArrowRight') rotateView(-turn, 0);
-    else if (e.shiftKey && k === 'ArrowUp') rotateView(0, tilt); else if (e.shiftKey && k === 'ArrowDown') rotateView(0, -tilt);
-    else if (k === 'ArrowLeft') panBy(-1, 0); else if (k === 'ArrowRight') panBy(1, 0); else if (k === 'ArrowUp') panBy(0, 1); else if (k === 'ArrowDown') panBy(0, -1);
-    else if (k === '+' || k === '=') zoomBy(0.7); else if (k === '-' || k === '_') zoomBy(1.4);
+    const k = e.key; const turn = Math.PI / 12, tilt = 0.12, add = !e.repeat;   // a held key keeps one pace
+    if (e.shiftKey && k === 'ArrowLeft') rotateView(turn, 0, add); else if (e.shiftKey && k === 'ArrowRight') rotateView(-turn, 0, add);
+    else if (e.shiftKey && k === 'ArrowUp') rotateView(0, tilt, add); else if (e.shiftKey && k === 'ArrowDown') rotateView(0, -tilt, add);
+    else if (k === 'ArrowLeft') panBy(-1, 0, add); else if (k === 'ArrowRight') panBy(1, 0, add); else if (k === 'ArrowUp') panBy(0, 1, add); else if (k === 'ArrowDown') panBy(0, -1, add);
+    else if (k === '+' || k === '=') zoomBy(0.7, add); else if (k === '-' || k === '_') zoomBy(1.4, add);
     else if (k === 'n' || k === 'N') northUp();
     else return; e.preventDefault();
   });
+
+  // ───────────────────────────────────────────────────────────── Lab Manager links: Show in 3D, live changes, pause
+  // Shared with Lab Manager (frontend/src/twinLinks.js). A ref names a server, a unit or a rack:
+  //   srv:<optKey>   a server: optKey() of its label (trimmed, lower-cased, inner spaces kept)
+  //   item:<id>      a Lab Manager rack item (unit): the twin's LIVE-<id>
+  //   rack:<name>    the rack (setup) whose DCIM rack (or name) it is, case-insensitive, trimmed
+  // In: /twin/index.html?embed=1&select=<encoded ref>, applied once the model is ready (after the first connected
+  // computeModel; offline after the connection attempt): select it, Focus (fly to it) and open its detail panel; and from
+  // the embedding page (same origin, its window only, checked on every message):
+  //   { type: 'twin:select', ref }            the same on the loaded twin (the latest one waits until the model is ready)
+  //   { type: 'twin:data-changed', domains }  data changed somewhere (Lab Manager's change feed): read the live
+  //                                           inventory again for layout / inventory / owners / devices / removed / twin
+  // An unknown ref only toasts "Not found in the 3D: <ref>" and changes nothing.
+  // Out: { type: 'twin:selected', ref | null } to the embedding page (its origin only) whenever what the twin shows differs
+  // from what the page's address names (parentRef): every selection the user makes here, a selection restored on load,
+  // and, after a ref the twin cannot find, what it still shows (null: nothing selected, or an object Lab Manager has no
+  // ref for: a shelf, a PDU …). Lab Manager puts it in its address (?select=), so a reload or a copied link opens on what
+  // the twin showed. The selection is kept in sessionStorage 'twin.sel' (its ref, else 'id:<twin id>', this browser tab
+  // only) and selected again, without a flight, on a load without ?select.
+  const EMBEDDED = (() => { try { return window.parent !== window; } catch { return true; } })();
+  const DATA_DOMAINS = new Set(['layout', 'inventory', 'owners', 'devices', 'removed', 'twin']);
+  const SEL_KEY = 'twin.sel';
+  let refsReady = false, pendingRef = null, restoreRef = null;
+  // The ref Lab Manager's address holds (?select=) as far as the twin knows: the one it opened the twin on or sent last
+  // (as the object found for it), else the last one the twin reported. null: none (a load without ?select).
+  let parentRef = null;
+  function refOf(rec) {
+    if (!rec) return null;
+    if (rec.cat === 'setup') { const rack = rackName(rec.def); return rack ? 'rack:' + rack : null; }
+    const it = rec.item; if (rec.cat !== 'item' || !it) return null;
+    if (it.type === 'opt') { const key = it.dcim?.optKey || optKey(it.name); return key ? 'srv:' + key : null; }
+    if (rec.id.startsWith('LIVE-') && String(it.type).startsWith('equip-') && it.dcimId != null) return 'item:' + it.dcimId;
+    return null;
+  }
+  function findByRef(ref) {
+    const m = /^(srv|item|rack|id):([\s\S]+)$/.exec(typeof ref === 'string' ? ref : ''); if (!m) return null;
+    const [, kind, value] = m; const recs = [...S.recs.values()];
+    if (kind === 'item') return S.recs.has('LIVE-' + value) ? 'LIVE-' + value : null;
+    if (kind === 'id') return S.recs.has(value) ? value : null;
+    if (kind === 'srv') {   // a Lab Manager server first, then one drawn in 3D
+      const key = optKey(value); const hits = recs.filter(r => r.cat === 'item' && r.item?.type === 'opt' && (r.item.dcim?.optKey || optKey(r.item.name)) === key);
+      return (hits.find(r => r.item.live?.inDcim) || hits.find(r => r.group) || hits[0])?.id || null;
+    }
+    const want = value.trim().toLowerCase(); const same = v => String(v || '').trim().toLowerCase() === want; const racks = recs.filter(r => r.cat === 'setup');
+    return (racks.find(r => same(r.def.dcimRack)) || racks.find(r => same(r.def.name) || same(rackName(r.def))))?.id || null;
+  }
+  function tellParent(ref) {
+    parentRef = ref;
+    if (EMBEDDED) { try { window.parent.postMessage({ type: 'twin:selected', ref }, location.origin); } catch { /* the page went away */ } }
+  }
+  // select() / closeDetail() call this. via: 'parent' (a twin:select) or 'link' (?select=): the page's address already
+  // names this object, nothing is posted. Anything else (the user's choice, 'restore' from sessionStorage, the twin
+  // itself) is posted when its ref differs from the address's; a refresh that re-selects the same object posts nothing.
+  function noteSelection(rec, via) {
+    const ref = rec ? refOf(rec) : null;
+    try { if (rec) sessionStorage.setItem(SEL_KEY, ref || 'id:' + rec.id); else sessionStorage.removeItem(SEL_KEY); } catch { /* storage blocked */ }
+    if (via === 'parent' || via === 'link') { parentRef = ref; return; }
+    if (ref !== parentRef) tellParent(ref);
+  }
+  function showRef(ref, via) {
+    const id = findByRef(ref);
+    if (!id) {
+      if (via === 'restore') return false;
+      toast(`Not found in the 3D: ${ref}`, 'err');
+      // the page's address now names a ref the twin cannot show: report what it does show, so the address follows the
+      // twin (a reload then opens on that, not on the same "Not found") and the next selection is compared with it
+      if (via === 'parent' || via === 'link') { const cur = S.selected ? S.recs.get(S.selected) : null; tellParent(cur ? refOf(cur) : null); }
+      return false;
+    }
+    if (S.moveItem) cancelMove();
+    select(id, { via, keepCamera: via === 'restore' });   // select flies to it (Focus) and opens the panel
+    return true;
+  }
+  function refsReadyNow() {
+    if (refsReady || !S.model) return; refsReady = true;
+    const ref = pendingRef, back = restoreRef; pendingRef = restoreRef = null;
+    if (ref) showRef(ref.ref, ref.via); else if (back) showRef(back, 'restore');
+  }
+  window.addEventListener('message', e => {
+    if (e.origin !== location.origin || e.source !== window.parent || !e.data || typeof e.data !== 'object') return;
+    const { type, ref, domains } = e.data;
+    if (type === 'twin:select' && typeof ref === 'string' && ref) {
+      if (refsReady) showRef(ref, 'parent'); else { pendingRef = { ref, via: 'parent' }; restoreRef = null; }
+    } else if (type === 'twin:data-changed') dataChanged(Array.isArray(domains) ? domains.map(String) : []);
+  });
+
+  // Live changes. Embedded, Lab Manager forwards its change feed (twin:data-changed above); opened on its own the twin
+  // reads GET /api/changes itself every 2 s while shown ({ rev, domains: { layout: n, … } }, frontend/src/api/changes.js;
+  // a backend without the feed answers 404: asked again a minute later, quietly). A change that matters reads the live
+  // inventory again (refreshSoon). It waits while the user is moving something or has unsaved editor input (the 1 s
+  // ticker applies it once they are done) and while the twin is hidden (shown again, it refreshes anyway).
+  const CHANGES_MS = 2000;
+  let refreshPending = false, changesTimer = 0, changesLast = null, changesBusy = false, changesQuietUntil = 0;
+  const refreshWaits = () => !!S.moveItem || moveAsking || (S.editMode && S.detailEdited);
+  function dataChanged(domains) {
+    if (!domains.some(d => DATA_DOMAINS.has(d)) || !S.live.connected) return false;
+    if (paused || refreshWaits()) refreshPending = true; else refreshSoon();
+    return true;
+  }
+  function flushPendingRefresh() {
+    if (!refreshPending || paused || refreshWaits()) return;
+    refreshPending = false; if (S.live.connected) refreshSoon();
+  }
+  // the domains whose counters differ between two answers (all of them when the server restarted with lower counters)
+  function changedDomains(before, after) {
+    if (!before || !after) return [];
+    if (!(Number(after.rev) >= Number(before.rev))) return [...DATA_DOMAINS, 'other'];
+    if (Number(after.rev) === Number(before.rev)) return [];
+    const a = after.domains || {}, b = before.domains || {};
+    const out = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(d => Number(a[d] || 0) !== Number(b[d] || 0));
+    return out.length ? out : ['other'];
+  }
+  async function pollChanges() {
+    if (EMBEDDED || paused || changesBusy || !S.live.connected || Date.now() < changesQuietUntil) return;
+    changesBusy = true; S.stats.changePolls++; const session = liveSession;
+    try {
+      const now = await api('/api/changes', { cache: 'no-store' });
+      if (session !== liveSession || !now || typeof now !== 'object' || !Number.isFinite(Number(now.rev))) return;
+      const domains = changedDomains(changesLast, now); changesLast = now;
+      if (domains.length) dataChanged(domains);
+    } catch (e) { if (e.status === 404) changesQuietUntil = Date.now() + 60000; }   // no change feed here: quietly later
+    finally { changesBusy = false; }
+  }
+  function startChangeFeed() { if (!EMBEDDED && !paused && !changesTimer) changesTimer = setInterval(pollChanges, CHANGES_MS); }
+  function stopChangeFeed() { clearInterval(changesTimer); changesTimer = 0; }
+
+  // Paused while hidden. Lab Manager keeps the twin loaded but hidden on its other tabs (the iframe's `hidden`; the
+  // no-build tab bridge, embed-tab.js, uses display: none), and a background browser tab is document.hidden. Then the
+  // twin does no work: no render loop, no 1 s ticker, no live poll / retry timer, no change feed. Shown again it renders
+  // at once and refreshes once. That is why Lab Manager can keep a hidden twin for TWIN_HIDDEN_KEEP_MS (10 min).
+  // Hidden: this tab in the background, the iframe `hidden` / display: none, or not rendered at all (no layout box: an
+  // ancestor of the iframe hidden or display: none, or the iframe taken out of the page).
+  const frameEl = (() => { try { return window.frameElement || null; } catch { return null; } })();
+  function isHiddenNow() {
+    if (document.hidden) return true;
+    try { return !!frameEl && (frameEl.hidden || frameEl.style.display === 'none' || !frameEl.isConnected || frameEl.getClientRects().length === 0); } catch { return false; }
+  }
+  function tick() { S.stats.ticks++; renderLive(); checkPduFreshness(); refreshHoverTip(); placeNavPad(); flushPendingRefresh(); }
+  function startTicker() { if (!paused && !ticker) ticker = setInterval(tick, 1000); }
+  function retryConnect() { connect({ retry: true }); }
+  // The one live timer (poll / reconnect / sign-in check): never started while paused; resumeTwin starts what is due.
+  function startLiveTimer(fn, ms) {
+    if (S.live.timer) clearInterval(S.live.timer); S.live.timer = null;
+    if (paused) { pausedTimer = true; return; }
+    S.live.timer = setInterval(fn, ms);
+  }
+  function restartLiveTimer() {
+    if (S.live.signedOut) startLiveTimer(resumeAfterSignIn, POLL_MS);
+    else if (S.live.retrying) startLiveTimer(retryConnect, POLL_MS);
+    else if (S.live.connected && S.settings.poll) startLiveTimer(refreshStatuses, refreshMs());
+  }
+  function pauseTwin() {
+    if (paused) return; paused = true;
+    if (rafId) cancelAnimationFrame(rafId); rafId = 0;
+    clearInterval(ticker); ticker = 0; stopChangeFeed();
+    if (S.live.timer) { clearInterval(S.live.timer); S.live.timer = null; pausedTimer = true; }
+    cancelNavigation(); dropHoverTrail(); hideHoverTip();
+  }
+  function resumeTwin() {
+    if (!paused) return; paused = false;
+    startTicker(); if (!rafId) rafId = requestAnimationFrame(animate);
+    if (pausedTimer) { pausedTimer = false; restartLiveTimer(); }
+    // one refresh now: whatever changed while hidden shows at once (the change feed then starts from the new counters)
+    refreshPending = false; changesLast = null; startChangeFeed();
+    if (S.live.connected) { if (refreshWaits()) refreshPending = true; else refreshSoon(); }   // not during a Move / unsaved edit
+    else if (S.live.signedOut) resumeAfterSignIn();
+    else if (S.live.retrying && !S.live.connecting) retryConnect();
+  }
+  function checkShown() { if (!S.data) return; if (isHiddenNow()) pauseTwin(); else resumeTwin(); }
+  document.addEventListener('visibilitychange', checkShown);
+  if (frameEl) { try { new MutationObserver(checkShown).observe(frameEl, { attributes: true, attributeFilter: ['hidden', 'style'] }); } catch { /* not observable */ } }
+  // An ancestor of the iframe hidden or shown changes the iframe's box (0 × 0 while not rendered) without touching its
+  // attributes: a ResizeObserver of the embedding page (its realm: it runs with that page's rendering, which goes on
+  // while this frame is hidden) sees that. Disconnected when this page goes away.
+  if (frameEl) {
+    try {
+      const PageRO = frameEl.ownerDocument?.defaultView?.ResizeObserver;
+      if (PageRO) {
+        const ro = new PageRO(() => checkShown()); ro.observe(frameEl);
+        window.addEventListener('pagehide', () => ro.disconnect());
+        window.addEventListener('pageshow', e => { if (e.persisted) { ro.observe(frameEl); checkShown(); } });
+      }
+    } catch { /* not observable */ }
+  }
 
   // ───────────────────────────────────────────────────────────── toasts / tabs
   function toast(msg, cls = '') { const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); }
@@ -3849,30 +4306,38 @@
     setupFilterUI(); buildStatic(); computeModel(); buildItems();
     setLabelMode(LS.get('labelMode', 'setups'), true); updateSaveBar();
     document.body.classList.toggle('embed', S.embed); document.body.classList.toggle('kiosk', S.kiosk); $('#btnKiosk').classList.toggle('on', S.kiosk); if (S.kiosk) $('#btnKiosk').textContent = 'Leave lab screen mode'; document.body.classList.toggle('editmode', S.editMode); markEdit(); applyLook(); renderLegend();
-    resize(); controls.maxDistance = Math.max(25, Math.hypot(S.data.room.width, S.data.room.depth, S.data.room.height) * 5);
-    camera.far = controls.maxDistance + 50; camera.updateProjectionMatrix();
+    resize(); MAX_DISTANCE_BASE = Math.max(25, Math.hypot(S.data.room.width, S.data.room.depth, S.data.room.height) * 5); controls.maxDistance = MAX_DISTANCE_BASE;
+    camera.far = MAX_DISTANCE_BASE + 50; camera.updateProjectionMatrix();
     // a target slid down to the floor must land on the room's floor (world x is mirrored: data x → −x)
     controls.groundBounds = new THREE.Box3(new THREE.Vector3(-S.data.room.width - 0.5, -0.01, -0.5), new THREE.Vector3(0.5, 0.01, S.data.room.depth + 0.5));
     VIEWS.orbit(); camera.position.copy(S.tween.p1); controls.target.copy(S.tween.t1v); S.tween = null; controls.update();
     previousCamera.copy(camera.position); previousTarget.copy(controls.target); markView('orbit');
     const racksList = S.racksList; setSheet('half', 'issues'); showTab(LS.get('sideTab', 'attn')); setRacksList(racksList); placeAttnDock();
-    setInterval(() => { renderLive(); checkPduFreshness(); }, 1000);
+    startTicker();
     animate();
+    // Show in 3D: ?select=<ref> (unless a twin:select came first), else the selection this browser tab had before a
+    // reload; applied by refsReadyNow once the model is ready
+    const linked = new URLSearchParams(location.search).get('select');
+    if (linked && !pendingRef) pendingRef = { ref: linked, via: 'link' };
+    else if (!linked && !pendingRef) { try { restoreRef = sessionStorage.getItem(SEL_KEY) || null; } catch { restoreRef = null; } }
     const auto = S.settings.url || location.protocol.startsWith('http') || window.LAB_DEMO; // same-origin when served from the backend (LAB_DEMO = simulated backend in the preview bundle)
     if (S.settings.url) connect();
     else if (auto) {
       S.live.connecting = true; pill('connecting', 'Connecting…'); refreshAttention();
       api('/api/version').then(() => connect()).catch(e => {
         S.live.connecting = false;
-        if (S.live.signedOut) { refreshAttention(); return; }
+        if (S.live.signedOut) { refreshAttention(); refsReadyNow(); return; }
         if (e.status === 404 || location.protocol === 'file:') pill('offline', 'Offline · static data');   // static file server: no backend here
         else connectFailed(e, e.status, true);
-        refreshAttention();
+        refreshAttention(); refsReadyNow();
       });
     }
+    if (!auto) refsReadyNow();   // no backend to wait for (opened from disk)
+    startChangeFeed(); checkShown();   // the standalone change feed; paused at once when loaded hidden
   }
   // debug handle (console): __twin.select('SETUP-003'), __twin.S.model.items …
-  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend, rackClearance };
+  window.__twin = { S, scene, camera, controls, renderer, POWER, powerOf, unitInfo, hostOf, renderShelfCards, northUp, orbitTo, updateLabels, select, closeDetail, flyTo, planFlight, safeArea, setView, connect, disconnect, refreshStatuses, computeModel, buildItems, VIEWS, finishMove, requestMove, movePlan, startMove, cancelMove, resolveMoveTarget, pickAt, toggleEdit, toggleKiosk, computeAttention, renderAttention, focusAttention, showTab, itemHealth, rackHealth, rowLabel, renderRackFront, showRackFront, hideRackFront, setColorBy, setSheet, paint, pingKey, feedsOf, shelfName, placeLabel, openSettings, closeSettings, rebuildAll, shelfToU, shelvesFor, floorsFor, isStorageRack, sightBlocked, renderLegend, rackClearance, keepInView, setLeftAction, zoomBy, rotateView, panBy, frameSafe, placeNavPad,
+    findByRef, refOf, showRef, dataChanged, pollChanges, checkShown, isPaused: () => paused };
   const boot = window.LAB_DATA ? Promise.resolve(window.LAB_DATA) : fetch('lab-data.json', { cache: 'no-store' }).then(r => { if (!r.ok) throw Object.assign(new Error(r.status), { status: r.status }); return r.json(); });
   Promise.all([boot, window.DCIM_ACCOUNT_READY]).then(([data]) => init(data)).catch(err => {
     console.warn('lab-data.json fetch failed:', err);

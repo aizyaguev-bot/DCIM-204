@@ -2,6 +2,73 @@
 
 ---
 
+## v2.46.15 — 2026-11-10 — Show in 3D
+
+### Added
+- **Show in 3D:** a 3D button on every rack card and rack page, in a server's details and in a
+  unit's details and edit panels. It opens the 3D Twin on that rack, server or unit, selected and
+  with its panel open. Storage racks have no button, because the 3D does not draw them.
+- **3D twin to Lab Manager:** the address follows what you select in the 3D, so a reload or a
+  shared link opens on the same object. A server's, unit's or rack's panel in the 3D links back
+  with "Open in Racks"; a unit's panel also has "Full history in Scan & Track", and a PDU's panel
+  has "Manage maintenance in Power".
+
+### Changed
+- **3D twin, unit owner:** a unit on a server's floor shows that server's owner, the same rule
+  Racks uses since v2.46.14. In Edit layout the owner is read-only there, with "Open <server>".
+- **3D twin, PDUs and KVMs never move:** Move, swap and the editor refuse them, including units
+  whose type is PDU or KVM.
+- **3D twin in the background:** while another tab is shown, the 3D pauses (no drawing and no
+  requests) and stays loaded for 10 minutes, so going back to it is instant.
+- **3D twin, live updates:** the 3D is ready to follow changes from other screens within seconds.
+  This starts with the live-sync release.
+
+---
+
+## v2.46.14 — 2026-11-10 — A unit's owner is the owner of the server on its floor
+
+### Changed
+- **Racks, unit owner:** a unit (product) on a floor or shelf that has a server shows that
+  server's owner, everywhere: on the floor, in its details, in its edit panel, in search and on
+  the shelf labels. Its Owner field there is read-only: "From OPT33, the server on this floor.
+  Change it on the server." Changing the server's owner, or moving the unit to another server's
+  floor, changes it at once.
+- A unit on a floor or shelf without a server (for example a storage shelf) keeps the owner set
+  on the unit itself, as before.
+- The AI assistant reports a unit's owner by the same rule.
+
+---
+
+## v2.46.13 — 2026-11-10 — 3D twin: navigation buttons and a hover tip
+
+### Added
+- **3D twin, camera buttons:** a column at the right edge with Pan / Rotate (what a left drag
+  does; the choice is remembered), rotate left / right and tilt up / down. On a phone they sit
+  behind a "Rotate" button.
+- **3D twin, hover tip:** pointing at a device with the mouse shows its name, ON / OFF / ? and
+  where it is ("OPT11 · ON · Rack-01 › Shelf 1").
+
+### Changed
+- **3D twin, rack clearance:** zoom, pan, rotate and tilt buttons and keys stop at 0.4 m from a
+  rack, like the mouse already did, so the view never ends up inside a rack.
+- **3D twin, selection stays in view:** an object clicked near the edge is moved into view when
+  its panel opens.
+- **3D twin, zoom out** stops at 1.6 × the whole-lab view, so the lab never shrinks to a dot.
+
+---
+
+## v2.46.12 — 2026-11-10 — 3D twin: PDUs and KVMs stay in place
+
+### Fixed
+- **3D twin:** PDUs and KVMs are fixed infrastructure and always stay where the lab layout puts
+  them. Since v2.46.11 a PDU without its own Lab Manager device (the PDU that Rack-06 and Rack-07
+  share) was moved to Unplaced; it is back on Rack-07.
+- **webpe lookup tool:** text with spaces in a unit's serial field (for example "Portia tray") is
+  not sent to webpe, and a serial number webpe refuses is asked again only after 6 hours instead of
+  every 5 minutes.
+
+---
+
 ## v2.46.11 — 2026-11-09 — 3D twin shows what Lab Manager has; stale power readings are grey
 
 ### Changed

@@ -4,6 +4,8 @@
  * stays under the pointer), right / middle drag (or Ctrl / Shift / Alt + left drag) rotates and tilts around the
  * target point, the wheel zooms towards the point under the pointer. Touch: one finger pans, two fingers pinch-zoom
  * about their midpoint, twist to rotate, and push both up / down together to tilt.
+ * leftAction = 'rotate' (the app's Pan / Rotate switch) makes a left drag and a one-finger drag rotate / tilt instead
+ * of pan; a left drag with Ctrl / Shift / Alt then pans (the modifier always picks the other action).
  *
  * The camera never rolls: it always looks at `target` with world Y up. User rotation keeps the polar angle inside
  * [minPolarAngle, maxPolarAngle] (never under the floor or over the top), user zoom keeps the distance inside
@@ -36,6 +38,7 @@
       this.minPolarAngle = 0.02; this.maxPolarAngle = 1.5;
       this.rotateSpeed = 0.5;        // a drag over the full view height turns rotateSpeed × 2π
       this.zoomSpeed = 1;
+      this.leftAction = 'pan';       // 'pan' | 'rotate': what a left drag / one-finger drag does
       this.groundY = 0;              // the floor the target sits on
       this.groundBounds = null;      // THREE.Box3: a grounded target must land inside it
       this._pointers = new Map();    // pointerId → { x, y, type }
@@ -102,7 +105,8 @@
     // anchor stay where they are on screen, so the thing under the pointer stays under the pointer.
     zoomAbout(anchor, s) {
       const r = this.getDistance(); if (r < 1e-9) return 1;
-      const k = clamp(s, this.minDistance / r, this.maxDistance / r); if (Math.abs(k - 1) < 1e-9) return k;
+      // never jump: a camera a preset left outside [min, max] may only move back towards the limits
+      const k = clamp(s, Math.min(1, this.minDistance / r), Math.max(1, this.maxDistance / r)); if (Math.abs(k - 1) < 1e-9) return k;
       const a = anchor || this.target;
       this.object.position.sub(a).multiplyScalar(k).add(a);
       this.target.sub(a).multiplyScalar(k).add(a); this._changed(); return k;
@@ -181,15 +185,20 @@
       if (first) { this.groundTarget(); this.dispatchEvent({ type: 'start' }); }
       this._startGesture(e);
     }
+    // One pointer: pan (the floor point under it stays under it) or rotate, as leftAction says.
+    _single(x, y, rotate = this.leftAction === 'rotate') {
+      return rotate ? { kind: 'rotate', x, y } : { kind: 'pan', x, y, grab: this._groundAt(x, y) };
+    }
     _startGesture(e) {
       this._samples = [];
       const pts = [...this._pointers.values()];
       if (e && e.pointerType !== 'touch') {
-        const rotate = e.button === 2 || e.button === 1 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey;
-        this._gesture = rotate ? { kind: 'rotate', x: e.clientX, y: e.clientY } : { kind: 'pan', x: e.clientX, y: e.clientY, grab: this._groundAt(e.clientX, e.clientY) };
+        const modifier = e.ctrlKey || e.metaKey || e.shiftKey || e.altKey;
+        const rotate = e.button === 2 || e.button === 1 || (this.leftAction === 'rotate') !== modifier;
+        this._gesture = this._single(e.clientX, e.clientY, rotate);
         return;
       }
-      if (pts.length === 1) { const p = pts[0]; this._gesture = { kind: 'pan', x: p.x, y: p.y, grab: this._groundAt(p.x, p.y) }; return; }
+      if (pts.length === 1) { const p = pts[0]; this._gesture = this._single(p.x, p.y); return; }
       const [a, b] = pts; const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
       this._gesture = { kind: 'touch', mode: null, mx, my, d: Math.hypot(b.x - a.x, b.y - a.y), ang: Math.atan2(b.y - a.y, b.x - a.x), sx: mx, sy: my, sd: Math.hypot(b.x - a.x, b.y - a.y), sang: Math.atan2(b.y - a.y, b.x - a.x), a0: { ...a }, b0: { ...b }, grab: this._groundAt(mx, my) };
     }
@@ -248,8 +257,8 @@
       if (!this._pointers.has(e.pointerId)) return;
       this._pointers.delete(e.pointerId);
       const g = this._gesture;
-      if (this._pointers.size) {   // one finger of two lifted: carry on panning with the other, without a jump
-        const rest = [...this._pointers.values()][0]; this._gesture = { kind: 'pan', x: rest.x, y: rest.y, grab: this._groundAt(rest.x, rest.y) }; this._samples = []; return;
+      if (this._pointers.size) {   // one finger of two lifted: carry on (pan or rotate, as leftAction) with the other, without a jump
+        const rest = [...this._pointers.values()][0]; this._gesture = this._single(rest.x, rest.y); this._samples = []; return;
       }
       this._gesture = null;
       if (g && e.type !== 'pointercancel') this._release(g);

@@ -723,6 +723,18 @@ async def get_rack_layout(ctx: ToolContext, rack: str) -> ToolResult:
         server["display_order"] = next((positions.index(a) for a in server["aliases"] if a in positions), None)
         server["shelf_position"] = None
         server["outside_mapped_shelves"] = shelf_count is not None and (server["u"] or 0) > shelf_count
+    # A unit (rack item) on a floor with a server belongs to that server's owner (the lab owner's rule, 2026-11-10; the
+    # Racks page shows the same, frontend/src/unitOwner.js). Several servers on one floor: the first in slot order. A unit
+    # on a floor with no server, on the rack level or unplaced keeps its own saved owner. Nothing saved is changed.
+    floor_servers = {}
+    for server in servers:
+        if not server["unplaced"]:
+            floor_servers.setdefault(server["u"], server)
+    for item in items:
+        server = None if item["unplaced"] else floor_servers.get(item["u"])
+        if server is not None:
+            item["owner"] = server["owner"]
+        item["owner_from_server"] = server["label"] if server is not None else None
     occupied.update(i["u"] for i in items if not i["unplaced"])
     placement_sources = {s.id: s.status for s in sources}
     placement_complete = all(placement_sources.get(name) == "ok"
@@ -797,7 +809,7 @@ TOOLS: list[ToolSpec] = [
              _schema({"kind": {"type": "string", "enum": ["pdu", "kvm", "switch", "rack", "server", "item"]}, "id": _STRING}, ("kind", "id")), "Viewer", get_dependencies),
     ToolSpec("get_power_and_environment", "Read persisted outlet observations and cache-only PDU inlet, wattage and environmental readings, optionally filtered by rack and/or PDU id. Preserve unknown values and freshness, deduplicate shared PDUs and label capacity assumptions. Never refresh devices.",
              _schema({"rack": {"type": ["string", "null"], "maxLength": _MAX_ARGUMENT}, "pdu_id": {"type": ["string", "null"], "maxLength": _MAX_ARGUMENT}}), "Viewer", get_power_and_environment),
-    ToolSpec("get_rack_layout", "Read equipment and server shelf indices, placement, owner names and twin shelf count/confidence for one rack. U01 means the top shelf, not a standard rack unit. Flag inferred/unplaced items and low-confidence free shelves; dimensions and weight are unavailable.",
+    ToolSpec("get_rack_layout", "Read equipment and server shelf indices, placement, owner names and twin shelf count/confidence for one rack. Equipment on a shelf with a server reports that server's owner (owner_from_server names it). U01 means the top shelf, not a standard rack unit. Flag inferred/unplaced items and low-confidence free shelves; dimensions and weight are unavailable.",
              _schema({"rack": _STRING}, ("rack",)), "Viewer", get_rack_layout),
     ToolSpec("search_docs", "Search literal terms only in CHANGELOG and seven allowlisted operational documents. Return file, nearest heading and short untrusted snippets. Query is never a path; team instructions, secrets and other files cannot be searched.",
              _schema({"query": _STRING, "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}}, ("query",)), "Viewer", search_docs),

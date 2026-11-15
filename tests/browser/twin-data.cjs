@@ -45,14 +45,17 @@ const JSON_ONLY = ['Opt207', 'optn85', 'Opt168', 'Opt133'];   // lab-data.json s
         else if (r.item.type !== 'pdu') unitsPerShelf[r.shelf] = (unitsPerShelf[r.shelf] || 0) + 1;
       }
       const mapped = new Set(S.data.setups.filter(s => s.dcimRack).map(s => s.id));
-      const jsonOnMapped = S.model.items.filter(i => !i.id.startsWith('LIVE-') && mapped.has(i.setup) && (i.type === 'opt' || i.type.startsWith('equip-') || ((i.type === 'pdu' || i.type === 'kvm') && !i.live?.device)));
+      const jsonOnMapped = S.model.items.filter(i => !i.id.startsWith('LIVE-') && mapped.has(i.setup) && (i.type === 'opt' || i.type.startsWith('equip-')));
+      // PDUs and KVMs are fixed infrastructure: each stays where lab-data.json puts it, matched or not.
+      const infraMoved = S.data.items.filter(d => d.type === 'pdu' || d.type === 'kvm').filter(d => { const i = S.model.items.find(x => x.id === d.id); return !i || i.notInLm || (i.setup ?? null) !== (d.setup ?? null); }).map(d => d.id + ' ' + d.name);
       const named = names.map(n => { const i = S.model.items.find(x => x.name === n); const r = i && S.recs.get(i.id); return { n, id: i?.id, setup: i?.setup ?? null, shelf: i?.shelf ?? null, unplaced: !!r?.unplaced, where: r ? t.placeLabel(r) : '' }; });
-      return { maxOpt: Math.max(0, ...Object.values(perShelf)), multi: Object.entries(perShelf).filter(([, n]) => n > 1), maxUnits: Math.max(0, ...Object.values(unitsPerShelf)), jsonOnMapped: jsonOnMapped.map(i => i.id + ' ' + i.name), named,
+      return { maxOpt: Math.max(0, ...Object.values(perShelf)), multi: Object.entries(perShelf).filter(([, n]) => n > 1), maxUnits: Math.max(0, ...Object.values(unitsPerShelf)), jsonOnMapped: jsonOnMapped.map(i => i.id + ' ' + i.name), infraMoved, named,
         live11: S.model.items.find(i => i.id === 'LIVE-opt11')?.setup };
     }, JSON_ONLY);
     assert.ok(model.maxOpt <= 1, 'one server per floor: ' + JSON.stringify(model.multi));
     assert.ok(model.maxUnits <= 1, 'one unit per floor, got ' + model.maxUnits);
-    assert.deepEqual(model.jsonOnMapped, [], 'no lab-data.json server / unit / PDU / KVM on a DCIM-mapped rack');
+    assert.deepEqual(model.jsonOnMapped, [], 'no lab-data.json server / unit on a DCIM-mapped rack');
+    assert.deepEqual(model.infraMoved, [], 'every PDU and KVM stays where lab-data.json puts it');
     for (const x of model.named) {
       assert.ok(x.id, x.n + ' is still in the model');
       assert.deepEqual([x.setup, x.shelf, x.unplaced, x.where], [null, null, true, 'In lab-data.json, not in Lab Manager'], x.n + ': ' + JSON.stringify(x));
