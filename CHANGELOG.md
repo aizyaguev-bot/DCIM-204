@@ -2,6 +2,43 @@
 
 ---
 
+## v2.46.16 — 2026-11-17 — Live sync on every screen; a server swap keeps PDU and KVM by floor
+
+### Added
+- **Live sync:** a change made anywhere (another browser, another user, the assistant) shows on
+  every open screen within a few seconds, with no reload: Racks, Dashboard, Power, Consoles,
+  Monitoring, Scan & Track, Inventory, Admin pages, the TV lab display and the 3D twin. A form
+  you are typing in is never overwritten. Its other fields keep updating.
+- **Racks, move and swap by location:** in Edit mode, drag a server onto another server (any
+  rack) to swap them, or onto a rack to move it. The server's "Move…" works the same way. A
+  preview shows exactly what changes before anything is saved: the PDU outlet and KVM port each
+  server takes over, every server's new place and the units that go along.
+- **3D twin, swap:** dropping a server onto another server in the 3D swaps them the same way, with
+  the same preview. A server dropped on a free shelf is moved in Racks: the 3D offers "Open in
+  Racks", because Racks asks which PDU outlet feeds that floor.
+
+### Changed
+- **PDU outlets and KVM ports belong to the floor:** when servers are swapped or moved, each
+  server takes over the outlet and KVM port of its new floor, and their names are rewritten, so
+  power and console buttons always reach the right machine. PDUs and KVMs themselves never
+  move.
+- **Units move with their server:** the units on a server's floor go with it to its new floor
+  (the box "Move the units on this floor with the server" can turn this off). Their owner follows
+  the server. Admin → Locations and the assistant move them the same way.
+- **Moving to an empty floor:** the outlet labelled for that floor ("empty" or "spare" with its
+  number) is offered; otherwise you are asked which outlet feeds it.
+- **A device that does not answer:** if a KVM or PDU does not report its port names, the
+  preview says which ports were not checked instead of claiming they changed. The assistant
+  says so too.
+- **Server health:** the Rack column follows the server's current rack after a move.
+- **Admin → Locations:** moving a server to ports on a floor that holds another server is
+  refused, so a server is never left with another floor's outlet. "Swap with <server>" does it
+  properly.
+- The move is all or nothing: if something changed meanwhile in another session, nothing is
+  saved and the preview is shown again.
+
+---
+
 ## v2.46.15 — 2026-11-10 — Show in 3D
 
 ### Added
