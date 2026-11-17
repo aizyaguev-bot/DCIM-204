@@ -1,5 +1,5 @@
-// Locations page (Admin > Locations): Clear location wording, the two swap boxes, no-op moves and a same-rack move
-// with a blank slot. Runs only against the isolated preview fixture (tests/browser/preview-server.py).
+// Locations page (Admin > Locations): Clear location wording, a move to ports onto a taken slot (refused, the server
+// swap offered instead), no-op moves and a same-rack move with a blank slot. Runs only against the isolated preview fixture (tests/browser/preview-server.py).
 //
 // Writes on the fixture: OPT34's PDU outlet label is cleared and then put back; OPT64 is placed at Rack-06 U6 once
 // (a repeat run finds it there and skips that step). Every other move is a preview only.
@@ -98,27 +98,49 @@ const ALLOWED_WRITES = new Set(['POST /api/auth/login', 'PATCH /api/devices/dire
       checks.push('Clear OPT34: the confirm says it becomes Unplaced and the notice says Now unplaced');
     }
 
-    // 2. The two swap boxes are separate: unticking the slot swap keeps the server swap on, so the target keeps a place.
+    // 2. PDU outlets and KVM ports belong to the floor, so a move to ports never swaps positions alone: a slot another
+    //    server holds is refused (409, nothing saved) and the dialog offers the swap with that server, which swaps the
+    //    outlets and KVM ports too. Clicking it previews that swap at once; the preview is not applied.
     await openMove('OPT51');
     let dialog = moveDialog();
     const serverSwap = dialog.getByRole('checkbox', { name: /^Swap with/ });
     assert.equal(await serverSwap.isChecked(), true);
     await dialog.getByRole('radio', { name: 'Empty ports' }).check();
     await dialog.locator('#move-slot').fill('3');
-    const slotSwap = dialog.getByRole('checkbox', { name: 'If that slot holds another server, swap positions with it' });
-    assert.equal(await slotSwap.isChecked(), true);
-    await slotSwap.uncheck();
-    await dialog.getByRole('radio', { name: "Another server's location" }).check();
-    assert.equal(await serverSwap.isChecked(), true, 'Unticking the slot swap must not untick the server swap');
-    await dialog.locator('#move-target').selectOption('opt52');
-    let { body, section } = await preview(dialog);
-    assert.equal(body.swap, true, 'Server mode sends its own swap box');
+    await dialog.locator('[data-slot-hint]').getByText('Choose an empty slot.', { exact: false }).waitFor();
+    assert.equal(await dialog.getByRole('checkbox').count(), 0, 'A move to ports has no swap box');
+    let sent = page.waitForRequest(r => r.url().endsWith('/api/devices/move-server') && r.method() === 'POST');
+    const refused = page.waitForResponse(r => r.url().endsWith('/api/devices/move-server') && r.request().method() === 'POST');
+    await dialog.getByRole('button', { name: 'Preview changes', exact: true }).click();
+    let body = (await sent).postDataJSON();
+    assert.equal((await refused).status(), 409, 'U3 in Rack-05 holds OPT53');
+    assert.deepEqual([body.target_slot, body.swap, body.dry_run], [3, false, true], 'A move to ports is a preview with swap off');
+    const refusal = dialog.getByRole('alert');
+    await refusal.waitFor();
+    assert.equal((await refusal.innerText()).trim(), 'U3 in Rack-05 is used by OPT53. Choose OPT53 as the target to swap the two servers (their outlets and KVM ports swap too), or choose an empty slot.');
+    assert.equal(await dialog.getByRole('region', { name: 'Preview of changes' }).count(), 0, 'Nothing to apply');
+    const offer = dialog.locator('[data-slot-taken]');
+    assert.match(await offer.innerText(), /OPT51 takes Rack-05 · U3 with its outlets and KVM port; OPT53 takes OPT51's place and ports\./);
+    sent = page.waitForRequest(r => r.url().endsWith('/api/devices/move-server') && r.method() === 'POST');
+    await offer.getByRole('button', { name: 'Swap with OPT53 instead', exact: true }).click();
+    body = (await sent).postDataJSON();
+    assert.deepEqual([body.target_server, body.target_ports, body.target_slot, body.swap, body.dry_run], ['opt53', null, null, true, true]);
+    let section = dialog.getByRole('region', { name: 'Preview of changes' });
+    await section.waitFor();
+    assert.equal(await dialog.getByRole('radio', { name: "Another server's location" }).isChecked(), true);
+    assert.equal(await dialog.locator('#move-target').inputValue(), 'opt53');
+    assert.equal(await serverSwap.isChecked(), true);
+    // Each floor keeps its outlet: U1's outlet 1 now names OPT53, U3's outlet 3 names OPT51; the two swap places.
+    const change = where => section.locator('li').filter({ hasText: where });
+    assert.match(await change('PDU 05 outlet 1').innerText(), /OPT51[\s\S]*OPT53/);
+    assert.match(await change('PDU 05 outlet 3').innerText(), /OPT53[\s\S]*OPT51/);
+    assert.match(await section.locator('li').filter({ hasText: 'OPT51' }).filter({ hasText: 'Rack-05 · U1' }).first().innerText(), /Rack-05 · U1[\s\S]*Rack-05 · U3/);
     assert.equal(await section.getByText(/Becomes unplaced/).count(), 0, 'With swap on nothing becomes unplaced');
-    await section.getByText('OPT52', { exact: false }).first().waitFor();
-    await dialog.getByRole('radio', { name: 'Empty ports' }).check();
-    assert.equal(await slotSwap.isChecked(), false, 'The slot box keeps its own state');
+    assert.equal(await dialog.getByRole('button', { name: 'Apply', exact: true }).isDisabled(), false);
     await cancel(dialog);
-    checks.push('Swap boxes do not carry over between modes; the server swap stays ticked and nothing becomes unplaced');
+    const rows = await locations();
+    assert.deepEqual(['opt51', 'opt53'].map(k => rows.find(s => s.key === k).pdu.map(p => `${p.device_id}:${p.port}`)), [['pdu5:1'], ['pdu5:3']], 'Nothing was saved');
+    checks.push('A move to ports onto a taken slot (OPT51 to U3 of Rack-05) is refused with the occupant named; "Swap with OPT53 instead" previews the server swap, where each floor keeps its outlet');
 
     // 3. A move to the ports the server already has changes nothing: no position line, Apply disabled.
     await openMove('OPT41');

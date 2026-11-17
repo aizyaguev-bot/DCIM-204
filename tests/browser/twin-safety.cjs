@@ -1,8 +1,10 @@
 // Digital Twin safety and usability regression (isolated fixture only: tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1).
 // Covers: power only from live DCIM mappings, one confirmation for On/Off/Cycle, fly-to framing inside the room,
-// mirrored label anchors, live warnings kept out of notes, move confirmation + swap without shifting other servers,
+// mirrored label anchors, live warnings kept out of notes, move confirmation + a server swap (Lab Manager's server move,
+// previewed by its dry run) without shifting other servers,
 // search ranking / keyboard / owners, blocked KVM popup, KVM in-use question and per-console leases, viewer card, rack bar, reduced motion, focus and disposal.
-// Writes only fixture data: one power cycle + one power on (simulated PDU), KVM port marks, rack-slot swaps and
+// Writes only fixture data: one power cycle + one power on (simulated PDU), KVM port marks, server swaps (POST
+// /api/devices/move-server, after dry runs), one rack-slots change through the API and
 // two saves of the fixture's temporary lab-data.json (only meta.modified changes).
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
@@ -14,7 +16,11 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
   const checks = [], errors = [], unexpected = [];
   const progress = m => { if (process.env.DCIM_QA_VERBOSE) console.error(new Date().toISOString().slice(11, 19) + ' ' + m); };
   const pass = m => { checks.push(m); progress('ok: ' + m); };
-  const allowed = [/^\/api\/auth\/login$/, /^\/api\/pdus\/pdu\d\/outlets\/\d\/power$/, /^\/api\/kvms\/kvm1\/ports\/\d\/mark-(in-use|free)$/, /^\/api\/rack-layout$/, /^\/api\/twin-data$/];   // moves: one atomic PUT /api/rack-layout, never the single stores
+  // moves: a server only through Lab Manager's server move (POST /api/devices/move-server: its dry run, then the
+  // previewed move), never PUT /api/rack-layout or the single stores
+  const allowed = [/^\/api\/auth\/login$/, /^\/api\/pdus\/pdu\d\/outlets\/\d\/power$/, /^\/api\/kvms\/kvm1\/ports\/\d\/mark-(in-use|free)$/, /^\/api\/devices\/move-server$/, /^\/api\/twin-data$/];
+  const isApplied = p => p.path === '/api/devices/move-server' && JSON.parse(p.body || '{}').dry_run !== true;
+  const appliedMove = page => page.waitForResponse(r => r.url().endsWith('/api/devices/move-server') && r.request().method() === 'POST' && JSON.parse(r.request().postData() || '{}').dry_run !== true);
   async function open(user, options = {}) {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: options.reducedMotion || 'no-preference' });
     await ctx.route('**/*', route => {
@@ -180,6 +186,8 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     assert.equal(tap.filtered, false, 'destinations are not hidden by the search while moving');
     assert.ok(tap.x != null, 'the target shelf is reachable with a tap');
     const shelvesBefore = await page.evaluate(() => Object.fromEntries(__twin.S.model.items.filter(i => i.type === 'opt' && i.live?.inDcim).map(i => [i.id, i.shelf])));
+    const labels = async () => Object.fromEntries((await (await ctx.request.get(origin + '/api/devices/')).json()).map(d => [d.id, d.labels]));
+    const labelsBefore = await labels();
     await page.mouse.click(tap.x, tap.y); await dialogOpen(page).waitFor();
     assert.equal(await page.locator('#cfTitle').innerText(), `${await page.evaluate(id => __twin.shelfName(id), plan.target)} is occupied`, 'the dialog names the shelf as people say it (Rack-0n › Shelf n)');
     assert.doesNotMatch(await page.locator('#cfBody').innerText(), /SHELF-|SETUP-|\bL\d\b/, 'no internal ids or geometric levels in the move dialog');
@@ -189,16 +197,27 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     assert.equal(posts.length, quiet, 'cancelling a move writes nothing'); assert.equal(await page.evaluate(() => __twin.S.moveItem), 'LIVE-opt11', 'still choosing a destination');
     await page.mouse.click(tap.x, tap.y); await dialogOpen(page).waitFor();
     const occupant = await page.evaluate(id => __twin.movePlan('LIVE-opt11', __twin.S.recs.get(id)).occupant.id, plan.target);
-    const writesBefore = posts.length; const atomic = page.waitForResponse(r => r.url().endsWith('/api/rack-layout') && r.request().method() === 'PUT');
+    assert.match(await page.locator('#cfBody').innerText(), /PDUs and KVMs stay where they are/, 'the swap dialog is the server move\'s preview');
+    const writesBefore = posts.length; const atomic = appliedMove(page);
     await page.locator('#cfActions [data-choice="swap"]').click();
     assert.equal((await atomic).status(), 200);
     await page.waitForFunction(id => __twin.S.recs.get('LIVE-opt11')?.shelf === id, plan.target, { timeout: 15000 });
-    assert.deepEqual(posts.slice(writesBefore).map(p => p.path), ['/api/rack-layout'], 'a swap is one atomic layout write');
-    assert.deepEqual(Object.keys(JSON.parse(posts[writesBefore].body)).sort(), ['rack_overrides', 'rack_positions', 'rack_slots']);
+    assert.deepEqual(posts.slice(writesBefore).map(p => p.path), ['/api/devices/move-server'], 'a swap is one server move (no rack-layout write)');
+    assert.deepEqual(Object.keys(JSON.parse(posts[writesBefore].body)).sort(), ['plan_revision', 'server', 'swap', 'target_server', 'units_follow']);
     await page.evaluate(() => __twin.refreshStatuses()); await page.waitForTimeout(300);
     const shelvesAfter = await page.evaluate(() => Object.fromEntries(__twin.S.model.items.filter(i => i.type === 'opt' && i.live?.inDcim).map(i => [i.id, i.shelf])));
     assert.equal(shelvesAfter['LIVE-opt11'], plan.target); assert.equal(shelvesAfter[occupant], plan.source);
     for (const [id, shelf] of Object.entries(shelvesBefore)) if (id !== 'LIVE-opt11' && id !== occupant) assert.equal(shelvesAfter[id], shelf, `${id} must not move`);
+    // the PDU outlet and KVM port stayed with the floor: OPT11's old floor (PDU 01 outlet 1, KVM 01 port 1) names the other server now
+    const occName = await page.evaluate(id => __twin.S.recs.get(id).item.name, occupant);
+    const swappedLabels = await labels();
+    assert.deepEqual([swappedLabels.pdu1['1'], swappedLabels.kvm1['1']], [occName, occName], 'PDU 01 outlet 1 and KVM 01 port 1 belong to the floor: they name the server now on it');
+    // and back (OPT11 onto that server, now on OPT11's old shelf): every label as before (the console checks below use OPT11's KVM port)
+    const back = appliedMove(page);
+    await page.evaluate(id => { __twin.startMove('LIVE-opt11'); __twin.finishMove(__twin.S.recs.get(id)); }, plan.source);
+    await dialogOpen(page).waitFor(); await page.locator('#cfActions [data-choice="swap"]').click(); assert.equal((await back).status(), 200);
+    await page.waitForFunction(([a, b, occ]) => __twin.S.recs.get('LIVE-opt11')?.shelf === a && __twin.S.recs.get(occ)?.shelf === b, [plan.source, plan.target, occupant], { timeout: 15000 });
+    assert.deepEqual(await labels(), labelsBefore, 'swapping back restores every outlet and port label');
     // a JSON-only item: plain from → to confirmation, Cancel keeps everything
     await page.evaluate(id => { __twin.select(id, { keepCamera: true }); __twin.startMove(id); }, stale);
     await page.evaluate(() => { __twin.requestMove(__twin.S.recs.get('STORAGE-02')); });   // resolves only after the dialog: not awaited here
@@ -206,7 +225,7 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     assert.match(await page.locator('#cfTitle').innerText(), /^Move .+\?$/); assert.match(await page.locator('#cfBody').innerText(), /To\s+ST-02/i);
     await page.locator('#cfActions [data-choice="cancel"]').click(); await page.locator('#moveCancel').click();
     await page.evaluate(() => __twin.toggleEdit(false)); await page.locator('#search').fill('');
-    pass('move: search ignored, from → to confirmation, occupied shelf asks Swap/Cancel, swap moves only the two servers');
+    pass('move: search ignored, from → to confirmation, occupied shelf asks Swap/Cancel (the server move\'s dry run), the swap is one POST /api/devices/move-server and moves only the two servers, PDU 01 outlet 1 / KVM 01 port 1 stay with the floor (name the other server), swapping back restores every label');
 
     // 7 — search: exact match first, arrow keys, owners
     await page.locator('#search').fill('OPT11'); await page.waitForTimeout(150);
@@ -409,7 +428,7 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
       const target = [...t.S.recs.values()].find(s => s.cat === 'shelf' && s.setup !== mover.setup && t.movePlan(mover.id, s)?.swappable);
       t.toggleEdit(true); t.startMove(mover.id); t.finishMove(target); return { id: mover.id, target: target.id };   // opens the confirmation
     });
-    const lateWrite = page.waitForResponse(r => r.url().endsWith('/api/rack-layout') && r.request().method() === 'PUT');
+    const lateWrite = appliedMove(page);
     await dialogOpen(page).waitFor(); await page.locator('#cfActions [data-choice="swap"]').click(); assert.equal((await lateWrite).status(), 200);
     await done; await page.waitForTimeout(1500);
     assert.equal(await page.evaluate(id => __twin.S.recs.get(id).shelf, late.id), late.target, 'late refresh response did not undo the move');
@@ -437,12 +456,12 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
     const quietMove = posts.length;
     await page.locator('#cfActions [data-choice="swap"]').click();
     await page.waitForFunction(name => document.querySelector('#confirmModal:not(.hidden) #cfBody')?.innerText.includes(name), swapCase.other.name, { timeout: 15000 });
-    assert.equal(posts.slice(quietMove).filter(p => p.path === '/api/rack-layout').length, 0, 'nothing written for a changed destination');
+    assert.equal(posts.slice(quietMove).filter(p => p.path === '/api/rack-layout' || isApplied(p)).length, 0, 'nothing written for a changed destination');
     await page.keyboard.press('Escape'); await page.locator('#moveCancel').click();
     // the debug handle cannot move without the dialog either
     await page.evaluate(() => { const t = __twin; t.startMove('LIVE-opt12'); t.finishMove([...t.S.recs.values()].find(s => s.cat === 'shelf' && s.id !== t.S.recs.get('LIVE-opt12').shelf)); });
     await dialogOpen(page).waitFor(); await page.keyboard.press('Escape'); await page.locator('#moveCancel').click(); await page.evaluate(() => __twin.toggleEdit(false));
-    assert.equal(posts.slice(quietMove).filter(p => /rack-layout|rack-items/.test(p.path)).length, 0);
+    assert.equal(posts.slice(quietMove).filter(p => /rack-layout|rack-items/.test(p.path) || isApplied(p)).length, 0);
     // PDU outlet menu: the outlet is relabelled while the confirmation is open → refused
     const pduRec = await page.evaluate(() => { const r = [...__twin.S.recs.values()].find(r => r.cat === 'item' && r.item?.type === 'pdu' && r.item.live?.device?.id === 'pdu1'); __twin.select(r.id, { keepCamera: true }); return r.id; });
     await page.locator('#dBody [data-outlet="3"]').click(); await page.locator('.pop [data-a="cycle"]').click(); await dialogOpen(page).waitFor();

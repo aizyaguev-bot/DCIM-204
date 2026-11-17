@@ -24,12 +24,19 @@
 // TL-9 a unit on OPT11's floor shows OPT11's owner (panel, inventory, search, read-only editor with the note); a unit on
 //      no server's floor keeps its own; a new owner of OPT11 reaches the unit; two servers on one floor: the first in
 //      slot order (rack-positions, then name) like Racks; on a storage-type rack "the server on this shelf"
-// TL-10 PDUs and KVMs stay where they are after a server move (model place and 3D position); outlet labels "KVM Power"
-//      and "empty" are no servers and never get a key in the rack-layout write; the Move tool refuses PDUs / KVMs, and
-//      units (rack items) of type KVM / PDU, also as the other half of a swap
+// TL-10 the 3D Move tool moves a Lab Manager server only through Lab Manager's server move (POST
+//      /api/devices/move-server; PDU outlets and KVM ports belong to the floor): onto a free shelf (outlet labels "KVM
+//      Power" / "empty" are no servers; a shelf with only a unit counts as free) it writes nothing and links to Racks
+//      (Cancel keeps the Move, "Open in Racks" opens Rack-03's Racks page); dropped on another server the dialog shows the
+//      dry run (each PDU outlet / KVM port label change, both new places, "Moves with it: …"), Cancel writes nothing,
+//      "Swap places" sends that move with its plan_revision (no rack-layout / rack-items write): the two floors' PDU and
+//      KVM labels swap, the units follow, owners stay with their servers, every PDU and KVM keeps its place (model and 3D
+//      position, GET /api/devices/ racks); a swap back restores every label. The Move tool refuses PDUs / KVMs, and units
+//      (rack items) of type KVM / PDU, also as the other half of a swap
 // Writes only fixture data (temporary folder): owners of opt11 / opt12 / item:ci-1 / item:storage-fixture, Switch 01's U
-// (PUT /api/rack-items with If-Match), one server move (PUT /api/rack-layout), OPT11 / OPT12 onto Rack-01 U1 (PUT
-// /api/rack-layout, twice). No hardware; evil.test is answered by the test itself (never resolved).
+// (PUT /api/rack-items with If-Match), OPT11 ⇄ OPT32 and back (POST /api/devices/move-server, after dry runs), OPT11 /
+// OPT12 onto Rack-01 U1 (PUT /api/rack-layout through the API, twice). No hardware; evil.test is answered by the test
+// itself (never resolved).
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8770';
@@ -50,9 +57,12 @@ const EVIL_PAGE = `<!doctype html><script>
 (async () => {
   assert.equal(new URL(origin).hostname, '127.0.0.1', 'Use the isolated local fixture only');
   const browser = await chromium.launch({ headless: true, channel: 'msedge' });
-  const passed = [], errors = [], unexpected = [], measured = [];
+  const passed = [], errors = [], unexpected = [], measured = [], writes = [];
   const pass = m => { passed.push(m); if (process.env.DCIM_QA_VERBOSE) console.error(new Date().toISOString().slice(11, 19) + ' ok: ' + m); };
-  const allowed = [/^\/api\/auth\/login$/, /^\/api\/rack-layout$/];   // the page's own writes (API writes below use ctx.request)
+  // the pages' own writes (API writes below use ctx.request): a server moves only through Lab Manager's server move
+  // (its dry runs are POSTs too); a rack-layout write from a page is unexpected
+  const allowed = [/^\/api\/auth\/login$/, /^\/api\/devices\/move-server$/];
+  const applied = () => writes.filter(w => w.path === '/api/devices/move-server' && !w.dry);
   async function session(username, viewport = { width: 1440, height: 900 }) {
     const ctx = await browser.newContext({ viewport });
     await ctx.addInitScript(() => { try { localStorage.setItem('dcim.seenVersion', 'LOCAL PREVIEW - TEST DATA'); } catch { /* blocked */ } });
@@ -61,7 +71,15 @@ const EVIL_PAGE = `<!doctype html><script>
       if (url.startsWith(EVIL + '/')) return route.fulfill({ status: 200, contentType: 'text/html', body: EVIL_PAGE });
       if (!url.startsWith(origin + '/')) return route.abort();
       const path = new URL(url).pathname;
-      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method()) && !allowed.some(re => re.test(path))) { unexpected.push(req.method() + ' ' + path); return route.abort(); }
+      // The fixture serves the real change feed (GET /api/changes). It answers 404 here so that these checks test the
+      // twin's own handling: Lab Manager's twin:data-changed is what refreshes an embedded twin (TL-6), a standalone twin
+      // on a backend without the feed stays quiet (TL-7b), and no page reloads by itself after the API writes below.
+      if (path === '/api/changes') return route.fulfill({ status: 404, contentType: 'application/json', body: '{"detail":"Not Found"}' });
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method())) {
+        if (!allowed.some(re => re.test(path))) { unexpected.push(req.method() + ' ' + path); return route.abort(); }
+        let body = null; try { body = JSON.parse(req.postData() || 'null'); } catch { /* not JSON */ }
+        writes.push({ method: req.method(), path, dry: body?.dry_run === true, body, at: Date.now() });
+      }
       return route.continue();
     });
     const login = await ctx.request.post(origin + '/api/auth/login', { data: { username, password: PASSWORD } });
@@ -259,10 +277,15 @@ const EVIL_PAGE = `<!doctype html><script>
     assert.equal(await tw.evaluate(() => window.__twin.S.moveItem), 'LIVE-opt11', 'the move goes on');
     await tw.evaluate(() => window.__twin.cancelMove());
     await tw.waitForFunction(name => window.__twin.S.model.items.find(i => i.id === 'LIVE-opt12')?.owner === name, e2.name, { timeout: 3000 });
-    // Show in 3D while the move dialog is open: the Move ends and its dialog closes, so its Swap / Move cannot write
+    // Show in 3D while the move dialog is open: the Move ends and its dialog closes, so its Swap / Move cannot write.
+    // (OPT11 onto OPT22's shelf: the dialog is Lab Manager's dry run of the swap, read before it opens.)
     await tw.evaluate(() => { const t = window.__twin; t.select('LIVE-opt11', { keepCamera: true }); t.startMove('LIVE-opt11');
       t.requestMove([...t.S.recs.values()].find(r => r.cat === 'shelf' && r.setup === 'SETUP-002' && t.shelfToU('SETUP-002', r.id) === 2)); });
     await tw.locator('#confirmModal:not(.hidden)').waitFor();
+    const preview6 = await tw.locator('#cfBody').innerText();
+    for (const line of ['PDU 01 outlet 1: OPT11 → OPT22', 'PDU 02 outlet 2: OPT22 → OPT11', 'Moves with OPT22: Switch 02', 'PDUs and KVMs stay where they are'])
+      assert.ok(preview6.includes(line), `the swap dialog shows "${line}": ${preview6}`);
+    assert.deepEqual(await tw.evaluate(() => [...document.querySelectorAll('#cfActions [data-choice]')].map(b => b.dataset.choice)), ['cancel', 'swap']);
     mark = Date.now();
     await lm.evaluate(sel => document.querySelector(sel).contentWindow.postMessage({ type: 'twin:select', ref: 'srv:opt21' }, location.origin), FRAME);
     await selected(tw, 'LIVE-opt21');
@@ -270,9 +293,10 @@ const EVIL_PAGE = `<!doctype html><script>
     assert.deepEqual(await tw.evaluate(() => ({ dialog: !document.querySelector('#confirmModal').classList.contains('hidden'), moving: window.__twin.S.moveItem, body: document.body.classList.contains('moving'), choices: document.querySelectorAll('#cfActions [data-choice]').length })),
       { dialog: false, moving: null, body: false, choices: 0 }, 'the move dialog closed with the Move');
     assert.deepEqual(lmRequests.filter(r => r.twin && r.at >= mark && r.method !== 'GET').map(r => r.method + ' ' + r.path), [], 'nothing written');
+    assert.deepEqual(applied(), [], 'no server move applied (only its dry run)');
     await tw.evaluate(() => window.__twin.toggleEdit(false));
     measured.push(`data-changed → owner shown: ${latency} ms`);
-    pass(`TL-6 OPT12's owner changed via PUT /api/opt-owners/opt12; the twin keeps the old one until Lab Manager posts twin:data-changed ['owners'], then shows ${e1.name} after ${latency} ms (< 3 s); ['power','monitoring'] reads nothing; during Move a change waits and is applied within 3 s of Cancel; a twin:select (srv:opt21) while the Move dialog (OPT11 → Rack-02 › Shelf 2) is open selects OPT21, ends the Move and closes the dialog, nothing is written`);
+    pass(`TL-6 OPT12's owner changed via PUT /api/opt-owners/opt12; the twin keeps the old one until Lab Manager posts twin:data-changed ['owners'], then shows ${e1.name} after ${latency} ms (< 3 s); ['power','monitoring'] reads nothing; during Move a change waits and is applied within 3 s of Cancel; a twin:select (srv:opt21) while the Move dialog (OPT11 onto OPT22's Rack-02 › Shelf 2: the server move's dry run "PDU 01 outlet 1: OPT11 → OPT22", "PDU 02 outlet 2: OPT22 → OPT11", "Moves with OPT22: Switch 02") is open selects OPT21, ends the Move and closes the dialog, nothing is written (no applied move)`);
 
     // ── TL-7: hidden, the twin does ~no work; shown again, one refresh ──
     await tw.evaluate(() => { const t = window.__twin; t.S.live.timer = setInterval(t.refreshStatuses, 15000); });   // its normal poll again
@@ -380,7 +404,7 @@ const EVIL_PAGE = `<!doctype html><script>
       await p.waitForFunction(name => window.__twin.S.model.items.find(i => i.id === 'LIVE-ci-1')?.owner === name, e2.name, { timeout: 10000 });
       pass(`TL-9 Switch 01 on OPT11's floor (U1) shows OPT11's owner "Fixture owner" (its own ${e3.name} kept aside): panel Owner cell "From OPT11, the server on this floor", inventory "(from OPT11, …)", search by OPT11's owner finds it and by its own owner does not; Edit layout shows it read-only with "From OPT11, the server on this floor. Change it on the server." and "Open OPT11" (no picker); the storage unit (no server's floor) keeps ${e3.name} with a picker; OPT11's new owner reaches the unit`);
 
-      // ── TL-10: PDUs / KVMs never move; non-server outlet labels never get a slot ──
+      // ── TL-10: a Lab Manager server moves only with its floor's PDU outlet and KVM port; PDUs / KVMs never move ──
       const infra = () => p.evaluate(() => { const t = window.__twin; t.scene.updateMatrixWorld(true); const out = {};
         for (const i of t.S.model.items) if (i.type === 'pdu' || i.type === 'kvm') { const r = t.S.recs.get(i.id); let c = null;
           if (r?.meshes?.length) { const b = new THREE.Box3(); r.meshes.forEach(x => b.expandByObject(x)); const v = b.getCenter(new THREE.Vector3()); c = [v.x, v.y, v.z].map(n => +n.toFixed(3)); }
@@ -388,32 +412,103 @@ const EVIL_PAGE = `<!doctype html><script>
         return out; });
       const devices = async () => (await (await ctx.request.get(origin + '/api/devices/')).json()).map(d => ({ id: d.id, kind: d.kind, rack: d.rack, labels: d.labels })).sort((a, b) => a.id.localeCompare(b.id));
       const devBefore = await devices();
-      // PDU 03 outlets 3 / 4 read "KVM Power" / "empty" (in the twin only)
+      const shelfAt = (setup, u) => p.evaluate(([setup, u]) => { const t = window.__twin; return [...t.S.recs.values()].find(r => r.cat === 'shelf' && r.setup === setup && t.shelfToU(setup, r.id) === u)?.id || null; }, [setup, u]);
+      const dialog = () => p.evaluate(() => ({ title: document.querySelector('#cfTitle').textContent, body: document.querySelector('#cfBody').innerText,
+        choices: [...document.querySelectorAll('#cfActions [data-choice]')].map(b => [b.dataset.choice, b.tagName, b.textContent, b.getAttribute('href'), b.getAttribute('target')]) }));
+      const dialogOpen = () => p.locator('#confirmModal:not(.hidden)').waitFor();
+      const where = () => p.evaluate(() => { const S = window.__twin.S, g = id => S.model.items.find(i => i.id === id) || {};
+        return Object.fromEntries(['LIVE-opt11', 'LIVE-opt32', 'LIVE-ci-1', 'LIVE-ci-3'].map(id => [id, g(id).shelf || null])); });
+      const sent = from => writes.slice(from).map(w => w.method + ' ' + w.path + (w.dry ? ' (dry run)' : ''));
+      // a — a free shelf: PDU 03 outlets 3 / 4 read "KVM Power" / "empty" and Switch 03 stands on floor 3 (in the twin
+      //     only), so Rack-03 › Shelf 3 holds no server, only a unit. The twin writes nothing and links to Racks.
       await p.evaluate(() => { const t = window.__twin, S = t.S; clearInterval(S.live.timer); S.live.timer = null;
         const dev = S.live.devices.find(d => d.id === 'pdu3'); dev.labels = { ...dev.labels, 3: 'KVM Power', 4: 'empty' };
         S.live.pdu.pdu3 = { ...S.live.pdu.pdu3, outlets: S.live.pdu.pdu3.outlets.map(o => (o.number === 3 ? { ...o, label: 'KVM Power' } : o.number === 4 ? { ...o, label: 'empty' } : o)) };
+        S.live.rackItems['Rack-03'].find(ci => ci.id === 'ci-3').u = 3;
         t.computeModel(); t.buildItems({ refresh: true }); });
       const asServers = await p.evaluate(() => window.__twin.S.model.items.filter(i => i.type === 'opt' && /kvm\s*power|^empty$|^opt3[34]$/i.test(i.name)).map(i => i.name));
       assert.deepEqual(asServers, [], '"KVM Power" / "empty" are no servers');
       const infraA = await infra();
       assert.ok(Object.keys(infraA).length >= 10, 'PDUs and KVMs in the model: ' + Object.keys(infraA).length);
-      const target = await p.evaluate(() => { const t = window.__twin; return [...t.S.recs.values()].find(r => r.cat === 'shelf' && r.setup === 'SETUP-003' && t.shelfToU('SETUP-003', r.id) === 3).id; });
-      const plan = await p.evaluate(id => { const pl = window.__twin.movePlan('LIVE-opt11', window.__twin.S.recs.get(id)); return { error: pl.error, occupant: pl.occupant?.id || null, kind: pl.kind }; }, target);
-      assert.deepEqual(plan, { error: null, occupant: null, kind: 'opt' });
-      await p.evaluate(id => { const t = window.__twin; t.toggleEdit(true); t.select('LIVE-opt11', { keepCamera: true }); t.startMove('LIVE-opt11'); t.requestMove(t.S.recs.get(id)); }, target);
-      await p.locator('#confirmModal:not(.hidden)').waitFor();
-      const put = p.waitForRequest(r => r.url().endsWith('/api/rack-layout') && r.method() === 'PUT');
-      const answer = p.waitForResponse(r => r.url().endsWith('/api/rack-layout') && r.request().method() === 'PUT');
-      await p.locator('#cfActions [data-choice="move"]').click();
-      const body = JSON.parse((await put).postData()); assert.equal((await answer).status(), 200);
-      const keys = [...Object.keys(body.rack_overrides.data), ...Object.values(body.rack_slots.data).flatMap(o => Object.keys(o || {})), ...Object.values(body.rack_positions.data).flatMap(a => (Array.isArray(a) ? a : []))];
-      assert.deepEqual(keys.filter(k => NON_SERVER.test(String(k).trim())), [], 'no outlet label that is not a server gets a slot, position or override');
-      assert.equal(body.rack_slots.data['Rack-03'].opt11, 3, 'OPT11 goes to Rack-03 U3');
-      assert.equal(body.rack_overrides.data.opt11, 'Rack-03');
-      await p.waitForFunction(id => window.__twin.S.recs.get('LIVE-opt11')?.shelf === id, target, { timeout: 15000 });
+      const free3 = await shelfAt('SETUP-003', 3);
+      const plan = await p.evaluate(id => { const t = window.__twin, pl = t.movePlan('LIVE-opt11', t.S.recs.get(id)); return { error: pl.error, occupant: pl.occupant?.id || null, kind: pl.kind, server: pl.server, unit: t.S.recs.get('LIVE-ci-3')?.shelf === id }; }, free3);
+      assert.deepEqual(plan, { error: null, occupant: null, kind: 'opt', server: 'racks', unit: true }, 'a shelf with only a unit (and outlets "KVM Power" / "empty") is free for a server');
+      let w0 = writes.length;
+      await p.evaluate(id => { const t = window.__twin; t.toggleEdit(true); t.select('LIVE-opt11', { keepCamera: true }); t.startMove('LIVE-opt11'); t.requestMove(t.S.recs.get(id)); }, free3);
+      await dialogOpen();
+      const free = await dialog();
+      assert.equal(free.title, 'Move OPT11?');
+      assert.match(free.body, /A server moved to a free shelf must get that shelf's PDU outlet, and Racks asks which outlet that is\. Move OPT11 in Racks\. Nothing changes here\./);
+      assert.deepEqual(free.choices, [['cancel', 'BUTTON', 'Cancel', null, null], ['racks', 'A', 'Open in Racks', '/?tab=racks&rack=Rack-03', '_top']]);
+      await p.locator('#cfActions [data-choice="cancel"]').click();
+      assert.equal(await p.evaluate(() => window.__twin.S.moveItem), 'LIVE-opt11', 'Cancel keeps the Move');
+      await p.evaluate(id => { const t = window.__twin; t.requestMove(t.S.recs.get(id)); }, free3);
+      await dialogOpen();
+      await Promise.all([p.waitForURL(u => { const q = new URL(u).searchParams; return q.get('tab') === 'racks' && q.get('rack') === 'Rack-03'; }, { timeout: 15000 }), p.locator('#cfActions [data-choice="racks"]').click()]);
+      await p.locator('#rack-detail-title').waitFor();
+      assert.match(await p.locator('#rack-detail-title').innerText(), /Rack-03/);
+      assert.deepEqual(sent(w0), [], 'a server dropped on a free shelf writes nothing');
+      assert.deepEqual(await devices(), devBefore, 'no outlet or port label changed');
+      // b — OPT11 (Rack-01 › Shelf 1, with Switch 01 since TL-9) dropped on OPT32 (Rack-03 › Shelf 2, with Switch 03):
+      //     Lab Manager's server move swaps the two; the dialog is its dry run
+      await p.goto(origin + '/twin/'); await ready(p);
+      const s1 = await shelfAt('SETUP-001', 1), s2 = await shelfAt('SETUP-003', 2);
+      assert.deepEqual(await where(), { 'LIVE-opt11': s1, 'LIVE-opt32': s2, 'LIVE-ci-1': s1, 'LIVE-ci-3': s2 }, 'nothing moved');
+      const infraB = await infra();
+      assert.deepEqual(infraB, infraA, 'the free-shelf attempt moved no PDU / KVM');
+      const names = await p.evaluate(([a, b]) => ({ a: window.__twin.shelfName(a), b: window.__twin.shelfName(b) }), [s1, s2]);
+      const ask = async target => {
+        const dry = p.waitForResponse(r => r.url().endsWith('/api/devices/move-server') && JSON.parse(r.request().postData() || '{}').dry_run === true);
+        await p.evaluate(id => { const t = window.__twin; t.requestMove(t.S.recs.get(id)); }, target);
+        const r = await dry; assert.equal(r.status(), 200, 'dry run');
+        await dialogOpen(); return { sent: JSON.parse(r.request().postData()), answer: await r.json(), dialog: await dialog() };
+      };
+      await p.evaluate(() => { const t = window.__twin; t.toggleEdit(true); t.select('LIVE-opt11', { keepCamera: true }); t.startMove('LIVE-opt11'); });
+      w0 = writes.length;
+      const first = await ask(s2);
+      assert.deepEqual(first.sent, { server: 'OPT11', target_server: 'OPT32', swap: true, units_follow: true, dry_run: true });
+      assert.deepEqual(first.answer.changes.map(c => `${c.device_id}:${c.port} ${c.before} → ${c.after}`).sort(), ['kvm1:1 OPT11 → OPT32', 'pdu1:1 OPT11 → OPT32', 'pdu3:2 OPT32 → OPT11'], 'the dry run swaps the two floors\' outlet and port labels');
+      const swapText = first.dialog.body;
+      for (const line of ['PDU 01 outlet 1: OPT11 → OPT32', 'PDU 03 outlet 2: OPT32 → OPT11', 'KVM 01 port 1: OPT11 → OPT32', `OPT11: ${names.a} · U1 → ${names.b} · U2`, `OPT32: ${names.b} · U2 → ${names.a} · U1`,
+        'Moves with it: Switch 01', 'Moves with OPT32: Switch 03', 'PDUs and KVMs stay where they are'])
+        assert.ok(swapText.includes(line), `the swap dialog shows "${line}": ${swapText}`);
+      assert.equal(/Not checked:/.test(swapText), !!first.answer.unchecked?.length, 'the "Not checked" warning exactly when the dry run reports unchecked ports');
+      assert.equal(first.dialog.title, `${names.b} is occupied`);
+      assert.deepEqual(first.dialog.choices.map(c => c[0]), ['cancel', 'swap']);
+      await p.locator('#cfActions [data-choice="cancel"]').click();
+      assert.deepEqual(sent(w0), ['POST /api/devices/move-server (dry run)'], 'Cancel writes nothing (only the dry run was sent)');
+      assert.deepEqual(await devices(), devBefore);
+      assert.equal(await p.evaluate(() => window.__twin.S.moveItem), 'LIVE-opt11', 'Cancel keeps the Move');
+      w0 = writes.length;
+      const second = await ask(s2);
+      const done = p.waitForResponse(r => r.url().endsWith('/api/devices/move-server') && r.request().method() === 'POST' && !JSON.parse(r.request().postData() || '{}').dry_run);
+      await p.locator('#cfActions [data-choice="swap"]').click();
+      const res = await done; assert.equal(res.status(), 200, 'the swap is saved');
+      assert.deepEqual(JSON.parse(res.request().postData()), { server: 'OPT11', target_server: 'OPT32', swap: true, units_follow: true, plan_revision: second.answer.plan_revision }, 'the previewed move with its plan_revision');
+      await p.waitForFunction(([a, b]) => { const S = window.__twin.S, g = id => S.model.items.find(i => i.id === id) || {};
+        return g('LIVE-opt11').shelf === b && g('LIVE-opt32').shelf === a && g('LIVE-ci-1').shelf === b && g('LIVE-ci-3').shelf === a; }, [s1, s2], { timeout: 15000 });
+      assert.ok(await p.evaluate(() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent === 'OPT11 ⇄ OPT32 swapped (saved in Lab Manager)') && window.__twin.S.selected === 'LIVE-opt11'), 'toast and selection');
+      assert.deepEqual(sent(w0), ['POST /api/devices/move-server (dry run)', 'POST /api/devices/move-server'], 'one server move; no rack-layout / rack-items write');
+      const swapped = { pdu1: { 1: 'OPT32' }, pdu3: { 2: 'OPT11' }, kvm1: { 1: 'OPT32' } };
+      assert.deepEqual(await devices(), devBefore.map(d => (swapped[d.id] ? { ...d, labels: { ...d.labels, ...swapped[d.id] } } : d)), 'PDU 01 outlet 1 / KVM 01 port 1 now name OPT32 and PDU 03 outlet 2 OPT11; no other label, no PDU / KVM rack changed');
       await p.evaluate(() => window.__twin.refreshStatuses()); await p.waitForTimeout(500);
-      assert.deepEqual(await infra(), infraA, 'every PDU and KVM keeps its place and 3D position after the server move');
-      assert.deepEqual(await devices(), devBefore, 'no device (PDU / KVM) changed rack or labels');
+      const model = await p.evaluate(() => { const S = window.__twin.S, g = id => S.model.items.find(i => i.id === id) || {};
+        const srv = id => ({ shelf: g(id).shelf, pdu: g(id).dcim?.pdu, outlet: g(id).dcim?.outlet, kvm: (g(id).dcim?.kvm || []).map(k => `${k.kvm}:${k.port}`) });
+        return { opt11: srv('LIVE-opt11'), opt32: srv('LIVE-opt32'), owner11: g('LIVE-opt11').owner, unit1: [g('LIVE-ci-1').shelf, g('LIVE-ci-1').ownerFrom?.name, g('LIVE-ci-1').owner], unit3: g('LIVE-ci-3').shelf }; });
+      assert.deepEqual(model, { opt11: { shelf: s2, pdu: 'pdu3', outlet: 2, kvm: [] }, opt32: { shelf: s1, pdu: 'pdu1', outlet: 1, kvm: ['kvm1:1'] }, owner11: e2.name, unit1: [s2, 'OPT11', e2.name], unit3: s1 },
+        'each server on its new floor with that floor\'s outlet and port; OPT11 keeps its owner; Switch 01 went with it and shows its owner; Switch 03 went with OPT32');
+      assert.deepEqual(await infra(), infraB, 'every PDU and KVM keeps its place and 3D position after the swap');
+      // c — and back (OPT11 onto OPT32, now on Rack-01 › Shelf 1): every label and both units as before
+      w0 = writes.length;
+      await p.evaluate(() => window.__twin.startMove('LIVE-opt11'));
+      await ask(s1);
+      const back = p.waitForResponse(r => r.url().endsWith('/api/devices/move-server') && r.request().method() === 'POST' && !JSON.parse(r.request().postData() || '{}').dry_run);
+      await p.locator('#cfActions [data-choice="swap"]').click(); assert.equal((await back).status(), 200);
+      await p.waitForFunction(([a, b]) => { const S = window.__twin.S, g = id => S.model.items.find(i => i.id === id) || {};
+        return g('LIVE-opt11').shelf === a && g('LIVE-opt32').shelf === b && g('LIVE-ci-1').shelf === a && g('LIVE-ci-3').shelf === b; }, [s1, s2], { timeout: 15000 });
+      assert.deepEqual(sent(w0), ['POST /api/devices/move-server (dry run)', 'POST /api/devices/move-server']);
+      assert.deepEqual(await devices(), devBefore, 'the swap back restores every label');
+      assert.equal(applied().length, 2, 'two server moves in all');
       const fixed = await p.evaluate(() => { const t = window.__twin; const shelf = [...t.S.recs.values()].find(r => r.cat === 'shelf' && r.setup === 'SETUP-002');
         const out = { kvmPlan: t.movePlan('ITEM-0041', shelf)?.error, pduPlan: t.movePlan('LIVE-pdu3', shelf)?.error };
         t.select('ITEM-0041', { keepCamera: true }); t.startMove('ITEM-0041'); out.moving = t.S.moveItem;
@@ -432,7 +527,7 @@ const EVIL_PAGE = `<!doctype html><script>
         out.editor = { fixed: document.querySelector('#eFixed')?.textContent || '', move: !!document.querySelector('#eMove') };
         t.toggleEdit(false); return out; });
       assert.deepEqual(units, { types: ['equip-kvm', 'equip-pdu'], kvm: FIXED, pdu: FIXED, swap: { occupant: 'LIVE-ci-5', swappable: false }, moving: null, editor: { fixed: FIXED, move: false } });
-      pass(`TL-10 with PDU 03 outlets 3 / 4 labelled "KVM Power" / "empty" (no servers then), OPT11 moved to Rack-03 › Shelf 3 in one PUT /api/rack-layout: no key matching NON_SERVER_LABEL in rack_slots / rack_positions / rack_overrides; all ${Object.keys(infraA).length} PDUs / KVMs keep setup, shelf, placement, side and 3D centre; GET /api/devices/ unchanged; Move refuses a KVM and a PDU ("${FIXED}") and their editor has no Move / Unplace / side buttons; a unit of type KVM (Switch 02) or PDU (Switch 05) is refused the same way (movePlan, startMove, editor note without Move), and Switch 01 cannot swap with the PDU unit`);
+      pass(`TL-10 a free shelf (Rack-03 › Shelf 3: PDU 03 outlets 3 / 4 "KVM Power" / "empty" are no servers, only Switch 03 on it): "Move OPT11?" says it must get that shelf's PDU outlet, which Racks asks for, and offers Cancel (keeps the Move) and "Open in Racks" (/?tab=racks&rack=Rack-03, target _top: opens Rack-03's Racks page); nothing written. OPT11 dropped on OPT32 (Rack-03 › Shelf 2): the dialog is the server move's dry run (PDU 01 outlet 1: OPT11 → OPT32, PDU 03 outlet 2: OPT32 → OPT11, KVM 01 port 1: OPT11 → OPT32, both new places, "Moves with it: Switch 01", "Moves with OPT32: Switch 03", PDUs and KVMs stay where they are); Cancel sends nothing but the dry run; "Swap places" sends ONE POST /api/devices/move-server with the preview's plan_revision (no rack-layout / rack-items write): GET /api/devices/ shows exactly those three labels changed and no PDU / KVM rack changed, OPT11 has PDU 03 outlet 2 and no KVM port, OPT32 PDU 01 outlet 1 and KVM 01 port 1, Switch 01 went with OPT11 (and shows its owner ${e2.name}), Switch 03 with OPT32, all ${Object.keys(infraB).length} PDUs / KVMs keep setup, shelf, placement, side and 3D centre; swapping back restores every label and unit. Move refuses a KVM and a PDU ("${FIXED}") and their editor has no Move / Unplace / side buttons; a unit of type KVM (Switch 02) or PDU (Switch 05) is refused the same way (movePlan, startMove, editor note without Move), and Switch 01 cannot swap with the PDU unit`);
 
       // ── TL-7 (standalone): document.hidden pauses; the missing change feed is quiet ──
       const feed = []; p.on('request', r => { if (apiPath(r) === '/api/changes') feed.push(Date.now()); });
@@ -450,7 +545,7 @@ const EVIL_PAGE = `<!doctype html><script>
       for (let i = 0; i < 30 && !devReq.some(t => t >= mark); i++) await p.waitForTimeout(100);
       assert.ok(devReq.some(t => t >= mark), 'shown again: one refresh');
       await p.close();
-      pass('TL-7b standalone: document.hidden pauses the twin (no frames, poll timer stopped) and showing it refreshes at once; GET /api/changes (404 on this branch) is asked once, then left alone for a minute, without a toast or error');
+      pass('TL-7b standalone: document.hidden pauses the twin (no frames, poll timer stopped) and showing it refreshes at once; GET /api/changes (answered 404 here, as a backend without the feed) is asked once, then left alone for a minute, without a toast or error');
     }
 
     // ── TL-9 (several servers on one floor): the unit takes the first server in slot order, as Racks does ──

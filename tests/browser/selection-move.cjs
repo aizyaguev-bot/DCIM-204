@@ -10,16 +10,19 @@ const assert=require('node:assert/strict');const origin=process.env.DCIM_PREVIEW
  await p.locator('#vFocus').click();await p.waitForTimeout(750);for(let i=0;i<30;i++)await p.mouse.wheel(0,-400);await p.waitForTimeout(150);
  assert.equal(await p.evaluate(()=>{const t=__twin;return [...t.S.recs.values()].some(r=>r.cat==='item'&&r.meshes.some(m=>{m.geometry.computeBoundingBox();const local=m.worldToLocal(t.camera.position.clone());const box=m.geometry.boundingBox.clone();box.min.addScalar(.001);box.max.addScalar(-.001);return box.containsPoint(local);}));}),false,'Camera zoomed inside equipment');
  await p.locator('#vReset').click();await p.waitForTimeout(750);await p.locator('#btnEdit').click();
- // Exercise the real Move button then the persisted move API on temporary inventory.
- // On a reused fixture the OPT may already sit elsewhere; a move back to its PDU's rack correctly clears the override.
- const ids=await p.evaluate(()=>{const t=__twin;const r=[...t.S.recs.values()].find(r=>r.cat==='item'&&r.item?.type==='opt'&&r.item.live?.inDcim);const home=t.S.live.devices.find(d=>d.id===r.item.dcim.pdu)?.rack;const rackOf=s=>t.S.data.setups.find(x=>x.id===s.setup)?.dcimRack;const target=[...t.S.recs.values()].find(s=>s.cat==='shelf'&&s.setup!==r.setup&&rackOf(s)&&rackOf(s)!==home);t.select(r.id,{keepCamera:true});return{id:r.id,key:r.item.dcim.optKey,target:target.id,rack:rackOf(target)};});
+ // Exercise the real Move button, then Lab Manager's server move on temporary inventory: a server dropped on a server of
+ // another rack swaps with it (PDU outlets and KVM ports belong to the floor, so the labels follow; the dialog shows the
+ // move's dry run and "Swap places" sends that move). A free shelf only links to Racks, so the target holds a server.
+ const ids=await p.evaluate(()=>{const t=__twin;const r=[...t.S.recs.values()].find(r=>r.cat==='item'&&r.item?.type==='opt'&&r.item.live?.inDcim&&r.shelf);const rackOf=s=>t.S.data.setups.find(x=>x.id===s.setup)?.dcimRack;const target=[...t.S.recs.values()].find(s=>s.cat==='shelf'&&s.setup!==r.setup&&rackOf(s)&&t.movePlan(r.id,s)?.server==='swap');t.select(r.id,{keepCamera:true});return{id:r.id,name:r.item.name,target:target.id,rack:rackOf(target)};});
  await p.locator('#eMove').click();assert.equal(await p.evaluate(()=>__twin.S.moveItem),ids.id);
- // The move always asks first (From → To; an occupied shelf offers Swap): confirm it like a user, then the one atomic layout write lands.
- const saved=p.waitForResponse(r=>r.url().endsWith('/api/rack-layout')&&r.request().method()==='PUT');
+ // The move always asks first (From → To; an occupied shelf offers Swap): confirm it like a user, then the one server move lands.
+ const saved=p.waitForResponse(r=>r.url().endsWith('/api/devices/move-server')&&r.request().method()==='POST'&&!JSON.parse(r.request().postData()||'{}').dry_run);
  await p.evaluate(target=>{__twin.finishMove(__twin.S.recs.get(target));},ids.target);
- await p.locator('#confirmModal:not(.hidden) #cfActions').locator('[data-choice="move"], [data-choice="swap"]').click();
+ await p.locator('#confirmModal:not(.hidden) #cfActions [data-choice="swap"]').click();
  assert.equal((await saved).status(),200);
- const overrides=await(await c.request.get(origin+'/api/rack-overrides')).json();assert.equal(overrides[ids.key],ids.rack);assert.equal(await p.evaluate(()=>__twin.S.moveItem),null);assert.equal(await p.evaluate(()=>__twin.controls.enableRotate),true);
+ const devs=await(await c.request.get(origin+'/api/devices/')).json();assert.ok(devs.some(d=>d.kind==='pdu'&&d.rack===ids.rack&&Object.values(d.labels||{}).includes(ids.name)),'a PDU outlet of the target rack now names the server');
+ assert.equal(await p.evaluate(()=>__twin.S.moveItem),null);assert.equal(await p.evaluate(()=>__twin.controls.enableRotate),true);
+ await p.waitForFunction(([id,shelf])=>__twin.S.recs.get(id)?.shelf===shelf,[ids.id,ids.target],{timeout:15000});
  await p.evaluate(()=>__twin.refreshStatuses());assert.equal(await p.evaluate(id=>__twin.S.recs.get(id).shelf,ids.id),ids.target);assert.deepEqual(errors,[]);
- console.log(JSON.stringify({passed:['mouse selects without camera jump','focused zoom does not enter equipment','explicit Move saves placement and survives refresh'],errors}));
+ console.log(JSON.stringify({passed:['mouse selects without camera jump','focused zoom does not enter equipment','explicit Move swaps two servers through the server move (the outlet label follows) and survives refresh'],errors}));
 }finally{await b.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

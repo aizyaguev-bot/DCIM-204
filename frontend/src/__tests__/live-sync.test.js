@@ -268,7 +268,7 @@ test("App and the lab display start the change feed; App forwards every change t
   const display = read("../pages/LabDisplay.jsx");
   assert.match(app, /startChangeFeed\(\)/);
   assert.match(display, /startChangeFeed\(\)/);
-  assert.match(app, /postMessage\(\{ type: "twin:data-changed", domains \}, location\.origin\)/);
+  assert.match(app, /postMessage\(\{ type: TWIN_DATA_CHANGED_MESSAGE, domains \}, location\.origin\)/);
 });
 
 test("Racks moves are one move-server step: port labels, layout and the units (rack_items) together", () => {
@@ -302,4 +302,91 @@ test("every view that shows servers, racks, units or owners reloads on its domai
     for (const domain of domains) assert.ok(source.includes(`"${domain}"`), `${file} listens to ${domain}`);
   }
   assert.doesNotMatch(read("../pages/LabDisplay.jsx"), /OVERRIDES_EVERY/, "rack overrides are read every cycle");
+});
+
+// ── the Racks page's reloads: an older, slower layout answer never replaces a newer one (layoutSeq / layoutShown) ──
+// reloadLayouts (DcimView.jsx) is run as written, with its refs, setters and fetch stubbed, so answers can arrive in
+// any order.
+function racksReloads() {
+  const view = read("../pages/DcimView.jsx");
+  const head = "const reloadLayouts = useCallback(";
+  const start = view.indexOf(head), end = view.indexOf("},[]);", start);
+  assert.ok(start > 0 && end > start, "reloadLayouts is found in DcimView.jsx");
+  const source = view.slice(start + head.length, end + 1);
+  const state = { rackOrder: {}, rackSlots: {}, switchAssignments: {}, rackOverrides: {}, optOwners: {}, loadErrors: {}, customItems: {}, chillers: null };
+  const setter = name => value => { state[name] = typeof value === "function" ? value(state[name]) : value; };
+  const ref = current => ({ current });
+  const calls = [];
+  const env = {
+    editingRef: ref(false), holdItemsRef: ref(false), itemsSeq: ref(0), holdCoolingRef: ref(false), coolingMissed: ref(false),
+    coolingSeq: ref(0), ownersSeq: ref(0), layoutSeq: ref(0), layoutShown: ref(0),
+    selectedCustomIdRef: ref(null), customItemsRef: ref({}), customDraftRef: ref(null),
+    document: { hidden: false },
+    fetch: path => { const d = deferred(); calls.push({ path, d }); return d.promise; },
+    loadRackItems: () => Promise.resolve({}),
+    setCustomPanel: setter("customPanel"), setCustomItems: setter("customItems"), setLoadErrors: setter("loadErrors"),
+    setChillers: setter("chillers"), setChillersLoaded: () => {}, setOptOwners: setter("optOwners"), setOwnersLoaded: () => {},
+    setRackOrder: setter("rackOrder"), setRackSlots: setter("rackSlots"), setSwitchAssignments: setter("switchAssignments"),
+    setRackOverrides: setter("rackOverrides"),
+  };
+  const reload = new Function(...Object.keys(env), `return ${source};`)(...Object.values(env));
+  // Starts a reload and returns its answer(data): data maps a path to its JSON (a path left out fails with HTTP 503).
+  function start_(...args) {
+    const from = calls.length;
+    const done = reload(...args);
+    const mine = calls.slice(from);
+    return {
+      paths: mine.map(c => c.path),
+      async answer(data) {
+        for (const c of mine) c.d.resolve(c.path in data ? { ok: true, json: async () => data[c.path] } : { ok: false, status: 503 });
+        await done;
+      },
+    };
+  }
+  return { state, env, start: start_ };
+}
+const LIVE_LAYOUT = new Set(["layout"]);
+const layoutAt = slot => ({ "/api/rack-positions": {}, "/api/rack-slots": { "Rack-01": { opt11: slot } },
+  "/api/switch-assignments": {}, "/api/rack-overrides": {} });
+
+test("Racks reloads: a slower periodic reload never puts back an older place over a newer live reload", async () => {
+  const { state, start } = racksReloads();
+  const periodic = start();                                  // the interval's reload, still on its way
+  const live = start(false, false, LIVE_LAYOUT);             // a move saved elsewhere: the change feed's reload
+  await live.answer(layoutAt(7));
+  assert.deepEqual(state.rackSlots, { "Rack-01": { opt11: 7 } });
+  await periodic.answer({ ...layoutAt(3), "/api/opt-owners": {}, "/api/chillers": { units: [], connections: [] } });
+  assert.deepEqual(state.rackSlots, { "Rack-01": { opt11: 7 } }, "the older answer is dropped");
+  // In order, the newer answer wins as before.
+  const first = start(false, false, LIVE_LAYOUT), second = start(false, false, LIVE_LAYOUT);
+  await first.answer(layoutAt(4));
+  assert.deepEqual(state.rackSlots, { "Rack-01": { opt11: 4 } });
+  await second.answer(layoutAt(5));
+  assert.deepEqual(state.rackSlots, { "Rack-01": { opt11: 5 } });
+  assert.deepEqual(state.loadErrors, {});
+});
+
+test("Racks reloads: an answer that is not used does not stop an older one; Edit mode keeps live layout and owners", async () => {
+  const { state, env, start } = racksReloads();
+  // A later reload whose every layout store failed shows nothing, so the earlier answer still counts.
+  const live = start(false, false, LIVE_LAYOUT), failed = start(false, false, LIVE_LAYOUT);
+  await failed.answer({});
+  assert.equal(state.loadErrors.layout, "HTTP 503");
+  await live.answer(layoutAt(6));
+  assert.deepEqual(state.rackSlots, { "Rack-01": { opt11: 6 } });
+  // A periodic reload overtaken by Edit mode is not used, and does not stop the live reload started before it.
+  const liveBefore = start(false, false, LIVE_LAYOUT), periodic = start();
+  env.editingRef.current = true;
+  await periodic.answer({ ...layoutAt(1), "/api/opt-owners": {} });
+  assert.deepEqual(state.rackSlots, { "Rack-01": { opt11: 6 } });
+  await liveBefore.answer(layoutAt(8));
+  assert.deepEqual(state.rackSlots, { "Rack-01": { opt11: 8 } }, "live reloads apply the layout in Edit mode");
+  // In Edit mode the interval's reload leaves the layout alone but still reads the owners (ownersSeq).
+  const editing = start();
+  assert.ok(!editing.paths.includes("/api/rack-slots") && editing.paths.includes("/api/opt-owners"));
+  await editing.answer({ "/api/opt-owners": { opt11: "eng-1" }, "/api/chillers": { units: [], connections: [] } });
+  assert.deepEqual(state.optOwners, { opt11: "eng-1" });
+  const view = read("../pages/DcimView.jsx");
+  assert.match(view, /function _reloadPositions\(\) \{\n\s+return reloadLayouts\(false, true, new Set\(\["layout"\]\)\);/,
+    "a label change or rename reads the layout through the same guarded reload");
 });

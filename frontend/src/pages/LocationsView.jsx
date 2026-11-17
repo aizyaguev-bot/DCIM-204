@@ -15,6 +15,15 @@ import {
 
 const input = "bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/60 disabled:opacity-50";
 
+// The server's 409 when a move to ports names a slot another server holds: "U3 in Rack-01 is used by OPTN44. Choose
+// OPTN44 as the target to swap the two servers (their outlets and KVM ports swap too), or choose an empty slot."
+// PDU outlets and KVM ports belong to the floor, so that slot is taken only by swapping with its server.
+const SLOT_IN_USE = /^U(\d+) in (.+?) is used by (.+?)\. Choose \3 as the target to swap/;
+function parseSlotInUse(detail) {
+  const match = SLOT_IN_USE.exec(String(detail || ""));
+  return match ? { slot: Number(match[1]), rack: match[2], owner: match[3] } : null;
+}
+
 // Server-centric view: where each server sits (rack, slot, PDU outlets, KVM port) and a guarded Move flow.
 export default function LocationsView({ devices, onChanged }) {
   const { canOperate } = useAccounts();
@@ -347,14 +356,17 @@ function ChangeList({ result }) {
 }
 
 function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale }) {
-  // swap: "Swap with the target server" (server mode); slotSwap: "If that slot holds another server" (ports mode).
-  const [draft, setDraft] = useState(() => ({ mode: "server", target: "", swap: true, slotSwap: true, rack: "", slot: "",
+  // swap: "Swap with the target server" (server mode). A move to ports never swaps (slotSwap false, sent as swap: false
+  // like the Racks page): a slot another server holds is refused (409) and offered as a swap with that server instead.
+  const [draft, setDraft] = useState(() => ({ mode: "server", target: "", swap: true, slotSwap: false, rack: "", slot: "",
     pdu: server.pdu.map(p => ({ ...p, current: true })), kvm: server.kvm.map(p => ({ ...p, current: true })) }));
   const [preview, setPreview] = useState(null);   // normalized dry-run result + the body it was made for
   const [result, setResult] = useState(null);     // normalized applied result
   const [busy, setBusy] = useState(null);         // "preview" | "apply"
   const [error, setError] = useState("");
   const [inUse, setInUse] = useState(null);       // port named by a 409 "Port N on X is used by Y"
+  const [slotTaken, setSlotTaken] = useState(null); // slot named by a 409 "UN in R is used by Y": { slot, rack, owner }
+  const previewNext = useRef(false);              // "Swap with … instead": preview once the new draft is in place
   const panelRef = useRef(null);
   const firstRef = useRef(null);
   const applyRef = useRef(null);
@@ -375,6 +387,8 @@ function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale
   const racks = useMemo(() => [...new Set([...locations.racks, server.rack].filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })), [locations, server.rack]);
   const takenPdu = draft.mode === "ports" ? takenPorts(draft.pdu, locations, server, "pdu", inUse) : {};
   const takenKvm = draft.mode === "ports" ? takenPorts(draft.kvm, locations, server, "kvm", inUse) : {};
+  // The server holding the slot a move to ports was refused for, when it is listed (the swap offered instead).
+  const slotOwner = slotTaken ? others.find(s => s.name.toLowerCase() === slotTaken.owner.toLowerCase()) || null : null;
   const anyTaken = Object.keys(takenPdu).length + Object.keys(takenKvm).length > 0;
   // A blank slot keeps the current U only while the rack stays the same; another rack has no U until one is chosen.
   const keepsSlot = server.slot != null && (!draft.rack || draft.rack === server.rack);
@@ -426,7 +440,20 @@ function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale
     setPreview(null);
     setError("");
     setInUse(null);
+    setSlotTaken(null);
   }
+
+  // The refused slot's server: switch to "Another server's location" with that server and swap on, and preview it.
+  function swapWithSlotOwner() {
+    if (!slotOwner || busyRef.current) return;
+    previewNext.current = true;
+    update({ mode: "server", target: slotOwner.key, swap: true });
+  }
+  useEffect(() => {
+    if (!previewNext.current) return;
+    previewNext.current = false;
+    runPreview();
+  }, [draft]);   // runPreview of this render reads the draft just set
 
   async function runPreview(e) {
     e?.preventDefault();
@@ -448,6 +475,7 @@ function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale
       setPreview(null);
       setError(moveErrorText(err));
       setInUse(err.status === 409 ? parsePortInUse(err.detail) : null);
+      setSlotTaken(err.status === 409 ? parseSlotInUse(err.detail) : null);
       if ([404, 409].includes(err.status)) onStale?.();
     } finally {
       busyRef.current = false;
@@ -471,6 +499,7 @@ function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale
       setPreview(null);
       setError(moveErrorText(err));
       setInUse(err.status === 409 ? parsePortInUse(err.detail) : null);
+      setSlotTaken(err.status === 409 ? parseSlotInUse(err.detail) : null);
       if ([404, 409].includes(err.status)) onStale?.();
     } finally {
       busyRef.current = false;
@@ -578,15 +607,23 @@ function MoveServerDialog({ server, gone, locations, onClose, onApplied, onStale
                     </div>
                   </div>
                   {String(draft.slot).trim() !== "" && (
-                    <label className="flex items-start gap-2 text-zinc-200">
-                      <input type="checkbox" checked={draft.slotSwap} disabled={disabled} onChange={e => update({ slotSwap: e.target.checked })} className="mt-1 accent-nv-400" />
-                      <span>If that slot holds another server, swap positions with it</span>
-                    </label>
+                    <p className="text-xs text-zinc-500" data-slot-hint="">
+                      Choose an empty slot. To take another server's slot, swap with that server: its outlets and KVM port swap too.
+                    </p>
                   )}
                 </div>
               )}
 
               {error && <p ref={errorRef} tabIndex={-1} role="alert" className="text-xs text-rose-300 focus:outline-none">{error}</p>}
+              {error && slotOwner && (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400" data-slot-taken="">
+                  <button type="button" onClick={swapWithSlotOwner} disabled={disabled}
+                    className="px-3 py-1.5 rounded border border-nv-400/40 bg-nv-400/10 hover:bg-nv-400/20 text-nv-300 disabled:opacity-50">
+                    Swap with {slotOwner.name} instead
+                  </button>
+                  <span>{server.name} takes {formatLocation(slotTaken)} with its outlets and KVM port; {slotOwner.name} takes {server.name}'s place and ports.</span>
+                </div>
+              )}
 
               {preview && (
                 <section ref={previewRef} tabIndex={-1} aria-label="Preview of changes" className="rounded border border-zinc-800 bg-zinc-900/40 p-3 focus:outline-none focus-visible:border-nv-400/60">

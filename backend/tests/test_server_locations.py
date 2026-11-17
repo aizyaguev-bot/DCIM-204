@@ -269,30 +269,50 @@ async def test_target_ports_keep_own_ports_and_carry_position_ids_to_the_new_lab
                                                                      "Rack-01": {"optn44": 3, "optn45 (psu1)": 7, "web-1": 1}}}
 
 
-async def test_target_slot_occupied_is_409_unless_swap_which_swaps_positions_only(lab):
-    files = snapshot(lab.folder)
-    body = dict(server="web-1", target_ports=[{"device_id": "pdu-a", "port": "4"}], target_rack="Rack-01", target_slot=3)
-    r = await move(lab, **body, swap=False)
-    assert r.status_code == 409 and r.json()["detail"].startswith("U3 in Rack-01 is used by OPTN44")
-    assert await saved_labels(lab.db) == LABELS and snapshot(lab.folder) == files
+OCCUPIED_U3 = ("U3 in Rack-01 is used by OPTN44. Choose OPTN44 as the target to swap the two servers (their outlets "
+               "and KVM ports swap too), or choose an empty slot.")
 
-    r = await move(lab, **body, swap=True)
-    assert r.status_code == 200, r.text
-    # web-1 showed at the automatic U1, so OPTN44 takes U1.
-    assert r.json()["positions"] == [
+
+async def test_target_slot_occupied_is_409_with_or_without_swap_and_writes_nothing(lab):
+    # PDU outlets and KVM ports belong to the floor (owner, 2026-11-10). Swapping positions only would leave OPTN44 on
+    # web-1's old floor with the outlet and KVM labels of the floor it left, so a move to ports takes an empty slot only.
+    write_units(lab)   # Switch 01 on OPTN44's floor U3
+    files, people = snapshot(lab.folder, locks=True), await monitors_and_owners(lab.db)
+    body = dict(server="web-1", target_ports=[{"device_id": "pdu-a", "port": "4"}], target_rack="Rack-01", target_slot=3)
+    for swap in (True, False):
+        for dry_run in (True, False):
+            r = await move(lab, **body, swap=swap, dry_run=dry_run, units_follow=True)
+            assert r.status_code == 409, r.text
+            assert r.json()["detail"] == OCCUPIED_U3
+            # Nothing written: port labels, layout files, the units, the change counter, not even a lock file.
+            assert await saved_labels(lab.db) == LABELS
+            assert snapshot(lab.folder, locks=True) == files
+            assert await monitors_and_owners(lab.db) == people
+    # The same slot given as the rack's own (no rack chosen) is refused the same way.
+    r = await move(lab, server="web-1", target_ports=[{"device_id": "pdu-a", "port": "4"}], target_slot=3)
+    assert r.status_code == 409 and r.json()["detail"] == OCCUPIED_U3
+    assert await saved_labels(lab.db) == LABELS and snapshot(lab.folder, locks=True) == files
+
+
+async def test_the_occupied_slot_is_taken_by_swapping_with_its_server_and_each_floor_keeps_its_ports(lab):
+    # What the 409 above points to: the swap with OPTN44 gives web-1 U3 with U3's outlets and KVM port, and OPTN44
+    # web-1's U1 with web-1's outlet. Every outlet and port names the server now on its floor.
+    write_units(lab)
+    dry = await move(lab, server="web-1", target_server="OPTN44", swap=True, units_follow=True, dry_run=True)
+    assert dry.status_code == 200, dry.text
+    assert dry.json()["positions"] == [
         {"server": "web-1", "before": {"rack": "Rack-01", "slot": 1}, "after": {"rack": "Rack-01", "slot": 3}},
         {"server": "OPTN44", "before": {"rack": "Rack-01", "slot": 3}, "after": {"rack": "Rack-01", "slot": 1}}]
-    labels = await saved_labels(lab.db)
-    # Only web-1's own ports moved; OPTN44 keeps every port label.
-    assert labels["pdu-a"] == {"1": "OPTN44", "2": "OPTN45 (PSU1)", "3": "Outlet 3", "4": "web-1"}
-    assert labels["pdu-b"] == LABELS["pdu-b"] and labels["kvm-a"] == LABELS["kvm-a"]
-    layout = read_layout(lab.folder)
-    # OPTN44 leaves Rack-02 (its PSU2 outlet) too, so the automatic U1 of OPTN45's PSU2 outlet there is pinned.
-    assert layout["rack_slots.json"] == {"Rack-01": {"optn45 (psu1)": 7, "web-1": 3, "optn44": 1, "optn44 (psu2)": 1},
-                                         "Rack-02": {"optn45 (psu2)": 1}}
-    assert layout["rack_overrides.json"] == {**LAYOUT["rack_overrides.json"], "web-1": "Rack-01",
-                                             "optn44": "Rack-01", "optn44 (psu2)": "Rack-01"}
-    assert layout["switch_assignments.json"] == LAYOUT["switch_assignments.json"]
+    r = await move(lab, server="web-1", target_server="OPTN44", swap=True, units_follow=True,
+                   plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 200, r.text
+    assert await saved_labels(lab.db) == {
+        "pdu-a": {"1": "web-1", "2": "OPTN45 (PSU1)", "3": "OPTN44"},
+        "pdu-b": {"1": "web-1", "2": "OPTN45 (PSU2)", "5": "Outlet 5"},   # a feed suffix is kept for OPT names only
+        "kvm-a": {"1": "web-1", "2": "OPTN45"}}
+    # The unit on U3 moves with OPTN44 to U1.
+    saved = json.loads((lab.folder / "rack_items.json").read_text(encoding="utf-8"))
+    assert sorted((i["id"], i["u"]) for i in saved["Rack-01"]) == [("u1", 1), ("u2", 7), ("u3", 5)]
 
 
 async def test_target_slot_alone_uses_the_current_rack(lab):
@@ -342,7 +362,7 @@ async def test_dry_run_returns_the_same_answer_and_writes_nothing(lab):
     files, people = snapshot(lab.folder, locks=True), await monitors_and_owners(lab.db)
     for body in (dict(server="optn45", target_server="optn44"), dict(server="optn45", target_server="optn44", swap=False),
                  dict(server="web-1", target_ports=[{"device_id": "pdu-a", "port": "4"}], target_rack="Rack-01",
-                      target_slot=3, swap=True)):
+                      target_slot=5)):
         preview = await move(lab, **body, dry_run=True)
         assert preview.status_code == 200, preview.text
         assert preview.json()["dry_run"] is True and preview.json()["changes"]
@@ -1040,14 +1060,15 @@ async def test_a_swap_keeps_every_automatic_u_in_both_racks(auto_lab):
                                          "Rack-07": {"opt52": 1, "opt72": 2, "opt73": 3}}
 
 
-async def test_a_slot_shown_by_an_automatic_u_is_occupied_and_swaps(auto_lab):
+async def test_a_slot_shown_by_an_automatic_u_is_occupied_and_the_server_swap_takes_it(auto_lab):
     body = dict(server="OPT73", target_ports=[{"device_id": "pdu-4", "port": "6"}], target_rack="Rack-04", target_slot=2)
-    r = await move(auto_lab, **body, swap=False)
-    assert r.status_code == 409, r.text
-    assert r.json()["detail"].startswith("U2 in Rack-04 is used by OPT42. Allow the swap")
-    assert not list(auto_lab.folder.glob("*.json"))
+    for swap in (False, True):
+        r = await move(auto_lab, **body, swap=swap)
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"].startswith("U2 in Rack-04 is used by OPT42. Choose OPT42 as the target to swap")
+        assert not list(auto_lab.folder.glob("*.json"))
     before = await dcim_view(auto_lab)
-    r = await move(auto_lab, **body, swap=True)
+    r = await move(auto_lab, server="OPT73", target_server="OPT42")
     assert r.status_code == 200, r.text
     assert r.json()["positions"] == [
         {"server": "OPT73", "before": {"rack": "Rack-07", "slot": 3}, "after": {"rack": "Rack-04", "slot": 2}},
@@ -1056,6 +1077,9 @@ async def test_a_slot_shown_by_an_automatic_u_is_occupied_and_swaps(auto_lab):
     assert await dcim_view(auto_lab) == {"Rack-04": {"opt41": 1, "opt73": 2, "opt43": 3, "opt44": 4},
                                          "Rack-05": before["Rack-05"],
                                          "Rack-07": {"opt71": 1, "opt72": 2, "opt42": 3}}
+    # Each floor keeps its outlet: U2's in Rack-04 now names OPT73, U3's in Rack-07 OPT42.
+    labels = await saved_labels(auto_lab.db)
+    assert (labels["pdu-4"]["2"], labels["pdu-7"]["3"]) == ("OPT73", "OPT42")
 
 
 async def test_moving_within_its_own_rack_without_a_slot_keeps_the_u(lab):

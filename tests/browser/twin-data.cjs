@@ -31,6 +31,10 @@ const JSON_ONLY = ['Opt207', 'optn85', 'Opt168', 'Opt133'];   // lab-data.json s
     assert.equal((await ctx.request.post(origin + '/api/auth/login', { data: { username: 'operator', password: 'test-password-123' } })).status(), 200);
     assert.equal((await (await ctx.request.get(origin + '/api/version')).json()).version, 'LOCAL PREVIEW - TEST DATA', 'Refuse any real lab environment');
     const page = await ctx.newPage();
+    // Isolation: this suite drives the twin's own refreshes (refreshStatuses with a shifted clock). Lab Manager's live
+    // change feed (GET /api/changes) would start extra refreshes after the suite's API writes and swallow those calls,
+    // so it answers 404 here (the twin then keeps only its regular poll). The feed itself is covered by live-sync.cjs.
+    await page.route('**/api/changes', r => r.fulfill({ status: 404, contentType: 'application/json', body: '{"detail":"Not Found"}' }));
     page.on('pageerror', e => errors.push(e.message));
     page.on('dialog', d => { errors.push('native dialog: ' + d.message()); d.dismiss(); });
     await page.goto(origin + '/twin/');

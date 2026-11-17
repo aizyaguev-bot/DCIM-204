@@ -1245,18 +1245,15 @@ def _plan_move(body, devices, labels, unreadable, layouts, names, items=None):
             if target_slot is not None:
                 occupant = next((k for k, s in sorted(after_servers.items()) if k != key and
                                  _position(s, after_index.get(k, set()), new_layouts) == {"rack": rack, "slot": target_slot}), None)
-            if occupant and not swap:
-                name = after_servers[occupant]["name"]
-                raise HTTPException(409, f"U{target_slot} in {rack} is used by {name}. "
-                                         f"Allow the swap to exchange positions with {name}, or choose another slot.")
-            _place(new_layouts, after_index.get(key, set()), current_ids, rack, slot)
             if occupant:
-                # The occupant leaves every rack it shows in for the mover's place: keep the U numbers there too.
-                _add_auto_pins(new_layouts, auto, {r for i, r in dcim_rack.items() if _key_of(i) == occupant} - racks,
-                               skip={key, occupant})
-                involved.append(occupant)
-                _place(new_layouts, after_index.get(occupant, set()), _dcim_ids(after_servers[occupant]),
-                       original["rack"], original["slot"])
+                # PDU outlets and KVM ports belong to the floor (owner, 2026-11-10). Swapping positions here would leave
+                # the occupant on the mover's old floor with the outlet and KVM labels of the floor it left, and the
+                # mover on a floor whose outlets still name the occupant. Only the swap with a target server rewrites
+                # both floors' labels, so a move to ports goes to an empty slot only (swap true or false alike).
+                name = after_servers[occupant]["name"]
+                raise HTTPException(409, f"U{target_slot} in {rack} is used by {name}. Choose {name} as the target to "
+                                         f"swap the two servers (their outlets and KVM ports swap too), or choose an empty slot.")
+            _place(new_layouts, after_index.get(key, set()), current_ids, rack, slot)
 
     changes = []
     for dev in devices:
@@ -1342,6 +1339,9 @@ def _units_following(servers, index, layouts, positions, items):
 @router.post("/move-server", status_code=200)
 async def move_server(body: dict, db: AsyncSession = Depends(get_db), _writer: None = Depends(_one_label_writer)):
     """Move a server to another server's location (swap, or take it over) or to empty ports, with its rack position.
+    "swap" applies to a target server only. A move to ports never lands on a slot another server holds: that is a 409
+    naming the server there, and the way to get that slot is to swap with that server (their outlets and KVM ports
+    swap too), so no server is ever left on a floor with another floor's outlet and KVM labels.
     dry_run returns the same answer without writing, plus plan_revision; an Apply that sends it back is refused if
     anything changed since. Monitors and owners follow the server and are not touched.
 

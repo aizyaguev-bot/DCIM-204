@@ -2560,6 +2560,13 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   // end) and owner reloads: an owner answer is used only when no save or later reload started or ended while it was on
   // its way (an older, slower answer never replaces a newer one).
   const ownersSeq = useRef(0);
+  // The layout stores (rack positions, U slots, switch ports, rack overrides) are read together. layoutSeq numbers the
+  // layout reloads in the order they started; layoutShown is the number of the newest one whose answer is shown. An
+  // answer is used only when no later reload's answer is shown already, so a slower periodic reload never puts back an
+  // older place over a newer live reload, while an answer that is not used (Edit mode began, or every store failed)
+  // does not stop an earlier one that arrives after it. (A save is followed by the change feed's reload.)
+  const layoutSeq = useRef(0);
+  const layoutShown = useRef(0);
   const holdItems = selectedCustomId != null;
   const holdItemsRef = useRef(holdItems);
   holdItemsRef.current = holdItems;
@@ -2580,11 +2587,11 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const holdCooling = !initial && !force && holdCoolingRef.current;
     if (live && want("cooling") && holdCooling) coolingMissed.current = true;
     const coolingTurn = !want("cooling") || holdCooling ? null : ++coolingSeq.current;
-    const layoutTurn = want("layout") && !editing;
+    const layoutTurn = want("layout") && !editing ? ++layoutSeq.current : null;
     // Owners are saved the moment they are chosen, so they reload in Edit mode too (ownersSeq: an answer a save or a
     // later reload overtook is dropped).
     const ownersTurn = want("owners") ? ++ownersSeq.current : null;
-    if (!layoutTurn && ownersTurn == null && itemsTurn == null && coolingTurn == null) return Promise.resolve();
+    if (layoutTurn == null && ownersTurn == null && itemsTurn == null && coolingTurn == null) return Promise.resolve();
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     const keep = setter => next => setter(prev => same(prev, next) ? prev : next);
     const failed = {};
@@ -2592,12 +2599,13 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     const fetchStore = (store, path) => fetch(path, { cache: "no-store" }).then(r => { if (r.ok) return r.json(); const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; })
       .catch(e => { if (store) failed[store] ||= reason(e); return null; });
     const get = (store, path, wanted) => wanted ? fetchStore(store, path) : Promise.resolve(null);
+    const layoutWanted = layoutTurn != null;
     return Promise.all([
-      get("layout", "/api/rack-positions", layoutTurn),
-      get("layout", "/api/rack-slots", layoutTurn),
-      get("layout", "/api/switch-assignments", layoutTurn),
+      get("layout", "/api/rack-positions", layoutWanted),
+      get("layout", "/api/rack-slots", layoutWanted),
+      get("layout", "/api/switch-assignments", layoutWanted),
       itemsTurn == null ? Promise.resolve(null) : loadRackItems().catch(e => { failed.items = reason(e); return null; }),
-      get("layout", "/api/rack-overrides", layoutTurn),
+      get("layout", "/api/rack-overrides", layoutWanted),
       get(null, "/api/opt-owners", ownersTurn != null),
       coolingTurn == null ? Promise.resolve(null) : fetchStore("cooling", "/api/chillers"),
     ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
@@ -2617,11 +2625,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         keep(setCustomItems)(items||{});
       }
       const coolingCurrent = coolingTurn != null && coolingTurn === coolingSeq.current && (initial || force || !holdCoolingRef.current);
+      const layoutCurrent = layoutTurn != null && layoutTurn > layoutShown.current;
       setLoadErrors(prev => {
         const next = { ...prev };
         const mark = store => { if (failed[store]) next[store] = failed[store]; else delete next[store]; };
         if (itemsCurrent) mark("items");
-        if (layoutTurn) mark("layout");
+        if (layoutCurrent) mark("layout");
         if (coolingCurrent) mark("cooling");
         return same(prev, next) ? prev : next;
       });
@@ -2629,7 +2638,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       if (owners && ownersTurn != null && ownersTurn === ownersSeq.current) { keep(setOptOwners)(owners); setOwnersLoaded(true); }
       if (!initial && !force && !live && editingRef.current) return;   // editing (or editing started while loading)
       // A failed reload keeps what is shown; the first load falls back to empty documents as before.
-      if (layoutTurn) {
+      if (layoutCurrent) {   // no later layout reload's answer is shown (layoutSeq, layoutShown)
+        if (initial || order || slots || sw || overrides) layoutShown.current = layoutTurn;
         if (order || initial) keep(setRackOrder)(order||{});
         if (slots || initial) keep(setRackSlots)(slots||{});
         if (sw || initial) keep(setSwitchAssignments)(sw||{});
@@ -3180,15 +3190,10 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       .catch(e => setLayoutError(`The new order was not saved: ${e.message}`));
   },[rackOrder,editMode,persistLayout]);
 
-  async function _reloadPositions() {
-    const [positions, slots, switches] = await Promise.all([
-      fetch("/api/rack-positions").then(r => r.json()).catch(() => ({})),
-      fetch("/api/rack-slots").then(r => r.json()).catch(() => ({})),
-      fetch("/api/switch-assignments").then(r => r.json()).catch(() => ({})),
-    ]);
-    setRackOrder(positions);
-    setRackSlots(slots);
-    setSwitchAssignments(switches);
+  // The layout stores read again through the one guarded reload (layoutSeq), in Edit mode too: an older reload still on
+  // its way cannot put back the ids from before the rename, and a failed read keeps what is shown.
+  function _reloadPositions() {
+    return reloadLayouts(false, true, new Set(["layout"]));
   }
 
   // After any label change reload positions so renamed IDs stay in place

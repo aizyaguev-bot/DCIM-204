@@ -1975,15 +1975,18 @@
     return withEtag ? { data, etag: r.headers.get('ETag') } : data;
   }
   // Layout reads / writes are counted (at start and end): a live refresh that overlapped one keeps the newer local copy
-  // of the layout stores instead of its older response (otherwise a just-saved move would jump back until the next poll).
-  // Moves write through readMoveLayout() + dcimMoveMany() (one atomic PUT /api/rack-layout with If-Match revisions).
+  // of the layout stores and of the device list (a server move rewrites outlet / port labels) instead of its older
+  // response (otherwise a just-saved move would jump back until the next poll).
+  // Units move through readMoveLayout() + dcimMoveMany() (PUT /api/rack-items with If-Match); servers only through Lab
+  // Manager's own server move (POST /api/devices/move-server, serverSwap), never a rack-layout write from the twin.
   let layoutWrites = 0;
-  const LAYOUT_KEYS = ['rackSlots', 'rackOverrides', 'rackOrder', 'rackItems', 'owners'];
+  const LAYOUT_KEYS = ['devices', 'rackSlots', 'rackOverrides', 'rackOrder', 'rackItems', 'owners'];
   async function layoutWrite(fn) { layoutWrites++; try { return await fn(); } finally { layoutWrites++; } }
-  // after a failed Lab Manager move, show what the server actually stores
+  // after a Lab Manager move (failed or saved), show what the server actually stores: labels, layout and units
   async function reloadLayout() {
-    const fresh = await layoutWrite(() => Promise.all(['/api/rack-slots', '/api/rack-overrides', '/api/rack-positions', '/api/rack-items'].map(p => api(p).catch(() => null))));
-    ['rackSlots', 'rackOverrides', 'rackOrder', 'rackItems'].forEach((key, i) => { if (fresh[i]) S.live[key] = fresh[i]; });
+    const keys = ['devices', 'rackSlots', 'rackOverrides', 'rackOrder', 'rackItems'];
+    const fresh = await layoutWrite(() => Promise.all(keys.map(k => api(INVENTORY_PATHS[k], { cache: 'no-store' }).catch(() => null))));
+    keys.forEach((key, i) => { if (fresh[i]) S.live[key] = fresh[i]; });
   }
   const INVENTORY_PATHS = {
     devices: '/api/devices/', rackSlots: '/api/rack-slots', rackOrder: '/api/rack-positions',
@@ -2167,14 +2170,17 @@
   const ACTION_BTN = { on: 'primary', off: 'danger', cycle: 'danger' };
   // One modal for every risky choice. Cancel has the focus, Escape / backdrop = cancel, Tab stays inside.
   let choiceOpen = null;
-  // alert: role=alertdialog (power); footnote: small text under the buttons.
+  // alert: role=alertdialog (power); footnote: small text under the buttons. A choice with `href` is a link that opens
+  // that Lab Manager page in the whole window (target=_top); the dialog then closes with its id.
   function askChoice({ title, html, choices, focus = 'cancel', alert = false, footnote = '' }) {
     if (choiceOpen) choiceOpen('cancel');
     const modal = $('#confirmModal'), acts = $('#cfActions'); const opener = document.activeElement;
     const card = $('.modal-card', modal); card.setAttribute('role', alert ? 'alertdialog' : 'dialog'); card.classList.toggle('alert', !!alert);
     $('#cfTitle').textContent = title; $('#cfBody').innerHTML = html;
     const foot = $('#cfFoot'); foot.textContent = footnote || ''; foot.classList.toggle('hidden', !footnote);
-    acts.innerHTML = choices.map(c => `<button type="button" class="kbtn md ${c.cls || 'secondary'}" data-choice="${esc(c.id)}">${esc(c.label)}</button>`).join('');
+    acts.innerHTML = choices.map(c => c.href
+      ? `<a class="kbtn md ${c.cls || 'secondary'}" data-choice="${esc(c.id)}" href="${esc(c.href)}" target="_top" rel="noopener">${esc(c.label)}</a>`
+      : `<button type="button" class="kbtn md ${c.cls || 'secondary'}" data-choice="${esc(c.id)}">${esc(c.label)}</button>`).join('');
     if (S.pwMenuOpen) closePwMenu(false, true);
     if (popEl) { popEl.remove(); popEl = null; }
     modal.classList.remove('hidden');
@@ -2194,7 +2200,8 @@
       choiceOpen = done;
       window.addEventListener('keydown', onKey, true);
       modal.onclick = e => { if (e.target === modal) done('cancel'); };
-      buttons.forEach(b => { b.onclick = () => done(b.dataset.choice); });
+      // a link closes the dialog after its click, so the browser still follows it
+      buttons.forEach(b => { b.onclick = b.tagName === 'A' ? () => { setTimeout(() => done(b.dataset.choice), 0); } : () => done(b.dataset.choice); });
       (buttons.find(b => b.dataset.choice === focus) || buttons[0]).focus();
     });
   }
@@ -3533,7 +3540,7 @@
   function startMove(itemId) {
     if (!S.editMode || !window.DCIM_CAN_OPERATE) return;
     if (isFixedInfra(S.recs.get(itemId)?.item?.type)) { toast(FIXED_NOTE, 'err'); return; }
-    controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden');
+    controls.cancel(); controls.enableRotate = false; S.moveItem = itemId; moveSeq++; document.body.classList.add('moving'); $('#moveBanner').classList.remove('hidden');
     setLeftAction('pan', false); hideHoverTip();   // Move: a left drag pans, a tap picks the destination (not stored)
     $('#moveText').textContent = `Move ${S.recs.get(itemId)?.def.name || itemId}: tap a shelf in 3D, or`;
     fillMoveTargets(itemId); applyFilters(); highlightTargets(true); placeAttnDock(); if (S.front) renderRackFront();
@@ -3559,7 +3566,7 @@
     select(id);
   }
   $('#moveGo').onclick = () => { const r = S.recs.get($('#moveTarget').value); if (r) requestMove(r); else toast('Choose a destination first', 'err'); };
-  function cancelMove() { controls.enableRotate = true; if (moveAsking && choiceOpen) choiceOpen('cancel'); if (!S.moveItem) return; S.moveItem = null; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); setLeftAction(LS.get('leftAction', 'pan'), false); placeAttnDock(); highlightTargets(false); applyFilters(); if (S.front) renderRackFront(); }
+  function cancelMove() { controls.enableRotate = true; if (moveAsking && choiceOpen) choiceOpen('cancel'); if (!S.moveItem) return; S.moveItem = null; moveSeq++; document.body.classList.remove('moving'); $('#moveBanner').classList.add('hidden'); setLeftAction(LS.get('leftAction', 'pan'), false); placeAttnDock(); highlightTargets(false); applyFilters(); if (S.front) renderRackFront(); }
   $('#moveCancel').onclick = cancelMove;
   function highlightTargets(on) {
     for (const r of S.recs.values()) if (r.cat === 'shelf') {
@@ -3568,8 +3575,9 @@
     }
     setHover(null);
   }
-  // Devices that Lab Manager places itself (OPTs with a rack slot, DCIM rack items) must be moved in Lab Manager's own
-  // files (rack-slots / rack-overrides / rack-items) — otherwise the live data snaps them back on the next refresh.
+  // Devices that Lab Manager places itself (OPTs with a rack slot, DCIM rack items) must be moved in Lab Manager —
+  // otherwise the live data snaps them back on the next refresh. 'opt': a server, moved only by Lab Manager's server
+  // move (PDU outlets and KVM ports belong to the floor, so their labels are rewritten with it); 'rack-item': a unit.
   function movesViaDcim(mit) {
     if (!S.live.connected || !mit) return false;
     if (mit.type === 'opt' && mit.live?.inDcim && mit.dcim?.optKey) return 'opt';
@@ -3589,9 +3597,6 @@
     if (!rack) throw new Error(`${sid} is not mapped to a DCIM rack yet — open the rack in Edit mode and set "DCIM rack" first`);
     return { rack, u: shelfToU(sid, target.cat === 'shelf' ? target.id : null) };
   }
-  // One write per Lab Manager store for the whole move (one device, or two for a swap), so a swap can never leave both
-  // devices on one shelf. Servers the move does not touch keep their shelf: auto-placed ones in the affected racks are
-  // pinned to the U they show now, otherwise taking or freeing a U would silently renumber them.
   // Fresh copies of the layout stores with their revisions (ETags). The occupancy check made right before a move and
   // the write itself use the same revisions, so a change by anyone in between is refused (409) instead of overwritten.
   async function readMoveLayout() {
@@ -3602,35 +3607,17 @@
       return { rackSlots, rackOverrides, rackOrder, rackItems };
     });
   }
-  // Write a move (one device, or two for a swap) in ONE request per store kind, against the revisions in `fresh`:
-  // OPTs → PUT /api/rack-layout (rack_slots + rack_positions + rack_overrides together or not at all, server side);
-  // DCIM rack items → PUT /api/rack-items. Servers the move does not touch keep their shelf: auto-placed ones in the
-  // affected racks are pinned to the U they show now, otherwise taking or freeing a U would silently renumber them.
+  // Write a unit move (one unit, or two for a swap) in ONE PUT /api/rack-items against the revision in `fresh`, so a
+  // swap can never leave both units on one shelf. Servers are never written here: a server's rack / U alone must not
+  // change, because its PDU outlet and KVM port belong to the floor (owner rule) — Lab Manager's server move
+  // (serverSwap → POST /api/devices/move-server) rewrites those labels and moves the units on the floor with it.
   async function dcimMoveMany(moves, fresh) {
     const dest = moves.map(m => ({ ...m, ...dcimDestination(m.target) }));
-    const opts = dest.filter(m => m.kind === 'opt'), equips = dest.filter(m => m.kind === 'rack-item');
-    // Only servers and units are written: never a PDU / KVM, and an outlet label such as "KVM Power" or "empty"
-    // (NON_SERVER_LABEL) never gets a rack slot, position or override from a move (nor from pinning the others).
+    const equips = dest.filter(m => m.kind === 'rack-item');
+    // Only units are written: never a PDU / KVM, never a server (nor an outlet label such as "KVM Power" or "empty")
     if (dest.some(m => isFixedInfra(m.mit?.type))) throw new Error(FIXED_NOTE);
-    if (opts.some(m => !isServerLabel(m.mit.name || '') || NON_SERVER_LABEL.test(m.mit.dcim.optKey))) throw new Error('Only a server can take a rack slot');
+    if (dest.some(m => m.kind !== 'rack-item')) throw new Error('A server moves only with its PDU outlet and KVM port (Lab Manager server move)');
     const clone = x => JSON.parse(JSON.stringify(x || {}));
-    if (opts.length) {
-      const keys = new Set(opts.map(m => m.mit.dcim.optKey));
-      const racks = new Set(opts.flatMap(m => [m.rack, m.mit.live?.rack].filter(Boolean)));
-      const pins = (S.model?.items || []).filter(i => i.type === 'opt' && i.live?.inDcim && i.dcim?.optKey && !keys.has(i.dcim.optKey) && racks.has(i.live.rack) && i.placementConfidence === 'low' && Number.isInteger(i.live.u) && isServerLabel(i.name || ''));
-      const ov = clone(fresh.rackOverrides.data), slots = clone(fresh.rackSlots.data), order = clone(fresh.rackOrder.data);
-      opts.forEach(m => {
-        const key = m.mit.dcim.optKey; const pduRack = S.live.devices.find(d => d.id === m.mit.dcim.pdu)?.rack || null;
-        if (m.rack === pduRack) delete ov[key]; else ov[key] = m.rack;
-        Object.keys(slots).forEach(r => { if (slots[r] && key in slots[r]) delete slots[r][key]; });
-        Object.keys(order).forEach(r => { if (Array.isArray(order[r])) order[r] = order[r].filter(k => k !== key); });
-      });
-      pins.forEach(i => { const r = (slots[i.live.rack] = slots[i.live.rack] || {}); if (r[i.dcim.optKey] == null) r[i.dcim.optKey] = i.live.u; });
-      opts.forEach(m => { (slots[m.rack] = slots[m.rack] || {})[m.mit.dcim.optKey] = m.u; (order[m.rack] = order[m.rack] || []).push(m.mit.dcim.optKey); });
-      await layoutWrite(() => api('/api/rack-layout', { method: 'PUT', body: JSON.stringify({
-        rack_overrides: { data: ov, if_match: fresh.rackOverrides.etag }, rack_slots: { data: slots, if_match: fresh.rackSlots.etag }, rack_positions: { data: order, if_match: fresh.rackOrder.etag } }) }));
-      Object.assign(S.live, { rackOverrides: ov, rackSlots: slots, rackOrder: order });
-    }
     if (equips.length) {
       // the whole record moves, so SN, barcode and tracking fields stay with it
       const items = clone(fresh.rackItems.data);
@@ -3678,15 +3665,19 @@
   }
   // What a drop on `target` would do: from → to, who already occupies the shelf, and whether the two can swap.
   // Shelf rule: one PC (OPT) and one rack item per shelf.
+  // A Lab Manager server (kind 'opt') moves only with its PDU outlet and KVM port, which belong to the floor:
+  // plan.server = 'swap' onto one other Lab Manager server (Lab Manager's server move swaps the two, serverSwap);
+  // 'racks' onto a free shelf (or one with only a unit): it must get that shelf's outlet, which Racks asks for, so the
+  // twin only links to Racks; null when the two cannot swap (plan.swapWhy).
   function movePlan(id, target) {
     const rec = S.recs.get(id); const mit = rec?.item; const def = S.data.items.find(x => x.id === id);
     if (!target || (!def && !mit)) return null;
     const it = mit || def; const kind = movesViaDcim(mit);
     // Lab Manager places a device dropped on a rack's bottom bay on its lowest shelf: say so, and check that shelf
     if (kind && target.cat === 'setup') { const low = recsOf(r => r.cat === 'shelf' && r.setup === target.id).sort((a, b) => a.level - b.level)[0]; if (low) target = low; }
-    const plan = { id, rec, mit, def, name: it.name || id, kind, target, from: placeText(it), to: targetText(target, kind), occupant: null, swappable: false, swapWhy: '', source: null, error: null, same: false };
+    const plan = { id, rec, mit, def, name: it.name || id, kind, target, from: placeText(it), to: targetText(target, kind), occupant: null, swappable: false, swapWhy: '', source: null, error: null, same: false, rack: '', server: null };
     if (isFixedInfra(it.type)) { plan.error = FIXED_NOTE; return plan; }   // a PDU / KVM (device or unit) never moves
-    if (kind) { try { dcimDestination(target); } catch (e) { plan.error = e.message; } }
+    if (kind) { try { plan.rack = dcimDestination(target).rack; } catch (e) { plan.error = e.message; } }
     else if (S.live.connected && (it.type === 'opt' || it.type === 'pdu' || it.type === 'kvm' || String(it.type).startsWith('equip-'))) {
       const sid = target.cat === 'shelf' ? target.setup : target.cat === 'setup' ? target.id : null; const rack = sid ? dcimRackOf(S.data.setups.find(s => s.id === sid) || {}) : '';
       if (rack) plan.error = `${rack} gets its servers and units from Lab Manager — add ${plan.name} there in Racks`;
@@ -3704,9 +3695,86 @@
       else if (isFixedInfra(plan.occupant.item?.type)) plan.swapWhy = `${plan.occupant.def.name || plan.occupant.id} is fixed infrastructure (PDU / KVM): it does not move.`;
       else if (!okind && !odef) plan.swapWhy = `${plan.occupant.def.name || plan.occupant.id} cannot be moved from the twin.`;
       else if (okind) { try { dcimDestination(src); } catch (e) { plan.swapWhy = e.message; } }
+      if (kind === 'opt' && !plan.swapWhy) {
+        const servers = occ.filter(r => movesViaDcim(r.item) === 'opt');
+        if (okind !== 'opt') plan.swapWhy = `${plan.occupant.def.name || plan.occupant.id} is not a Lab Manager server: swap them in Racks.`;
+        else if (servers.length > 1) plan.swapWhy = `${servers.map(r => r.def.name || r.id).join(' and ')} share this shelf: in Racks, drop ${plan.name} onto the one to swap with.`;
+      }
       plan.swappable = !plan.swapWhy;
     }
+    if (kind === 'opt') plan.server = !plan.occupant ? 'racks' : plan.swappable ? 'swap' : null;
     return plan;
+  }
+  // The server move's body for a swap of two Lab Manager servers (each takes the other's place, PDU outlet and KVM
+  // port; the units on their shelves go along). Only real servers: never a PDU / KVM, never an outlet label such as
+  // "KVM Power" or "empty" (NON_SERVER_LABEL).
+  function serverSwapBody(plan) {
+    const real = it => !!it && it.type === 'opt' && !isFixedInfra(it.type) && isServerLabel(it.name || '') && !!it.dcim?.optKey && !NON_SERVER_LABEL.test(it.dcim.optKey);
+    const other = plan.occupant?.item;
+    if (plan.kind !== 'opt' || !real(plan.mit) || movesViaDcim(other) !== 'opt' || !real(other)) throw new Error('Only a server can swap places with a server');
+    return { server: plan.mit.name.trim(), target_server: other.name.trim(), swap: true, units_follow: true };
+  }
+  // A place in the server move's answer ({ rack, slot }) as the twin says it: "Rack-03 › Shelf 2 · U2", else "Rack-03 · U2".
+  function lmPlaceText(p) {
+    if (!p || !p.rack) return 'no rack';
+    const u = Number.isInteger(p.slot) ? p.slot : null; const su = S.data.setups.find(s => dcimRackOf(s) === p.rack);
+    const sh = su && u != null ? recsOf(r => r.cat === 'shelf' && r.setup === su.id).find(r => shelfToU(su.id, r.id) === u) : null;
+    return sh ? `${shelfName(sh.id)} · U${u}` : `${p.rack}${u != null ? ' · U' + u : ''}`;
+  }
+  // What the swap dialog shows from the dry run: each server's new place, every PDU outlet / KVM port label change, the
+  // units that go along, and the PDUs / KVMs whose own port names could not be checked.
+  function serverSwapHtml(plan, ans, fromTo) {
+    const list = v => (Array.isArray(v) ? v : []);
+    const other = plan.occupant.item?.name || plan.occupant.id; const li = t => `<li>${esc(t)}</li>`;
+    const places = list(ans?.positions).map(p => `${p?.server}: ${lmPlaceText(p?.before)} → ${lmPlaceText(p?.after)}`);
+    const labels = list(ans?.changes).map(c => `${c?.device_name || c?.device_id} ${c?.kind === 'kvm' ? 'port' : 'outlet'} ${c?.port}: ${c?.before || '—'} → ${c?.after || '—'}`);
+    const units = list(ans?.units).filter(u => list(u?.units).length)
+      .map(u => `${optKey(String(u.server || '')) === plan.mit.dcim.optKey ? 'Moves with it' : `Moves with ${u.server}`}: ${list(u.units).map(x => x?.name || x?.id || 'Unit').join(', ')}`);
+    const unchecked = list(ans?.unchecked).map(d => { const ports = list(d?.ports).map(String); return `${d?.device_name || d?.device_id} ${d?.kind === 'pdu' ? 'outlet' : 'port'}${ports.length > 1 ? 's' : ''} ${ports.join(', ')}`; });
+    return `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div>${fromTo}`
+      + `<div class="cf-sec" data-cf="places"><div class="k">New places</div><ul>${places.map(li).join('')}</ul></div>`
+      + `<div class="cf-sec" data-cf="labels"><div class="k">PDU outlets and KVM ports</div>${labels.length ? `<ul>${labels.map(li).join('')}</ul>` : '<p>No PDU outlet or KVM port label changes.</p>'}</div>`
+      + (units.length ? `<div class="cf-sec" data-cf="units">${units.map(t => `<p>${esc(t)}</p>`).join('')}</div>` : '')
+      + (unchecked.length ? `<div class="warn-box" data-cf="unchecked">Not checked: ${esc(unchecked.join('; '))}: ${unchecked.length > 1 ? 'these devices do not answer now, so their' : 'this device does not answer now, so its'} own port names are unknown and those ports keep their names. Check them under Consoles or Power.</div>` : '')
+      + `<div class="note">Each server takes over the PDU outlet and KVM port of its new shelf, and the units on its shelf go with it. PDUs and KVMs stay where they are. Saved in Lab Manager.</div>`;
+  }
+  // A server move rewrote outlet labels: the PDU readings the twin holds name the new servers at once (the next status
+  // read brings them from Lab Manager too), so no power action can reach an outlet under its old server name meanwhile.
+  function patchOutletLabels(changes) {
+    (Array.isArray(changes) ? changes : []).forEach(c => {
+      if (c?.kind !== 'pdu') return;
+      const o = S.live.pdu?.[c.device_id]?.outlets?.find(x => Number(x.number) === Number(c.port));
+      if (o) o.label = c.after || '';
+    });
+  }
+  // Runs only after the user confirmed the swap preview. As performMove: planned again on what Lab Manager holds now (a
+  // different occupant writes nothing and asks again); the write is the previewed move itself (the same body with the
+  // preview's plan_revision), so Lab Manager refuses it (409) if anything changed since — then nothing was moved and
+  // the twin previews again.
+  async function serverSwap(plan, body, preview) {
+    const again = now => { if (S.editMode && window.DCIM_CAN_OPERATE && now && !now.same) { startMove(plan.id); return requestMove(plan.target); } return false; };
+    try { await reloadLayout(); } catch (e) { toast('Move failed: ' + e.message, 'err'); return false; }
+    computeModel(); buildItems();
+    const now = movePlan(plan.id, plan.target);
+    if (!now || now.same || now.error || now.server !== 'swap' || now.occupant?.id !== plan.occupant?.id) {
+      toast('The destination changed while the dialog was open — nothing was moved; check it and confirm again', 'err');
+      return again(now);
+    }
+    const other = plan.occupant.item?.name || plan.occupant.id;
+    toast(`Swapping ${plan.name} and ${other} in Lab Manager…`);
+    let answer;
+    try { answer = await layoutWrite(() => api('/api/devices/move-server', { method: 'POST', body: JSON.stringify({ ...body, plan_revision: preview.plan_revision }) })); }
+    catch (e) {
+      await reloadLayout(); computeModel(); buildItems();
+      if (e.status === 409) { toast('Changed since the preview — nothing was moved. Check the new preview.', 'err'); return again(movePlan(plan.id, plan.target)); }
+      toast('Move failed: ' + e.message, 'err'); return false;
+    }
+    patchOutletLabels(answer?.changes);
+    await reloadLayout(); computeModel(); buildItems();
+    refreshSoon();   // PDU / KVM readings and the rest as Lab Manager stores them now
+    toast(`${plan.name} ⇄ ${other} swapped (saved in Lab Manager)`, 'ok');
+    select(plan.id, { keepCamera: true });
+    return true;
   }
   // Runs only after the user confirmed `plan` in the dialog. The destination may have changed while the dialog was
   // open (a live refresh, another person's move), so it is planned again on what Lab Manager holds right now — read
@@ -3751,32 +3819,49 @@
   // A tap (or the destination list / a tree row) while moving: always ask, showing from → to; an occupied shelf offers
   // Swap or Cancel. Cancel keeps the move mode so another shelf can be chosen (the banner's Cancel ends it).
   // There is deliberately no way to move without this dialog (window.__twin.finishMove opens it too).
-  let moveAsking = false;
+  // A Lab Manager server: onto another one, the dialog shows Lab Manager's dry run of the swap (POST
+  // /api/devices/move-server with dry_run) and "Swap places" sends exactly that move; onto a free shelf it only
+  // offers "Open in Racks" (nothing is written by the twin).
+  let moveAsking = false, moveSeq = 0;
   async function requestMove(target) {
     if (!S.editMode || !window.DCIM_CAN_OPERATE) { cancelMove(); return false; }
     const id = S.moveItem; if (!id || moveAsking) return false;
     const plan = movePlan(id, target); if (!plan) { cancelMove(); return false; }
     if (plan.same) { toast(`${plan.name} is already on ${plan.to}`, 'err'); return false; }
     if (plan.error) { toast(plan.error, 'err'); return false; }
-    moveAsking = true;
-    let choice;
+    moveAsking = true; const seq = moveSeq;
+    let choice, swapBody = null, preview = null;
     try {
       const fromTo = `<div class="cf-move"><span class="k">From</span><b>${esc(plan.from)}</b><span class="k">To</span><b>${esc(plan.to)}</b></div>`;
       const where = plan.kind ? 'Saved in Lab Manager (rack / U slot).' : 'Saved in the twin — press “Save to server” afterwards.';
-      if (plan.occupant) {
+      const shelfTitle = `${plan.to.replace(/ · U\d+$/, '')} is occupied`;
+      const racks = { id: 'racks', label: 'Open in Racks', href: racksHref(plan.rack) };
+      if (plan.server === 'swap') {
+        try {
+          swapBody = serverSwapBody(plan);
+          preview = await api('/api/devices/move-server', { method: 'POST', body: JSON.stringify({ ...swapBody, dry_run: true }) });
+        } catch (e) { toast('The swap could not be checked: ' + e.message, 'err'); return false; }
+        if (S.moveItem !== id || moveSeq !== seq) return false;   // the Move ended while the preview was read
+        choice = await askChoice({ title: shelfTitle, html: serverSwapHtml(plan, preview, fromTo), choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'swap', label: 'Swap places', cls: 'primary' }] });
+      } else if (plan.server === 'racks') {
+        choice = await askChoice({ title: `Move ${plan.name}?`, html: `${fromTo}<div class="note" data-cf="racks">A server moved to a free shelf must get that shelf's PDU outlet, and Racks asks which outlet that is. Move ${esc(plan.name)} in Racks. Nothing changes here.</div>`,
+          choices: [{ id: 'cancel', label: 'Cancel' }, { ...racks, cls: 'primary' }] });
+      } else if (plan.occupant) {
         const other = plan.occupant.def.name || plan.occupant.id;
         choice = await askChoice(plan.swappable
-          ? { title: `${plan.to.replace(/ · U\d+$/, '')} is occupied`, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div>${fromTo}<div class="note">Swap places: ${esc(other)} moves to ${esc(plan.from)}. Nothing else moves. ${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'swap', label: 'Swap places', cls: 'primary' }] }
-          : { title: `${plan.to.replace(/ · U\d+$/, '')} is occupied`, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div><div class="note">The two cannot swap places: ${esc(plan.swapWhy)} Choose a free shelf, or move ${esc(other)} first.</div>`, choices: [{ id: 'cancel', label: 'Choose another shelf' }] });
+          ? { title: shelfTitle, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div>${fromTo}<div class="note">Swap places: ${esc(other)} moves to ${esc(plan.from)}. Nothing else moves. ${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'swap', label: 'Swap places', cls: 'primary' }] }
+          : { title: shelfTitle, html: `<div class="warn-box">${esc(other)} is already on ${esc(plan.to)}.</div><div class="note">The two cannot swap places: ${esc(plan.swapWhy)} ${plan.kind === 'opt' ? 'Swap with a single server here, or move it in Racks.' : `Choose a free shelf, or move ${esc(other)} first.`}</div>`,
+            choices: [{ id: 'cancel', label: 'Choose another shelf' }, ...(plan.kind === 'opt' ? [racks] : [])] });
       } else {
         choice = await askChoice({ title: `Move ${plan.name}?`, html: `${fromTo}<div class="note">${esc(where)}</div>`, choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'move', label: 'Move here', cls: 'primary' }] });
       }
     } finally { moveAsking = false; }
+    if (choice === 'racks') { cancelMove(); return false; }   // the link opens Racks in the whole window
     // Move mode ended while the dialog was open (cancelMove closes the dialog with 'cancel'): nothing is written
     if (choice !== 'move' && choice !== 'swap') return false;
-    if (S.moveItem !== id) return false;
+    if (S.moveItem !== id || moveSeq !== seq) return false;
     cancelMove();
-    return performMove(plan, choice === 'swap');
+    return plan.server === 'swap' ? serverSwap(plan, swapBody, preview) : performMove(plan, choice === 'swap');
   }
   const finishMove = target => requestMove(target);   // kept name (debug handle, older notes): the same confirmed path
 
@@ -3807,7 +3892,7 @@
     if (rec.cat === 'item' && isLive) {
       html += `<section class="sec big">${H('Where')}${where}
           ${isFixedInfra(it.type) ? `<div class="edit-note">Live from Lab Manager.</div><div class="edit-note" id="eFixed">${esc(FIXED_NOTE)}</div>`
-            : `<div class="edit-note">Live from Lab Manager. Moving it writes the rack and U slot back into Lab Manager.</div>
+            : `<div class="edit-note">${movesViaDcim(it) === 'opt' ? 'Live from Lab Manager. Drop it on another server to swap the two in Lab Manager, with their PDU outlets, KVM ports and units; a move to a free shelf is done in Racks.' : 'Live from Lab Manager. Moving it writes the rack and U slot back into Lab Manager.'}</div>
           ${movesViaDcim(it) ? `<div class="row-lg">${moveBtn}</div>` : ''}`}</section>
         ${dcimOwnerKey(it) && it.ownerFrom ? `<section class="sec big">${H('Owner')}<div class="where" id="eOwnerFrom" dir="auto">${esc(it.owner || 'No owner')}</div>
           <div class="edit-note" id="eOwnerNote">From ${esc(it.ownerFrom.name)}, the server on this ${it.ownerFrom.place || 'floor'}. Change it on the server.</div>

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { api } from "../api/client.js";
 import {
   serverIdentity, normalizeLocations, filterServers, portOptions, groupByDevice, buildMoveRequest, formatLocation,
@@ -401,4 +402,35 @@ test("taken ports are marked from the 409 detail and from the refreshed list", (
   // The 409 names a port the list still shows as free (stale list): it is marked too, "07" matching "7".
   assert.deepEqual(takenPorts(chosen, loc, server, "pdu", { port: "02", device_name: "PDU-A", owner: "optn99" }), { "pa:2": "optn99", "pa:5": "optn44" });
   assert.deepEqual(takenPorts([], loc, server, "kvm"), {});
+});
+
+// ── a move to ports never swaps: a taken slot is refused and the Move dialog offers the swap with its server ──
+
+const readSource = path => readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+// The server's 409 (pinned by backend/tests/test_server_locations.py OCCUPIED_U3).
+const SLOT_409 = "U3 in Rack-01 is used by OPTN44. Choose OPTN44 as the target to swap the two servers (their outlets and KVM ports swap too), or choose an empty slot.";
+
+test("Move dialog: a taken slot is offered as a swap with its server; there is no positions-only swap box", () => {
+  const view = readSource("../pages/LocationsView.jsx");
+  const literal = /const SLOT_IN_USE = \/(.+)\/;/.exec(view);
+  assert.ok(literal, "LocationsView parses the slot 409 with SLOT_IN_USE");
+  const slotInUse = new RegExp(literal[1]);
+  assert.deepEqual(slotInUse.exec(SLOT_409).slice(1), ["3", "Rack-01", "OPTN44"]);
+  assert.deepEqual(slotInUse.exec("U12 in Rack 2. A is used by web.1 (a). Choose web.1 (a) as the target to swap the two servers").slice(1),
+    ["12", "Rack 2. A", "web.1 (a)"]);
+  assert.equal(slotInUse.exec("Port 1 on PDU-A is used by OPTN44. Choose OPTN44 as the target to swap."), null);
+  assert.equal(parsePortInUse(SLOT_409), null, "a slot 409 marks no port as in use");
+  // The backend still words it so.
+  const backend = readSource("../../../backend/app/routers/devices.py");
+  assert.match(backend, /is used by \{name\}\. Choose \{name\} as the target to "\n\s+f"swap the two servers \(their outlets and KVM ports swap too\), or choose an empty slot\."/);
+  // The box that swapped positions only (leaving each server with the other floor's outlet labels) is gone.
+  assert.doesNotMatch(view, /swap positions with it/);
+  assert.match(view, /slotSwap: false/, "a move to ports is sent with swap off, like the Racks page");
+  assert.match(view, /Swap with \{slotOwner\.name\} instead/);
+  assert.match(view, /update\(\{ mode: "server", target: slotOwner\.key, swap: true \}\)/);
+  assert.match(view, /setSlotTaken\(err\.status === 409 \? parseSlotInUse\(err\.detail\) : null\)/);
+  // With slotSwap false the ports body says swap: false whatever the server-mode box says.
+  const server = normalizeLocations(sample).servers[0];
+  const ports = [{ device_id: "pa", device_name: "PDU-A", port: "2" }];
+  assert.equal(buildMoveRequest(server, { mode: "ports", pdu: ports, slot: "3", swap: true, slotSwap: false }, true).body.swap, false);
 });

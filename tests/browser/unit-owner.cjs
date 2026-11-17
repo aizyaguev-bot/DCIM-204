@@ -118,7 +118,8 @@ const KEYS=[S1_ID,S2_ID,`item:${TRAY}`,`item:${BOX}`];
   // ── UO-4 Edit mode: read-only Owner with its note; the server's owner changed here updates the unit at once ──
   await page.locator('button.edit-toggle').click();
   assert.equal(await page.locator('button.edit-toggle').getAttribute('aria-pressed'),'true');
-  const panel=page.locator('div.fixed.inset-0.z-50.flex.justify-end').filter({hasText:TRAY_NAME});
+  // The server's panel names the unit too ("Moves with it: …", [data-units-follow]): this is the unit's panel only.
+  const panel=page.locator('div.fixed.inset-0.z-50.flex.justify-end').filter({hasText:TRAY_NAME}).filter({hasNot:page.locator('[data-units-follow]')});
   const openTray=async u=>{await slot(RACK,u,TRAY).locator('.slot-field[data-field="part_number"]').click();await panel.getByText('Save changes').waitFor();};
   const ownerField=panel.getByLabel(`Owner for ${TRAY_NAME}`,{exact:true});
   const note=panel.locator('#edit-equipment-owner-from');
