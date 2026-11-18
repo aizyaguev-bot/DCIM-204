@@ -43,6 +43,9 @@ test("KVM power, PDU and placeholder labels are skipped in any position; real na
     server("empty-box", "empty box")];
   const { uMap } = buildRackRows(servers, "Rack-01", {}, {}, {});
   assert.deepEqual(uMap, { "empty-box": 1, opt1: 2, opt2: 3 });
+  // "OptXXX" (opt / optn followed only by x's) holds the place of a server not known yet: no U either.
+  const unknown = [server("optxxx", "OptXXX"), server("opt1"), server("optnxx", "OPTNXX"), server("optx1", "OPTX1")];
+  assert.deepEqual(buildRackRows(unknown, "Rack-01", {}, {}, {}).uMap, { opt1: 1, optx1: 2 });
 });
 
 test("explicit rack_slots and rack order still decide the U of real servers", () => {
@@ -64,9 +67,10 @@ test("the 3D Twin filters exactly the same labels", () => {
 });
 
 test("isServerLabel: real names are servers; default outlet names and non-computer labels are not", () => {
-  for (const label of ["OPT64", "opt11", " Opt106 ", "empty box", "KVM-01 host", "PDU2-node"]) assert.equal(isServerLabel(label), true, label);
+  for (const label of ["OPT64", "opt11", " Opt106 ", "empty box", "KVM-01 host", "PDU2-node", "OPT174", "Optn45", "OPTX1",
+    "Opt", "OPTN"]) assert.equal(isServerLabel(label), true, label);
   for (const label of ["", "   ", "Outlet 3", "port 12", "empty", " Empty ", "KVM Power", "kvm_power", "kvm-power", "PDU", "spare",
-    "FREE", "n/a", "-", "---"]) assert.equal(isServerLabel(label), false, JSON.stringify(label));
+    "FREE", "n/a", "-", "---", "OptXXX", "OPTXX", "optnxxx", "OPT-XXX", "optn_x"]) assert.equal(isServerLabel(label), false, JSON.stringify(label));
 });
 
 test("the DCIM server list (and so every OPT count, the rack meta and the KPI bar) uses isServerLabel", () => {

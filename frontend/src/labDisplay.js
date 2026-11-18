@@ -34,11 +34,30 @@ export const LIST_GAP_EM = 0.45;
 export const STRIP_ITEM_EM = { inUse: 24, changes: 40 };
 
 // The same text as DcimView.jsx NON_SERVER_LABEL / isDefaultOutletLabel (lab-display.test.js keeps them equal).
-const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
+const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+|optn?[\s_-]*x+)$/i;
 const DEFAULT_OUTLET_LABEL = /^(outlet\s*\d+|port\s*\d+|\s*)$/i;
 export function isServerLabel(label) {
   return !!label && !DEFAULT_OUTLET_LABEL.test(String(label).trim()) && !NON_SERVER_LABEL.test(String(label).trim());
 }
+
+// Ping Monitor entries named by a placeholder label ("empty", "KVM Power", "OptXXX", "Outlet 3") are no servers. The
+// backend deletes the monitors discovery imported for them (ping_monitor.prune_placeholder_targets); these filters are
+// defense in depth, so a monitor that is still there (or a manual one) never shows as a server.
+export const isPlaceholderName = name => typeof name === "string" && name.trim() !== "" && !isServerLabel(name);
+// A monitor's identity: server_key (GET /api/monitoring), else its inventory name (older answers).
+const targetIdentity = t => (typeof t?.server_key === "string" && t.server_key ? t.server_key : t?.inventory_name || t?.name);
+// The lab display leaves out every monitor whose identity is a placeholder, whoever added it. A real server's monitor
+// whose shown name (an alias set on the Monitoring page) reads like one, such as "Spare", stays: its alarms still count.
+export function isPlaceholderTarget(target) {
+  return !!target && isPlaceholderName(targetIdentity(target));
+}
+// The rule the backend prunes by (ping_monitor.is_placeholder_target): a monitor imported from inventory whose identity
+// is a placeholder. The Monitoring page hides only these: a monitor added by hand stays listed so it can be edited.
+export function isPlaceholderMonitor(target) {
+  return target?.source === "inventory" && isPlaceholderName(targetIdentity(target));
+}
+// An email alert title of a monitor ("<server>: network reachability") whose server is a placeholder.
+const placeholderAlertTitle = title => isPlaceholderName(/^(.*): network reachability$/i.exec(title)?.[1]);
 
 export const naturalCompare = (a, b) => String(a ?? "").localeCompare(String(b ?? ""), "en", { numeric: true, sensitivity: "base" });
 const finite = value => typeof value === "number" && Number.isFinite(value);
@@ -229,19 +248,20 @@ export function kpis({ devices = [], pduStatuses = {}, kvmStatuses = {}, servers
   };
 }
 
-// Open email alerts: the newest message per subject title is an "[DCIM alert]" (a later "[DCIM recovered]" closes it).
+// Open email alerts: the newest message per subject title is an "[DCIM alert]" (a later "[DCIM recovered]", or a
+// "[DCIM closed]" sent when its monitor was deleted, closes it). A placeholder's monitor alert is never shown.
 export function openAlerts(recent) {
   const seen = new Set();
   const open = [];
   const rows = asArray(recent).filter(r => r && typeof r.subject === "string")
     .sort((a, b) => Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0));
   for (const row of rows) {
-    const match = /^\[DCIM (alert|recovered)\]\s*(.*)$/i.exec(row.subject.trim());
+    const match = /^\[DCIM (alert|recovered|closed)\]\s*(.*)$/i.exec(row.subject.trim());
     if (!match) continue;
     const title = match[2].trim();
     if (!title || seen.has(title.toLowerCase())) continue;
     seen.add(title.toLowerCase());
-    if (match[1].toLowerCase() === "alert") open.push({ id: row.id || title, title, at: Date.parse(row.created_at) || null });
+    if (match[1].toLowerCase() === "alert" && !placeholderAlertTitle(title)) open.push({ id: row.id || title, title, at: Date.parse(row.created_at) || null });
   }
   return open;
 }
@@ -288,7 +308,8 @@ export function attentionItems({ devices = [], pduStatuses = {}, kvmStatuses = {
       [own("Ping and alert items are left out until it answers again")]);
   } else if (monitoring) {
     for (const t of asArray(monitoring.targets)) {
-      if (!t || t.enabled === false) continue;
+      // A placeholder label's monitor ("empty", "KVM Power", "OptXXX") is no server: never an Attention row.
+      if (!t || t.enabled === false || isPlaceholderTarget(t)) continue;
       const where = rackPrefix(t.rack);
       const lastUp = own(t.last_up_at ? `last answered ${relativeAge(now - Date.parse(t.last_up_at))}` : "no reply yet");
       if (t.status === "down") add(`ping:${t.id}`, "alarm", "ping", t.rack, [typed(t.name), own(" not answering ping")], [...where, lastUp]);
@@ -366,9 +387,16 @@ export function consolesInUse(devices = [], kvmStatuses = {}) {
 const MAINT_TEXT = { shutdown: "maintenance started", restore: "maintenance ended" };
 const INCIDENT_END = { recovered: "answering ping again", paused: "ping check paused", address_changed: "ping address changed" };
 
-// Recent changes, newest first and at most TICKER_MAX: maintenance shutdowns / restores and ping incidents.
-export function recentChanges({ devices = [], maintenance = null, incidents = null }) {
+// Recent changes, newest first and at most TICKER_MAX: maintenance shutdowns / restores and ping incidents. Incidents of
+// a placeholder label's monitor are left out: by its monitor in `monitoring` when listed there (a real server's alias
+// never hides it), else by the incident's name.
+export function recentChanges({ devices = [], maintenance = null, incidents = null, monitoring = null }) {
   const names = new Map(devices.map(d => [String(d.id), d.name]));
+  const monitors = asArray(monitoring?.targets).filter(Boolean);
+  const listed = new Set(monitors.map(t => String(t.id)));
+  const placeholderIds = new Set(monitors.filter(isPlaceholderTarget).map(t => String(t.id)));
+  const placeholderIncident = incident => (listed.has(String(incident.target_id))
+    ? placeholderIds.has(String(incident.target_id)) : isPlaceholderName(incident.name));
   const rows = [];
   for (const entry of asArray(maintenance?.log)) {
     const text = MAINT_TEXT[entry?.action];
@@ -378,7 +406,7 @@ export function recentChanges({ devices = [], maintenance = null, incidents = nu
       parts, text: partsText(parts) });
   }
   for (const incident of asArray(incidents)) {
-    if (!incident?.id) continue;
+    if (!incident?.id || placeholderIncident(incident)) continue;
     const started = Date.parse(incident.first_failed_at);
     const ended = Date.parse(incident.ended_at);
     if (Number.isFinite(ended)) {

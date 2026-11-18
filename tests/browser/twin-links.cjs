@@ -44,7 +44,7 @@ const PASSWORD = 'test-password-123';
 const EVIL = 'http://evil.test';
 const FRAME = 'iframe[title="3D Digital Twin"]';
 const MEASURE_MS = Number(process.env.TWIN_HIDDEN_MEASURE_MS || 30000);
-const NON_SERVER = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;   // NON_SERVER_LABEL in lab-twin/app.js
+const NON_SERVER = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+|optn?[\s_-]*x+)$/i;   // NON_SERVER_LABEL in lab-twin/app.js
 // a cross-origin page inside Lab Manager: posts to the twin's window and to Lab Manager, then reports it did
 const EVIL_PAGE = `<!doctype html><script>
   const twin = [...Array(parent.frames.length).keys()].map(i => parent.frames[i]).find(w => w !== window);

@@ -2,6 +2,21 @@
 
 ---
 
+## v2.46.17 — 2026-11-18 — Lab display: outlet labels such as "empty", "KVM Power" and "OptXXX" are no longer servers
+
+### Fixed
+- **Lab display and Monitoring:** monitors that were once created for PDU outlet labels that are
+  not servers ("empty", "KVM Power", "spare", "OptXXX" and the like) are removed, with their ping
+  history and open alarms. They no longer show in Attention, on the rack cards or in Recent.
+  Open screens update within seconds.
+- **"OptXXX" (a server whose name is not known yet) is not a server:** it is no longer counted or
+  shown as a server in Racks, the 3D twin, the lab display totals or Monitoring. A name with a
+  digit, such as "OPTX1", is still a server.
+- If an alert email had already been sent for such a monitor, one closing email says the alert is
+  closed because the monitor was removed (no recovery is claimed).
+
+---
+
 ## v2.46.16 — 2026-11-17 — Live sync on every screen; a server swap keeps PDU and KVM by floor
 
 ### Added

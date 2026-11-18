@@ -982,6 +982,9 @@ def test_auto_u_follows_build_rack_rows_for_placeholders_order_and_slots():
     rows = [pdu_row("pdu-1", "Rack-01", ["KVM Power", "OPT1", "PDU", "--", "n/a", " Free ", "SPARE", "kvm_power"]),
             pdu_row("pdu-2", "Rack-01", ["OPT2", "empty box", "Outlet 3", "port 4", "  "])]
     assert dcim_u(rows, {}) == {"Rack-01": {"empty box": 1, "opt1": 2, "opt2": 3}}
+    # "OptXXX" (opt / optn followed only by x's) holds the place of a server not known yet; "OPTX1" is a server.
+    rows = [pdu_row("pdu-1", "Rack-01", ["OptXXX", "OPT1", "OPTNXX", "OPTX1"])]
+    assert dcim_u(rows, {}) == {"Rack-01": {"opt1": 1, "optx1": 2}}
     rows = [pdu_row("pdu-1", "Rack-01", ["empty", "OPT1", "OPT2", "OPT3"])]
     assert dcim_u(rows, {"rack_positions.json": {"Rack-01": ["opt3", "empty", "opt1", "opt2"]},
                          "rack_slots.json": {"Rack-01": {"opt2": 1}}}) == {"Rack-01": {"opt2": 1, "opt3": 2, "opt1": 3}}

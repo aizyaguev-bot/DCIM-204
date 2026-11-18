@@ -16,7 +16,7 @@
   const TYPE_STRIPE = { opt: '#76b900', kvm: '#a78bfa', pdu: '#fbbf24', chiller: '#22d3ee', 'equip-switch': '#22d3ee', 'equip-patchpanel': '#94a3b8', 'equip-kvm': '#a78bfa', 'equip-pdu': '#fbbf24', 'equip-ups': '#4ade80', 'equip-cable': '#71717a', 'equip-blank': '#3f3f46', 'equip-other': '#a1a1aa', cart: '#3b82f6', ladder: '#facc15', toolbox: '#f97316', 'spare-chassis': '#d6c9a8', misc: '#71717a' };
   // realistic body colours (photo-matched); status is shown by edge outline + LED + label dot
   const TYPE_BODY = { opt: '#2b2d33', kvm: '#1c1c20', pdu: '#1b1b20', chiller: '#e6e1d5', 'equip-switch': '#1a1d24', 'equip-patchpanel': '#3a3f47', 'equip-ups': '#26292e', 'equip-kvm': '#1c1c20', 'equip-pdu': '#1b1b20', 'equip-cable': '#3f3f46', 'equip-blank': '#3f3f46', 'equip-other': '#4b5058', cart: '#2f6fd6', ladder: '#f2c230', toolbox: '#2b2b2b', 'spare-chassis': '#c9bf9c', misc: '#8a8f97', other: '#8a8f97' };
-  const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
+  const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+|optn?[\s_-]*x+)$/i;
   // PDUs and KVMs are fixed infrastructure (owner, 2026-11-10): the twin never moves them, not with the Move tool, not
   // as the other half of a swap, and never because a server moved or changed (their outlets / ports belong to the floor).
   // A Lab Manager unit (rack item) of type PDU or KVM ('equip-pdu' / 'equip-kvm' here) is a PDU / KVM too: the 3D does not
