@@ -2,6 +2,16 @@
 
 ---
 
+## v2.46.18 — 2026-11-23 — Automatic updates on the lab VM no longer stop when the disk is nearly full
+
+### Fixed
+- **Automatic update on the lab VM:** when less than 1 GiB is free, the updater no longer pauses
+  every release. It now deletes the oldest installer backups, one at a time, until enough space
+  is free. The newest 3 backups and the backups of the installed and the new version are always
+  kept. It pauses only if less than 1 GiB is still free after that.
+
+---
+
 ## v2.46.17 — 2026-11-18 — Lab display: outlet labels such as "empty", "KVM Power" and "OptXXX" are no longer servers
 
 ### Fixed
