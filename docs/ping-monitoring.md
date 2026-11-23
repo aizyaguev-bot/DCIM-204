@@ -27,6 +27,14 @@ the same host; descriptive OPT suffixes such as `(SSD)` are stripped. Default
 `Port 1` / `Outlet 1` labels are ignored. Names that cannot be DNS hostnames, such
 as `Opt (unlabeled)`, appear as **Needs address** and are not probed.
 
+Placeholder labels are not servers and get no monitor: `Empty`, `KVM Power`, `PDU`,
+`Spare`, `Free`, `N/A`, `--`, and `OptXXX` / `OPTN-XX` (opt or optn followed only by
+x's, for a server not known yet; `OPTX1` has a digit and is a server). A monitor that
+discovery imported for such a label earlier is deleted at the next discovery with its
+checks, incidents, display alias and alert state (one **[DCIM closed]** email when a
+failure email had been sent; it never claims a recovery). Monitors added with **Add
+server** are never deleted by this rule.
+
 Valid names are used as DNS hostnames by default. The Lab Manager host must resolve
 them to the intended server. Choose **Details**, enter an IP or hostname, and save
 to override any address. Computer inventory `ip`/`hostname` fields are imported

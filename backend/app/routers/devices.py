@@ -856,7 +856,7 @@ def _position(server, ids, layouts):
 # PDU's rack. Per rack it sorts them by rack_positions, then by name, takes the U from rack_slots and gives every one
 # without a U the next free U from 1. Custom rack items do not block a server's U. A move pins those automatic U
 # numbers first (as the 3D twin's dcimMoveMany does), so taking or freeing a U, or a renamed id, cannot renumber them.
-_NON_SERVER_LABEL = re.compile(r"^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$", re.I)  # = DcimView, byte for byte
+_NON_SERVER_LABEL = re.compile(r"^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+|optn?[\s_-]*x+)$", re.I)  # = DcimView, byte for byte
 _DEFAULT_OUTLET_LABEL = re.compile(r"outlet\s*[0-9]+|port\s*[0-9]+|\s*", re.I)  # DcimView isDefaultOutletLabel
 _JS_DECIMAL = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 _ICU_PUNCTUATION = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"  # ASCII punctuation in ICU root collation order

@@ -8,7 +8,8 @@
 // panels) and the recovery, one failing source ("Live · partial"), the role warning, the TV sign-in, the narrow-screen
 // notice and the header link for both roles, long free text (Attention titles, a maintenance reason, a rack name) drawn
 // smaller to fit before it is cut (Hebrew keeps its first words), a long alarm title whole beside a WARNING row, a line
-// measured again when a neighbour appears or goes (MAINT badge, the next maintenance entry). Extra readings (sensors, an open console, maintenance, an email alert, many racks) are added
+// measured again when a neighbour appears or goes (MAINT badge, the next maintenance entry), monitors of placeholder labels (empty, KVM Power, OptXXX) never shown or
+// counted. Extra readings (sensors, an open console, maintenance, an email alert, many racks, placeholder monitors) are added
 // to GET responses in the browser only; the fixture is never written.
 // Run: DCIM_TEST_ACCOUNTS=1 python tests/browser/preview-server.py 9311, then
 // DCIM_PREVIEW_URL=http://127.0.0.1:9311 node tests/browser/lab-display.cjs (screenshots: DCIM_QA_SHOTS, default C:/t/lb-shots).
@@ -28,6 +29,14 @@ const LONG_RACK = 'Rack-05-Training';
 const FIT_RACK = 'Rack-04B';
 const HEBREW_REASON = 'החלפת כבלי החשמל בספקי הכוח של השרתים בצד השמאלי של הארון לפני העברת כל הציוד לחדר החדש בקומה השנייה';
 const HEBREW_TITLE = 'התראה ראשונה: ספק כוח 2 בשרת gpu-node-114 לא מגיב לבדיקות החום והמתח כבר יותר משעה שלמה';
+// Monitors imported for placeholder outlet labels before the rule covered them (the live display showed "empty: ping
+// probe error"), with an open incident and an email alert each: the display never shows or counts them.
+const GHOST = (id, name, rack, status) => ({ id, name, inventory_name: name, server_key: name.toLowerCase(), source: 'inventory', host: '', rack,
+  enabled: true, revision: 0, name_synced: true, status, last_result: status, checked_at: new Date().toISOString(), last_up_at: null, rtt_ms: null,
+  detail: 'No IP address or hostname configured', pdu: [], kvm: [] });
+const GHOST_TARGETS = [GHOST('qa-ghost-empty', 'empty', 'Rack-06', 'error'), GHOST('qa-ghost-kvm', 'KVM Power', 'Rack-05', 'down'),
+  GHOST('qa-ghost-optx', 'OptXXX', 'Rack-01', 'error')];
+const GHOST_TEXT = /empty: ping probe error|KVM Power|OptXXX/;
 const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, name: `QA rack ${i}`, kind: 'rack', model: 'Compute', ip: '0.0.0.0', rack: `Rack-${String(i + 20).padStart(2, '0')}`, labels: {}, enabled: true, port_count: 0, notes: '' }));
 
 (async () => {
@@ -44,7 +53,7 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
     // rackNames: racks renamed in the device list ({ 'Rack-04': 'Rack-04B' }); attention: replaces the Ping Monitor targets
     // (all answering) and the open alerts with these titles; maintenance(t) (state.maintenance, changeable later): replaces
     // the PDUs in maintenance.
-    async function open(role, viewport, { extraRacks = false, clock = false, longText = false, reason = null, title = null, rackNames = null, attention = null, maintenance = null } = {}) {
+    async function open(role, viewport, { extraRacks = false, clock = false, longText = false, reason = null, title = null, rackNames = null, attention = null, maintenance = null, ghosts = false } = {}) {
       const context = await browser.newContext({ viewport });
       const login = await context.request.post(origin + '/api/auth/login', { data: { username: role, password: PASSWORD } });
       assert.equal(login.status(), 200, `${role} signs in`);
@@ -81,7 +90,15 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
             j.targets = (j.targets || []).map(t => ({ ...t, status: 'up' }));
             j.email_alerts.recent = attention.map((t, i) => alert(`qa-attn-${i}`, t, 700000 + i * 1000));
           }
+          if (ghosts) {
+            j.targets = [...(j.targets || []), ...GHOST_TARGETS];
+            j.email_alerts.recent = [...j.email_alerts.recent, ...GHOST_TARGETS.map(t => alert(`qa-${t.id}`, `${t.name}: network reachability`, 500000))];
+          }
         });
+        if (ghosts && url.pathname === '/api/monitoring/incidents') return patch(list => [
+          ...GHOST_TARGETS.map((t, i) => ({ id: 990000 + i, target_id: t.id, name: t.name, rack: t.rack, host: '', previous_up_at: null,
+            first_failed_at: new Date(Date.now() - 30000).toISOString(), last_failed_at: new Date(Date.now() - 30000).toISOString(),
+            ended_at: null, end_reason: null, failed_checks: 1, observed_seconds: 0 })), ...(Array.isArray(list) ? list : [])]);
         return route.continue();
       });
       const page = await context.newPage();
@@ -522,6 +539,31 @@ const EXTRA_RACKS = Array.from({ length: 22 }, (_, i) => ({ id: `qa-rack-${i}`, 
       await orderly(page, 'operator 1920 (role warning)');
       await page.screenshot({ path: path.join(shots, 'operator-1920x1080.png') });
       checks.push('operator 1920: same figures as the Viewer, role warning, two refresh cycles, read-only');
+      await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
+    }
+
+    // ── Placeholder monitors ("empty", "KVM Power", "OptXXX"): never in Attention, rack cards, alerts or Recent ──
+    {
+      const racksOf = page => page.locator('[data-rack]').evaluateAll(cards => cards.map(c => [c.dataset.rack, c.dataset.level, c.querySelector('.ld-rack-state')?.innerText.trim()]));
+      const plain = await open('viewer', { width: 1920, height: 1080 });
+      const base = { f: await figures(plain.page), racks: await racksOf(plain.page) };
+      await plain.context.unrouteAll({ behavior: "ignoreErrors" }); await plain.context.close();
+      const { context, page } = await open('viewer', { width: 1920, height: 1080 }, { ghosts: true });
+      await chromeFree(page, 'viewer 1920 placeholder monitors');
+      const f = await figures(page);
+      const comparable = s => ({ ...s, changes: s.changes.replace(/\d\d:\d\d/g, 'hh:mm') });
+      assert.deepEqual(comparable(f), comparable(base.f), 'placeholder monitors add nothing: same KPIs, attention count, first row and recent changes');
+      assert.deepEqual(await racksOf(page), base.racks, 'rack cards unchanged');
+      const shown = await page.locator('.lab-display').innerText();
+      assert.doesNotMatch(shown, GHOST_TEXT, 'no placeholder monitor named anywhere on the screen');
+      // Every Attention page (it rotates every 10 s) is free of them too.
+      const pages = Number((await pager(page, '.ld-attention')).split('/')[1] || 1);
+      for (let i = 1; i < pages; i++) {
+        const from = await pager(page, '.ld-attention');
+        await turned(page, '.ld-attention', from);
+        assert.doesNotMatch(await page.locator('.ld-attention').innerText(), GHOST_TEXT, `attention page ${i + 1}`);
+      }
+      checks.push(`viewer 1920: placeholder monitors (empty, KVM Power, OptXXX) with an incident and an alert each are not shown or counted (${pages} attention page(s) checked)`);
       await context.unrouteAll({ behavior: "ignoreErrors" }); await context.close();
     }
 

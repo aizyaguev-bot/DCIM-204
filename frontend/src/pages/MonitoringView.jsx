@@ -3,6 +3,7 @@ import {useAccounts} from "../accounts";
 import { useRemovedServers } from "../removedServers.jsx";
 import { withoutRemovedTargets } from "../api/removedServers.js";
 import { useLiveReload } from "../api/useLiveReload";
+import { isPlaceholderMonitor } from "../labDisplay.js";
 
 const input = "w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:border-nv-400";
 const button = "rounded-lg border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800 disabled:opacity-40";
@@ -318,8 +319,12 @@ export default function MonitoringView() {
     catch (e) { setError(e.message); }
     finally { setBusy(false); }
   }
-  // Servers an Admin removed from the lab are not listed (their monitors are paused, history kept).
-  const targets = withoutRemovedTargets(data?.targets || [], removedHidden);
+  // Servers an Admin removed from the lab are not listed (their monitors are paused, history kept). Nor are monitors
+  // imported for placeholder labels ("empty", "KVM Power", "OptXXX"): no servers, the next check deletes them. A
+  // monitor added by hand stays listed whatever its name, so it can still be edited or paused here.
+  const placeholderIds = new Set((data?.targets || []).filter(isPlaceholderMonitor).map(t => t.id));
+  const targets = withoutRemovedTargets(data?.targets || [], removedHidden).filter(t => !placeholderIds.has(t.id));
+  const shownIncidents = incidents.filter(i => !placeholderIds.has(i.target_id));
   const timezone = data?.timezone || "Asia/Jerusalem";
   const selected = targets.find(t => t.id === selectedId);
   const attention = t => ["error", "stale", "unconfigured", "pending"].includes(t.status) || ["pdu", "kvm"].some(kind => !t[kind]?.length || t[kind].some(link => !["on", "active", "idle"].includes(link.status)));
@@ -367,7 +372,7 @@ export default function MonitoringView() {
     </div>
     <section className="rounded-xl border border-zinc-800 overflow-hidden">
       <div className="p-4 border-b border-zinc-800 flex flex-wrap justify-between items-center gap-3"><div><h2 className="font-semibold">Ping failure & recovery log</h2><p className="text-xs text-zinc-500 mt-1">Latest 200 incidents across all servers · closed incidents retained for 90 days</p></div><a href="/api/monitoring/incidents.csv" className={button} download>Export CSV</a></div>
-      <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="text-xs text-zinc-500 bg-zinc-900/60"><tr>{["Server", "First failed check", "Last failed check", "First reply / closed", "Observed window", "Failed checks"].map(h => <th key={h} scope="col" className="px-4 py-3 font-medium">{h}</th>)}</tr></thead><tbody>{incidents.map(i => <tr key={i.id} className="border-t border-zinc-800/60"><td className="px-4 py-3"><button onClick={e => openDetails(i.target_id, e)} className="font-medium hover:text-nv-400">{i.name}</button><div className="text-xs font-mono text-zinc-500 mt-1">{i.host}</div></td><td className="px-4 py-3 text-xs whitespace-nowrap text-rose-300">{when(i.first_failed_at, timezone)}</td><td className="px-4 py-3 text-xs whitespace-nowrap text-zinc-400">{when(i.last_failed_at, timezone)}</td><td className="px-4 py-3 text-xs whitespace-nowrap">{i.ended_at ? <><span className={i.end_reason === "recovered" ? "text-emerald-300" : "text-zinc-400"}>{when(i.ended_at, timezone)}</span><div className="text-zinc-500 mt-1">{i.end_reason === "recovered" ? "Reply received" : i.end_reason?.replaceAll("_", " ")}</div></> : <span className="text-rose-300">No recovery observed</span>}</td><td className="px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">{elapsed(i.observed_seconds)}</td><td className="px-4 py-3 text-zinc-400 tabular-nums">{i.failed_checks}</td></tr>)}{!incidents.length && <tr><td colSpan={6} className="text-center text-zinc-500 px-5 py-8">{data ? "No failed ICMP checks recorded yet." : "Loading incidents…"}</td></tr>}</tbody></table></div>
+      <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="text-xs text-zinc-500 bg-zinc-900/60"><tr>{["Server", "First failed check", "Last failed check", "First reply / closed", "Observed window", "Failed checks"].map(h => <th key={h} scope="col" className="px-4 py-3 font-medium">{h}</th>)}</tr></thead><tbody>{shownIncidents.map(i => <tr key={i.id} className="border-t border-zinc-800/60"><td className="px-4 py-3"><button onClick={e => openDetails(i.target_id, e)} className="font-medium hover:text-nv-400">{i.name}</button><div className="text-xs font-mono text-zinc-500 mt-1">{i.host}</div></td><td className="px-4 py-3 text-xs whitespace-nowrap text-rose-300">{when(i.first_failed_at, timezone)}</td><td className="px-4 py-3 text-xs whitespace-nowrap text-zinc-400">{when(i.last_failed_at, timezone)}</td><td className="px-4 py-3 text-xs whitespace-nowrap">{i.ended_at ? <><span className={i.end_reason === "recovered" ? "text-emerald-300" : "text-zinc-400"}>{when(i.ended_at, timezone)}</span><div className="text-zinc-500 mt-1">{i.end_reason === "recovered" ? "Reply received" : i.end_reason?.replaceAll("_", " ")}</div></> : <span className="text-rose-300">No recovery observed</span>}</td><td className="px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">{elapsed(i.observed_seconds)}</td><td className="px-4 py-3 text-zinc-400 tabular-nums">{i.failed_checks}</td></tr>)}{!shownIncidents.length && <tr><td colSpan={6} className="text-center text-zinc-500 px-5 py-8">{data ? "No failed ICMP checks recorded yet." : "Loading incidents…"}</td></tr>}</tbody></table></div>
     </section>
     <p className="text-xs text-zinc-500 leading-relaxed max-w-4xl">PDU power and KVM observations do not verify the operating system, applications or a working remote console session. A missing ICMP reply indicates a reachability problem, not necessarily a server crash. Brief failures between checks may be missed. Incident windows show observations at check times; they do not establish continuous downtime or the exact failure time. DNS or local probe errors appear separately. Monitoring continues while the backend is running, even with this page closed.</p>
   </main>;

@@ -154,9 +154,10 @@ const ITEM_TYPES = {
 export function isDefaultOutletLabel(label) {
   return !label || /^(outlet\s*\d+|port\s*\d+|\s*)$/i.test(label.trim());
 }
-// Outlet labels that are not computers ("empty", "KVM Power", placeholders) are not OPTs: they never take a U slot
+// Outlet labels that are not computers ("empty", "KVM Power", placeholders such as "OptXXX": opt / optn followed only
+// by x's, for a server not known yet) are not OPTs: they never take a U slot
 // and are not counted. The 3D Twin (lab-twin/app.js NON_SERVER_LABEL) uses the same text, so both show the same shelves.
-const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
+const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+|optn?[\s_-]*x+)$/i;
 export function isServerLabel(label) {
   return !isDefaultOutletLabel(label) && !NON_SERVER_LABEL.test(String(label).trim());
 }

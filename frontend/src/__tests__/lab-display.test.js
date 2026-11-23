@@ -5,7 +5,7 @@ import {
   isServerLabel, buildServers, pduLoad, buildRacks, environment, kpis, openAlerts, attentionItems, consolesInUse,
   recentChanges, gridLayout, rowsThatFit, pageOf, relativeAge, formatKw, formatRange, connectionState, pruneStatuses,
   changeTime, clockTime, longDate, rackGrid, RACK_CARD_EM, ROW_EM, LIST_GAP_EM, fillRows, pinnedPage, labStatus, sourceAfter, maintenanceEntries, outletRuns, partsText, STALE_MS, TICKER_MAX, RATED_AMPS,
-  mergeServerFeeds, withTimeout, REQUEST_TIMEOUT_MS,
+  mergeServerFeeds, withTimeout, REQUEST_TIMEOUT_MS, isPlaceholderName, isPlaceholderTarget, isPlaceholderMonitor,
 } from "../labDisplay.js";
 
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
@@ -27,6 +27,61 @@ test("server labels match the Racks page rules (DcimView and serverPower keep th
   assert.match(own, /\/\^\(outlet\\s\*\\d\+\|port\\s\*\\d\+\|\\s\*\)\$\/i/);
   for (const label of ["Outlet 3", "port 2", "", "  ", "KVM Power", "spare", "EMPTY", "n/a", "---"]) assert.equal(isServerLabel(label), false, label);
   for (const label of ["OPT11", "OPT5 (PSU1)", "build-server"]) assert.equal(isServerLabel(label), true, label);
+  // A server not known yet: opt / optn followed only by x's is a placeholder; a digit makes it a server name.
+  for (const label of ["OptXXX", "OPTXX", "optnxxx", "OPTN X", "opt-xxx", " OptX "]) assert.equal(isServerLabel(label), false, label);
+  for (const label of ["OPT174", "Optn45", "OPTX1", "OPTXX1", "Opt", "OPTN", "OptXXX box", "OPTN45 Eden Levi"]) assert.equal(isServerLabel(label), true, label);
+});
+
+test("placeholder monitors ('empty', 'KVM Power', 'OptXXX') are never counted or shown: Attention, rack cards, alerts, Recent", () => {
+  const now = Date.parse("2026-10-26T12:00:00Z");
+  const target = (id, name, extra = {}) => ({ id, name, inventory_name: name, server_key: name.toLowerCase(), source: "inventory",
+    rack: "Rack-01", status: "error", last_result: "error", enabled: true, ...extra });
+  const targets = [
+    target("t-empty", "empty", { rack: "Rack-06" }),                     // the live TV showed "empty: ping probe error"
+    target("t-kvm", "KVM Power", { status: "down", last_result: "down", rack: "Rack-05" }),
+    target("t-optx", "OptXXX"),
+    target("t-manual", "OPTXX", { source: "manual", server_key: "optxx", status: "down" }),   // the display hides it too
+    target("t-renamed", "Spare", { server_key: "opt15", inventory_name: "OPT15", status: "down", rack: "Rack-02" }),   // OPT15, alias "Spare"
+    target("t-real", "OPT11", { status: "down", last_result: "down" }),
+    target("t-real2", "OPTX1", { status: "error" }),
+  ];
+  assert.deepEqual(targets.filter(isPlaceholderTarget).map(t => t.id), ["t-empty", "t-kvm", "t-optx", "t-manual"]);
+  // The backend's prune rule: inventory monitors whose identity is a placeholder (the Monitoring page hides only these).
+  assert.deepEqual(targets.filter(isPlaceholderMonitor).map(t => t.id), ["t-empty", "t-kvm", "t-optx"]);
+  // An older answer without server_key: the inventory name decides.
+  assert.equal(isPlaceholderMonitor({ id: "o", name: "Lab name", inventory_name: "Empty", source: "inventory" }), true);
+  assert.equal(isPlaceholderName(""), false);
+  assert.equal(isPlaceholderName(undefined), false);
+  const recent = [
+    { id: "a1", subject: "[DCIM alert] KVM Power: network reachability", created_at: "2026-10-26T11:00:00Z" },
+    { id: "a2", subject: "[DCIM alert] OPT11: network reachability", created_at: "2026-10-26T11:10:00Z" },
+    { id: "a3", subject: "[DCIM alert] OptXXX: network reachability", created_at: "2026-10-26T11:20:00Z" },
+    // A deleted monitor's alert is closed by "[DCIM closed]" (backend alerts.forget_network), never left open.
+    { id: "a4", subject: "[DCIM alert] OPT12: network reachability", created_at: "2026-10-26T10:00:00Z" },
+    { id: "a5", subject: "[DCIM closed] OPT12: network reachability", created_at: "2026-10-26T10:30:00Z" },
+  ];
+  assert.deepEqual(openAlerts(recent).map(a => a.title), ["OPT11: network reachability"]);
+  const devices = [pdu(1)];
+  const pduStatuses = { pdu1: online(1) };
+  const monitoring = { service: "scheduled", targets, email_alerts: { recent } };
+  const items = attentionItems({ devices, pduStatuses, monitoring, now });
+  assert.deepEqual(items.map(i => i.key).sort(), ["alert:a2", "ping:t-real", "ping:t-real2", "ping:t-renamed"]);
+  assert.ok(items.every(i => !/empty|KVM Power|OptXXX|OPTXX\b/.test(i.title)), JSON.stringify(items.map(i => i.title)));
+  // A real server whose alias (set on the Monitoring page) reads like a placeholder keeps its alarm: only the identity counts.
+  assert.equal(items.find(i => i.key === "ping:t-renamed")?.title, "Spare not answering ping");
+  // Rack cards count only the real server's failed ping.
+  const racks = Object.fromEntries(buildRacks(devices, pduStatuses, buildServers(devices, pduStatuses), null, { attention: items }).map(r => [r.rack, r]));
+  assert.deepEqual([racks["Rack-01"].level, racks["Rack-01"].reason], ["alarm", "1 not answering ping"]);
+  // KPIs: "OptXXX" on an outlet is no server either.
+  const withPlaceholder = { ...pdu(1), labels: { 1: "OPT11", 2: "OptXXX", 3: "empty", 4: "KVM Power" } };
+  assert.equal(kpis({ devices: [withPlaceholder], servers: buildServers([withPlaceholder]) }).servers.total, 1);
+  // Recent: incidents of placeholder monitors (by their monitor, else by name when the monitor is not listed) are left out.
+  const incident = (id, name, target_id) => ({ id, name, target_id, first_failed_at: "2026-10-26T10:00:00Z" });
+  const changes = recentChanges({ devices, monitoring, incidents: [
+    incident(1, "empty", "t-empty"), incident(2, "KVM Power", "t-kvm"), incident(3, "Spare", "t-renamed"),
+    incident(4, "OptXXX", "gone"), incident(5, "OPT11", "t-real"),
+  ] });
+  assert.deepEqual(changes.map(c => c.text).sort(), ["OPT11 stopped answering ping", "Spare stopped answering ping"]);
 });
 
 test("buildServers: live outlets win over saved labels, overrides move a server to another rack", () => {

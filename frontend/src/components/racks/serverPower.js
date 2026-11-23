@@ -17,7 +17,7 @@ export const BLOCK = {
 };
 
 // Same text as DcimView.jsx NON_SERVER_LABEL and isDefaultOutletLabel (racks-power.test.js keeps them equal).
-const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+)$/i;
+const NON_SERVER_LABEL = /^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+|optn?[\s_-]*x+)$/i;
 const DEFAULT_OUTLET_LABEL = /^(outlet\s*\d+|port\s*\d+|\s*)$/i;
 function isServerLabel(label) {
   return !!label && !DEFAULT_OUTLET_LABEL.test(String(label).trim()) && !NON_SERVER_LABEL.test(String(label).trim());

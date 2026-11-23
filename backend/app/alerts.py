@@ -107,6 +107,27 @@ async def observe_network(db, target, result, now, *, minute=False):
                          f"ICMP result: {result.status}. {result.detail}", settings=settings)
 
 
+async def forget_network(db, target, now, reason):
+    """The monitor `target` is being deleted (ping_monitor.prune_placeholder_targets): its network alert state
+    ("network:<id>") is deleted with it, since nothing could ever observe or close it again. When a failure email was
+    sent and no recovery yet, one "[DCIM closed]" email (same title as the alert) says the alert is closed without a
+    recovery; it is never a "[DCIM recovered]", which would claim a reply that was not observed. With email alerts
+    off nothing is queued (as observe_network). Call within the deletion's transaction."""
+    key = "network:" + target.id
+    state = await db.get(AlertCondition, key)
+    if state is None:
+        return
+    settings = get_settings()
+    if state.notified and settings.email_alerts_enabled:
+        first = f"First failed observation: {local_time(state.started_at)}\n" if state.started_at is not None else ""
+        enqueue(db, key, f"[DCIM closed] {target.name}: network reachability",
+                f"Server: {target.name}\nAddress: {target.host or 'none'}\nRack: {target.rack or 'Unassigned'}\n"
+                f"{reason}\nClosed: {local_time(now)}\n{first}"
+                "No recovery was observed: the alert is closed because the monitor no longer exists.", now, settings)
+    await db.execute(delete(AlertCondition).where(AlertCondition.key == key))
+    db.expunge(state)
+
+
 def _configuration_key(settings):
     """The HMAC key for credential fingerprints, derived from the master key (crypto.py's dev fallback when unset)."""
     master = settings.lab_manager_master_key or base64.urlsafe_b64encode(hashlib.sha256(b"lab-manager-dev-key").digest())

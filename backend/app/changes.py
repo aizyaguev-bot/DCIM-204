@@ -51,6 +51,7 @@ DOMAIN TABLE (RULES; the first matching rule wins; the path without its trailing
              (/api/ssh/*), the lab assistant (/api/assistant/*, including action proposals)
 Outside HTTP (record()): assistant actions, when they finish: power switching and PDU maintenance -> power; location
 changes (server swap, move, clear) -> devices + layout + monitoring. Ping monitor round finished -> monitoring.
+Monitors of placeholder labels deleted by discovery (ping_monitor.discover_targets) -> monitoring.
 Device name sync batch written -> devices.
 """
 from __future__ import annotations
