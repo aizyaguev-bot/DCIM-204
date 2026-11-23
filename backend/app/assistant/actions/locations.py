@@ -1,9 +1,10 @@
 """Location changes proposed by the assistant (contracts.DATA_KINDS: server_swap, server_move, server_clear).
 
-The planner is the same one Admin -> Locations uses (routers/devices.py move-server, plus its clear-location
-variant): the proposal pins its exact dry-run answer, execution re-plans and applies only an unchanged plan (drift =
-any difference). No power is switched and no PDU or KVM is contacted; only saved port labels and the rack layout files
-change. Called by resolve.build_impact / resolve.check_drift and by runner.execute (switch == "data").
+The planner is the same one the server window's Move and Clear location use (routers/devices.py move-server and
+clear-server): the proposal pins its exact dry-run answer, execution re-plans and applies only an unchanged plan
+(drift = any difference). No power is switched and the action itself contacts no PDU or KVM; only saved port labels and
+the rack layout files change (afterwards device name sync may write the new port names, as after any label save).
+Called by resolve.build_impact / resolve.check_drift and by runner.execute (switch == "data").
 
 Planner interface (routers/devices.py, imported lazily so this module never imports the HTTP routers at load time):
   async def plan_move(db, body: dict) -> dict                    # the move-server dry-run answer
@@ -31,6 +32,12 @@ log = logging.getLogger(__name__)
 
 PLAN_KEYS = ("changes", "positions", "unplaced")
 UNITS_KEY = "units"   # the units that move with their servers: in a plan only when there are any
+# Each involved server's switch port before and after a move (move-server "switch", part of its plan_revision): pinned
+# with the plan when the planner answers it, so a switch change made elsewhere since the proposal is drift too.
+SWITCH_KEY = "switch"
+# The automatic U numbers a clear pins so the servers drawn after the cleared one keep their floors (clear-server
+# "pins", part of its plan_revision): in a plan only when there are any.
+PINS_KEY = "pins"
 # PDUs/KVMs whose own port names are unknown now (move-server "unchecked"; a KVM that does not answer, or one nothing
 # read since the backend started): their ports do not follow the move, so the proposal and the summary say so. Not part
 # of the plan (or its revision), as in move-server: a page or card shows it as a warning.
@@ -41,7 +48,7 @@ _CODES = {400: "invalid", 404: "not_resolved", 409: "invalid", 503: "invalid"}
 _SUMMARY_REFUSED = "המיקומים השתנו מאז ההצעה, ולכן לא בוצע שום שינוי. יש לבקש הצעה חדשה."
 _SUMMARY_UNSAVED = "השינוי לא נשמר ולא בוצע שום שינוי. אפשר לנסות שוב."
 _SUMMARY_ERROR = "הפעולה נכשלה עקב שגיאה פנימית. יש לבדוק את המיקומים לפני ניסיון נוסף."
-_SUMMARY_SAVED = "השינוי נשמר. יש לבדוק את המיקומים במסך Locations."
+_SUMMARY_SAVED = "השינוי נשמר. אפשר לבדוק את המיקום בחלון של השרת."
 _SUMMARY_INTERRUPTED = "הפעולה נקטעה. יש לבדוק את המיקומים לפני ניסיון נוסף."
 
 
@@ -64,11 +71,14 @@ def _error(exc: HTTPException) -> ActionError:
 
 
 def plan_of(response) -> dict:
-    """{changes, positions, unplaced} of a planner answer, plus "units" when units move with the servers (it is part of
-    the plan's revision), as plain JSON (exactly what a stored pin reads back as)."""
+    """{changes, positions, unplaced} of a planner answer, plus "switch" when the planner gives it (a move), "units"
+    when units move with the servers and "pins" when a clear pins other servers' U numbers (all are part of the plan's
+    revision), as plain JSON (exactly what a stored pin reads back as)."""
     if not isinstance(response, dict) or not all(isinstance(response.get(key), list) for key in PLAN_KEYS):
         raise ActionError(503, "invalid", "The location planner returned no plan")
-    keys = PLAN_KEYS + ((UNITS_KEY,) if isinstance(response.get(UNITS_KEY), list) and response[UNITS_KEY] else ())
+    keys = PLAN_KEYS + ((SWITCH_KEY,) if isinstance(response.get(SWITCH_KEY), list) else ())
+    keys += (UNITS_KEY,) if isinstance(response.get(UNITS_KEY), list) and response[UNITS_KEY] else ()
+    keys += (PINS_KEY,) if isinstance(response.get(PINS_KEY), list) and response[PINS_KEY] else ()
     return json.loads(json.dumps({key: response[key] for key in keys}))
 
 
@@ -211,7 +221,7 @@ def _warnings(kind: str, shown: dict) -> list[str]:
 
 
 async def build_impact(db, req) -> Impact:
-    """The exact Locations preview of a location request. Raises ActionError (400/404/409/503)."""
+    """The exact move / clear preview of a location request. Raises ActionError (400/404/409/503)."""
     from . import store
 
     req = store.validate_request(req)

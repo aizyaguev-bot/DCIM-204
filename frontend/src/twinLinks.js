@@ -8,6 +8,10 @@ export const TWIN_PATH = "/twin/index.html";
 export const TWIN_SELECT_MESSAGE = "twin:select";
 export const TWIN_SELECTED_MESSAGE = "twin:selected";
 export const TWIN_DATA_CHANGED_MESSAGE = "twin:data-changed";
+// The twin asks Lab Manager to open a window: { type: "twin:open", target: { kind, id, sec?, moveTo? } } (v1's
+// { type: "twin:open-server", key, sec?, moveTo? } is still accepted). Same origin and the twin's frame only;
+// window/windowUrl.js twinOpenRequest reads it.
+export const TWIN_OPEN_MESSAGE = "twin:open";
 // How long the twin stays loaded, hidden, after leaving the Twin tab (a round trip or "Show in 3D" then needs no
 // reload). A hidden twin pauses itself (no rendering, no polling: lab-twin/app.js pauseTwin), so it may stay 10 minutes;
 // then it is removed (its memory: the WebGL scene) and the next visit loads it again.

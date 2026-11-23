@@ -26,7 +26,7 @@ LABELS = {
     "pdu-b": {"1": "optn44 (PSU2)", "2": "OPTN45 (PSU2)", "5": "Outlet 5"},
     "kvm-a": {"1": "optn44", "2": "OPTN45"},
 }
-EXISTS = "{} already exists — use Locations to swap or move"
+EXISTS = "{} already exists — open it and use Swap with or Move."
 
 
 def lab_devices():

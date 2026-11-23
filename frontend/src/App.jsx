@@ -9,9 +9,10 @@ import { loadRackItems, MAIN_STORAGE } from "./api/inventory";
 import { startChangeFeed } from "./api/changes";
 import { useDataChanged } from "./api/useDataChanged";
 import { useLiveReload } from "./api/useLiveReload";
-import PduDetail from "./pages/PduDetail";
-import KvmDetail from "./pages/KvmDetail";
 import DcimView from "./pages/DcimView";
+import ManageView from "./pages/ManageView";
+import { LabWindowProvider, WindowBackdrop } from "./window/LabWindowProvider";
+import { assistantDetail, twinOpenRequest } from "./window/windowUrl";
 import SyncView from "./pages/SyncView";
 import LocationsView from "./pages/LocationsView";
 import ConnectionsView from "./pages/ConnectionsView";
@@ -51,6 +52,9 @@ function LabManagerApp() {
   const [pduStatuses, setPduStatuses] = useState({});   // { id: PduStatus }
   const [kvmStatuses, setKvmStatuses] = useState({});   // { id: KvmStatus }
   const [view, setView] = useState({ kind: "dashboard" });
+  // The lab window over the page (window/LabWindowProvider.jsx): its handle, and the window open now (assistant context).
+  const labWindowRef = useRef(null);
+  const [windowTarget, setWindowTarget] = useState(null);
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
     return tab === "dcim" ? "racks" : ["sync", "locations", "connections", "assistant"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
@@ -114,6 +118,8 @@ function LabManagerApp() {
     else url.searchParams.delete("select");
     if (tab !== "ssh") url.searchParams.delete("server");
     url.searchParams.delete("section");
+    // A tab change closes the lab window and forgets a Racks unit and a highlighted row (window/windowUrl.js).
+    for (const name of ["srv", "open", "sec", "item", "focus"]) url.searchParams.delete(name);
     const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
     history.pushState({ tab, view: {kind:"dashboard"}, adminSection: section || adminSection }, "", url);
     setView({kind:"dashboard"}); setMainTab(section ? "admin" : tab); setEditMode(false);
@@ -124,9 +130,9 @@ function LabManagerApp() {
     setAdminSection(section);
     history.replaceState({ ...history.state, adminSection: section }, "");
   }
+  // PDU and KVM details are device windows now (?open=dev:<id>), over the current tab (the assistant and the cards).
   function openDetail(newView) {
-    history.pushState({ view: newView, tab: mainTab }, "");
-    setView(newView);
+    if (newView?.kind === "pdu" || newView?.kind === "kvm") labWindowRef.current?.open({ kind: "dev", id: newView.id });
   }
   // navigate() plus the rack it wrote to the URL (Header tabs, storage cards, What's new, the assistant).
   // Admin sub-pages keep navigateAdmin(): rackParam is only read on Racks, and every way back there sets it.
@@ -151,6 +157,7 @@ function LabManagerApp() {
     url.searchParams.set("tab", "racks");
     if (next) url.searchParams.set("rack", next);
     else url.searchParams.delete("rack");
+    for (const name of ["srv", "open", "sec", "item", "focus"]) url.searchParams.delete(name);
     history.pushState({ tab: "racks", view: { kind: "dashboard" }, adminSection }, "", url);
     setRackParam(next);
   }
@@ -217,6 +224,21 @@ function LabManagerApp() {
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, []);
+  // The twin asks for a lab window ({ type: "twin:open", target } or v1's "twin:open-server"; a live server's Move…
+  // carries moveTo): the same origin and frame checks as twin:selected. The window opens over the Twin tab.
+  useEffect(() => {
+    const onTwinOpen = event => {
+      const frame = twinFrameRef.current;
+      if (event.origin !== location.origin || !frame || event.source !== frame.contentWindow) return;
+      const request = twinOpenRequest(event.data);
+      if (request) labWindowRef.current?.open({ ...request.target, ...(request.moveTo ? { moveTo: request.moveTo } : {}) });
+    };
+    window.addEventListener("message", onTwinOpen);
+    return () => window.removeEventListener("message", onTwinOpen);
+  }, []);
+  // An old PDU / KVM detail entry in the history (Back / Forward): the window provider opens it as a device window over
+  // the entry's tab, so the page under it is the tab itself.
+  useEffect(() => { if (view.kind !== "dashboard") setView({ kind: "dashboard" }); }, [view]);
   // A ref for the loaded twin is posted two frames after the Twin tab shows it, so the twin handles it laid out on
   // screen (hidden, it keeps its size and gets no resize). A newer ref before then replaces it.
   useEffect(() => {
@@ -631,22 +653,47 @@ function LabManagerApp() {
   const shownCount = mainTab === "power" ? visiblePdus.length : mainTab === "consoles" ? visibleKvms.length
     : (filter === "all" || filter === "pdus" ? visiblePdus.length : 0) + (filter === "all" || filter === "kvms" ? visibleKvms.length : 0) + (filter === "all" || filter === "racks" ? visibleInventoryRacks.length : 0);
   const filtersActive = !!search.trim() || rackFilter !== "all" || (mainTab === "dashboard" && filter !== "all");
-  const detailFrom = { power: "Power", consoles: "Consoles", admin: "Admin" }[mainTab] || "Dashboard";
+  const itemParam = new URLSearchParams(location.search).get("item");   // ?item=: a Racks unit (WP-5 opens its panel)
   // Full-height terminal: no footer or assistant panel over it, and terminal text never reaches the assistant.
   const sshPage = view.kind === "dashboard" && mainTab === "ssh";
 
   return (
+    <LabWindowProvider devices={devices} pduStatuses={pduStatuses} kvmStatuses={kvmStatuses} maintenance={maintenance}
+      apiRef={labWindowRef} onWindowChange={setWindowTarget}
+      app={{ goTo, outletAction: handleOutletAction, turnOnAll: handleTurnOnAll, openMaintenance: (mode, pduId) => setMaintenanceDialog({ mode, pduId }),
+        saveLabels, markKvmFree: handleMarkKvmFree, openConsole: openKvmConsole, deleteDevice: handleDeleteDevice, switchFeeds,
+        refresh: async () => { await loadDevices(); await refreshAllStatuses(); } }}>
     <div className={sshPage ? "h-[100dvh] flex flex-col overflow-hidden" : "min-h-screen flex flex-col"}>
       <Header activeTab={mainTab} onNavigate={goTo} summary={summary} editMode={editMode} onEditChange={value => setEditMode(canOperate && value)} onHome={() => goTo("dashboard")}
         onAccount={() => goTo("account")} onUsers={() => navigateAdmin("users")} remoteInstall={pxeConfig?.enabled === true} />
+      <WindowBackdrop>
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
       {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
       {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"],["removed","Removed servers"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canOperate?[["ssh","SSH"]]:[]),...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
       {view.kind === "dashboard" && pageInfo && <div className="page-intro"><h1>{pageInfo[0]}</h1><p>{pageInfo[1]} {updatedText}</p></div>}
       {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
-      {view.kind === "dashboard" && ["racks", "inventory", "power", "changelog"].includes(mainTab) && (
+      {view.kind === "dashboard" && mainTab === "inventory" && (
+        <ManageView editMode={editMode} onSummary={setSummary} rack={rackParam} onRackChange={selectRack} item={itemParam}
+          devices={devices}
+          pduStatuses={pduStatuses}
+          kvmStatuses={kvmStatuses}
+          onOutletAction={async (pduId, outletNumber, action) => {
+            const device = pdus.find(p => p.id === pduId);
+            if (device) await handleOutletAction(device, outletNumber, action);
+          }}
+          onLabelChange={(pduId, newLabels, revision) => saveLabels(pduId, newLabels, revision ?? devices.find(d => d.id === pduId)?.labels_revision)}
+          onRenameOpt={handleRenameOpt}
+          onRefresh={loadDevices}
+          onOpenConsole={openKvmConsole}
+          maintenance={maintenance}
+          onSwitchFeeds={switchFeeds}
+          onRequestEdit={canOperate ? () => setEditMode(true) : null}
+          onShowIn3d={ref => goTo("twin", { ref })}
+        />
+      )}
+      {view.kind === "dashboard" && ["racks", "power", "changelog"].includes(mainTab) && (
         <DcimView section={mainTab} editMode={editMode} onSummary={setSummary}
-          rack={rackParam} onRackChange={selectRack}
+          rack={rackParam} onRackChange={selectRack} item={itemParam}
           devices={devices}
           pduStatuses={pduStatuses}
           kvmStatuses={kvmStatuses}
@@ -769,40 +816,7 @@ function LabManagerApp() {
         <p>Access continues to use the VM's existing authentication. Version: <span className="font-mono">{version || "Unknown"}</span>.</p>
       </main>}
 
-      {(view.kind === "pdu" || view.kind === "kvm") && !deviceError && !devices.some(d => d.id === view.id && d.kind === view.kind) && (
-        <RemovedDevice from={detailFrom} onBack={() => history.back()} />
-      )}
-
-      {view.kind === "pdu" && pdus.some(p => p.id === view.id) && (
-        <PduDetail key={`pdu:${view.id}`}
-          device={pdus.find(p => p.id === view.id)}
-          status={pduStatuses[view.id]}
-          maintenance={maintenanceStateFor(maintenance, view.id)}
-          maintenanceMode={maintenance?.password_mode}
-          onMaintenance={mode => setMaintenanceDialog({ mode, pduId: view.id })}
-          onBack={() => history.back()}
-          from={detailFrom}
-          onOutletAction={(n, a, confirmed) => handleOutletAction(pdus.find(p => p.id === view.id), n, a, confirmed)}
-          onTurnOnAll={numbers => handleTurnOnAll(pdus.find(p => p.id === view.id), numbers)}
-          onDelete={async () => { if (await handleDeleteDevice(view.id)) history.back(); }}
-          onLabelsSave={(labels, revision) => saveLabels(view.id, labels, revision)}
-          devices={devices}
-        />
-      )}
-
-      {view.kind === "kvm" && kvms.some(k => k.id === view.id) && (
-        <KvmDetail key={`kvm:${view.id}`}
-          device={kvms.find(k => k.id === view.id)}
-          status={kvmStatuses[view.id]}
-          onBack={() => history.back()}
-          from={detailFrom}
-          onPortClick={(port) => openKvmConsole(view.id, port.number)}
-          onDelete={async () => { if (await handleDeleteDevice(view.id)) history.back(); }}
-          onMarkFree={() => handleMarkKvmFree(view.id)}
-          onLabelsSave={(labels, revision) => saveLabels(view.id, labels, revision)}
-          devices={devices}
-        />
-      )}
+      </WindowBackdrop>
 
       {addOpen && <AddDeviceModal racks={racks} onClose={() => setAddOpen(false)} onAdd={handleAddDevice} />}
       {inlineConsole && <InlineKvmConsole key={`${inlineConsole.deviceId}:${inlineConsole.port}`} console={inlineConsole} onClose={() => closeInlineConsole()} />}
@@ -818,9 +832,10 @@ function LabManagerApp() {
       )}
 
       <WhatsNew version={version} onOpenChangelog={() => goTo("changelog")} />
-      {!sshPage && assistantShown && <AssistantPanel context={{tab: mainTab, rack: mainTab === "racks" ? rackParam : null, detail: view.kind !== "dashboard" ? {kind: view.kind, id: view.id} : null}} navigate={goTo} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />}
+      {!sshPage && assistantShown && <AssistantPanel context={{tab: mainTab, rack: mainTab === "racks" ? rackParam : null, detail: assistantDetail(windowTarget, devices)}} navigate={goTo} openDetail={openDetail} devices={devices} onOpenConsole={openKvmConsole} onDataChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />}
       {!sshPage && <footer className="app-footer"><span>Lab Manager · Raritan PX4 + KX III / LX II · Lab 204</span><span>Auto-refreshes every {preferences.refresh_seconds}s{version ? ` · ${version}` : ""}</span></footer>}
     </div>
+    </LabWindowProvider>
   );
 }
 
@@ -835,20 +850,6 @@ export default function App() {
     return () => window.removeEventListener("popstate", followUrl);
   }, []);
   return display ? <LabDisplay /> : <LabManagerApp />;
-}
-
-// A PDU or KVM detail page whose device was removed, here or in another session.
-function RemovedDevice({ from, onBack }) {
-  return (
-    <main className="device-page">
-      <div className="flex items-center gap-3 text-sm">
-        <button onClick={onBack} className="text-zinc-400 hover:text-nv-400"><span aria-hidden="true">← </span>Back</button>
-        <span className="text-zinc-600">/</span>
-        <span className="text-zinc-500">{from}</span>
-      </div>
-      <p role="status" className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 text-sm text-zinc-300">This device was removed.</p>
-    </main>
-  );
 }
 
 function Toolbar({ filter, setFilter, rackFilter, setRackFilter, racks, count, rackCount, onAdd }) {

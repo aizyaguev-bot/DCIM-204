@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app import accounts, inventory_store
+from app import accounts, inventory_store, name_sync
 from app.database import Base, get_db
 from app.models import AssetOwner, Device, PingTarget, User
 from app.routers import devices
@@ -690,6 +690,7 @@ async def test_servers_without_ports_stay_listed_and_can_be_moved_to_ports(lab):
 def test_required_roles_for_the_new_paths():
     assert accounts.required_role("/api/devices/locations", "GET") == "Viewer"
     assert accounts.required_role("/api/devices/move-server", "POST") == "Operator"
+    assert accounts.required_role("/api/devices/clear-server", "POST") == "Operator"
     assert accounts.required_role("/api/devices/rename-opt", "POST") == "Operator"
     assert accounts.required_role("/api/devices/pdu-a", "PUT") == "Admin"
     assert accounts.required_role("/api/devices/move-server-x", "POST") == "Admin"
@@ -730,6 +731,20 @@ async def accounts_lab(tmp_path, monkeypatch):
     app.dependency_overrides[get_db] = dependency
     yield app
     await engine.dispose()
+
+
+@pytest.mark.parametrize("username,status", [("viewer", 403), ("operator", 200), ("admin", 200)])
+async def test_only_operators_and_admins_clear_a_server(accounts_lab, username, status):
+    async with AsyncClient(transport=ASGITransport(app=accounts_lab), base_url="http://test") as c:
+        r = await c.post("/api/auth/login", json={"username": username, "password": PASSWORD})
+        assert r.status_code == 200, r.text
+        c.headers["X-DCIM-CSRF"] = r.json()["csrf_token"]
+        for dry_run in (True, False):
+            r = await c.post("/api/devices/clear-server", json={"server": "web-1", "dry_run": dry_run})
+            assert r.status_code == status, r.text
+        rows = {s["key"]: s for s in (await c.get("/api/devices/locations")).json()["servers"]}
+        assert rows["web-1"]["pdu"] == ([] if status == 200 else [
+            {"device_id": "pdu-a", "device_name": "PDU-A", "port": "3", "label": "web-1"}])
 
 
 @pytest.mark.parametrize("username,move_status", [("viewer", 403), ("operator", 200), ("admin", 200)])
@@ -1368,3 +1383,255 @@ async def test_units_follow_keeps_the_units_of_a_shared_floor_and_moves_none_wit
                        units_follow=True, dry_run=True)
     assert ports.status_code == 200, ports.text
     assert "units" not in ports.json()
+
+
+# ── One server window (WP-B): /locations floors and flags, removed servers, the switch in a move plan, clear-server
+#    and the rack a move to ports names ──────────────────────────────────────────────────────────────────────────────
+
+REMOVED_TEXT = "{} was removed from the lab. Restore it first (Inventory › Removed)."
+
+
+def write_removed(folder, key, name, ports):
+    """removed_servers.json with one server removed while the ports `ports` ("device_id:port") carried its name."""
+    (folder / "removed_servers.json").write_text(json.dumps(
+        {"servers": {key: {"key": key, "name": name, "removed_at": 1.0, "ports_ids": ports}}, "log": []}))
+
+
+async def location_rows(lab):
+    r = await lab.client.get("/api/devices/locations")
+    assert r.status_code == 200, r.text
+    return {s["key"]: s for s in r.json()["servers"]}
+
+
+async def clear(lab, **body):
+    return await lab.client.post("/api/devices/clear-server", json=body)
+
+
+async def test_locations_rows_give_the_dcim_ids_the_drawn_floor_and_the_removed_flag(lab):
+    rows = await location_rows(lab)
+    assert {k: (r["dcim_ids"], r["drawn"], r["removed"]) for k, r in rows.items()} == {
+        "optn44": (["optn44", "optn44 (psu2)"], {"rack": "Rack-01", "u": 3, "auto": False}, False),
+        "optn45": (["optn45 (psu1)", "optn45 (psu2)", "optn45"], {"rack": "Rack-01", "u": 7, "auto": False}, False),
+        "web-1": (["web-1"], {"rack": "Rack-01", "u": 1, "auto": True}, False),     # the next free U, numbered by DCIM
+        "other": (["other"], None, False)}       # known only from rack_overrides.json: not drawn on Racks
+    # The fields the pages read before are unchanged.
+    assert (rows["optn44"]["rack"], rows["optn44"]["slot"], rows["optn44"]["kept_position"]) == (
+        "Rack-01", 3, {"rack": "Rack-01", "slot": 3})
+    # A U that is no number (DCIM reads NaN) is drawn without a U, and the answer is still JSON.
+    layout = {**LAYOUT, "rack_slots.json": {**LAYOUT["rack_slots.json"],
+                                            "Rack-01": {**LAYOUT["rack_slots.json"]["Rack-01"], "web-1": "x"}}}
+    write_layout(lab.folder, layout)
+    assert (await location_rows(lab))["web-1"]["drawn"] == {"rack": "Rack-01", "u": None, "auto": False}
+    # A removed server is flagged and is not drawn (it takes no U); the others are as they were.
+    write_layout(lab.folder)
+    write_removed(lab.folder, "web-1", "web-1", ["pdu-a:3"])
+    after = await location_rows(lab)
+    assert (after["web-1"]["removed"], after["web-1"]["drawn"]) == (True, None)
+    assert {k: r for k, r in after.items() if k != "web-1"} == {k: r for k, r in rows.items() if k != "web-1"}
+
+
+async def test_a_removed_server_is_never_moved_swapped_with_or_cleared(lab):
+    write_removed(lab.folder, "web-1", "web-1", ["pdu-a:3"])
+    files, labels = snapshot(lab.folder), await saved_labels(lab.db)
+    for body in ({"server": "web-1", "target_ports": [{"device_id": "pdu-a", "port": "4"}]},
+                 {"server": "WEB-1", "target_server": "optn44"},
+                 {"server": "optn44", "target_server": "web-1", "swap": True},
+                 {"server": "optn44", "target_server": "web-1", "swap": False}):
+        for dry_run in (True, False):
+            r = await move(lab, **body, dry_run=dry_run)
+            assert r.status_code == 409 and r.json()["detail"] == REMOVED_TEXT.format("web-1"), (body, r.text)
+        r = await move(lab, **body, units_follow=True)
+        assert r.status_code == 409, r.text
+    for dry_run in (True, False):
+        r = await clear(lab, server="web-1", dry_run=dry_run)
+        assert r.status_code == 409 and r.json()["detail"] == REMOVED_TEXT.format("web-1"), r.text
+    assert snapshot(lab.folder) == files and await saved_labels(lab.db) == labels
+    # Its name written on another port (a new machine that reuses the name) shows it again: then it moves as any server.
+    r = await lab.client.patch("/api/devices/direct-label", json={"device_id": "pdu-b", "port": "6", "label": "web-1"})
+    assert r.status_code == 200, r.text
+    assert (await location_rows(lab))["web-1"]["removed"] is False
+    assert (await move(lab, server="web-1", target_ports=[{"device_id": "pdu-a", "port": "4"}], dry_run=True)).status_code == 200
+    assert (await clear(lab, server="web-1", dry_run=True)).status_code == 200
+
+
+async def test_the_move_plan_lists_each_servers_switch_port_before_and_after(lab):
+    swap = await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True)
+    assert swap.status_code == 200, swap.text
+    # The switch_assignments.json entries follow the layout ids, so they stay with the floor as the outlets do.
+    assert swap.json()["switch"] == [
+        {"server": "OPTN45", "before": {"switch": "SW2", "port": "3"}, "after": {"switch": "SW1", "port": "12"}},
+        {"server": "OPTN44", "before": {"switch": "SW1", "port": "12"}, "after": {"switch": "SW2", "port": "3"}}]
+    take = await move(lab, server="optn45", target_server="OPTN44", swap=False, dry_run=True)
+    assert take.json()["switch"] == [
+        {"server": "OPTN45", "before": {"switch": "SW2", "port": "3"}, "after": {"switch": "SW1", "port": "12"}},
+        {"server": "OPTN44", "before": {"switch": "SW1", "port": "12"}, "after": None}]
+    ports = await move(lab, server="web-1", target_ports=[{"device_id": "pdu-a", "port": "4"}], dry_run=True)
+    assert ports.json()["switch"] == [{"server": "web-1", "before": None, "after": None}]
+    # The switch is part of the plan: a switch port changed in another session since the preview refuses the Apply.
+    layout = {**LAYOUT, "switch_assignments.json": {**LAYOUT["switch_assignments.json"], "optn44": {"switch": "SW7", "port": 1}}}
+    write_layout(lab.folder, layout)
+    stale = await move(lab, server="optn45", target_server="OPTN44", swap=True, plan_revision=swap.json()["plan_revision"])
+    assert stale.status_code == 409 and stale.json()["detail"] == "Changed since the preview. Preview again."
+    assert await saved_labels(lab.db) == LABELS and read_layout(lab.folder) == layout
+    fresh = await move(lab, server="optn45", target_server="OPTN44", swap=True, dry_run=True)
+    assert fresh.json()["switch"][0]["after"] == {"switch": "SW7", "port": "1"}
+    applied = await move(lab, server="optn45", target_server="OPTN44", swap=True, plan_revision=fresh.json()["plan_revision"])
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["switch"] == fresh.json()["switch"]
+    assert read_layout(lab.folder)["switch_assignments.json"] == {
+        "optn45": {"switch": "SW7", "port": 1}, "optn44 (psu1)": {"switch": "SW2", "port": "3"}}
+
+
+async def test_clear_server_previews_then_clears_every_port_and_keeps_the_rack_place(lab, monkeypatch):
+    queued = []
+
+    async def spy(device_ports):
+        queued.append({k: set(v) for k, v in device_ports.items()})
+        return {"device_names": "queued"}
+    monkeypatch.setattr(name_sync, "queue", spy)
+    files, people = snapshot(lab.folder), await monitors_and_owners(lab.db)
+    dry = await clear(lab, server="optn44 (psu2)", dry_run=True)
+    assert dry.status_code == 200, dry.text
+    plan = dry.json()
+    assert [(c["device_id"], c["port"], c["before"], c["after"]) for c in plan["changes"]] == [
+        ("pdu-a", "1", "OPTN44", "Outlet 1"), ("pdu-b", "1", "optn44 (PSU2)", "Outlet 1"), ("kvm-a", "1", "optn44", "Port 1")]
+    assert plan["positions"] == [
+        {"server": "OPTN44", "before": {"rack": "Rack-01", "slot": 3}, "after": {"rack": "Rack-01", "slot": 3}}]
+    assert (plan["ok"], plan["dry_run"], plan["unplaced"], "device_names" in plan) == (True, True, [], False)
+    assert queued == [] and await saved_labels(lab.db) == LABELS and snapshot(lab.folder) == files
+    r = await clear(lab, server="OPTN44", plan_revision=plan["plan_revision"])
+    assert r.status_code == 200, r.text
+    assert r.json() == {**plan, "dry_run": False, "device_names": "queued"}
+    assert queued == [{"pdu-a": {"1"}, "pdu-b": {"1"}, "kvm-a": {"1"}}]     # the device names follow, once
+    assert await saved_labels(lab.db) == {"pdu-a": {**LABELS["pdu-a"], "1": "Outlet 1"},
+                                          "pdu-b": {**LABELS["pdu-b"], "1": "Outlet 1"},
+                                          "kvm-a": {**LABELS["kvm-a"], "1": "Port 1"}}
+    # No layout file is written: the server is no longer drawn on Racks and keeps its saved place for a later move.
+    assert snapshot(lab.folder) == files and await monitors_and_owners(lab.db) == people
+    row = (await location_rows(lab))["optn44"]
+    assert (row["pdu"], row["kvm"], row["drawn"], row["kept_position"]) == ([], [], None, {"rack": "Rack-01", "slot": 3})
+
+
+async def test_clear_server_refuses_a_stale_preview_bad_bodies_and_servers_on_no_port(lab):
+    dry = await clear(lab, server="optn45", dry_run=True)
+    assert dry.status_code == 200, dry.text
+    # Another session names one more port after OPTN45 since the preview.
+    r = await lab.client.patch("/api/devices/direct-label", json={"device_id": "pdu-a", "port": "6", "label": "OPTN45 (PSU3)"})
+    assert r.status_code == 200, r.text
+    labels, files = await saved_labels(lab.db), snapshot(lab.folder)
+    r = await clear(lab, server="optn45", plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 409 and r.json()["detail"] == "Changed since the preview. Preview again."
+    for body, status in (({"server": "optn45", "dry_run": "yes"}, 400), ({"server": "optn45", "plan_revision": 5}, 400),
+                         ({}, 400), ({"server": "Outlet 5"}, 400), ({"server": "Empty"}, 400), ({"server": "x" * 201}, 400),
+                         ({"server": "optn99"}, 404), ({"server": "other"}, 404)):
+        r = await clear(lab, **body)
+        assert r.status_code == status, (body, r.text)
+    assert await saved_labels(lab.db) == labels and snapshot(lab.folder) == files
+
+
+async def test_a_move_to_ports_names_a_known_rack_in_any_case_and_never_creates_one(lab):
+    port = [{"device_id": "pdu-a", "port": "4"}]
+    r = await move(lab, server="web-1", target_ports=port, target_rack=" rack-02 ", target_slot=4, dry_run=True)
+    assert r.status_code == 200 and r.json()["positions"][0]["after"] == {"rack": "Rack-02", "slot": 4}, r.text
+    # A rack only the layout files name (rack_overrides.json: Rack-09) and a rack of the equipment list count too.
+    r = await move(lab, server="web-1", target_ports=port, target_rack="RACK-09", dry_run=True)
+    assert r.status_code == 200 and r.json()["positions"][0]["after"] == {"rack": "Rack-09", "slot": None}, r.text
+    (lab.folder / "rack_items.json").write_text(json.dumps({"Storage": []}))
+    r = await move(lab, server="web-1", target_ports=port, target_rack="storage", dry_run=True)
+    assert r.status_code == 200 and r.json()["positions"][0]["after"]["rack"] == "Storage", r.text
+    # A rack the lab does not know is refused: a move never creates a rack that no page draws.
+    files, labels = snapshot(lab.folder), await saved_labels(lab.db)
+    for dry_run in (True, False):
+        r = await move(lab, server="web-1", target_ports=port, target_rack="rack-05", target_slot=2, dry_run=dry_run)
+        assert r.status_code == 409 and r.json()["detail"] == "There is no rack named rack-05. Choose one of the lab's racks."
+    assert snapshot(lab.folder) == files and await saved_labels(lab.db) == labels
+    # Applied: the server lands in Rack-02 as the lab spells it.
+    r = await move(lab, server="web-1", target_ports=port, target_rack="rack-02", target_slot=4)
+    assert r.status_code == 200, r.text
+    assert read_layout(lab.folder)["rack_overrides.json"]["web-1"] == "Rack-02"
+    body = (await lab.client.get("/api/devices/locations")).json()
+    assert "rack-02" not in body["racks"]
+    assert {s["key"]: (s["rack"], s["slot"]) for s in body["servers"]}["web-1"] == ("Rack-02", 4)
+    # Two racks whose names differ only in case: an exact name is taken, any other spelling is refused.
+    lab.db.add(Device(id="rack-y", name="Rack Y", kind="rack", ip="192.0.2.15", rack="RACK-02"))
+    await lab.db.commit()
+    r = await move(lab, server="web-1", target_ports=port, target_rack="rack-02", dry_run=True)
+    assert r.status_code == 409 and r.json()["detail"] == (
+        "Several racks are named rack-02 with different capitals (RACK-02, Rack-02). Choose one of them exactly.")
+    r = await move(lab, server="web-1", target_ports=port, target_rack="RACK-02", dry_run=True)
+    assert r.status_code == 200 and r.json()["positions"][0]["after"]["rack"] == "RACK-02", r.text
+
+
+async def add_web_2(lab):
+    """web-2 on PDU-A outlet 4: drawn in Rack-01 right after web-1, both numbered automatically (U1 and U2)."""
+    r = await lab.client.patch("/api/devices/direct-label", json={"device_id": "pdu-a", "port": "4", "label": "web-2"})
+    assert r.status_code == 200, r.text
+    rows = await location_rows(lab)
+    assert (rows["web-1"]["drawn"], rows["web-2"]["drawn"]) == (
+        {"rack": "Rack-01", "u": 1, "auto": True}, {"rack": "Rack-01", "u": 2, "auto": True})
+
+
+async def test_clearing_an_automatically_numbered_server_pins_the_servers_drawn_after_it(lab):
+    await add_web_2(lab)
+    files = snapshot(lab.folder)
+    dry = await clear(lab, server="web-1", dry_run=True)
+    assert dry.status_code == 200, dry.text
+    # Freeing web-1's U1 would move web-2 to floor 1, whose outlet is not its own: web-2's U2 is pinned instead.
+    assert dry.json()["pins"] == [{"rack": "Rack-01", "id": "web-2", "slot": 2}]
+    assert snapshot(lab.folder) == files
+    r = await clear(lab, server="web-1", plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 200, r.text
+    assert r.json()["pins"] == dry.json()["pins"]
+    layout = read_layout(lab.folder)
+    assert layout == {**LAYOUT, "rack_slots.json": {**LAYOUT["rack_slots.json"],
+                                                    "Rack-01": {**LAYOUT["rack_slots.json"]["Rack-01"], "web-2": 2}}}
+    rows = await location_rows(lab)
+    assert rows["web-2"]["drawn"] == {"rack": "Rack-01", "u": 2, "auto": False}
+    assert (rows["web-1"]["pdu"], rows["web-1"]["drawn"], rows["web-1"]["kept_position"]) == (
+        [], None, {"rack": "Rack-01", "slot": None})
+    # A pinned server (optn44, U3) frees a U no automatic number takes: nothing is pinned and no layout file is written.
+    files = snapshot(lab.folder)
+    plain = await clear(lab, server="optn44", dry_run=True)
+    assert plain.status_code == 200 and "pins" not in plain.json(), plain.text
+    r = await clear(lab, server="optn44", plan_revision=plain.json()["plan_revision"])
+    assert r.status_code == 200 and snapshot(lab.folder) == files, r.text
+
+
+async def test_clear_pins_are_checked_again_never_overwrite_an_unreadable_file_and_go_back_on_a_failed_save(
+        lab, monkeypatch):
+    await add_web_2(lab)
+    dry = await clear(lab, server="web-1", dry_run=True)
+    # Another session pins web-2 at U5 since the preview: the plan (its pins) changed, nothing is written.
+    moved = {**LAYOUT, "rack_slots.json": {**LAYOUT["rack_slots.json"],
+                                           "Rack-01": {**LAYOUT["rack_slots.json"]["Rack-01"], "web-2": 5}}}
+    write_layout(lab.folder, moved)
+    labels = await saved_labels(lab.db)
+    r = await clear(lab, server="web-1", plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 409 and r.json()["detail"] == "Changed since the preview. Preview again."
+    assert await saved_labels(lab.db) == labels and read_layout(lab.folder) == moved
+    # rack_slots.json cannot be read: the preview numbers every server automatically, and the Apply never overwrites
+    # the file.
+    write_layout(lab.folder)
+    (lab.folder / "rack_slots.json").write_text("{not json")
+    dry = await clear(lab, server="web-1", dry_run=True)
+    assert dry.status_code == 200 and dry.json()["pins"], dry.text
+    r = await clear(lab, server="web-1", plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 503 and r.json()["detail"] == "A rack layout file cannot be read, so nothing was changed."
+    assert (lab.folder / "rack_slots.json").read_text() == "{not json" and await saved_labels(lab.db) == labels
+    # The labels cannot be saved: the pins written just before are taken back.
+    write_layout(lab.folder)
+    dry = await clear(lab, server="web-1", dry_run=True)
+
+    async def failed_commit(db):
+        return RuntimeError("database is locked"), False
+    monkeypatch.setattr(devices, "_finish_commit", failed_commit)
+    r = await clear(lab, server="web-1", plan_revision=dry.json()["plan_revision"])
+    assert r.status_code == 503 and r.json()["detail"] == devices._CLEAR_FAILED
+    assert read_layout(lab.folder) == LAYOUT and await saved_labels(lab.db) == labels
+
+
+async def test_main_storage_is_always_a_rack_a_move_to_ports_may_name(lab):
+    # No device and no equipment list names Storage-Main yet; it is a rack all the same (routers/inventory.py).
+    r = await move(lab, server="web-1", target_ports=[{"device_id": "pdu-a", "port": "4"}], target_rack="storage-main",
+                   target_slot=2, dry_run=True)
+    assert r.status_code == 200 and r.json()["positions"][0]["after"] == {"rack": "Storage-Main", "slot": 2}, r.text

@@ -1,5 +1,7 @@
-// PDU and KVM detail pages: label drafts survive a 409, Turn on all, role reasons, maintenance hint,
-// LX II text, IN USE ports and the inline console focus trap. Runs only against the isolated local fixture.
+// PDU and KVM details (a device window over the tab, ?open=dev:<id>, since the one-place windows): label drafts survive
+// a 409, Turn on all, role reasons, maintenance hint, LX II text, IN USE ports and the inline console focus trap. Runs
+// only against the isolated local fixture. Selectors inside the details are scoped to the window ([data-window]): the
+// page behind it keeps its own cards.
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8936';
@@ -154,9 +156,9 @@ const ALLOWED_WRITES = [
     assert.equal(shutdown.status, 200);
     try {
       await openDetail(page, 'power', 'PDU 02');
-      await page.getByText(/In maintenance since/).waitFor();
+      await page.locator('[data-window]').getByText(/In maintenance since/).waitFor();
       await page.getByRole('button', { name: 'Power on OPT21' }).waitFor();
-      const titles = await page.locator('main button[title]').evaluateAll(buttons => buttons.map(b => b.title));
+      const titles = await page.locator('[data-window] main button[title]').evaluateAll(buttons => buttons.map(b => b.title));
       const locked = titles.filter(t => /maintenance mode/.test(t));
       assert.ok(locked.length >= 5, 'outlet buttons and Turn on all explain the lock: ' + JSON.stringify(titles));
       for (const title of locked) { assert.match(title, /Restore power/); assert.doesNotMatch(title, /Maintenance column/); }
@@ -170,11 +172,11 @@ const ALLOWED_WRITES = [
     assert.equal((await call(page, 'POST', '/api/kvms/kvm1/ports/2/mark-in-use')).status, 200);
     try {
       await openDetail(page, 'consoles', 'KVM 01');
-      const tile = page.locator('main button[data-in-use]').filter({ hasText: 'P2' });
-      await page.waitForFunction(() => [...document.querySelectorAll('main button[data-in-use="true"]')].some(b => b.textContent.includes('P2')), null, { timeout: 5000 });
+      const tile = page.locator('[data-window] main button[data-in-use]').filter({ hasText: 'P2' });
+      await page.waitForFunction(() => [...document.querySelectorAll('[data-window] main button[data-in-use="true"]')].some(b => b.textContent.includes('P2')), null, { timeout: 5000 });
       assert.match(await tile.getAttribute('title'), /· In use$/);
       assert.match(await tile.innerText(), /IN USE/);
-      assert.equal(await page.locator('main button[data-in-use]').filter({ hasText: 'P3' }).getAttribute('data-in-use'), 'false');
+      assert.equal(await page.locator('[data-window] main button[data-in-use]').filter({ hasText: 'P3' }).getAttribute('data-in-use'), 'false');
       assert.equal(await page.getByRole('button', { name: /OPT11/ }).count(), 1, 'the tile keeps its visible name');
       checks.push('KVM-1: an in-use port tile has data-in-use=true, "In use" in its title and a visible IN USE');
     } finally {
@@ -195,7 +197,7 @@ const ALLOWED_WRITES = [
       assert.equal(await page.getByText(/native viewer|LX II unit/i).count(), 0);
       const popupReady = page.context().waitForEvent('page');
       const used = page.waitForResponse(r => new URL(r.url()).pathname === '/api/kvms/kvm1/ports/2/mark-in-use');
-      await page.locator('main button[data-in-use]').filter({ hasText: 'P2' }).click();
+      await page.locator('[data-window] main button[data-in-use]').filter({ hasText: 'P2' }).click();
       const popup = await popupReady;
       assert.equal(new URL(popup.url()).pathname, '/api/kvms/kvm1/autologin');
       assert.equal(new URL(popup.url()).searchParams.get('port'), '2');
@@ -242,14 +244,14 @@ const ALLOWED_WRITES = [
     const blocked = await login('operator', { blockPopup: true });
     const bp = blocked.page;
     await openDetail(bp, 'consoles', 'KVM 01');
-    const p3 = bp.locator('main button[data-in-use]').filter({ hasText: 'P3' });
+    const p3 = bp.locator('[data-window] main button[data-in-use]').filter({ hasText: 'P3' });
     const used3 = bp.waitForResponse(r => new URL(r.url()).pathname === '/api/kvms/kvm1/ports/3/mark-in-use');
     await p3.click();
     const dialog = bp.getByRole('dialog', { name: 'KVM console', exact: true });
     await dialog.waitFor();
     await bp.frameLocator('iframe[title="KVM console viewer"]').getByRole('heading', { name: 'Console preview' }).waitFor();
     await used3;
-    const inDialog = () => bp.evaluate(() => !!document.querySelector('[role="dialog"]')?.contains(document.activeElement));
+    const inDialog = () => bp.evaluate(() => !!document.querySelector('[role="dialog"][aria-label="KVM console"]')?.contains(document.activeElement));
     assert.equal(await inDialog(), true, 'focus starts in the dialog');
     for (const key of ['Tab', 'Shift+Tab']) {
       for (let i = 0; i < 30; i++) {

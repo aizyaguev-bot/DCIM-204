@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 // A modal console: Escape closes, Tab and Shift+Tab stay on the close button and the viewer, focus cannot move
 // behind the dialog, and closing returns focus to the control that opened it. No `inert` on #root: the assistant
-// button is portalled outside it.
+// button is portalled outside it. z-[65]: above a lab window (z-[55]) and the dialogs it opens (z-[60]).
 export default function InlineKvmConsole({ console, onClose }) {
   const dialogRef = useRef(null);
   const closeRef = useRef(null);
@@ -39,7 +39,7 @@ export default function InlineKvmConsole({ console, onClose }) {
   }, []);
 
   return <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="KVM console" aria-describedby="kvm-console-note"
-    className="fixed inset-0 z-50 bg-zinc-950 flex flex-col">
+    className="fixed inset-0 z-[65] bg-zinc-950 flex flex-col">
     <div className="flex items-center justify-between gap-4 p-3 border-b border-zinc-800">
       <div><strong>{console.name} · Port {console.port}</strong>
         <p id="kvm-console-note" dir="rtl" className="text-xs text-zinc-400 mt-1">הדפדפן לא פתח לשונית חדשה. הקונסול נפתח כאן בתוך האתר.</p>

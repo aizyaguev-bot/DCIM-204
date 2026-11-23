@@ -196,7 +196,8 @@ def required_role(path, method):
     if method in ("GET", "HEAD", "OPTIONS"): return "Viewer"
     if path in ("/api/auth/logout", "/api/me", "/api/me/password", "/api/me/preferences", "/api/me/end-other-sessions"): return "Viewer"
     if path == "/api/devices" or re.fullmatch(r"/api/devices/[^/]+", path):
-        if path not in ("/api/devices/rename-opt", "/api/devices/direct-label", "/api/devices/move-server"): return "Admin"
+        if path not in ("/api/devices/rename-opt", "/api/devices/direct-label", "/api/devices/move-server",
+                        "/api/devices/clear-server"): return "Admin"
     return "Operator"
 
 

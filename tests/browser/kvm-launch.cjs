@@ -149,8 +149,9 @@ const skipFocusTrap = process.env.DCIM_SKIP_FOCUS_TRAP === '1';
     }
     const freed3 = marking(operator.page, 'mark-free', 3);
     const used1 = marking(operator.page, 'mark-in-use', 1);
-    // A click that reaches a port behind the console (script, assistive tech) replaces the console.
-    await operator.page.evaluate(() => [...document.querySelectorAll('main button')].find(button => /OPT11/.test(button.textContent)).click());
+    // A click that reaches a port behind the console (script, assistive tech) replaces the console. The port tile of the
+    // KVM window (the KVM details are a window over Remote consoles).
+    await operator.page.evaluate(() => [...document.querySelectorAll('[data-window] main button')].find(button => /OPT11/.test(button.textContent)).click());
     assertFreedWith(await freed3, lease3);
     const lease1 = await leaseOf(await used1);
     await consoleDialog(operator.page).getByText('Port 1').waitFor();
@@ -226,7 +227,8 @@ const skipFocusTrap = process.env.DCIM_SKIP_FOCUS_TRAP === '1';
     await viewer.page.getByText('לפתיחת קונסול KVM נדרשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.').waitFor();
     await viewer.page.getByRole('button', { name: 'Details →' }).click();
     assert.equal(await viewer.page.getByRole('button', { name: /OPT11/ }).isDisabled(), true);
-    await viewer.page.getByText('לפתיחת קונסול KVM נדרשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.').waitFor();
+    // The KVM details are a window over Remote consoles now: the card's note stays on the page behind it.
+    await viewer.page.locator('[data-window="kvm"]').getByText('לפתיחת קונסול KVM נדרשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.').waitFor();
     checks.push('Viewer access stays disabled and explains the required role on both views');
     await viewer.context.close();
     assert.deepEqual(errors, [], 'No browser JavaScript errors');

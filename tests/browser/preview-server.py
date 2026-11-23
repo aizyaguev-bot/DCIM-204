@@ -20,6 +20,12 @@ for key, value in (('PXE_ENABLED', 'true'), ('PXE_DRIVER', 'simulated'), ('PXE_T
     os.environ.setdefault(key, value)
 os.environ['PXE_DRIVER'] = 'simulated'
 account_test = os.environ.get('DCIM_TEST_ACCOUNTS') == '1'
+# DCIM_FIXTURE_ONE_PLACE=1: the lab states the lab windows and the Manage page are tested on (one-place spec v1 WP-0
+# and v2 section F; see ONE_PLACE below). Off by default, so every older browser check keeps the fixture it was
+# written for (racks-ui.cjs counts 9 racks; these states add Rack-08 and Rack-09).
+one_place = os.environ.get('DCIM_FIXTURE_ONE_PLACE') == '1'
+# FIXTURE_PXE_HOLD=1 (with DCIM_FIXTURE_ONE_PLACE=1): one remote install holds OPT21, KVM 02 port 1 and PDU 02.
+pxe_hold = os.environ.get('FIXTURE_PXE_HOLD') == '1'
 os.environ['ACCOUNTS_ENABLED'] = 'true' if account_test else 'false'
 if account_test:
     os.environ['LAB_MANAGER_PASSWORD'] = 'test-password-123'
@@ -30,7 +36,8 @@ os.environ['DEVICE_NAME_SYNC'] = 'auto' if fake_names else 'off'
 sys.path.insert(0, str(root / 'backend'))
 from app import main, inventory_store, name_sync
 from app.database import init_db, AsyncSessionLocal
-from app.models import Device, PingTarget, MonitorDeviceSnapshot
+from app.models import (Device, PingTarget, MonitorDeviceSnapshot, PingSample, PingIncident, PduMaintenance, AlertCondition,
+                        AlertEmail, PxeJob)
 from sqlalchemy import select
 from app.routers import pdus, kvms, pxe, devices, kvm_proxy
 from app.pxe.runner import PxeRunner
@@ -63,10 +70,74 @@ main._OPT_OWNERS_FILE.write_text(json.dumps({'opt11':'Fixture owner', 'opt21':'H
 main._CHILLERS_FILE.write_text(json.dumps({'units':[{'id':f'ch{n}', 'name':'Cooling', 'rack':f'Rack-{n:02}', 'u':3} for n in range(1,8)], 'connections':[]}))
 power_states = {}
 
+# ── DCIM_FIXTURE_ONE_PLACE=1: the states the windows are tested on ────────────────────────────────────────────────
+#   Rack-05   PDU 05: 1 "OPT51" (floor 1), 2 "Spare" (floor 2 is empty: a "Spare N" outlet with the floor's number),
+#             3 "OPT53 (PSU1)" and 4 "OPT53 (PSU2)": one server with two feeds on floor 3, a different owner per feed
+#             and per-feed switch ports; floor 4 is empty with no placeholder label. Unit "Tray 53" on floor 3.
+#   Rack-06   OPT61 and OPT62 share floor 1 (rack_slots); OPT63, OPT64 pinned on 2 and 3.
+#   Rack-01..04, Rack-07  every server auto-placed (no rack_slots entry), e.g. OPT41.
+#   KVM 02    Rack-02, reachable, port 1 "OPT21", port 2 "OPT90": OPT90 is a KVM-only server. No 3D record (LIVE-kvm2).
+#   KVM 03    Rack-03, unreachable and never read (its port names are unknown: a move preview lists it as unchecked).
+#   OPT96     unplaced: only an empty rack override names it.
+#   OPT74     removed (PDU 07 outlet 4 still says OPT74), with log entries; OPT98 removed and its outlet relabelled since
+#             (PDU 06 outlet 4 says OPT64 now), so /locations has no row for it.
+#   PDU 04    in maintenance (every outlet off).
+#   PDU-Rack-08  pdu8, Rack-08, no outlet count, no labels, unreachable; a notified device-api alert and its mail. It is
+#             the only Lab Manager PDU that links to a lab-data.json record (ITEM-0040, by name).
+#   Monitors  OPT11 has 60 checks and two closed incidents; optn85 is monitor-only (down, never up); OPT300 is a
+#             computer unit on Rack-03 floor 2 with a monitor (badge "Unit"); "Lab printer" is a non-server target.
+#   Units     "Old NIC" on Rack-04 floor 3, last seen 40 days ago; rack "Rack-09" exists only as an empty unit list.
+#   lab-data.json is the unchanged copy: its PDU / KVM ids do not match Lab Manager's (the mismatch case).
+ONE_PLACE_PDU_LABELS = {'pdu5': {'1': 'OPT51', '2': 'Spare', '3': 'OPT53 (PSU1)', '4': 'OPT53 (PSU2)'}}
+ONE_PLACE_KVMS = {'kvm2': {'name': 'KVM 02', 'rack': 'Rack-02', 'labels': {'1': 'OPT21', '2': 'OPT90'}, 'reachable': True},
+                  'kvm3': {'name': 'KVM 03', 'rack': 'Rack-03', 'labels': {'1': 'OPT31'}, 'reachable': False}}
+
+def iso_ago(seconds):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(time.time() - seconds, timezone.utc).isoformat()
+
+if one_place:
+    items['Rack-03'].append({'id': 'u-pc300', 'name': 'OPT300', 'type': 'computer', 'u': 2, 'notes': 'Fixture: a computer unit with a ping monitor'})
+    items['Rack-04'].append({'id': 'u-old-nic', 'name': 'Old NIC', 'type': 'other', 'u': 3, 'serial_number': 'OLD-NIC-001',
+                             'last_seen_at': iso_ago(40 * 86400), 'tracking_history': [{'at': iso_ago(40 * 86400), 'action': 'scanned', 'from': None, 'to': 'Rack-04 · floor 3', 'note': ''}]})
+    items['Rack-05'].append({'id': 'u-tray53', 'name': 'Tray 53', 'type': 'other', 'u': 3, 'serial_number': 'TRAY-053'})
+    items['Rack-09'] = []
+    inventory_store.ITEMS_FILE.write_text(json.dumps(items))
+    main._OPT_OWNERS_FILE.write_text(json.dumps({'opt11': 'Fixture owner', 'opt21': 'Hardware team',
+                                                 'opt53 (psu1)': 'Alice Feed', 'opt53 (psu2)': 'Bob Feed'}))
+    (data / 'rack_slots.json').write_text(json.dumps({'Rack-05': {'opt51': 1, 'opt53 (psu1)': 3, 'opt53 (psu2)': 3},
+                                                      'Rack-06': {'opt61': 1, 'opt62': 1, 'opt63': 2, 'opt64': 3}}))
+    (data / 'rack_overrides.json').write_text(json.dumps({'opt96': ''}))
+    (data / 'switch_assignments.json').write_text(json.dumps({'opt11': {'switch': 'SW-01', 'port': '1'},
+        'opt53 (psu1)': {'switch': 'SW-05', 'port': '3'}, 'opt53 (psu2)': {'switch': 'SW-05', 'port': '4'}}))
+    removed_at = time.time() - 3 * 86400
+    port = lambda dev, name, n, label: {'device_id': dev, 'device_name': name, 'kind': 'pdu', 'port': str(n), 'label': label}
+    (data / 'removed_servers.json').write_text(json.dumps({
+        'servers': {
+            'opt74': {'key': 'opt74', 'name': 'OPT74', 'removed_at': removed_at, 'removed_by': 'admin', 'reason': 'Fixture: the machine left the lab',
+                      'ports': [port('pdu7', 'PDU 07', 4, 'OPT74')], 'ports_ids': ['pdu7:4'], 'position': {'rack': 'Rack-07', 'slot': None},
+                      'cleaned': {'layout': 0, 'pinned': 0, 'owner': None}, 'monitor': {'id': 't74', 'was_enabled': True}},
+            'opt98': {'key': 'opt98', 'name': 'OPT98', 'removed_at': removed_at - 86400, 'removed_by': 'admin', 'reason': 'Fixture: relabelled since',
+                      'ports': [port('pdu6', 'PDU 06', 4, 'OPT98')], 'ports_ids': ['pdu6:4'], 'position': {'rack': 'Rack-06', 'slot': 4},
+                      'cleaned': {'layout': 1, 'pinned': 0, 'owner': None}, 'monitor': None},
+        },
+        'log': [
+            {'at': removed_at - 86400, 'action': 'removed', 'key': 'opt98', 'name': 'OPT98', 'by': 'admin', 'reason': 'Fixture: relabelled since'},
+            {'at': removed_at - 7200, 'action': 'removed', 'key': 'opt74', 'name': 'OPT74', 'by': 'admin', 'reason': 'First removal'},
+            {'at': removed_at - 3600, 'action': 'restored', 'key': 'opt74', 'name': 'OPT74', 'by': 'admin', 'reason': ''},
+            {'at': removed_at, 'action': 'removed', 'key': 'opt74', 'name': 'OPT74', 'by': 'admin', 'reason': 'Fixture: the machine left the lab'},
+        ]}))
+    for i in range(1, 5):
+        power_states[('192.0.2.4', i)] = 'off'   # PDU 04 is in maintenance: its outlets were switched off
+
 async def pdu_status(device_id, dev):
     n = int(device_id.removeprefix('pdu')) if device_id.startswith('pdu') else 1
+    if one_place and device_id == 'pdu8':   # PDU-Rack-08 never answers
+        return PduStatus(device_id=device_id, reachable=False, outlets=[], error='Fixture: PDU unavailable')
     online = n != 7
     def label(i):
+        if one_place and not fake_names:   # the labels the fixture saved on the PDU (PDU 05's Spare and PSU feeds)
+            return json.loads(dev.labels_json or '{}').get(str(i)) or f'OPT{n}{i}'
         if not fake_names:
             return f'OPT{n}{i}'
         # As the real status read: a saved site label wins, else the name stored on the (fake) PDU or its default.
@@ -82,6 +153,11 @@ kvm_down = os.environ.get('DCIM_FIXTURE_KVM_DOWN') == '1'
 async def kvm_status(device_id, dev):
     if kvm_down:
         return KvmStatus(device_id=device_id, reachable=False, error='Fixture: KVM unavailable')
+    if one_place and device_id in ONE_PLACE_KVMS:
+        if not ONE_PLACE_KVMS[device_id]['reachable']:
+            return KvmStatus(device_id=device_id, reachable=False, error='Fixture: KVM unavailable')
+        saved = json.loads(dev.labels_json or '{}')
+        return KvmStatus(device_id=device_id, reachable=True, ports=[KvmPort(number=i, label=saved.get(str(i)) or f'Port {i}', status='idle', status_source='live') for i in range(1, 5)])
     return KvmStatus(device_id=device_id, reachable=True, ports=[KvmPort(number=i,label=f'OPT1{i}',status='active' if i==1 else 'idle',status_source='live') for i in range(1,5)])
 
 async def fake_power(self, number, action):
@@ -277,6 +353,66 @@ async def preview_hardware_boundary(request, call_next):
         return JSONResponse({'detail':'Hardware access is disabled in the isolated preview.'}, status_code=409)
     return await call_next(request)
 
+async def seed_one_place():
+    """The database part of DCIM_FIXTURE_ONE_PLACE=1 (see ONE_PLACE above)."""
+    now = time.time()
+    async with AsyncSessionLocal() as db:
+        for device_id, labels in ONE_PLACE_PDU_LABELS.items():
+            dev = await db.get(Device, device_id)
+            dev.labels_json = json.dumps(labels)
+            snapshot = await db.get(MonitorDeviceSnapshot, device_id)
+            snapshot.ports_json = json.dumps([o.model_dump() for o in (await pdu_status(device_id, dev)).outlets])
+        db.add(Device(id='pdu8', name='PDU-Rack-08', kind='pdu', model='PX4', ip='192.0.2.8', rack='Rack-08', port_count=0, labels_json='{}'))
+        db.add(MonitorDeviceSnapshot(device_id='pdu8', kind='pdu', ip='192.0.2.8', checked_at=now - 600, reachable=False, ports_json='[]'))
+        db.add(AlertCondition(key='device-api:pdu8', configuration=json.dumps(['pdu', '192.0.2.8', 'fixture']), started_at=now - 7200,
+                              checked_at=now - 600, notified=True))
+        db.add(AlertEmail(id='fixture-pdu8-alert', condition_key='device-api:pdu8', created_at=now - 5400, recipient='lab-alerts@example.test',
+                          subject='[DCIM alert] PDU-Rack-08: PDU API availability', body='Fixture: PDU-Rack-08 does not answer its API.',
+                          attempts=1, next_attempt_at=now - 5400, sent_at=now - 5390))
+        for device_id, kvm in ONE_PLACE_KVMS.items():
+            n = device_id.removeprefix('kvm')
+            db.add(Device(id=device_id, name=kvm['name'], kind='kvm', model='KX III', ip=f'192.0.2.2{n}', rack=kvm['rack'], port_count=4,
+                          labels_json=json.dumps(kvm['labels'])))
+            if kvm['reachable']:
+                db.add(MonitorDeviceSnapshot(device_id=device_id, kind='kvm', ip=f'192.0.2.2{n}', checked_at=now, reachable=True,
+                                             ports_json=json.dumps([{'number': int(p), 'label': l, 'status': 'idle', 'status_source': 'live'} for p, l in kvm['labels'].items()])))
+        db.add(PduMaintenance(device_id='pdu4', started_at=now - 1800, started_by='admin', reason='Fixture: rewiring Rack-04',
+                              outlets_off_json=json.dumps([1, 2, 3, 4]), failed_json='[]'))
+        removed = await db.get(PingTarget, 't74')
+        removed.enabled, removed.revision = False, removed.revision + 1   # paused by the removal
+        for gone in ('t52', 't54'):   # OPT52 / OPT54 are not on PDU 05 any more (Spare, PSU2): no monitor either
+            await db.delete(await db.get(PingTarget, gone))
+        # OPT11: 60 checks (5 minutes apart, two failures) and two closed incidents.
+        for k in range(60):
+            at = now - (60 - k) * 300
+            down = k in (20, 21)
+            db.add(PingSample(target_id='t11', host='opt11', checked_at=at, status='down' if down else 'up', rtt_ms=None if down else 1.1 + k % 5 / 10,
+                              detail='Fixture: no reply' if down else ''))
+        db.add(PingIncident(target_id='t11', host='opt11', previous_up_at=now - 41 * 300, first_failed_at=now - 40 * 300,
+                            last_failed_at=now - 39 * 300, ended_at=now - 38 * 300, end_reason='recovered', failed_checks=2))
+        db.add(PingIncident(target_id='t11', host='opt11', previous_up_at=now - 3 * 86400, first_failed_at=now - 3 * 86400 + 300,
+                            last_failed_at=now - 3 * 86400 + 900, ended_at=now - 3 * 86400 + 1200, end_reason='recovered', failed_checks=3))
+        db.add(PingTarget(id='tn85', source_key='server:optn85', name='optn85', host='optn85', rack='', checked_at=now, status='down',
+                          last_up_at=None, rtt_ms=None, detail='Fixture: no reply'))
+        db.add(PingTarget(id='t300', source_key='server:opt300', name='OPT300', host='opt300', rack='Rack-03', checked_at=now, status='up',
+                          last_up_at=now, rtt_ms=0.9))
+        db.add(PingTarget(id='tdev1', source_key='device:lab-printer', name='Lab printer', host='lab-printer', rack='', source='manual',
+                          checked_at=now, status='up', last_up_at=now, rtt_ms=2.5))
+        await db.commit()
+
+async def seed_pxe_hold():
+    """FIXTURE_PXE_HOLD=1: a remote install that holds OPT21 (active_key), KVM 02 port 1 and PDU 02 outlet 1. It sits in
+    install_started with a lease far in the future, so the PXE runner never resumes, fails or finishes it."""
+    now = time.time()
+    async with AsyncSessionLocal() as db:
+        db.add(PxeJob(id='fixture-pxe-hold', computer_key='opt21', computer_name='OPT21', kvm_device_id='kvm2', kvm_port=1,
+                      pdu_targets_json=json.dumps([{'device_id': 'pdu2', 'device_name': 'PDU 02', 'outlet': 1}]),
+                      reboot_method='pdu_cycle', driver='simulated', sim_scenario='happy', state='install_started', state_entered_at=now,
+                      deadline_at=now + 4 * 3600, version=1, install_sent_at=now, install_may_have_started=True,
+                      active_key='opt21', active_port_key='kvm2:1', lease_owner='fixture-hold', lease_until=now + 30 * 86400,
+                      created_by='admin', created_at=now, updated_at=now))
+        await db.commit()
+
 @asynccontextmanager
 async def lifespan(app):
     await init_db()
@@ -304,6 +440,10 @@ async def lifespan(app):
         db.add(Device(id='kvm1',name='KVM 01',kind='kvm',model='KX III',ip='192.0.2.20',rack='Rack-01',port_count=4,labels_json=json.dumps({'1':'OPT11'})))
         db.add(MonitorDeviceSnapshot(device_id='kvm1',kind='kvm',ip='192.0.2.20',checked_at=time.time(),reachable=True,ports_json=json.dumps([{'number':1,'label':'OPT11','status':'active','status_source':'live'}])))
         await db.commit()
+    if one_place:
+        await seed_one_place()
+    if pxe_hold:
+        await seed_pxe_hold()
     if fake_names:   # the fake devices start with the seeded site names stored on them
         async with AsyncSessionLocal() as db:
             for dev in (await db.execute(select(Device).where(Device.kind.in_(('pdu', 'kvm'))))).scalars():

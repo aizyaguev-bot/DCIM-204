@@ -17,6 +17,16 @@ export const isStorageRack = rack => rack != null && storageRacks.has(rack);
 // The storage racks among rack stats ({ rack, rackType }): the ones whose type is "storage", and Main storage.
 export const storageRackNames = rackStats => (rackStats || []).filter(rs => rs?.rackType === "storage" || rs?.rack === MAIN_STORAGE).map(rs => rs.rack);
 
+// The storage racks from the device list alone (the lab windows set them when Racks was never opened): Main storage,
+// and every rack whose first PDU or rack device (in list order) has model "Storage", DcimView rackStats' rule.
+export function storageRacksFromDevices(devices) {
+  const first = new Map();
+  for (const d of devices || []) {
+    if (d && d.rack && (d.kind === "pdu" || d.kind === "rack") && !first.has(d.rack)) first.set(d.rack, d);
+  }
+  return [MAIN_STORAGE, ...[...first.values()].filter(d => d.model === "Storage").map(d => d.rack)];
+}
+
 // A storage rack has shelves; every other rack has floors.
 export const rackHasFloors = rack => !isStorageRack(rack);
 

@@ -922,6 +922,45 @@ async def test_real_planner_apply_refuses_a_plan_other_than_the_confirmed_one(la
     assert locations.plan_of(applied) == cleared and await lab_state(lab) != initial
 
 
+@needs_planner
+async def test_the_pinned_move_plan_carries_the_switch_ports_and_a_switch_change_since_is_drift(lab):
+    body = {"server": "optn45", "target_server": "optn44", "swap": True}
+    async with lab.sessions() as db:
+        pinned = locations.plan_of(await devices.plan_move(db, body))
+        cleared = locations.plan_of(await devices.plan_clear(db, "optn44"))
+    # move-server's "switch" is part of its plan_revision, so the pin carries it (a clear writes no layout file).
+    assert pinned["switch"] == [
+        {"server": "OPTN45", "before": {"switch": "SW2", "port": "3"}, "after": {"switch": "SW1", "port": "12"}},
+        {"server": "OPTN44", "before": {"switch": "SW1", "port": "12"}, "after": {"switch": "SW2", "port": "3"}}]
+    assert "switch" not in cleared
+    async with signed_in(lab.app) as client:
+        proposal = await propose(client, {"kind": "server_swap", "server": "optn45", "target_server": "optn44"})
+    # Another session changes OPTN44's switch port: the swap the user confirmed is no longer the one that would run.
+    (lab.folder / "switch_assignments.json").write_text(json.dumps(
+        {**LAYOUT["switch_assignments.json"], "optn44": {"switch": "SW9", "port": "1"}}))
+    before = await lab_state(lab)
+    async with signed_in(lab.app) as client:
+        response = await client.post(f"{PROPOSALS}/{proposal['id']}/execute", json={})
+        assert response.status_code == 409 and response.json()["code"] == "drift", response.text
+    assert await lab_state(lab) == before
+
+
+@needs_planner
+async def test_the_assistant_never_moves_swaps_with_or_clears_a_removed_server(lab):
+    (lab.folder / "removed_servers.json").write_text(json.dumps(
+        {"servers": {"web-1": {"key": "web-1", "name": "web-1", "removed_at": 1.0, "ports_ids": ["pdu-a:3"]}},
+         "log": []}))
+    before = await lab_state(lab)
+    async with signed_in(lab.app) as client:
+        for request in ({"kind": "server_clear", "server": "web-1"},
+                        {"kind": "server_swap", "server": "optn44", "target_server": "web-1"},
+                        {"kind": "server_move", "server": "web-1", "target_ports": [{"device": "PDU-B", "port": "6"}]}):
+            response = await client.post(PROPOSALS, json=request)
+            assert response.status_code == 409 and response.json()["code"] == "invalid", response.text
+            assert "web-1 was removed from the lab" in response.text
+    assert await lab_state(lab) == before
+
+
 async def test_an_applied_location_change_counts_server_places_for_live_sync(app):
     async with signed_in(app) as client:
         proposal = await propose(client)
@@ -946,3 +985,25 @@ def test_an_assistant_move_says_which_kvm_ports_it_could_not_check():
     assert "KVM 01" in locations._done_summary(shown)
     plain = locations.plan_of({"changes": [], "positions": [], "unplaced": [], "unchecked": []})
     assert "unchecked" not in plain and "unchecked" not in locations._shown(plain)
+
+
+def test_the_saved_summary_points_to_the_server_window_not_the_locations_page():
+    assert "Locations" not in locations._SUMMARY_SAVED and "חלון" in locations._SUMMARY_SAVED
+
+
+@needs_planner
+async def test_an_assistant_clear_pins_the_servers_drawn_after_the_cleared_one_as_its_preview_said(lab):
+    async with signed_in(lab.app, "admin") as admin:
+        response = await admin.patch("/api/devices/direct-label",
+                                     json={"device_id": "pdu-a", "port": "4", "label": "web-2"})
+        assert response.status_code == 200, response.text
+    async with lab.sessions() as db:
+        cleared = locations.plan_of(await devices.plan_clear(db, "web-1"))
+    # web-1 and web-2 have automatic U numbers 1 and 2 in Rack-01: the pin keeps web-2 on floor 2 (part of the plan).
+    assert cleared["pins"] == [{"rack": "Rack-01", "id": "web-2", "slot": 2}]
+    async with signed_in(lab.app) as client:
+        proposal = await propose(client, {"kind": "server_clear", "server": "web-1"})
+        response = await client.post(f"{PROPOSALS}/{proposal['id']}/execute", json={})
+        assert response.status_code == 200 and response.json()["status"] == "succeeded", response.text
+    slots = json.loads((lab.folder / "rack_slots.json").read_text(encoding="utf-8"))
+    assert slots == {**LAYOUT["rack_slots.json"], "Rack-01": {**LAYOUT["rack_slots.json"]["Rack-01"], "web-2": 2}}

@@ -6,7 +6,7 @@ and every page hides it; its DCIM-side data that would otherwise dangle is clean
 written to a PDU or KVM: the outlet label stays as it is.
 
 THE KEY RULE. A removed server is identified by its server identity (ping_monitor.server_identity: "OPTN44 (PSU2)" ->
-"optn44"), the same key the owners, ping monitors, SSH and Locations use, and never by a prefix or a substring: removing
+"optn44"), the same key the owners, ping monitors, SSH and /locations use, and never by a prefix or a substring: removing
 "optn44" never hides "optn4" or "optn440". A renamed or relabelled server has another identity, so it is a different
 server and is not hidden. The record also keeps the PDU/KVM ports that carried the name at removal time, and it hides
 the server only while every port that carries that identity is one of them. When the same name is written on another
@@ -21,6 +21,8 @@ What a removal cleans (and Restore does not bring back; the UI says so):
 What it pauses (and Restore resumes when it was running): its ping monitor. The monitor and its history are kept;
 while the server is removed no monitor is created for it automatically.
 Never touched: equipment units (rack items) on its shelf stay in the rack, SSH settings, PDU/KVM labels, devices.
+While it is removed, a server is never moved, swapped with or cleared (routers/devices.py move-server and clear-server
+answer 409 until it is restored), and GET /api/devices/locations marks its row "removed".
 
 Keys on the wire: a key can hold any character a label can ("optn44/45", "switch 1/2"), so restore takes it in the
 body (POST /api/removed-servers/restore {key}), never in the URL path, where a "/" would not match the route.
@@ -62,7 +64,7 @@ MAX_NAME = 200
 
 NOT_A_SERVER = "{} is not a server name."
 UNKNOWN = "No server named {} is in the lab."
-ALREADY = "{} is already removed. Restore it from Admin → Removed servers."
+ALREADY = "{} is already removed. Restore it from the server window (Inventory › Removed)."
 NOT_REMOVED = "This server is not in the removed list any more. Reload the list."
 PLAN_CHANGED = "The server or the rack layout changed since the preview. Nothing was removed; preview again."
 RELOAD = "Reload the removed servers list before saving."

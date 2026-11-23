@@ -15,11 +15,16 @@ function slice(start, end) {
 }
 const fn = (names, source, result) => new Function(...names, `${source}\nreturn ${result};`);
 
-test("detail pages remount for each device so a label draft never carries over", () => {
-  assert.match(app, /<PduDetail key=\{`pdu:\$\{view\.id\}`\}/);
-  assert.match(app, /<KvmDetail key=\{`kvm:\$\{view\.id\}`\}/);
-  assert.match(app, /<RemovedDevice /);
-  assert.match(app, /This device was removed\./);
+test("device windows remount for each device so a label draft never carries over", () => {
+  // PDU and KVM details are device windows (?open=dev:<id>) now: App renders no detail page of its own.
+  const read = path => readFileSync(new URL(path, import.meta.url), "utf8");
+  assert.doesNotMatch(app, /<PduDetail |<KvmDetail /);
+  assert.match(app, /labWindowRef\.current\?\.open\(\{ kind: "dev", id: newView\.id \}\)/);
+  assert.match(read("../devices/PduWindow.jsx"), /<PduDetail key=\{`pdu:\$\{device\.id\}`\}/);
+  assert.match(read("../devices/KvmWindow.jsx"), /<KvmDetail key=\{`kvm:\$\{device\.id\}`\}/);
+  // One window component per window, keyed by kind:id, so another device starts a fresh one.
+  assert.match(read("../window/LabWindowProvider.jsx"), /<Window key=\{windowId\(target\)\} target=\{target\} onClose=\{onClose\}\/>/);
+  assert.match(read("../devices/DeviceWindow.jsx"), /This device was removed\./);
 });
 
 test("the frozen navigate and onPop regions know nothing about racks or consoles", () => {

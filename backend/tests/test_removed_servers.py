@@ -94,6 +94,7 @@ async def lab(tmp_path, monkeypatch):
     app.add_middleware(accounts.AccountAccess)
     app.include_router(accounts.router)
     app.include_router(removed_servers.router)
+    app.include_router(devices.router)   # /locations, move-server and clear-server see removed servers
 
     async def dependency():
         async with factory() as db:
@@ -320,8 +321,33 @@ async def test_names_that_are_no_server_unknown_or_already_removed(lab):
                                                             "dry_run": True})).status_code == 400
         assert (await remove(c)).status_code == 200
         r = await c.post("/api/removed-servers", json={"name": "optn45 (psu2)", "dry_run": True})
-        assert r.status_code == 409 and "already removed" in r.json()["detail"]
+        assert r.status_code == 409 and r.json()["detail"] == (
+            "OPTN45 is already removed. Restore it from the server window (Inventory › Removed).")
         assert tag != await etag(c)
+
+
+async def test_a_removed_server_is_marked_on_locations_and_never_moved_or_cleared_until_restored(lab):
+    async with signed_in(lab) as c:
+        rows = {s["key"]: s for s in (await c.get("/api/devices/locations")).json()["servers"]}
+        assert (rows["optn45"]["removed"], rows["optn45"]["drawn"]) == (False, {"rack": "Rack-01", "u": 2, "auto": False})
+        assert (await remove(c)).status_code == 200
+        rows = {s["key"]: s for s in (await c.get("/api/devices/locations")).json()["servers"]}
+        assert (rows["optn45"]["removed"], rows["optn45"]["drawn"], rows["optn44"]["removed"]) == (True, None, False)
+        state = await db_state(lab)
+        text = "OPTN45 was removed from the lab. Restore it first (Inventory › Removed)."
+        for path, body in (("move-server", {"server": "optn45", "target_server": "optn44"}),
+                           ("move-server", {"server": "optn44", "target_server": "OPTN45 (PSU2)", "swap": False}),
+                           ("move-server", {"server": "optn45", "target_ports": [{"device_id": "pdu-a", "port": "6"}]}),
+                           ("clear-server", {"server": "optn45"})):
+            for dry_run in (True, False):
+                r = await c.post(f"/api/devices/{path}", json={**body, "dry_run": dry_run})
+                assert r.status_code == 409 and r.json()["detail"] == text, (path, body, r.text)
+        assert await db_state(lab) == state
+        r = await c.post("/api/removed-servers/restore", json={"key": "optn45"}, headers={"If-Match": await etag(c)})
+        assert r.status_code == 200, r.text
+        rows = {s["key"]: s for s in (await c.get("/api/devices/locations")).json()["servers"]}
+        assert rows["optn45"]["removed"] is False
+        assert (await c.post("/api/devices/clear-server", json={"server": "optn45", "dry_run": True})).status_code == 200
 
 
 async def test_removal_is_by_identity_and_never_hides_a_similar_or_renamed_server(lab):

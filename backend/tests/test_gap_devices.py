@@ -100,6 +100,12 @@ async def lab(client, db_session, tmp_path, monkeypatch):
     return SimpleNamespace(client=client, db=db_session, folder=tmp_path)
 
 
+async def add_rack(lab, rack):
+    """A rack device, so a move to ports may name `rack` (move-server refuses a rack the lab does not know)."""
+    lab.db.add(Device(id="rack-" + rack.lower(), name=rack, kind="rack", ip="192.0.2.15", rack=rack))
+    await lab.db.commit()
+
+
 async def move(lab, **body):
     return await lab.client.post("/api/devices/move-server", json=body)
 
@@ -274,7 +280,7 @@ async def test_rename_opt_validates_both_names(lab, body, detail):
 
 
 @pytest.mark.parametrize("new_name,detail", [
-    ("OPTN45", "OPTN45 already exists — use Locations to swap or move"),                    # ports + monitor
+    ("OPTN45", "OPTN45 already exists — open it and use Swap with or Move."),               # ports + monitor
     ("optn99", "This server name already has an owner. Choose a different name."),            # owner row
     ("optn98 (PSU1)", "This server name already has an owner. Choose a different name."),     # legacy owners file
 ])
@@ -414,6 +420,7 @@ async def test_a_server_known_only_by_its_monitor_needs_a_rack_for_a_slot_and_ca
 
 
 async def test_moving_to_ports_with_only_a_rack_drops_the_old_slot_and_keeps_the_switch_port(lab):
+    await add_rack(lab, "Rack-05")
     r = await move(lab, server="optn44", target_ports=[{"device_id": "pdu-a", "port": "4"}], target_rack="  Rack-05  ")
     assert r.status_code == 200, r.text
     assert r.json()["positions"] == [
@@ -541,6 +548,7 @@ async def test_a_layout_file_corrupted_during_the_commit_refuses_the_move_and_pu
 
 
 async def test_a_concurrent_save_that_makes_the_move_impossible_is_reported_as_a_layout_change(lab, monkeypatch):
+    await add_rack(lab, "Rack-05")
     path, real_commit, commits = lab.folder / "rack_slots.json", lab.db.commit, []
     other = {**LAYOUT["rack_slots.json"], "Rack-05": ["kept"]}
 

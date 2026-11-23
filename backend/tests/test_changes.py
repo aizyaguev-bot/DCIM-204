@@ -210,6 +210,8 @@ WRITE_DOMAINS = {
     "PATCH /api/devices/direct-label": SERVER_FOLLOWS, "POST /api/devices/{device_id}/device-names/push": SERVER_FOLLOWS,
     "POST /api/devices/rename-opt": {"devices", "layout", "owners", "monitoring"},
     "POST /api/devices/move-server": {"devices", "layout", "monitoring"},
+    # Clearing a server's location rewrites only port labels (its rack layout entries are kept).
+    "POST /api/devices/clear-server": SERVER_FOLLOWS,
     "POST /api/kvms/{device_id}/ports/{port}/mark-in-use": {"devices"},
     "POST /api/kvms/{device_id}/ports/{port}/mark-free": {"devices"}, "POST /api/kvms/{device_id}/mark-free": {"devices"},
     # Removed servers: their rack entries, owner and monitor change with them.
@@ -432,6 +434,32 @@ async def test_previews_count_nothing_and_the_applied_move_counts_server_places(
                                                               "rack_items": {"data": {"Rack-01": []}, "if_match": etag}})
     assert units.status_code == 200, units.text
     assert moved(after, changes.current()) == {"devices", "layout", "monitoring", "inventory"}
+
+
+async def test_a_cleared_server_counts_devices_and_monitoring_and_its_preview_counts_nothing(site, db_session):
+    # OPT11..OPT13 have automatic U numbers 1..3 in Rack-01.
+    db_session.add(Device(id="pdu1", name="PDU-1", kind="pdu", ip="192.0.2.1", rack="Rack-01", port_count=8,
+                          labels_json=json.dumps({"1": "OPT11", "2": "OPT12", "3": "OPT13"})))
+    await db_session.commit()
+    preview = await site.post("/api/devices/clear-server", json={"server": "OPT13", "dry_run": True})
+    assert preview.status_code == 200 and "pins" not in preview.json(), preview.text
+    assert changes.current()["rev"] == 0
+    applied = await site.post("/api/devices/clear-server",
+                              json={"server": "OPT13", "plan_revision": preview.json()["plan_revision"]})
+    assert applied.status_code == 200, applied.text
+    after = changes.current()
+    assert after["rev"] == 1 and moved(changes._empty(), after) == {"devices", "monitoring"}
+    # A stale preview is refused and counts nothing.
+    stale = await site.post("/api/devices/clear-server",
+                            json={"server": "OPT12", "plan_revision": preview.json()["plan_revision"]})
+    assert stale.status_code == 409 and changes.current()["rev"] == 1
+    # Clearing OPT11 pins OPT12 at U2 (rack_slots.json), so the layout counts too.
+    preview = await site.post("/api/devices/clear-server", json={"server": "OPT11", "dry_run": True})
+    assert preview.json()["pins"] == [{"rack": "Rack-01", "id": "opt12", "slot": 2}], preview.text
+    applied = await site.post("/api/devices/clear-server",
+                              json={"server": "OPT11", "plan_revision": preview.json()["plan_revision"]})
+    assert applied.status_code == 200, applied.text
+    assert changes.current()["rev"] == 2 and moved(after, changes.current()) == {"devices", "monitoring", "layout"}
 
 
 async def test_a_failed_count_never_fails_the_write(site, monkeypatch, caplog):
