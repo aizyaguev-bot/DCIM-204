@@ -1077,6 +1077,7 @@ def test_prune_is_refused_for_root_and_outside_linux(ctx, monkeypatch, capsys):
 # ---------------------------------------------------------------- backup retention
 
 KEEP = vm.KEEP_BACKUPS
+MIB = 1024 * 1024
 
 
 def installer_backup(ctx, age, commit=None, size=0):
@@ -1115,6 +1116,7 @@ def present(folders):
 
 def test_retention_keeps_the_newest_eight_and_recent_ones_up_to_the_cap(ctx):
     assert (vm.KEEP_BACKUPS, vm.MAX_BACKUPS, vm.RECENT_BACKUPS) == (8, 12, timedelta(days=7))
+    assert (vm.MIN_BACKUPS, vm.INSTALL_MARGIN, vm.MIN_FREE) == (3, 512 * MIB, 1024 * MIB)
     recent = [installer_backup(ctx, timedelta(hours=1 + 12 * index)) for index in range(10)]  # all younger than 7 days
     old = [installer_backup(ctx, timedelta(days=10 + index)) for index in range(5)]
     crontabs = [crontab_backup(ctx, timedelta(days=20 + index)) for index in range(10)]
@@ -1127,16 +1129,18 @@ def test_retention_keeps_the_newest_eight_and_recent_ones_up_to_the_cap(ctx):
     burst = [installer_backup(ctx, timedelta(minutes=10 + index)) for index in range(15)]
     vm.prune_backups(ctx.root, now=T0)
     assert present(burst + recent) == [True] * vm.MAX_BACKUPS + [False] * 13
-    # Low on space, only the newest eight of each kind stay.
-    vm.prune_backups(ctx.root, low_disk=True, now=T0)
-    assert present(burst) == [True] * KEEP + [False] * 7 and present(crontabs[:KEEP]) == [True] * KEEP
+    # Short of space, installer backups go oldest first down to the newest three; crontab backups keep the normal rule.
+    result = vm.prune_backups(ctx.root, need=100 * 1024 ** 3, now=T0)  # the fixture's disk has only 50 GiB free
+    assert present(burst) == [True] * vm.MIN_BACKUPS + [False] * 12 and present(crontabs[:KEEP]) == [True] * KEEP
+    assert result["for_space"] == vm.MAX_BACKUPS - vm.MIN_BACKUPS and result["failed"] == []
 
 
 def test_retention_keeps_up_to_eight_old_backups(ctx):
     folders = [installer_backup(ctx, timedelta(days=60 + index)) for index in range(KEEP)]
-    assert vm.prune_backups(ctx.root, low_disk=True, now=T0)["deleted"] == []
+    assert vm.prune_backups(ctx.root, need=vm.MIN_FREE, now=T0)["deleted"] == []  # enough free: no low-disk step
     assert present(folders) == [True] * KEEP
-    assert vm.prune_backups(ctx.root / "missing", now=T0) == {"deleted": [], "failed": [], "kept": 0}  # no folder
+    assert vm.prune_backups(ctx.root / "missing", need=vm.MIN_FREE, now=T0) == {  # no folder
+        "deleted": [], "failed": [], "kept": 0, "for_space": 0, "free": None}
 
 
 def test_retention_never_touches_foreign_names_files_links_or_auto_update(ctx, tmp_path):
@@ -1217,20 +1221,143 @@ def test_run_prunes_before_and_after_installing_but_never_the_deployed_or_target
     assert main(ctx, "run") == 0 and capsys.readouterr().out == ""  # up to date: nothing to prune, nothing printed
 
 
-def test_low_disk_prunes_recent_extras_and_still_pauses_when_that_is_not_enough(ctx, capsys, monkeypatch):
-    monkeypatch.setattr(vm, "free_bytes", lambda root: 100 * 1024 * 1024)
+def test_low_disk_prunes_down_to_the_newest_three_and_pauses_only_when_that_is_not_enough(ctx, capsys, monkeypatch):
+    monkeypatch.setattr(vm, "free_bytes", lambda root: 100 * MIB)  # deleting never frees enough
     recent = [installer_backup(ctx, timedelta(hours=1 + index)) for index in range(KEEP + 3)]  # under the cap
+    floor, gone = vm.MIN_BACKUPS, KEEP + 3 - vm.MIN_BACKUPS
     assert main(ctx, "run") == 0
     out = capsys.readouterr().out
-    assert present(recent) == [True] * KEEP + [False] * 3 and "pruned 3 backups" in out
-    assert out.count("paused: less than 1 GiB free") == 1 and out.index("pruned 3") < out.index("paused")
+    assert present(recent) == [True] * floor + [False] * gone
+    assert "pruned 8 backups (0 MiB), 8 for disk space; 100 MiB free" in out
+    oldest_first = recent[floor:][::-1]
+    for older, newer in zip(oldest_first, oldest_first[1:]):
+        assert out.index(older.name) < out.index(newer.name)
+    assert out.count("paused: less than 1 GiB free on the project disk (100 MiB after pruning") == 1
+    assert out.index("pruned 8") < out.index("paused")
     assert ctx.fake.installers() == [] and ctx.downloads == [] and state(ctx)["last_result"] == "low-disk"
     later(ctx, minutes=2)
     assert main(ctx, "run") == 0 and capsys.readouterr().out == ""  # still paused, quietly
-    assert present(recent) == [True] * KEEP + [False] * 3 and state(ctx)["last_result"] == "low-disk"
+    assert present(recent) == [True] * floor + [False] * gone and state(ctx)["last_result"] == "low-disk"
     assert main(ctx, "status") == 0
     text = capsys.readouterr().out
-    assert "paused: low disk (less than 1 GiB free)" in text and "last backup prune: pruned 3 backups" in text
+    assert "paused: low disk (less than 1 GiB free)" in text and "last backup prune: pruned 8 backups" in text
+    monkeypatch.setattr(vm, "free_bytes", lambda root: 2 * 1024 ** 3)  # space freed by hand: the next run installs
+    later(ctx, minutes=2)
+    assert main(ctx, "run") == 0 and state(ctx)["deployed_commit"] == NEW
+    assert present(recent) == [True] * floor + [False] * gone
+
+
+def virtual_disk(ctx, monkeypatch, free, sizes):
+    """Backup folders of the given sizes (MiB by folder name) on a disk with `free` MiB free while they all exist.
+    A name added to the returned dict later counts as soon as that folder exists (a new installer backup)."""
+    parent = ctx.root / ".monitor-backups"
+    total = (free + sum(sizes.values())) * MIB
+    monkeypatch.setattr(vm, "folder_size", lambda path: sizes.get(Path(path).name, 0) * MIB)
+    monkeypatch.setattr(vm, "free_bytes",
+                        lambda root: total - sum(size for name, size in sizes.items() if (parent / name).is_dir()) * MIB)
+    return sizes
+
+
+def test_1020_mib_free_with_ten_backups_prunes_only_until_1_gib_and_installs(ctx, capsys, monkeypatch):
+    # The VM in November 2026: ten installer backups of 70-84 MiB and 1020 MiB free. The two oldest belong to the
+    # deployed and the new commit, so the old low-disk rule (keep the newest 8) could delete nothing and every release
+    # waited until backups were deleted by hand.
+    commits = [OLD] + [None] * 7 + [NEW, OLD]
+    folders = [installer_backup(ctx, timedelta(days=1 + index), commit) for index, commit in enumerate(commits)]
+    sizes = virtual_disk(ctx, monkeypatch, 1020, {folder.name: size for folder, size in
+                                                  zip(folders, [84, 82, 80, 79, 77, 76, 74, 72, 71, 70])})
+    assert vm.prune_plan(vm.backup_folders(vm.backups_parent(ctx.root)), T0, {OLD[:7], NEW[:7]},
+                         recent=timedelta(0)) == []  # what the old low-disk rule would have deleted
+    made = []
+
+    def install_writes_a_backup(process):
+        made.append(installer_backup(ctx, timedelta(0), NEW))
+        sizes[made[-1].name] = 85
+
+    ctx.fake.during_wait = install_writes_a_backup
+    assert main(ctx, "run") == 0
+    out = capsys.readouterr().out
+    assert "paused" not in out and "installed " + NEW[:12] in out
+    saved = state(ctx)
+    assert saved["deployed_commit"] == NEW and saved["last_result"] == "installed"
+    # Before: only the oldest unprotected one (72 MiB) went, enough for 1 GiB. After: the new 85 MiB backup took the
+    # disk below 1 GiB again, so the next oldest went too.
+    assert present(folders) == [True] * 6 + [False, False] + [True, True] and present(made) == [True]
+    assert out.index("deleted old backup " + folders[7].name + " (72 MiB)") < out.index("installing " + NEW[:12])
+    assert "pruned 1 backup (72 MiB), 1 for disk space; 1092 MiB free" in out
+    assert out.index("installed " + NEW[:12]) < out.index("deleted old backup " + folders[6].name + " (74 MiB)")
+    assert "pruned 1 backup (74 MiB), 1 for disk space; 1081 MiB free" in out
+    assert out.count("deleted old backup") == 2 and vm.free_bytes(ctx.root) >= vm.MIN_FREE
+    assert main(ctx, "status") == 0
+    assert "last backup prune: pruned 1 backup (74 MiB)" in capsys.readouterr().out
+
+
+def test_low_disk_never_deletes_the_newest_three_or_the_deployed_or_target_backups(ctx, capsys, monkeypatch):
+    monkeypatch.setattr(vm, "free_bytes", lambda root: 100 * MIB)  # never enough
+    newest = [installer_backup(ctx, timedelta(hours=1 + index)) for index in range(vm.MIN_BACKUPS)]
+    deployed = [installer_backup(ctx, timedelta(days=2), OLD), installer_backup(ctx, timedelta(days=30), OLD)]
+    target = installer_backup(ctx, timedelta(days=3), NEW)  # an earlier attempt at the commit being installed
+    others = [installer_backup(ctx, timedelta(days=4, hours=index)) for index in range(4)]
+    crontabs = [crontab_backup(ctx, timedelta(days=50 + index)) for index in range(3)]
+    kept = newest + deployed + [target] + crontabs
+    assert main(ctx, "run") == 0
+    out = capsys.readouterr().out
+    assert present(kept) == [True] * len(kept) and present(others) == [False] * 4
+    assert all(folder.name not in out for folder in kept)
+    assert "pruned 4 backups" in out and "4 for disk space" in out
+    assert out.count("paused: less than 1 GiB free") == 1 and ctx.fake.installers() == []
+
+
+def test_low_disk_manual_prune_keeps_the_deployed_commit_and_an_install_in_progress(ctx, capsys, monkeypatch):
+    monkeypatch.setattr(vm, "free_bytes", lambda root: 100 * MIB)
+    newest = [installer_backup(ctx, timedelta(days=1 + index)) for index in range(vm.MIN_BACKUPS)]
+    deployed = installer_backup(ctx, timedelta(days=20), OLD)
+    installing = installer_backup(ctx, timedelta(days=30), NEWER)
+    others = [installer_backup(ctx, timedelta(days=10 + index)) for index in range(3)]
+    ctx.directory.mkdir(parents=True)
+    vm.save_state(ctx.directory, {"attempt": {"commit": NEWER, "started": vm.stamp(T0)}})
+    assert main(ctx, "prune", "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "would prune 3 backups (0 MiB), 3 for disk space; 100 MiB free" in out and "nothing was deleted" in out
+    assert present(others) == [True] * 3
+    assert main(ctx, "prune") == 0
+    out = capsys.readouterr().out
+    assert present(newest + [deployed, installing]) == [True] * 5 and present(others) == [False] * 3
+    assert "pruned 3 backups (0 MiB), 3 for disk space" in out
+    log = (ctx.directory / "cron.log").read_text(encoding="utf-8")
+    assert all("deleted old backup " + folder.name in log for folder in others)
+
+
+def test_low_disk_counts_what_it_deleted_when_the_disk_reports_freed_space_late(ctx, monkeypatch):
+    # An NFS disk can report freed space late: here free_bytes stays at 1000 MiB whatever is deleted.
+    monkeypatch.setattr(vm, "free_bytes", lambda root: 1000 * MIB)
+    monkeypatch.setattr(vm, "folder_size", lambda path: 80 * MIB)
+    folders = [installer_backup(ctx, timedelta(days=10 + index)) for index in range(KEEP + 2)]
+    # The normal rule's two deletions already make 1 GiB, so nothing more goes, and a dry run plans the same.
+    dry = vm.prune_backups(ctx.root, need=vm.MIN_FREE, dry_run=True, now=T0)
+    result = vm.prune_backups(ctx.root, need=vm.MIN_FREE, now=T0)
+    assert dry["deleted"] == result["deleted"] == [(folder.name, 80 * MIB) for folder in folders[:KEEP - 1:-1]]
+    assert dry["for_space"] == result["for_space"] == 0 and result["free"] == 1160 * MIB
+    # With nothing for the normal rule, one deletion makes 1 GiB: only the oldest goes, not all down to the newest 3.
+    result = vm.prune_backups(ctx.root, need=vm.MIN_FREE, now=T0)
+    assert result["deleted"] == [(folders[KEEP - 1].name, 80 * MIB)] and result["for_space"] == 1
+    assert result["free"] == 1080 * MIB and present(folders) == [True] * (KEEP - 1) + [False] * 3
+
+
+@pytest.mark.parametrize("newest_mib, deleted", [(84, 0), (600, 1)])
+def test_before_an_install_the_new_backup_must_leave_512_mib(ctx, capsys, monkeypatch, newest_mib, deleted):
+    # 1050 MiB free is above 1 GiB, but a new backup as large as the recent ones (600 MiB) would leave under 512 MiB.
+    folders = [installer_backup(ctx, timedelta(days=1 + index)) for index in range(5)]
+    virtual_disk(ctx, monkeypatch, 1050, {folder.name: size for folder, size in zip(folders, [newest_mib] + [80] * 4)})
+    assert main(ctx, "run") == 0
+    out = capsys.readouterr().out
+    assert present(folders) == [True] * (5 - deleted) + [False] * deleted
+    assert "installed " + NEW[:12] in out and "paused" not in out
+    if deleted:
+        assert out.index("deleted old backup " + folders[-1].name + " (80 MiB)") < out.index("installing " + NEW[:12])
+        assert "1 for disk space; 1130 MiB free" in out
+    else:
+        assert "deleted old backup" not in out
 
 
 def test_pruning_that_frees_enough_space_lets_the_install_go_ahead(ctx, capsys, monkeypatch):
@@ -1259,12 +1386,15 @@ def test_a_backup_that_cannot_be_deleted_is_reported_once(ctx, capsys, monkeypat
         later(ctx, minutes=2)
     out = capsys.readouterr().out
     assert out.count("could not delete: " + folders[-1].name) == 1 and "deleted old backup" not in out
-    assert state(ctx)["backup_prune_failed"] == [folders[-1].name] and folders[-1].is_dir()
+    # The normal rule's candidate, then the low-disk candidates oldest first (the newest three are never tried).
+    failed = [folder.name for folder in reversed(folders[vm.MIN_BACKUPS:])]
+    assert state(ctx)["backup_prune_failed"] == failed and present(folders) == [True] * (KEEP + 1)
     assert main(ctx, "status") == 0
     assert "backup prune problem: could not delete: " + folders[-1].name in capsys.readouterr().out
     monkeypatch.setattr(vm.shutil, "rmtree", real_rmtree)
     assert main(ctx, "run") == 0
-    assert not folders[-1].exists() and "backup_prune_failed" not in state(ctx)
+    assert present(folders) == [True] * vm.MIN_BACKUPS + [False] * (KEEP + 1 - vm.MIN_BACKUPS)
+    assert "backup_prune_failed" not in state(ctx)
 
 
 def test_prune_dry_run_deletes_nothing_and_prune_logs_every_deletion(ctx, capsys):

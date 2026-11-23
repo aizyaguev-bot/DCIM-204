@@ -17,8 +17,10 @@ environment, .env or credentials. Run it with backend/.venv/bin/python.
 
 Before and after each install `run` deletes old installer and crontab backup folders in
 .monitor-backups so they cannot fill the disk: of each kind the newest 8 stay, and those
-younger than 7 days up to 12 (only the newest 8 while less than 1 GiB is free). The backups of
-the deployed commit and of the commit being installed always stay. `prune` does the same now.
+younger than 7 days up to 12. While less than 1 GiB is free after that (before an install
+also: less than the new backup's size plus 512 MiB), more installer backups go, oldest first,
+until enough is free, but the newest 3 always stay; only then does `run` pause. The backups
+of the deployed commit and of the commit being installed always stay. `prune` does the same now.
 """
 import argparse
 from collections import namedtuple
@@ -62,11 +64,16 @@ MAX_ATTEMPTS = 3
 KEEP_ATTEMPTS = 20
 # Retention of the backup folders in .monitor-backups, for each kind separately: the newest KEEP_BACKUPS always stay,
 # and so does every folder younger than RECENT_BACKUPS while fewer than MAX_BACKUPS are kept, so a burst of releases
-# cannot fill the disk (beyond the cap the oldest go first). While less than MIN_FREE is free, only the newest
-# KEEP_BACKUPS stay. The backups of the deployed commit and of the commit being installed are never deleted.
+# cannot fill the disk (beyond the cap the oldest go first). While less than MIN_FREE is free after that (before an
+# install also: less than the new backup's size plus INSTALL_MARGIN), more installer backups go, oldest first and one
+# at a time, until enough is free, but the newest MIN_BACKUPS always stay; updates pause only when MIN_FREE is still
+# not free. Crontab backups (a few KiB) keep the normal rule. The backups of the deployed commit and of the commit
+# being installed are never deleted.
 KEEP_BACKUPS = 8
 MAX_BACKUPS = 12
 RECENT_BACKUPS = timedelta(days=7)
+MIN_BACKUPS = 3
+INSTALL_MARGIN = 512 * 1024 ** 2
 # Exactly the folder names retention may delete: install-monitoring.py's backup (its local time, then the first 7
 # characters of the commit it installs) and backup_crontab() below (FILE_STAMP in UTC plus mkdtemp's 8 characters).
 # Every other name (auto-update/, other tools' -env, -restart and -crontab folders, files) is never touched.
@@ -718,6 +725,15 @@ def prune_plan(folders, now, protected=(), keep=KEEP_BACKUPS, recent=RECENT_BACK
     return sorted(doomed, key=lambda item: (item.when, item.name))
 
 
+def space_plan(folders, planned=(), protected=(), floor=MIN_BACKUPS):
+    """The installer backups that may also go while disk space is short, oldest first: not already planned, not among
+    the newest `floor` installer backups, not of a protected commit (7-character prefix). Crontab backups never."""
+    newest = sorted((item for item in folders if item.kind == "installer"), key=lambda item: (item.when, item.name),
+                    reverse=True)
+    return sorted((item for item in newest[floor:] if item not in planned and item.commit not in protected),
+                  key=lambda item: (item.when, item.name))
+
+
 def folder_size(path):
     """Bytes of the files under path; links are counted as links and never followed."""
     size = 0
@@ -730,30 +746,73 @@ def folder_size(path):
     return size
 
 
-def prune_backups(root, protected=(), low_disk=False, dry_run=False, now=None):
-    """Delete (dry_run: only list) the backup folders retention lets go; low_disk keeps only the newest KEEP_BACKUPS.
-    protected holds full commit SHAs. Returns deleted and failed (name, bytes) lists and the number kept."""
-    result = {"deleted": [], "failed": [], "kept": 0}
+def remove_backup(parent, folder, result, dry_run=False):
+    """Delete one folder (dry_run: only list it) and record it in result; its bytes when deleted, else None."""
+    path = parent / folder.name
+    size = folder_size(path)
+    if not dry_run:
+        try:
+            if not stat.S_ISDIR(os.lstat(path).st_mode) or path.resolve() != path:
+                raise UpdateError("no longer a folder inside .monitor-backups")
+            shutil.rmtree(path)  # never follows links inside the folder
+        except (OSError, UpdateError):
+            result["failed"].append((folder.name, size))
+            return None
+    result["deleted"].append((folder.name, size))
+    return size
+
+
+def measured_free(root):
+    try:
+        return free_bytes(root)
+    except OSError:
+        return None
+
+
+def prune_backups(root, protected=(), need=None, dry_run=False, now=None):
+    """Delete (dry_run: only list) the backup folders retention lets go. need is the free space wanted: while less is
+    free after the normal rule, the installer backups of space_plan go too, oldest first and one at a time, until that
+    much is free (counting all it deleted, in case the disk reports freed space late; a dry run counts only that).
+    protected holds full commit SHAs. Returns deleted and failed (name, bytes) lists, the number kept, how many were
+    deleted for space and the free bytes after that step (None when it did not run)."""
+    result = {"deleted": [], "failed": [], "kept": 0, "for_space": 0, "free": None}
     parent = backups_parent(root)
     if parent is None:
         return result
     prefixes = {commit[:7] for commit in protected if isinstance(commit, str) and SHA.fullmatch(commit)}
     folders = backup_folders(parent)
-    plan = prune_plan(folders, now or utcnow(), prefixes, recent=timedelta(0) if low_disk else RECENT_BACKUPS)
-    result["kept"] = len(folders) - len(plan)
+    plan = prune_plan(folders, now or utcnow(), prefixes)
+    start = None if need is None else measured_free(root)  # before any deletion, so a late report cannot hide one
     for folder in plan:
-        path = parent / folder.name
-        size = folder_size(path)
-        if not dry_run:
-            try:
-                if not stat.S_ISDIR(os.lstat(path).st_mode) or path.resolve() != path:
-                    raise UpdateError("no longer a folder inside .monitor-backups")
-                shutil.rmtree(path)  # never follows links inside the folder
-            except (OSError, UpdateError):
-                result["failed"].append((folder.name, size))
-                continue
-        result["deleted"].append((folder.name, size))
+        remove_backup(parent, folder, result, dry_run)
+    if start is not None:
+        start += sum(size for _, size in result["deleted"])
+        freed = 0
+
+        def free_now():
+            current = None if dry_run else measured_free(root)
+            return max(start + freed, current or 0)
+
+        for folder in space_plan(folders, plan, prefixes):
+            if free_now() >= need:
+                break
+            size = remove_backup(parent, folder, result, dry_run)
+            if size is not None:
+                freed += size
+                result["for_space"] += 1
+        result["free"] = free_now()
+    result["kept"] = len(folders) - len(result["deleted"]) - len(result["failed"])
     return result
+
+
+def next_backup_bytes(root):
+    """About what the next install's backup takes: the largest of the newest MIN_BACKUPS installer backups (0 if none)."""
+    parent = backups_parent(root)
+    if parent is None:
+        return 0
+    newest = sorted((item for item in backup_folders(parent) if item.kind == "installer"),
+                    key=lambda item: (item.when, item.name), reverse=True)[:MIN_BACKUPS]
+    return max((folder_size(parent / item.name) for item in newest), default=0)
 
 
 def size_text(value):
@@ -764,25 +823,33 @@ def plural(count, word):
     return str(count) + " " + word + ("" if count == 1 else "s")
 
 
-def make_room(root, state, protected, out):
-    """Retention before (and after) an install: prune old backups, then, while less than MIN_FREE is free, the recent
-    extras beyond the newest KEEP_BACKUPS too. Each deletion is logged with the folder name and size only."""
-    deleted, failed = [], []
+def space_note(result):
+    """", N for disk space; X MiB free" when the low-disk step of prune_backups deleted something."""
+    if not result.get("for_space"):
+        return ""
+    return ", " + str(result["for_space"]) + " for disk space; " + mib(result["free"]) + " free"
+
+
+def make_room(root, state, protected, out, installing=False):
+    """Retention before (installing) and after an install: prune old backups; while less than MIN_FREE is free (before
+    an install also: less than the new backup's size plus INSTALL_MARGIN), installer backups beyond the newest
+    MIN_BACKUPS too, oldest first, until enough is free. Each deletion is logged with the folder name and size only."""
+    result = {"deleted": [], "failed": [], "for_space": 0, "free": None}
+    failed = []
     try:
-        result = prune_backups(root, protected)
-        deleted += result["deleted"]
+        need = MIN_FREE
+        if installing:
+            need = max(need, next_backup_bytes(root) + INSTALL_MARGIN)
+        result = prune_backups(root, protected, need=need)
         failed = [name for name, _ in result["failed"]]
-        if free_bytes(root) < MIN_FREE:
-            result = prune_backups(root, protected, low_disk=True)  # retries the earlier failures too
-            deleted += result["deleted"]
-            failed = [name for name, _ in result["failed"]]
     except (OSError, UpdateError) as exc:
         failed.append(".monitor-backups (" + (clean(str(exc)) or type(exc).__name__) + ")")
+    deleted = result["deleted"]
     for name, size in deleted:
         say(out, "deleted old backup " + name + " (" + size_text(size) + ")")
     if deleted:
         total = sum(size for _, size in deleted)
-        say(out, "pruned " + plural(len(deleted), "backup") + " (" + mib(total) + ")")
+        say(out, "pruned " + plural(len(deleted), "backup") + " (" + mib(total) + ")" + space_note(result))
         state["backup_prune"] = {"at": stamp(utcnow()), "count": len(deleted), "bytes": total}
     if failed:
         if failed != state.get("backup_prune_failed"):  # printed once, until it changes
@@ -1086,10 +1153,13 @@ def locked_run(root, branch, directory, out):
         persist(directory, state, before, now)
         return 0
     state.pop("busy_until", None)
-    make_room(root, state, (head, target), out)
-    if free_bytes(root) < MIN_FREE:
+    make_room(root, state, (head, target), out, installing=True)
+    free = free_bytes(root)
+    if free < MIN_FREE:
         if state.get("last_result") != "low-disk":
-            say(out, "paused: less than 1 GiB free on the project disk; waiting before installing " + target[:12])
+            say(out, "paused: less than 1 GiB free on the project disk (" + mib(free) + " after pruning old backups; the "
+                "newest " + str(MIN_BACKUPS) + " and those of the deployed and new commit stay); waiting before installing "
+                + target[:12])
         state["last_result"] = "low-disk"
         persist(directory, state, before, now)
         return 0
@@ -1267,21 +1337,22 @@ def cmd_prune(root, dry_run=False, out=None):
     """Apply the backup retention now; the cron job does the same before and after each install."""
     out = sys.stdout if out is None else out
     policy = ("kept: the newest " + str(KEEP_BACKUPS) + " of each kind, and those younger than "
-              + str(RECENT_BACKUPS.days) + " days up to " + str(MAX_BACKUPS) + "; never the deployed commit's")
+              + str(RECENT_BACKUPS.days) + " days up to " + str(MAX_BACKUPS) + " (below 1 GiB free, installer backups "
+              "go oldest first down to the newest " + str(MIN_BACKUPS) + "); never the deployed commit's")
     if dry_run:
-        result = prune_backups(root, protected_commits(root, load_state(state_dir(root))), dry_run=True)
+        result = prune_backups(root, protected_commits(root, load_state(state_dir(root))), need=MIN_FREE, dry_run=True)
         for name, size in result["deleted"]:
             print("would delete " + name + " (" + size_text(size) + ")", file=out)
         total = sum(size for _, size in result["deleted"])
-        print("would prune " + plural(len(result["deleted"]), "backup") + " (" + mib(total) + "); "
-              + str(result["kept"]) + " " + policy + "; nothing was deleted", file=out)
+        print("would prune " + plural(len(result["deleted"]), "backup") + " (" + mib(total) + ")" + space_note(result)
+              + "; " + str(result["kept"]) + " " + policy + "; nothing was deleted", file=out)
         return 0
     directory = ensure_state_dir(root)
     with run_lock(directory, touch=False) as acquired:
         if not acquired:
             raise UpdateError("An update run is in progress; try again in a few minutes")
         state = load_state(directory, quarantine=True)
-        result = prune_backups(root, protected_commits(root, state))
+        result = prune_backups(root, protected_commits(root, state), need=MIN_FREE)
         fd = os.open(directory / "cron.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT | NOFOLLOW, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as log:  # the same audit trail as the cron job's deletions
             for name, size in result["deleted"]:
@@ -1291,8 +1362,8 @@ def cmd_prune(root, dry_run=False, out=None):
         if result["deleted"]:
             state["backup_prune"] = {"at": stamp(utcnow()), "count": len(result["deleted"]), "bytes": total}
             save_state(directory, state)
-    print("pruned " + plural(len(result["deleted"]), "backup") + " (" + mib(total) + "); " + str(result["kept"]) + " "
-          + policy, file=out)
+    print("pruned " + plural(len(result["deleted"]), "backup") + " (" + mib(total) + ")" + space_note(result) + "; "
+          + str(result["kept"]) + " " + policy, file=out)
     if result["failed"]:
         print("could not delete: " + ", ".join(name for name, _ in result["failed"]), file=out)
         return 1
