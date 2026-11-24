@@ -850,19 +850,63 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
 
 // ─── ADD OPT MODAL ────────────────────────────────────────────────────────────
 // Rendered OUTSIDE any DnD context (at RacksView level) — this is the fix for close not working
-function AddOptModal({ rack, onClose, onSave }) {
+// The outlets of one PDU for "Add server": free ones (default name, "empty", "spare", "free", "OptXXX") can be chosen;
+// an outlet that carries a server's name (saved or reported by the PDU), "KVM Power" or "PDU" is shown but disabled, so
+// adding a server never overwrites another server's outlet.
+export function addServerOutlets(pdu, status) {
+  if (!pdu) return [];
+  const saved = pdu.labels && typeof pdu.labels === "object" ? pdu.labels : {};
+  const live = new Map((status?.outlets || []).map(o => [String(o.number), String(o.label ?? "")]));
+  const numbers = [...Object.keys(saved), ...live.keys()].map(n => parseInt(n, 10)).filter(n => n > 0);
+  const count = Math.max(Number(pdu.port_count) || 0, ...numbers, 0) || 24;
+  const kind = label => {
+    const text = String(label ?? "").trim();
+    if (isDefaultOutletLabel(text)) return "free";
+    if (/^(kvm[\s_-]*power|pdu)$/i.test(text)) return "reserved";
+    if (NON_SERVER_LABEL.test(text)) return "free";
+    return "server";
+  };
+  return Array.from({ length: count }, (_, i) => {
+    const number = String(i + 1);
+    const names = [saved[number], live.get(number)].map(l => String(l ?? "").trim()).filter(Boolean);
+    const taken = names.find(l => kind(l) !== "free");
+    const label = names.find(l => !isDefaultOutletLabel(l)) || "";
+    return { number, label, free: !taken, takenBy: taken || "" };
+  });
+}
+
+function AddOptModal({ rack, racks = [], pduStatuses = {}, servers = [], onClose, onSave }) {
   useEscClose(onClose);
-  const [pduId, setPduId]   = useState(rack.pdus[0]?.id || "");
+  // Opened on one rack (rack given), or from the Racks toolbar: then the rack is chosen here.
+  const choices = rack ? [rack] : racks.filter(r => (r.pdus || []).some(p => p.kind === "pdu"));
+  const [rackName, setRackName] = useState(rack?.rack || "");
+  const current = choices.find(r => r.rack === rackName) || null;
+  const pdus = (current?.pdus || []).filter(p => !p.kind || p.kind === "pdu");
+  const [pduId, setPduId]   = useState(pdus[0]?.id || "");
   const [outlet, setOutlet] = useState("");
   const [name,   setName]   = useState("");
   const [busy,   setBusy]   = useState(false);
   const [error,  setError]  = useState("");
-  const pdu = rack.pdus.find(p => p.id === pduId);
+  const pdu = pdus.find(p => p.id === pduId);
+  const outlets = useMemo(() => addServerOutlets(pdu, pduStatuses[pdu?.id]), [pdu, pduStatuses]);
+  const freeCount = outlets.filter(o => o.free).length;
+  const wanted = name.trim();
+  const existing = wanted ? servers.find(s => serverIdentity(s.name) && serverIdentity(s.name) === serverIdentity(wanted)) : null;
+  const nameError = !wanted ? "" : NON_SERVER_LABEL.test(wanted) || isDefaultOutletLabel(wanted) ? `"${wanted}" is not a server name`
+    : existing ? `${existing.name} already exists${existing.rack ? ` (${existing.rack})` : ""}` : "";
+  const chosen = outlets.find(o => o.number === outlet);
+  const ready = !!pdu && !!chosen?.free && !!wanted && !nameError && !busy;
+
+  function pickRack(value) {
+    setRackName(value);
+    const first = (choices.find(r => r.rack === value)?.pdus || []).find(p => !p.kind || p.kind === "pdu");
+    setPduId(first?.id || ""); setOutlet("");
+  }
 
   async function submit() {
-    if (!outlet || !name.trim()) return;
+    if (!ready) return;
     setBusy(true); setError("");
-    try { await onSave(pduId, parseInt(outlet, 10), name.trim(), pdu?.labels || {}); }
+    try { await onSave(pduId, parseInt(outlet, 10), wanted, pdu?.labels || {}); }
     catch (e) { setError("Save failed — check PDU connection."); setBusy(false); }
   }
 
@@ -872,35 +916,49 @@ function AddOptModal({ rack, onClose, onSave }) {
       <div className="bg-zinc-900 border border-zinc-700/60 rounded-2xl shadow-2xl w-80 overflow-hidden"
         onClick={e => e.stopPropagation()}>
         <div className="px-5 py-3.5 border-b border-zinc-800/60 flex items-center justify-between">
-          <span className="text-sm font-bold text-zinc-100">Add OPT — {rack.rack}</span>
+          <span className="text-sm font-bold text-zinc-100">Add server{rack ? ` — ${rack.rack}` : ""}</span>
           <CloseBtn onClose={onClose}/>
         </div>
         <div className="px-5 py-4 space-y-3">
-          {rack.pdus.length > 1 && (
-            <div><SL>PDU</SL>
-              <select value={pduId} onChange={e => setPduId(e.target.value)}
+          {!rack && (
+            <div><SL>Rack</SL>
+              <select value={rackName} onChange={e => pickRack(e.target.value)} aria-label="Rack" data-add-server="rack"
                 className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50">
-                {rack.pdus.map(p => <option key={p.id} value={p.id}>{p.name} — {p.ip}</option>)}
+                <option value="">Choose a rack…</option>
+                {choices.map(r => <option key={r.rack} value={r.rack}>{r.rack}</option>)}
               </select>
             </div>
           )}
-          <div><SL>Outlet number</SL>
-            <input type="number" min="1" max="48" value={outlet} onChange={e => setOutlet(e.target.value)}
-              placeholder="1 – 48"
-              className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
-          </div>
-          <div><SL>OPT name</SL>
+          {pdus.length > 1 && (
+            <div><SL>PDU</SL>
+              <select value={pduId} onChange={e => { setPduId(e.target.value); setOutlet(""); }} aria-label="PDU" data-add-server="pdu"
+                className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50">
+                {pdus.map(p => <option key={p.id} value={p.id}>{p.name} — {p.ip}</option>)}
+              </select>
+            </div>
+          )}
+          {pdu && <div><SL>PDU outlet</SL>
+            <select value={outlet} onChange={e => setOutlet(e.target.value)} aria-label="PDU outlet" data-add-server="outlet"
+              className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50">
+              <option value="">{freeCount ? `Choose a free outlet (${freeCount} free)…` : "No free outlet on this PDU"}</option>
+              {outlets.map(o => <option key={o.number} value={o.number} disabled={!o.free}>
+                Outlet {o.number} — {o.free ? (o.label ? `free (${o.label})` : "free") : o.takenBy}</option>)}
+            </select>
+          </div>}
+          {!pdu && rackName && <p className="text-xs text-amber-300">{rackName} has no PDU.</p>}
+          <div><SL>Server name</SL>
             <input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()}
-              placeholder="e.g. Opt106"
+              placeholder="e.g. Opt106" aria-label="Server name" data-add-server="name" aria-invalid={nameError ? "true" : undefined}
               className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
+            {nameError && <p role="alert" className="mt-1 text-xs text-rose-400">{nameError}</p>}
           </div>
           {error && <div className="text-[10px] text-rose-400">{error}</div>}
         </div>
         <div className="px-5 pb-4 flex gap-2">
           <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-500 border border-zinc-700/40 rounded-lg hover:text-zinc-300 transition">Cancel</button>
-          <button onClick={submit} disabled={!outlet || !name.trim() || busy}
+          <button onClick={submit} disabled={!ready} data-action="add-server-save"
             className="flex-1 py-2 text-sm font-bold bg-nv-400 text-zinc-950 rounded-lg disabled:opacity-40 flex items-center justify-center gap-2 transition">
-            {busy && <Spinner/>}Add OPT
+            {busy && <Spinner/>}Add server
           </button>
         </div>
       </div>
@@ -1930,7 +1988,7 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
 // onRequestMove({ id, rack, swapWith, fixed }): a server dropped onto another rack's card (choose the floor) or onto a
 // server in another rack (fixed: a swap with it); both open the move dialog.
 function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onRequestMove, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onSaveItems, onRefresh, pdus, rackDevices, optOwners, pduStatuses, base, cooling }) {
-  const {canAdmin} = useAccounts();
+  const {canAdmin, canOperate} = useAccounts();
   // With onSelectRack the App owns the open rack (?rack= in the address, so Back and Forward work);
   // without it the open rack is local state that starts from ?rack=, as before.
   const [localRack,      setLocalRack]      = useState(() => onSelectRack ? null : new URLSearchParams(location.search).get("rack"));
@@ -2256,6 +2314,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
             coolingTotal={coolingTotal} coolingNeeds={coolingNeeds}/>
           <div className="racks-phone-options" data-desktop={phone ? undefined : ""}>
             {phone && <button type="button" className="racks-chip" onClick={toggleAll}>{allCollapsed ? "Expand all" : "Collapse all"}</button>}
+            {canOperate && <button type="button" className="racks-btn racks-btn-accent" data-action="add-server" onClick={() => setAddOptFor({ pick: true })}>{Icon.plus} Add server</button>}
             <button type="button" className="racks-chip" data-action="shelf-labels" onClick={() => setLabelsScope({ rack: null })}>{Icon.tag} Shelf labels</button>
           </div>
           {hiding && hiddenRacks > 0 && visibleRacks.length > 0 && <p className="racks-hidden-note">
@@ -2303,7 +2362,8 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
       {/* Modals rendered via Portal — completely outside DOM tree, immune to any stacking context */}
       {addOptFor && (
         <Portal>
-          <AddOptModal rack={addOptFor} onClose={() => setAddOptFor(null)} onSave={handleSaveOpt}/>
+          <AddOptModal rack={addOptFor.pick ? null : addOptFor} racks={rackStats} pduStatuses={pduStatuses || {}}
+            servers={rackStats.flatMap(r => r.servers || [])} onClose={() => setAddOptFor(null)} onSave={handleSaveOpt}/>
         </Portal>
       )}
       {addEquipFor && (
