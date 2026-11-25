@@ -30,7 +30,7 @@ import useAssistantUseful from "./components/assistant/useAssistantUseful";
 import SshAdmin from "./pages/SshAdmin";
 import { useRemovedServers } from "./removedServers.jsx";
 import { withoutRemovedDevice, withoutRemovedStatuses } from "./api/removedServers.js";
-import { twinSrc, linkedTwinRef, isTwinRef, twinSelectMessage, twinRefToReplay, twinSelectedAddress, TWIN_SELECTED_MESSAGE, TWIN_DATA_CHANGED_MESSAGE, TWIN_HIDDEN_KEEP_MS } from "./twinLinks";
+import { TWIN_ENABLED, twinSrc, linkedTwinRef, isTwinRef, twinSelectMessage, twinRefToReplay, twinSelectedAddress, TWIN_SELECTED_MESSAGE, TWIN_DATA_CHANGED_MESSAGE, TWIN_HIDDEN_KEEP_MS } from "./twinLinks";
 // The terminal page (and xterm) loads only when an SSH tab is opened.
 const SshTerminal = lazy(() => import("./pages/SshTerminal"));
 // The Admin menu (one place, R1): only these sections. Devices, Removed servers, PDU–KVM mapping, Locations and
@@ -83,7 +83,7 @@ function LabManagerApp() {
   const [windowTarget, setWindowTarget] = useState(null);
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "dcim" ? "racks" : tab === "manage" ? "inventory" : tab === "assistant" ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
+    return tab === "dcim" || (tab === "twin" && !TWIN_ENABLED) ? "racks" : tab === "manage" ? "inventory" : tab === "assistant" ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
   });
   const [pxeConfig, setPxeConfig] = useState(undefined);   // undefined: loading, null: unavailable
   const [pxeConfigError, setPxeConfigError] = useState("");
@@ -118,7 +118,7 @@ function LabManagerApp() {
   // it is removed (its WebGL scene would keep the memory) and the next visit loads it again, on the address's ?select=.
   // "Show in 3D" (goTo("twin", { ref })) loads it with ?select=<ref> while it has not loaded, and posts
   // { type: "twin:select", ref } to the loaded twin (same origin only) once the Twin tab shows it again.
-  const [twinFrameSrc, setTwinFrameSrc] = useState(() => (new URLSearchParams(location.search).get("tab") === "twin" ? twinSrc(linkedTwinRef(location.search)) : null));
+  const [twinFrameSrc, setTwinFrameSrc] = useState(() => (TWIN_ENABLED && new URLSearchParams(location.search).get("tab") === "twin" ? twinSrc(linkedTwinRef(location.search)) : null));
   const [twinPost, setTwinPost] = useState(null);   // { ref } for the loaded twin, posted when the Twin tab shows it
   const twinFrameRef = useRef(null);
   const twinLoadedRef = useRef(false);
@@ -166,6 +166,7 @@ function LabManagerApp() {
   // goTo("twin", { ref }) is "Show in 3D": the Twin tab (?select=<ref> in the address) opens on that rack, server or unit.
   function goTo(tab, target) {
     const { rack, ref } = target && typeof target === "object" ? target : { rack: target };
+    if (tab === "twin" && !TWIN_ENABLED) { navigate("racks"); setRackParam(null); return; }   // the 3D twin is switched off
     if (tab === "twin" && isTwinRef(ref)) {
       navigate(tab, undefined, ref);
       setRackParam(null);
@@ -193,7 +194,7 @@ function LabManagerApp() {
     const onPop = event => {
       const tab = event.state?.tab || new URLSearchParams(location.search).get("tab") || "dashboard";
       const section = ({ assistant: "assistant" })[tab];
-      const nextTab = tab === "dcim" ? "racks" : tab === "manage" ? "inventory" : section ? "admin" : tab;
+      const nextTab = tab === "dcim" || (tab === "twin" && !TWIN_ENABLED) ? "racks" : tab === "manage" ? "inventory" : section ? "admin" : tab;
       const view = event.state?.view || { kind: "dashboard" };
       // Back / Forward between a rack and all racks stays in Edit mode; anything else leaves it.
       // The open rack itself is re-read from ?rack= by onHistory below.
@@ -211,7 +212,7 @@ function LabManagerApp() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const twinShown = view.kind === "dashboard" && mainTab === "twin";
+  const twinShown = TWIN_ENABLED && view.kind === "dashboard" && mainTab === "twin";
   // On the Twin tab without a twin (the first visit, or after it was removed): mount it, on the address's ?select=.
   useEffect(() => {
     if (!twinShown || twinFrameSrc) return;

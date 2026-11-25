@@ -338,9 +338,10 @@ function twinRows(twin, only, who) {
 
 // -> { rows, counts: { total, types: {type: n}, problems: {problem: n} }, mismatch: { unlinked, total } }.
 // Deleted rows (removed servers) are counted under problems.deleted only.
-export function buildLabIndex(data = {}, role = "viewer", { now = Date.now() } = {}) {
+export function buildLabIndex(data = {}, role = "viewer", { now = Date.now(), twin: withTwin = true } = {}) {
   const who = roleOf(role);
-  const twin = twinDoc(data?.twin);
+  // withTwin false (the 3D twin is switched off, twinLinks.js TWIN_ENABLED): no 3D-only rows and no "In 3D" badges.
+  const twin = withTwin ? twinDoc(data?.twin) : null;
   const { linked, only } = twin ? classifyTwin(twin, liveForTwin(data)) : { linked: new Map(), only: [] };
   const linksTo = new Map();
   for (const [twinId, uid] of linked) linksTo.set(uid, [...(linksTo.get(uid) || []), twinId]);

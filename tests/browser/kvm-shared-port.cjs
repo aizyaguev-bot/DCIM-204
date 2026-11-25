@@ -55,7 +55,8 @@ const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:8774';
     // The operator signs in afterwards, so the first status already shows the admin's console.
     const operator = await login('operator', true);
     await operator.page.getByRole('button', { name: 'Details →' }).click();
-    const tile = operator.page.locator('[data-in-use="true"]').filter({ hasText: 'OPT11' });
+    // Details opens the KVM window over the Dashboard: the window's port tile (the card behind shows the same port).
+    const tile = operator.page.locator('[data-window] button[data-in-use="true"]').filter({ hasText: 'OPT11' }).first();
     await tile.waitFor();
     assert.match(await tile.getAttribute('title'), /In use/);
     const writes = [];

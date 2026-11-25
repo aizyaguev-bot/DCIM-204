@@ -3,7 +3,7 @@
 // Props: { target: { kind: "rack", id: <rack name> }, onClose }
 import { useLabWindow } from "../window/labWindowContext.js";
 import WindowShell, { WindowSection } from "../window/WindowShell.jsx";
-import { rackRef } from "../twinLinks.js";
+import { TWIN_ENABLED, rackRef } from "../twinLinks.js";
 import { MAIN_STORAGE } from "../api/inventory.js";
 
 export default function RackWindow({ target, onClose }) {
@@ -19,7 +19,7 @@ export default function RackWindow({ target, onClose }) {
     facts={[`${servers.length} ${servers.length === 1 ? "server" : "servers"}`, `${units.length} ${units.length === 1 ? "unit" : "units"}`]}
     tools={<>
       <button type="button" className="lab-window-btn" onClick={() => act.goTo("racks", rack)}>Show on Racks</button>
-      {rackRef(rack) && <button type="button" className="lab-window-btn" onClick={() => act.goTo("twin", { ref: rackRef(rack) })}>3D</button>}
+      {TWIN_ENABLED && rackRef(rack) && <button type="button" className="lab-window-btn" onClick={() => act.goTo("twin", { ref: rackRef(rack) })}>3D</button>}
     </>}>
     <WindowSection title="PDUs and KVMs" id="devices">
       {devices.filter(d => d.kind !== "rack").length ? <ul className="m-0 p-0 list-none">

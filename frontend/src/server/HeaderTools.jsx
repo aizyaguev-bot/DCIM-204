@@ -6,6 +6,7 @@
 //            minute old).
 //   3D       every role: the Twin tab on srv:<first DCIM id> (it leaves the window).
 import { useEffect } from "react";
+import { TWIN_ENABLED } from "../twinLinks.js";
 import { useAccounts } from "../accounts";
 import { sshStatusStore } from "../api/ssh";
 import SshButton from "../components/SshButton";
@@ -33,6 +34,6 @@ export default function HeaderTools({ record, can, act }) {
       </button>;
     })}
     {operate && <span className="srv-ssh" data-tool="ssh"><SshButton name={record.name} size="md"/></span>}
-    <button type="button" className="lab-window-btn" data-tool="3d" title={`Show ${record.name} in 3D`} onClick={() => act.showIn3d()}>3D</button>
+    {TWIN_ENABLED && <button type="button" className="lab-window-btn" data-tool="3d" title={`Show ${record.name} in 3D`} onClick={() => act.showIn3d()}>3D</button>}
   </>;
 }

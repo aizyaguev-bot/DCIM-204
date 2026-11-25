@@ -30,7 +30,7 @@ import { buildShelfLabels } from "../shelfLabels.js";
 import { floorServer, rowsUnitOwners, unitOwners, withUnitOwners, ownerOfUnit, ownerFromText } from "../unitOwner.js";
 import { useStoredState, useMediaQuery, useDebounced, flash, prefersReducedMotion } from "../components/racks/hooks.js";
 import { mergeServerFeeds } from "../labDisplay.js";
-import { rackRef } from "../twinLinks.js";
+import { TWIN_ENABLED, rackRef } from "../twinLinks.js";
 // The lab windows (window/CONTRACT.md): a server opens its window, a unit its unit window, a PDU or KVM its device
 // window; a drag opens the server window on its move dialog; power goes through the provider's one power hook.
 import { useLabWindow } from "../window/labWindowContext.js";
@@ -86,6 +86,7 @@ import { CSS } from "@dnd-kit/utilities";
 // onBlocked instead.
 const TwinLinkContext = createContext(null);
 function ShowIn3dButton({ target, name, text = false, className = "icon-btn show-3d", blocked = null, onBlocked = null }) {
+  if (!TWIN_ENABLED) return null;   // the 3D twin is switched off (twinLinks.js)
   const showIn3d = useContext(TwinLinkContext);
   if (!showIn3d || !target) return null;
   const label = `Show ${name} in 3D`;

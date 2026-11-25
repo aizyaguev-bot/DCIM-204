@@ -15,7 +15,7 @@ import { MAIN_STORAGE } from "../api/inventory.js";
 import useDialogFocus from "../components/racks/useDialogFocus.js";
 import ScanUnitDialog from "../components/racks/ScanUnitDialog.jsx";
 import { floorsFor, rackHasFloors, validFloor } from "../components/racks/floors.js";
-import { itemRef } from "../twinLinks.js";
+import { TWIN_ENABLED, itemRef } from "../twinLinks.js";
 import { itemOwnerKey, ownerFromText } from "../unitOwner.js";
 import { useLabWindow } from "../window/labWindowContext.js";
 import WindowShell, { WindowSection } from "../window/WindowShell.jsx";
@@ -176,7 +176,7 @@ export default function UnitWindow({ target, onClose }) {
     facts={[unitTypeText(item.type), item.serial_number ? `SN ${item.serial_number}` : null, item.model || null, `Owner: ${owner || "none"}${server ? ` (from ${server.name})` : ""}`]}
     tools={<>
       <button type="button" className="lab-window-btn" onClick={() => act.showOnRacks(rack)}>Show on Racks</button>
-      <button type="button" className="lab-window-btn" title={`Show ${item.name} in 3D`} onClick={() => act.showIn3d(itemRef(item.id))}>3D</button>
+      {TWIN_ENABLED && <button type="button" className="lab-window-btn" title={`Show ${item.name} in 3D`} onClick={() => act.showIn3d(itemRef(item.id))}>3D</button>}
     </>}
     bar={<>
       <button type="button" className="lab-window-btn" data-action="move-unit" onClick={() => setDialog("move")} disabled={!data.etags?.rackItems}>Move…</button>

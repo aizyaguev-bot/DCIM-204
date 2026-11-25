@@ -56,7 +56,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
     // The PATCH replaces the whole map: never start from an empty list. Saved labels win over the status reading
     // so the map matches the revision sent with it; saved ports the status does not list are kept as they are.
     if (!outlets.length) return;
-    const { draft, original, base } = labelEditState(device.labels, outlets);
+    const { draft, original, base } = labelEditState(((devices || []).find(d => d.id === device.id) || device).labels, outlets)   /* the saved names as they are: the shown device may hide a removed server's name */;
     setDraftLabels(draft);
     setDraftOriginal(original);
     setDraftBase(base);

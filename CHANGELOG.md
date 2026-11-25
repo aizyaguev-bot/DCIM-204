@@ -2,6 +2,16 @@
 
 ---
 
+## v2.46.20 — 2026-11-25 — The 3D twin is switched off for now
+
+### Changed
+- **3D twin switched off:** the "3D Twin" tab and every "Show in 3D" button are gone. An old
+  3D link (`?tab=twin` or the `/twin/` address) opens Racks. Nothing else changes: Racks,
+  Dashboard, Power, Consoles, the lab display and everything else work as before. The 3D files
+  are kept, so it can be switched back on later (`TWIN_ENABLED`).
+
+---
+
 ## v2.46.19 — 2026-11-24 — "Add server" on Racks; a removed server no longer shows on the PDU and KVM cards
 
 ### Added

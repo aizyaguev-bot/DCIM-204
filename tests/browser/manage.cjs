@@ -18,6 +18,9 @@
 //  M-12 + Add › Server… adds a server on Rack-05 and its window opens
 //  M-13 no horizontal page scroll at 1440, 1280, 1024, 390 and 375 px
 const { chromium } = require('playwright');
+// The 3D twin is switched off (frontend/src/twinLinks.js TWIN_ENABLED false): Manage then has no 3D-only rows, no
+// "In 3D" badges and no mismatch banner; the 3D steps below run only while it is on.
+const TWIN = /export const TWIN_ENABLED = true;/.test(require('node:fs').readFileSync(require('node:path').join(__dirname, '../../frontend/src/twinLinks.js'), 'utf8'));
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -72,7 +75,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       rackItems: await json(s, '/api/rack-items'), owners: await json(s, '/api/opt-owners'), switches: await json(s, '/api/switch-assignments'),
       monitoring: await json(s, '/api/monitoring'), chillers: await json(s, '/api/chillers'), twin: { data: await json(s, '/api/twin-data') },
       removed, hidden: hiddenSet(removed) };
-    return buildLabIndex(data, role);
+    return buildLabIndex(data, role, { twin: TWIN });
   }
 
   try {
@@ -101,17 +104,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     // ── M-2 not-in-lm ──
     page = await manage(admin, 'show=not-in-lm');
     let uids = await shownUids(page);
-    for (const uid of ['twin:ITEM-0044', 'twin:ITEM-0043', 'twin:ITEM-0033', 'server:optn85']) assert.ok(uids.includes(uid), `not-in-lm lists ${uid}`);
+    if (!TWIN) {
+      assert.ok(!uids.some(u => u.startsWith('twin:')), `no 3D-only rows while the 3D is off: ${uids.join(', ')}`);
+      assert.equal(await page.locator('[data-banner="mismatch"]').count(), 0, 'no 3D mismatch banner while the 3D is off');
+    }
+    if (TWIN) for (const uid of ['twin:ITEM-0044', 'twin:ITEM-0043', 'twin:ITEM-0033', 'server:optn85']) assert.ok(uids.includes(uid), `not-in-lm lists ${uid}`);
     for (const uid of ['twin:ITEM-0040', 'server:opt300', 'dev:pdu8']) assert.ok(!uids.includes(uid), `not-in-lm leaves out ${uid}`);
-    assert.match(await rowOf(page, 'twin:ITEM-0043').innerText(), /No KVM with id kvm-unit3 or name KVM-Unit-3 in Lab Manager/);
+    if (TWIN) assert.match(await rowOf(page, 'twin:ITEM-0043').innerText(), /No KVM with id kvm-unit3 or name KVM-Unit-3 in Lab Manager/);
     assert.match(await rowOf(page, 'server:optn85').innerText(), /optn85[\s\S]*Monitor only/);
-    assert.match(await page.locator('[data-banner="mismatch"]').innerText(), /lab-data\.json PDU\/KVM ids do not match Lab Manager \(10 of 11\)/);
-    for (const uid of ['twin:ITEM-0033', 'twin:ITEM-0043']) {
+    if (TWIN) assert.match(await page.locator('[data-banner="mismatch"]').innerText(), /lab-data\.json PDU\/KVM ids do not match Lab Manager \(10 of 11\)/);
+    for (const uid of TWIN ? ['twin:ITEM-0033', 'twin:ITEM-0043'] : []) {
       const box = rowOf(page, uid).locator('input[type="checkbox"]');
       assert.equal(await box.isDisabled(), true, `${uid}: a 3D PDU / KVM row cannot be selected`);
       assert.match(await box.getAttribute('title'), /3D PDU and KVM records are never bulk-selected/);
     }
-    assert.equal(await rowOf(page, 'twin:ITEM-0044').locator('input[type="checkbox"]').isDisabled(), false);
+    if (TWIN) assert.equal(await rowOf(page, 'twin:ITEM-0044').locator('input[type="checkbox"]').isDisabled(), false);
     // OPT300 is the computer unit u-pc300: one row, badge "Unit", opening the unit window
     page = await manage(admin, 'q=opt300');
     assert.deepEqual(await shownUids(page), ['server:opt300']);
@@ -136,7 +143,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     // ── M-4 every row opens its window ──
     page = await manage(admin);
-    for (const [uid, kind] of [['server:opt11', 'server'], ['dev:pdu5', null], ['unit:u-tray53', 'unit'], ['twin:ITEM-0044', 'twin'], ['rack:Rack-05', null], ['cooling:ch5', 'cooling']]) {
+    for (const [uid, kind] of [['server:opt11', 'server'], ['dev:pdu5', null], ['unit:u-tray53', 'unit'], ...(TWIN ? [['twin:ITEM-0044', 'twin']] : []), ['rack:Rack-05', null], ['cooling:ch5', 'cooling']]) {
       await rowOf(page, uid).locator('.manage-name').click();
       const win = kind ? page.locator(`[data-window="${kind}"]`) : page.locator('[data-window]');
       await win.waitFor({ timeout: 15000 });
@@ -146,7 +153,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     // ⋯ › Open does the same; a click on the row itself too
     await rowOf(page, 'server:opt12').getByRole('button', { name: 'Actions for OPT12' }).click();
     const menuItems = await rowOf(page, 'server:opt12').getByRole('menuitem').allTextContents();
-    assert.deepEqual(menuItems, ['Open', 'Show in 3D', 'Show on Racks', 'Delete…']);
+    assert.deepEqual(menuItems, ['Open', ...(TWIN ? ['Show in 3D'] : []), 'Show on Racks', 'Delete…']);
     await rowOf(page, 'server:opt12').getByRole('menuitem', { name: 'Open' }).click();
     await page.locator('[data-window="server"] h2', { hasText: 'OPT12' }).waitFor();
     assert.equal(new URL(page.url()).searchParams.get('srv'), 'opt12');
@@ -273,6 +280,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     passed.push(`M-9 another context swaps OPT41 and OPT42 (move-server); the Viewer's table shows OPT41 on U2 in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 
     // ── M-10 Admin bulk delete of five; the TV and the twin follow; Deleted › Restore ──
+    if (TWIN) {
     const tv = viewer.page;
     await tv.goto(origin + '/?tab=display');
     await tv.locator('[data-testid="kpi-pdus"]').waitFor({ timeout: 30000 });
@@ -336,6 +344,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.ok(TWIN_IDS.every(id => back.has(id)), 'the 3D records are back');
     await twin.close();
     passed.push(`M-10 Admin selects the cart, the ladder, Opt207 (JSON opt), SSD SA (JSON equip) and optn85; "Type 5 to delete 5 items"; gone from Manage in ${manageSeconds.toFixed(1)} s and for another account; ${tvText}; ${twinText}; show=deleted lists the batch's 5 entries; Restore batch brings them back`);
+    } else notes.push('M-10 not run: the 3D twin is switched off; bulk delete, the TV and Restore are covered by lab-delete.cjs');
 
     // ── M-11 the servers removed before this release ──
     page = await manage(admin, 'show=deleted');

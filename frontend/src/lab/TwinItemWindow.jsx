@@ -2,6 +2,7 @@
 // [Edit in 3D] and Delete from 3D….
 // Props: { target: { kind: "twin", id: <lab-data.json items[] / storage[] / setups[] id> }, onClose }
 import { useLabWindow } from "../window/labWindowContext.js";
+import { TWIN_ENABLED } from "../twinLinks.js";
 import WindowShell, { WindowSection } from "../window/WindowShell.jsx";
 import { classifyTwin } from "./twinRecords.js";
 import { liveForTwin } from "./labIndex.js";
@@ -32,7 +33,7 @@ export default function TwinItemWindow({ target, onClose }) {
     badges={link ? [] : ["3D only"]} can={{ operate: false, admin: false }}
     readOnlyText={can.operate ? "3D records are edited in the 3D Twin for now" : "Viewer · read only"} onClose={onClose}
     facts={[type, record.id, record.status]}
-    tools={<button type="button" className="lab-window-btn" onClick={() => act.goTo("twin", { ref: `id:${record.id}` })}>3D</button>}>
+    tools={TWIN_ENABLED ? <button type="button" className="lab-window-btn" onClick={() => act.goTo("twin", { ref: `id:${record.id}` })}>3D</button> : null}>
     <WindowSection title="Details" id="details">
       <dl className="lab-window-dl">
         <dt>Id</dt><dd>{record.id}</dd>

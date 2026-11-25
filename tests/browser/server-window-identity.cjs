@@ -325,7 +325,7 @@ const PASSWORD = 'test-password-123';
     await restore.getByText('Its rack place, switch port and owner do not come back.', { exact: true }).waitFor();
     await restore.getByRole('button', { name: 'Restore', exact: true }).click();
     await restore.waitFor({ state: 'detached' });
-    await toast(ad, 'OPT12 is back in the lab.').waitFor();
+    await toast(ad, kind === 'lab' ? 'Restored OPT12' : 'OPT12 is back in the lab.').waitFor();   // a deleted server's Restore says Restored
     await aw.locator('[data-removed-banner]').waitFor({ state: 'detached' });
     await aw.getByRole('button', { name: 'Rename…', exact: true }).waitFor();
     assert.equal((await get('/api/removed-servers')).hidden.includes('opt12'), false, 'OPT12 is not removed any more');

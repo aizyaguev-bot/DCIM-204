@@ -13,6 +13,7 @@
 //   Live       the window provider reloads its stores on the change feed; this page re-reads the Deleted list.
 // Props (from App): editMode. App's other props (DcimView's) are not used.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TWIN_ENABLED } from "../twinLinks.js";
 import { accountRequest } from "../accounts.jsx";
 import { listDeleted, purgeDeleted, restoreDeleted } from "../api/labDelete.js";
 import { patchDevice } from "../api/devices.js";
@@ -160,7 +161,7 @@ export default function ManageView({ editMode = false }) {
   const rowMenu = row => {
     const items = [{ id: "open", label: "Open", onSelect: () => openRow(row) }];
     const ref = twinRefOf(row);
-    if (ref) items.push({ id: "3d", label: "Show in 3D", onSelect: () => act.showIn3d(ref) });
+    if (ref && TWIN_ENABLED) items.push({ id: "3d", label: "Show in 3D", onSelect: () => act.showIn3d(ref) });
     if (row.rack && row.kind !== "twin") items.push({ id: "racks", label: "Show on Racks", onSelect: () => act.showOnRacks(row.rack) });
     const allowed = row.deleteTarget && !row.problems.has("deleted") && (row.deleteRole === "admin" ? can.admin : can.operate);
     if (allowed) items.push({ id: "delete", label: "Delete…", tone: "danger", onSelect: () => act.openDelete([row.deleteTarget]) });

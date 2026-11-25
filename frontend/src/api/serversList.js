@@ -10,6 +10,7 @@
 //   outletCountCandidates(devices, pduStatuses)             "Set outlet counts from the PDUs" (Admin)
 //   csvText(columns, rows)                                  the CSV of the rows shown
 //   entryState(entry), batchRestorable(batch), legacyRemoved(removed, batches), entryRole(kind)   the Deleted view
+import { TWIN_ENABLED } from "../twinLinks.js";
 
 // ── copied from ConnectionsView.jsx (unchanged) ──
 
@@ -122,7 +123,7 @@ export function sortServerTable(rows, key = "rack", dir = 1) {
 
 // The Type select: [label, URL value]. Any other list shows as "Custom".
 export const TYPE_CHOICES = [["All", ""], ["Servers", "server"], ["PDUs & KVMs", "pdu,kvm"], ["PDUs", "pdu"], ["KVMs", "kvm"],
-  ["Units", "unit"], ["Cooling", "cooling"], ["Racks", "rack"], ["3D only", "other"]];
+  ["Units", "unit"], ["Cooling", "cooling"], ["Racks", "rack"], ...(TWIN_ENABLED ? [["3D only", "other"]] : [])];
 const KNOWN_TYPES = new Set(["server", "pdu", "kvm", "unit", "cooling", "rack", "other"]);
 
 // type= (a comma list) -> { value (normalised list), types: [type], label }.

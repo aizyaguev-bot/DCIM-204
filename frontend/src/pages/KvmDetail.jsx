@@ -48,7 +48,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
     // The PATCH replaces the whole map: never start from an empty list. Saved labels win over the status reading
     // so the map matches the revision sent with it; saved ports the status does not list are kept as they are.
     if (!ports.length) return;
-    const { draft, original, base } = labelEditState(device.labels, ports);
+    const { draft, original, base } = labelEditState(((devices || []).find(d => d.id === device.id) || device).labels, ports)   /* the saved names as they are: the shown device may hide a removed server's name */;
     setDraftLabels(draft);
     setDraftOriginal(original);
     setDraftBase(base);

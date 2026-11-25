@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TWIN_ENABLED } from "../twinLinks.js";
 import { useAccounts } from "../accounts.jsx";
 import { useRemovedServers } from "../removedServers.jsx";
 import { useEngineers } from "../engineers.jsx";
@@ -253,7 +254,7 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
   }), [devices, pduStatuses, kvmStatuses, maintenance, stores, removed?.data, removed?.hidden, removed?.etag, directory?.engineers]);
   const role = canAdmin ? "admin" : canOperate ? "operator" : "viewer";
   const full = wanted === ALL;
-  const index = useMemo(() => (full ? buildLabIndex(data, role) : null), [full, data, role]);
+  const index = useMemo(() => (full ? buildLabIndex(data, role, { twin: TWIN_ENABLED }) : null), [full, data, role]);
   const servers = useMemo(() => serverList(stores.locations, { hidden: removed?.hidden, admin: !!canAdmin }), [stores.locations, removed?.hidden, canAdmin]);
   const can = useMemo(() => ({ operate: !!canOperate, admin: !!canAdmin }), [canOperate, canAdmin]);
 

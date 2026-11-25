@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useAccounts, UserMenu } from "../accounts";
 import nvidiaLogo from "../assets/nvidia-logo.svg";
-const tabs = [
+import { TWIN_ENABLED } from "../twinLinks";
+const allTabs = [
   ["dashboard", "Dashboard", "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"],
   ["racks", "Racks", "M4 3h16v7H4zM4 14h16v7H4zM7 6h.01M7 17h.01"],
   ["inventory", "Manage", "M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01"],
@@ -14,6 +15,7 @@ const tabs = [
   ["admin", "Admin", "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"],
   ["changelog", "Changelog", "M12 20h9M16 3l5 5-12 12-6 1 1-6z"],
 ];
+const tabs = TWIN_ENABLED ? allTabs : allTabs.filter(([id]) => id !== "twin");   // the 3D twin is switched off
 // Keeps the current tab of a scrolling tab strip in view; data-overflow-* marks edges that hide tabs (styled as a fade).
 export function useTabStripCue(navRef, deps) {
   useEffect(() => {

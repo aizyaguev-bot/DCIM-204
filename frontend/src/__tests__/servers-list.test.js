@@ -1,5 +1,6 @@
 // The Manage page's pure helpers (api/serversList.js): v1's server table (Type = Servers), the filters in the URL, the
 // "Set outlet counts" candidates, the CSV and the Deleted view.
+import { TWIN_ENABLED } from "../twinLinks.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { KIND_TEXT, TYPE_CHOICES, connectionRacks, connectionsLoader, csvText, entryRole, entryState, filterConnections, filterServerTable,
@@ -43,10 +44,11 @@ test("state filter and column sort (numbers numerically, blanks last, the name b
 });
 
 test("the Type select and show= in the URL", () => {
-  assert.deepEqual(TYPE_CHOICES.map(([l]) => l), ["All", "Servers", "PDUs & KVMs", "PDUs", "KVMs", "Units", "Cooling", "Racks", "3D only"]);
+  // "3D only" is offered only while the 3D twin is switched on (twinLinks.js TWIN_ENABLED).
+  assert.deepEqual(TYPE_CHOICES.map(([l]) => l), ["All", "Servers", "PDUs & KVMs", "PDUs", "KVMs", "Units", "Cooling", "Racks", ...(TWIN_ENABLED ? ["3D only"] : [])]);
   assert.deepEqual(typeChoice(""), { value: "", types: [], label: "All" });
   assert.deepEqual(typeChoice("pdu,kvm"), { value: "pdu,kvm", types: ["pdu", "kvm"], label: "PDUs & KVMs" });
-  assert.deepEqual(typeChoice("other"), { value: "other", types: ["other"], label: "3D only" });
+  if (TWIN_ENABLED) assert.deepEqual(typeChoice("other"), { value: "other", types: ["other"], label: "3D only" });
   assert.equal(typeChoice("unit,rack").label, "Custom");
   assert.equal(typeChoice("Server, nonsense").value, "server", "unknown types are dropped");
   assert.equal(showParam("unplaced", PROBLEMS), "no-location", "v1's unplaced");
