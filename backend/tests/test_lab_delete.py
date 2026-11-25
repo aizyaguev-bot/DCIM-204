@@ -795,6 +795,10 @@ def test_the_guard_refuses_a_dropped_unit_in_every_whole_list_save(monkeypatch):
         inventory_store.checked_items(current, {"R": [{"id": "a", "u": 1}]})
     assert getattr(caught.value, "status_code", None) == 422
     assert inventory_store.checked_items(current, {"R": [{"id": "a", "u": 1}]}, allow_drop={"b"}) == {"R": [{"id": "a", "u": 1}]}
+    # A malformed list keeps its own reason: the guard runs after the shape, U slot and detail checks.
+    with pytest.raises(Exception) as caught:
+        inventory_store.checked_items(current, {"R": "not a list"})
+    assert caught.value.detail == "Expected racks containing equipment lists."
     monkeypatch.setattr(inventory_store, "UNIT_DROP_GUARD", False)
     assert inventory_store.checked_items(current, {"R": [{"id": "a", "u": 1}]}) == {"R": [{"id": "a", "u": 1}]}
 

@@ -110,8 +110,8 @@ App mounts the provider once, around the page:
 ```jsx
 <LabWindowProvider devices pduStatuses kvmStatuses maintenance apiRef={labWindowRef} onWindowChange={setWindowTarget}
   app={{ goTo, outletAction(device, n, action, confirmed), turnOnAll(device, numbers), openMaintenance(mode, pduId),
-         saveLabels(id, labels, revision), markKvmFree(id), openConsole(deviceId, port), deleteDevice(id),
-         switchFeeds(targets, action, opts), refresh() }}>
+         saveLabels(id, labels, revision), markKvmFree(id), openConsole(deviceId, port),
+         switchFeeds(targets, action, opts), refresh() }}>   ← deleteDevice is gone (R1, 12.3): use act.openDelete
   <Header/>                      ← stays clickable while a window is open (a tab change closes it)
   <WindowBackdrop> …page… </WindowBackdrop>   ← aria-hidden + inert while a window is open
   …App's own dialogs (console z-[65], maintenance, What's new, assistant, footer)…
@@ -162,7 +162,7 @@ All reads below are Viewer reads.
 | `rackItems` | `GET /api/rack-items` document `{ rack: [item] }` |
 | `owners` | `GET /api/opt-owners` `{ key: name }` |
 | `switches` | `GET /api/switch-assignments` `{ dcim id: { switch, port } }` |
-| `monitoring` | `GET /api/monitoring` (`targets[].server_key`) |
+| `monitoring` | `GET /api/monitoring` (`targets[].server_key`; `targets[].removed` is true for a removed server's monitor, so a screen can hide it) |
 | `chillers` | `GET /api/chillers` `{ units, connections }` |
 | `twin` | `{ data, etag }` of `GET /api/twin-data` |
 | `shelves` | `GET /api/shelves` (v3, section 11): `null` while loading, `unavailableShelves()` without the backend |
@@ -199,7 +199,7 @@ showResult(key, result),                    // the "Last change" panel: result =
 showOnRacks(rack), goTo(tab, target), showIn3d(ref),
 during(fn), reload(domains?),
 power: { enabled, groupFor(name), pending(key), request(name, action, opener, { scope, feedId }), blocked(name, scope) },   // blocked: v3, 11.6
-app: { outletAction, turnOnAll, openMaintenance, saveLabels, markKvmFree, openConsole, deleteDevice, switchFeeds, refresh }
+app: { outletAction, turnOnAll, openMaintenance, saveLabels, markKvmFree, openConsole, switchFeeds, refresh }   // no deleteDevice (12.3)
 
 // server window (ServerWindow.jsx) on top of the above
 openMove({ mode: "swap" | "move" | "takeover" | "pin", swapWith, moveTo, fixed })   // → dialog { type: "move", key, … }
@@ -293,7 +293,7 @@ The window is composed of the following parts:
   - `sec=move` opens `act.openMove({ mode, moveTo, swapWith })` once, for Operators;
   - `sec=delete` opens `act.openDelete` once, for Admins.
 
-`can = { operate: canOperate && !record.removed?.active && !record.missing, admin: canAdmin }`. A removed window is read-only for every role; its bar says "Removed · read only".
+`can = { operate: canOperate && !record.removed?.active && !record.missing, admin: canAdmin }`. A removed window is read-only for every role; its bar says "Removed · read only". An Admin still gets Delete… in that bar (WindowShell, 12.3).
 
 Every action package default-exports an object:
 
@@ -340,7 +340,7 @@ The window's own dialogs:
 | `kind` | `server`, `pdu`, `kvm`, `rack`, `unit`, `cooling` or `twin`; it becomes `data-window` |
 | `state.tone` | `ok`, `warn`, `bad`, `off` or `unknown` |
 | `badges` | `[text \| { text, tone }]`; at most 2 are shown, in the order given |
-| `bar` | rendered only when `can.operate`; otherwise the line says `readOnlyText` (default "Viewer · read only") |
+| `bar` | rendered only when `can.operate`; otherwise the line says `readOnlyText` (default "Viewer · read only"), followed by Delete… when `deleteTarget` is set and the role may delete (12.3) |
 | `more` | `[MenuItem]` |
 | `deleteRole` | `"operator"` (units, 3D-only records) or `"admin"` (servers, devices, racks, cooling units) |
 | `size` | `"normal"` or `"wide"` (the PDU / KVM detail stubs: a centred sheet up to 1200 px at every width) |
@@ -369,7 +369,7 @@ There is no horizontal scroll at 1440, 1280, 1024, 390 or 375 px.
 | Target | Component | Props |
 |---|---|---|
 | `server` | `server/ServerWindow` | `{ target, onClose }` |
-| `dev` | `devices/DeviceWindow` → `PduWindow` / `KvmWindow`; a rack-kind device opens `RackWindow` for its rack | `PduWindow` / `KvmWindow`: `{ target, device, status, can, act, onClose }` |
+| `dev` | `devices/DeviceWindow` → `PduWindow` / `KvmWindow`; a rack-kind device opens `RackWindow` for its rack | `PduWindow` / `KvmWindow`: `{ target, device, status, can, act, onClose }`; `device` and `status` come with removed servers' names masked, and both windows have Delete… for Admins (12.3) |
 | `rack` | `devices/RackWindow` | `{ target: { kind: "rack", id: rackName }, onClose }` |
 | `unit` | `units/UnitWindow` | `{ target, onClose }`; `findUnit(rackItems, id)` is exported |
 | `cooling` | `units/CoolingWindow` | `{ target, onClose }` |
@@ -669,3 +669,64 @@ WP-P disables the whole-server items in `PowerAction` and `PowerBlock` with `rec
 4. **Seat letters.** `placeText` shows the letter for seat 2 and up, and for seat 1 only when it is told the shelf has more than one seat. `shelfTag` writes "R06·S1·B".
 5. **Pre-selection.** `suggested.pdu` follows the old `floorOutlet` rule over the PDUs that serve the rack, shared ones included, so two matches (one on a shared PDU) pre-select nothing. `suggested.kvm` looks at the rack's own KVMs only.
 6. **An empty map is no map.** With WP-S installed but nothing in `shelf_ports`, `GET /api/shelves` lists every drawn server as `used, mapped: false`. Screens use `hasShelfMap` before acting on `mapped: false` (the record's `shelfSeat` is `null` then), so the fixture without `DCIM_FIXTURE_SHELVES` reads exactly as before.
+
+## 12. One place, release R1 (INT-A)
+
+The owner's rule: one place to manage everything. The Manage tab (`?tab=inventory`) is the list, + Add and delete /
+restore; each item's window has all its actions; there is no Admin page per kind of thing.
+
+### 12.1 The Admin menu (`App.jsx`)
+
+| Section (`?tab=admin&section=`) | Label | Who sees it |
+|---|---|---|
+| `users` | Users | Admin, accounts mode |
+| `engineers` | Engineers | Admin |
+| `ssh` | SSH | Operator, Admin |
+| `assistant` (also `?tab=assistant`) | AI assistant | Admin |
+| `help` | Help & About | everyone |
+
+- `ADMIN_SECTIONS` lists them. `linkedAdminSection(search)` answers the section, or `""` for none or an unknown one.
+- `adminPage` is the section shown: the one asked for when the role's menu has it, else the first in the menu. So a bare
+  `?tab=admin` opens Users for an Admin, SSH for an Operator and Help & About for a Viewer.
+
+### 12.2 Retired pages and their addresses
+
+Admin › Devices, Removed servers, PDU–KVM mapping, Locations and Connections left the menu and are not rendered.
+`App()` calls `leaveRetiredAdminPage()` before `LabManagerApp` reads the address. It replaces an old address with its
+Manage address (`history.replaceState`, no extra history step). The other parameters, such as `srv=`, `open=` and `q=`,
+are kept.
+
+| Old address | Manage address |
+|---|---|
+| `?tab=admin&section=devices`, `section=mapping`, `?tab=sync` | `?tab=inventory&type=pdu,kvm` |
+| `?tab=admin&section=removed`, `show=removed` on `tab=admin`, `inventory` or `manage` | `?tab=inventory&show=deleted` (Operators and Admins; Manage shows a Viewer the whole list) |
+| `?tab=admin&section=locations`, `?tab=locations` | `?tab=inventory&type=server&show=no-location` |
+| `?tab=admin&section=connections`, `?tab=connections` | `?tab=inventory&type=server` |
+
+- The page files (`pages/SyncView.jsx`, `LocationsView.jsx`, `ConnectionsView.jsx`, `RemovedServersView.jsx`) stay in
+  the tree until WP-8 deletes them. App no longer imports them.
+- `tests/browser/sync.cjs`, `locations.cjs` and `connections.cjs` drove those pages; they are retired.
+- `navigate()` and `onPop` know only `assistant` as an Admin tab with its own `?tab=`.
+
+### 12.3 Windows
+
+- **PDU and KVM windows.** They pass `deleteTarget={{ kind: "device", id }}` and `deleteRole="admin"`, so Delete… is
+  last in ⋯ More. The page's "Remove device" calls `act.openDelete([{ kind: "device", id }])` too. App's
+  `deleteDevice` (the legacy `DELETE /api/devices/{id}`, which answers 409 now) is gone from `act.app`.
+- **Removed server names.** `DeviceWindow` hands the PDU and KVM windows the device and its reading through
+  `withoutRemovedDevice` and `withoutRemovedStatus` with `data.hidden`. A removed server's name on an outlet or port reads
+  as its default name ("Outlet 4", "Port 2"), as on the Dashboard cards. Known side effect: the page's label editor also
+  starts from the masked map, so saving it writes the default name over that outlet (as in v2.46.19).
+- **Read-only windows.** In a read-only window (`can.operate` false) WindowShell still shows Delete… to a role that may
+  delete. It sits after the read-only text. Today this is only a removed server's window ("Removed · read only"), for an
+  Admin.
+- **Restore toast.** RemoveAction's RestoreDialog toasts `restoredText(answer)` (`lab/deletePlan.js`) after a
+  Deleted-list restore: "Restored OPT74; it stays removed from the lab, as before" when the server was removed before it
+  was deleted. A restore through the old removal list still says "X is back in the lab."
+
+### 12.4 Dashboard and console
+
+- The Dashboard's "+ Add Device" (and "+ Add your first device") opens `devices/AddDeviceDialog`. It is the same dialog
+  as Manage › + Add › PDU… / KVM…. Manage is the place to add.
+- `openKvmConsole` and "Mark KVM free" ask in English. They still use the browser's confirm, because the app has no
+  in-app yes/no dialog for them yet and `kvm-launch.cjs` / `kvm-shared-port.cjs` answer the native dialog.

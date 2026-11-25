@@ -212,16 +212,20 @@ test("AI assistant has its own shareable ?tab=assistant link and Back restores i
   assert.equal(app.state.adminSection, "assistant");
   const entry = app.history.state;
   assert.equal(entry.adminSection, "assistant");
-  app.actions().navigateAdmin("connections");
-  assert.equal(app.state.adminSection, "connections");
+  app.actions().navigateAdmin("ssh");
+  assert.equal(new URL(app.window.location.href).searchParams.get("tab"), "admin");
+  assert.equal(app.state.adminSection, "ssh");
   app.pop({ state: entry });
   assert.equal(app.state.adminSection, "assistant");
   assert.equal(app.state.mainTab, "admin");
-  app.pop({ state: null });   // the URL now says ?tab=connections
-  assert.equal(app.state.adminSection, "connections");
+  app.actions().navigate("dashboard");
   app.actions().navigate("assistant");
   assert.equal(app.state.mainTab, "admin");
   assert.equal(app.state.adminSection, "assistant");
+  app.state.adminSection = "ssh";
+  app.pop({ state: null });   // the URL says ?tab=assistant
+  assert.equal(app.state.adminSection, "assistant");
+  assert.equal(app.state.mainTab, "admin");
 });
 
 test("a shared ?tab=assistant link opens Admin -> AI assistant on load", () => {
@@ -236,7 +240,8 @@ test("a shared ?tab=assistant link opens Admin -> AI assistant on load", () => {
 test("the AI assistant sub-tab is listed for Admins only and renders the key page", () => {
   assert.match(appSource, /import AssistantKeyView from "\.\/pages\/AssistantKeyView";/);
   assert.match(appSource, /\.\.\.\(canAdmin\s*\?\s*\[\["assistant",\s*"AI assistant"\]\]\s*:\s*\[\]\)/);
-  assert.match(appSource, /adminSection === "assistant" && <AssistantKeyView \/>/);
+  // adminPage: the section shown, from the role's menu (one place, R1).
+  assert.match(appSource, /adminPage === "assistant" && <AssistantKeyView \/>/);
 });
 
 // ---- AssistantKeyView.jsx (JSX is not importable here, so its key handling is checked in the source) ----

@@ -8,7 +8,8 @@
 // TL-2 the selection is kept per browser tab (sessionStorage twin.sel) and restored without a flight on a reload;
 //      embedded, a restored selection is reported to Lab Manager (its address gets ?select=)
 // TL-3 Lab Manager: "Show Rack-03 in 3D" ends with the iframe's __twin.S.selected = Rack-03's setup; a second Show in 3D
-//      (OPT31) while the twin is loaded switches the selection without reloading the iframe
+//      while the twin is loaded (OPT31's window, its header tool 3D; then Switch 03's unit window, its 3D) switches the
+//      selection without reloading the iframe
 // TL-4 a selection made in the twin replaces Lab Manager's ?select= (no new history entry); closing it drops it; a ref
 //      the twin cannot find (an old address with rack:Storage-Main) changes nothing there and the address follows what it still shows
 // TL-5 cross-origin messages (and a same-origin one from another window) are ignored by the twin and by Lab Manager
@@ -194,15 +195,36 @@ const EVIL_PAGE = `<!doctype html><script>
     const tab = name => lm.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name, exact: true });
     await lm.goBack(); await lm.locator('#rack-detail-title').waitFor();
     await tw.waitForFunction(() => window.__twin.isPaused(), null, { timeout: 5000 });
+    // Racks opens OPT31's window (one-place WP-5: no server dialog of its own); Show in 3D is the window's header tool
     await lm.locator('.racks-table').getByRole('button', { name: 'View OPT31', exact: true }).click();
-    await lm.locator('[data-dialog="server"]').getByRole('button', { name: 'Show OPT31 in 3D', exact: true }).click();
+    const serverWindow = lm.locator('[data-window="server"]');
+    await serverWindow.locator('h2', { hasText: 'OPT31' }).waitFor();
+    const server3d = serverWindow.locator('[data-tool="3d"]');
+    await server3d.waitFor();   // the window first renders "Loading…" without its tools
+    assert.equal(await server3d.getAttribute('title'), 'Show OPT31 in 3D');
+    await server3d.click();
     await lm.locator(FRAME).waitFor({ state: 'visible' });
+    await serverWindow.waitFor({ state: 'detached' });
     tw = await frameOf(lm);
     await selected(tw, 'LIVE-opt31'); await idle(tw);
     assert.equal(await tw.evaluate(() => window.__tlMark), 'first load', 'the iframe was not reloaded');
     const f31 = await focusOf(tw, 'LIVE-opt31');
     assert.deepEqual([f31.panel, f31.onScreen], [true, true]);
-    pass(`TL-3 Lab Manager /?tab=racks&rack=Rack-03 → "Show Rack-03 in 3D" → the iframe's __twin.S.selected = SETUP-003 (Rack-03); back on Racks the hidden twin is paused; OPT31's Show in 3D then selects LIVE-opt31 in the same twin document (no reload), panel open, on screen (${f31.dist} m)`);
+    // a unit opens its unit window (Racks has no unit panel any more); its 3D selects item:ci-3 in the same document
+    await tab('Racks').click(); await lm.locator('[data-rack-id]').first().waitFor();
+    await tw.waitForFunction(() => window.__twin.isPaused(), null, { timeout: 5000 });
+    await lm.locator('.racks-grid [data-rack-id="Rack-03"] .equipment-cell[data-item-id="ci-3"]').click();
+    const unitWindow = lm.locator('[data-window="unit"]');
+    await unitWindow.locator('h2', { hasText: 'Switch 03' }).waitFor();
+    const unit3d = unitWindow.getByRole('button', { name: '3D', exact: true });
+    assert.equal(await unit3d.getAttribute('title'), 'Show Switch 03 in 3D');
+    await unit3d.click();
+    await lm.locator(FRAME).waitFor({ state: 'visible' });
+    await unitWindow.waitFor({ state: 'detached' });
+    await selected(tw, 'LIVE-ci-3'); await idle(tw);
+    assert.equal(await tw.evaluate(() => window.__tlMark), 'first load', 'the iframe was not reloaded');
+    assert.equal(new URL(lm.url()).searchParams.get('select'), 'item:ci-3');
+    pass(`TL-3 Lab Manager /?tab=racks&rack=Rack-03 → "Show Rack-03 in 3D" → the iframe's __twin.S.selected = SETUP-003 (Rack-03); back on Racks the hidden twin is paused; OPT31's window → 3D ("Show OPT31 in 3D") then selects LIVE-opt31 in the same twin document (no reload), panel open, on screen (${f31.dist} m); Switch 03's unit window → 3D selects LIVE-ci-3 (select=item:ci-3), still no reload`);
 
     // ── TL-4: a selection made in the twin goes into Lab Manager's address (replaced) ──
     const query = () => new URL(lm.url()).searchParams;

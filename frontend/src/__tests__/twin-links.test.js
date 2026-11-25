@@ -209,21 +209,28 @@ test("Back / Forward onto a Show in 3D address shows its ref in the twin again",
   assert.deepEqual(run("?tab=twin&select=rack%3ARack-03", { tab: "twin", view: { kind: "pdu", id: 1 } }, null), [], "a detail view over the twin tab");
 });
 
-test("DcimView offers Show in 3D on the rack card, the rack detail, the server dialog, the unit dialog and both edit panels", () => {
+test("Show in 3D: Racks on the rack card and the rack detail; a server and a unit from their windows (the Racks dialogs are gone)", () => {
   assert.match(dcim, /\{!detail && floors && <ShowIn3dButton target=\{rackRef\(r\.rack\)\} name=\{r\.rack\}\/>\}/);   // a storage rack (no floors) has no place in the 3D
   assert.match(dcim, /\{rackHasFloors\(r\.rack\) && <ShowIn3dButton target=\{rackRef\(r\.rack\)\} name=\{r\.rack\} text className="racks-btn racks-btn-sm"\/>\}/);
-  assert.match(dcim, /twinButton=\{<ShowIn3dButton target=\{serverRef\(selectedServer\.name\)\} name=\{selectedServer\.name\}\/>\}/);
-  assert.match(read("../components/racks/ServerDetailsDialog.jsx"), /<span className="server-details-tools">\{sshSlot\}\{twinButton\}<button/);
-  assert.match(dcim, /<ShowIn3dButton target=\{itemRef\(item\.id\)\} name=\{item\.name\} className=\{PANEL_ICON_BTN\}\/>/);
   assert.match(dcim, /const label = `Show \$\{name\} in 3D`;/);
   assert.match(dcim, /aria-label=\{label\}/);
   // the text button's visible words are its whole accessible name (WCAG 2.5.3 label in name)
   assert.match(dcim, /\{Icon\.cube\} Show <bdi>\{name\}<\/bdi> in 3D<\/button>/);
   assert.doesNotMatch(dcim, /Show<span className="sr-only">/);
-  // Edit mode: the server and unit edit panels, blocked (aria-disabled, the reason on click) while unsaved
-  assert.match(dcim, /<ShowIn3dButton target=\{serverRef\(server\.name\)\} name=\{server\.name\} className=\{PANEL_ICON_BTN\} blocked=\{twinBlocked\} onBlocked=\{twinBlockedClick\}\/>/);
-  assert.match(dcim, /<ShowIn3dButton target=\{itemRef\(item\.id\)\} name=\{item\.name\} className=\{PANEL_ICON_BTN\} blocked=\{twinBlocked\} onBlocked=\{twinBlockedClick\}\/>/);
+  // blocked (aria-disabled, the reason on click) stays available to a caller that cannot leave Racks now
   assert.match(dcim, /"aria-disabled": blocked \? "true" : undefined/);
   assert.match(dcim, /if \(blocked\) onBlocked\?\.\(\); else showIn3d\(target\);/);
   assert.match(dcim, /<TwinLinkContext\.Provider value=\{onShowIn3d\}>/);
+  // Racks has no server or unit dialog of its own any more (WP-5): no Show in 3D for a server or a unit there
+  assert.doesNotMatch(dcim, /<ShowIn3dButton target=\{(?:serverRef|itemRef)\(/);
+  assert.doesNotMatch(dcim, /ServerDetailsDialog|asset-details-title|twinBlocked/);
+  // the server window's header tools: 3D for every role (outside the Operator-only Console and SSH), its first DCIM id
+  const tools = read("../server/HeaderTools.jsx");
+  assert.match(tools, /<button type="button" className="lab-window-btn" data-tool="3d" title=\{`Show \$\{record\.name\} in 3D`\} onClick=\{\(\) => act\.showIn3d\(\)\}>3D<\/button>/);
+  assert.doesNotMatch(slice(tools, "  return <>", "</>;"), /operate && <button[^>]*data-tool="3d"/);
+  assert.match(read("../server/ServerWindow.jsx"), /showIn3d: ref => base\.goTo\("twin", \{ ref: ref \|\| serverRef\(record\.dcim_ids\[0\] \?\? record\.name\) \}\)/);
+  // the unit window's header tools: 3D on item:<id>
+  assert.match(read("../units/UnitWindow.jsx"), /title=\{`Show \$\{item\.name\} in 3D`\} onClick=\{\(\) => act\.showIn3d\(itemRef\(item\.id\)\)\}>3D<\/button>/);
+  // both go to the Twin tab through App's goTo("twin", { ref })
+  assert.match(read("../window/LabWindowProvider.jsx"), /showIn3d: ref => appRef\.current\.goTo\?\.\("twin", \{ ref \}\)/);
 });

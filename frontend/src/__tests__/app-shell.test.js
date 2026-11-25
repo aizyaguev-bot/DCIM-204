@@ -95,7 +95,7 @@ test("an in-use port asks first; Cancel opens and marks nothing", () => {
   assert.equal(h.open("kvm1", 1), "cancelled", "the assistant's console button can say that nothing opened");
   assert.equal(h.calls.confirm.length, 1);
   assert.match(h.calls.confirm[0], /OPT11/);
-  assert.match(h.calls.confirm[0], /בשימוש/);
+  assert.match(h.calls.confirm[0], /is marked IN USE/);
   assert.deepEqual([h.calls.open, h.calls.fetch, h.calls.shown], [[], [], []]);
   const free = consoleHarness({ inUse: false });
   free.open("kvm1", 1);
@@ -294,24 +294,80 @@ test("a 409 on labels reloads and hands the fresh device to the editor", async (
   assert.equal((await run(undefined)).error.latest, undefined, "reload failed: no latest device");
 });
 
-test("removing a device: a 404 counts as removed and stale lists cannot bring it back", async () => {
-  const run = async (failure) => {
-    const state = { devices: [{ id: "a", name: "PDU A" }, { id: "b", name: "PDU B" }], alerts: [] };
-    const devicesSeq = { current: 5 };
-    const remove = fn(["devices", "confirm", "alert", "api", "errorMessage", "devicesSeq", "devicesJson", "setDevices"],
-      slice("  async function handleDeleteDevice(", "  const match ="), "handleDeleteDevice")(
-      state.devices, () => true, text => state.alerts.push(text),
-      { deleteDevice: async () => { if (failure) throw failure; } }, e => e.message, devicesSeq, { current: "[]" },
-      update => { state.devices = update(state.devices); });
-    return { result: await remove("a"), state, seq: devicesSeq.current };
+test("one place (R1): the Admin menu is Users, Engineers, SSH, AI assistant and Help & About, per role", () => {
+  const menuSource = app.match(/const adminMenu = ([^;]+);/)?.[1];
+  const pageSource = app.match(/const adminPage = ([^;]+);/)?.[1];
+  assert.ok(menuSource && pageSource, "App builds the Admin menu");
+  const menu = (accountMode, canAdmin, canOperate) => new Function("accountMode", "canAdmin", "canOperate", `return ${menuSource};`)(accountMode, canAdmin, canOperate);
+  const page = (adminMenu, adminSection) => new Function("adminMenu", "adminSection", `return ${pageSource};`)(adminMenu, adminSection);
+  const labels = list => list.map(([, label]) => label);
+  assert.deepEqual(labels(menu("accounts", true, true)), ["Users", "Engineers", "SSH", "AI assistant", "Help & About"]);
+  assert.deepEqual(labels(menu("legacy", true, true)), ["Engineers", "SSH", "AI assistant", "Help & About"]);
+  assert.deepEqual(labels(menu("accounts", false, true)), ["SSH", "Help & About"]);
+  assert.deepEqual(labels(menu("accounts", false, false)), ["Help & About"]);
+  // A bare ?tab=admin (or a section the account cannot see, or an old one) opens the first section it can see.
+  assert.equal(page(menu("accounts", true, true), ""), "users");
+  assert.equal(page(menu("accounts", false, true), ""), "ssh");
+  assert.equal(page(menu("accounts", false, false), "users"), "help");
+  assert.equal(page(menu("accounts", true, true), "mapping"), "users");
+  assert.equal(page(menu("accounts", true, true), "assistant"), "assistant");
+  // The old pages are not rendered any more (their files stay until WP-8) and the menu has no Hebrew label.
+  for (const gone of ["<SyncView", "<LocationsView", "<ConnectionsView", "<RemovedServersView", '"Removed servers"', '"PDU–KVM mapping"', '["devices","Devices"]']) {
+    assert.ok(!app.includes(gone), `App.jsx still has ${gone}`);
+  }
+  assert.doesNotMatch(app, /[\u0590-\u05ff]/, "App.jsx UI text is English");
+  for (const section of ["users", "engineers", "assistant", "ssh", "help"]) assert.match(app, new RegExp(`adminPage === "${section}"`));
+});
+
+test("one place (R1): an old Admin page's address lands in Manage", () => {
+  const retired = fn([], slice("function retiredAdminSearch(", "// Before the page reads its address"), "retiredAdminSearch")();
+  const linked = fn([], `const ADMIN_SECTIONS = ${app.match(/const ADMIN_SECTIONS = (\[[^\]]+\]);/)[1]};\n${slice("function linkedAdminSection(", "// An old Admin page")}`, "linkedAdminSection")();
+  const cases = {
+    "?tab=admin&section=devices": "?tab=inventory&type=pdu,kvm",
+    "?tab=admin&section=mapping": "?tab=inventory&type=pdu,kvm",
+    "?tab=sync": "?tab=inventory&type=pdu,kvm",
+    "?tab=admin&section=removed": "?tab=inventory&show=deleted",
+    "?tab=admin&show=removed": "?tab=inventory&show=deleted",
+    "?tab=inventory&show=removed": "?tab=inventory&show=deleted",
+    "?tab=admin&section=locations": "?tab=inventory&type=server&show=no-location",
+    "?tab=locations": "?tab=inventory&type=server&show=no-location",
+    "?tab=admin&section=connections": "?tab=inventory&type=server",
+    "?tab=connections&srv=opt11": "?tab=inventory&type=server&srv=opt11",
   };
-  let r = await run(null);
-  assert.deepEqual([r.result, r.state.devices.map(d => d.id), r.seq], [true, ["b"], 6]);
-  r = await run(Object.assign(new Error("Device not found"), { status: 404 }));
-  assert.deepEqual([r.result, r.state.devices.map(d => d.id), r.state.alerts], [true, ["b"], []]);
-  r = await run(Object.assign(new Error("Server error"), { status: 500 }));
-  assert.deepEqual([r.result, r.state.devices.length, r.seq], [false, 2, 5]);
-  assert.match(r.state.alerts[0], /Could not remove PDU A: Server error/);
+  for (const [from, to] of Object.entries(cases)) assert.equal(retired(from), to, from);
+  for (const kept of ["", "?tab=admin", "?tab=admin&section=ssh", "?tab=admin&section=users", "?tab=assistant", "?tab=inventory",
+    "?tab=inventory&show=deleted", "?tab=racks&show=removed", "?tab=admin&section=constructor", "?tab=admin&section=__proto__"]) {
+    assert.equal(retired(kept), null, kept);
+  }
+  assert.equal(linked("?tab=admin&section=ssh"), "ssh");
+  assert.equal(linked("?tab=admin&section=devices"), "", "an old section is not a menu section");
+  assert.equal(linked("?tab=admin"), "");
+  // It runs before LabManagerApp reads ?tab=, and replaces the address (no extra history step).
+  assert.match(app, /useState\(\(\) => \{ leaveRetiredAdminPage\(\); return displayRequested\(\); \}\)/);
+  assert.match(slice("function leaveRetiredAdminPage(", "import { dashboardStats }"), /window\.history\.replaceState\(/);
+});
+
+test("one place (R1): PDU and KVM windows delete through the one Delete dialog; removed servers read as default names", () => {
+  const read = path => readFileSync(new URL(path, import.meta.url), "utf8");
+  for (const file of ["../devices/PduWindow.jsx", "../devices/KvmWindow.jsx"]) {
+    const source = read(file);
+    assert.match(source, /deleteTarget=\{\{ kind: "device", id: device\.id \}\} deleteRole="admin"/, file);
+    assert.match(source, /act\.openDelete\(\[\{ kind: "device", id: device\.id \}\]\)/, file);
+    assert.match(source, /onDelete=\{openDelete\}/, file);
+    assert.doesNotMatch(source, /deleteDevice/, `${file}: the legacy DELETE answers 409`);
+  }
+  assert.doesNotMatch(app, /handleDeleteDevice|deleteDevice:/);
+  const deviceWindow = read("../devices/DeviceWindow.jsx");
+  assert.match(deviceWindow, /withoutRemovedDevice\(found, data\.hidden\)/);
+  assert.match(deviceWindow, /withoutRemovedStatus\(reading, data\.hidden\)/);
+  // The Dashboard's Add is Manage's Add device dialog.
+  assert.match(app, /<AddDeviceDialog racks=\{racks\}/);
+  assert.doesNotMatch(app, /<AddDeviceModal /);
+  // A read-only window (a removed server) keeps Delete… for a role that may delete.
+  const shell = read("../window/WindowShell.jsx");
+  assert.match(shell, /<span className="lab-window-readonly">\{readOnlyText\}<\/span>\s*\{mayDelete && <button[^>]*onClick=\{openDelete\}>Delete…<\/button>\}/);
+  // RestoreDialog's toast says when the server stays removed.
+  assert.match(read("../server/RemoveAction.jsx"), /act\.toast\(deleted \? restoredText\(/);
 });
 
 test("Mark KVM free names the ports it clears and does nothing on Cancel", async () => {

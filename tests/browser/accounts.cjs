@@ -104,9 +104,15 @@ const ALLOWED = [/^POST \/api\/auth\/(login|logout)$/, /^PATCH \/api\/users\/(vi
     await admin.goto(origin + '/?tab=admin');
     await signIn(admin, 'admin');
     await role(admin).filter({ hasText: 'Admin' }).waitFor();
-    await admin.getByRole('navigation', { name: 'Administration' }).getByRole('button', { name: 'Users', exact: true }).click();
+    // One place (R1): the Admin menu has only these sections, and a bare ?tab=admin opens the first one (Users).
+    const adminMenu = page => page.getByRole('navigation', { name: 'Administration' });
+    const menuLabels = async page => (await adminMenu(page).getByRole('button').allInnerTexts()).map(text => text.trim());
+    await adminMenu(admin).getByRole('button', { name: 'Users', exact: true }).waitFor();
+    assert.deepEqual(await menuLabels(admin), ['Users', 'Engineers', 'SSH', 'AI assistant', 'Help & About'], 'the Admin menu');
+    assert.equal(await adminMenu(admin).getByRole('button', { name: 'Users', exact: true }).getAttribute('aria-current'), 'page', '?tab=admin opens Users');
     const viewerRole = admin.getByLabel('Role for viewer', { exact: true });
     await viewerRole.waitFor();
+    passed.push('Admin menu: Users, Engineers, SSH, AI assistant, Help & About; ?tab=admin opens Users');
 
     // ---- ACC-1: an arrow key on the role select asks first; Cancel changes nothing ----
     await viewerRole.focus();
@@ -266,8 +272,9 @@ const ALLOWED = [/^POST \/api\/auth\/(login|logout)$/, /^PATCH \/api\/users\/(vi
     await admin.getByRole('complementary', { name: 'Maintenance', exact: true }).getByText('Viewer · read only', { exact: true }).waitFor();
     assert.equal(await admin.evaluate(() => [...document.querySelectorAll('button[aria-label^="Shut down all outlets on"]')].filter(b => !b.disabled).length), 0, 'no enabled shutdown button for a Viewer');
     await nav(admin, 'Admin');
-    await admin.getByRole('navigation', { name: 'Administration' }).waitFor();
-    assert.equal(await admin.getByRole('navigation', { name: 'Administration' }).getByRole('button', { name: 'Users', exact: true }).count(), 0, 'no Users section for a Viewer');
+    await adminMenu(admin).getByRole('button', { name: 'Help & About', exact: true }).waitFor();
+    assert.deepEqual(await menuLabels(admin), ['Help & About'], 'a Viewer\'s Admin menu has Help & About only (no Users section)');
+    await admin.getByRole('heading', { name: 'Help & About', exact: true }).waitFor();
     assert.equal(await admin.getByLabel('Role for viewer', { exact: true }).count(), 0, 'the user table is gone');
     passed.push(`ACC-2: the other tab follows the Viewer sign-in (notice after ${took.toFixed(1)} s, Viewer header after ${header.toFixed(1)} s); Power and Users follow the role`);
 

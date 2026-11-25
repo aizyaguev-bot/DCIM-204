@@ -96,47 +96,45 @@ test("filtering preserves backend natural order and does not alter source rows",
   assert.deepEqual(servers, before);
 });
 
-test("Connections navigation uses its shareable query and restores the Admin subtab", () => {
-  const app = navigationHarness();
-  app.actions().navigateAdmin("connections");
-  assert.equal(new URL(app.window.location.href).searchParams.get("tab"), "connections");
-  assert.equal(app.state.mainTab, "admin");
-  assert.equal(app.state.adminSection, "connections");
-  app.state.adminSection = "devices";
-  app.pop({ state: app.history.state });
-  assert.equal(app.state.adminSection, "connections");
-  app.pop({ state: null });
-  assert.equal(app.state.adminSection, "connections");
-  assert.equal(app.state.mainTab, "admin");
-});
-
-test("Back from mapping restores Connections after Dashboard and Admin navigation", () => {
-  const app = navigationHarness("connections");
+// One place (R1): Admin › Connections, Locations and PDU–KVM mapping are the Manage tab now (?tab=connections, ?tab=locations
+// and ?tab=sync land there, app-shell.test.js). The Admin sub-tabs left keep their place in the history.
+test("Back from SSH restores the Admin section after Dashboard and Admin navigation", () => {
+  const app = navigationHarness("ssh");
   app.actions().navigate("dashboard");
   app.actions().navigate("admin");
   const adminEntry = app.history.state;
-  assert.equal(app.state.adminSection, "connections");
-  assert.equal(adminEntry.adminSection, "connections");
-  app.actions().navigateAdmin("mapping");
-  assert.equal(app.state.adminSection, "mapping");
-  assert.equal(app.history.state.adminSection, "mapping");
+  assert.equal(app.state.adminSection, "ssh");
+  assert.equal(adminEntry.adminSection, "ssh");
+  app.actions().navigateAdmin("help");
+  assert.equal(new URL(app.window.location.href).searchParams.get("tab"), "admin");
+  assert.equal(app.state.adminSection, "help");
+  assert.equal(app.history.state.adminSection, "help");
   app.pop({ state: adminEntry });
   assert.equal(app.state.mainTab, "admin");
-  assert.equal(app.state.adminSection, "connections");
+  assert.equal(app.state.adminSection, "ssh");
 });
 
-test("Manage users records Users so Back from Connections restores the users page", () => {
-  const app = navigationHarness("connections");
+test("Manage users records Users so Back from SSH restores the users page", () => {
+  const app = navigationHarness("ssh");
   const callback = appSource.match(/onUsers=\{\(\) => ([^}]+)\}/)?.[1];
   assert.ok(callback, "Header exposes its Manage users callback");
   new Function("navigateAdmin", callback)(app.actions().navigateAdmin);
   const usersEntry = app.history.state;
   assert.equal(app.state.adminSection, "users");
   assert.equal(usersEntry.adminSection, "users");
-  app.actions().navigateAdmin("connections");
+  app.actions().navigateAdmin("ssh");
   app.pop({ state: usersEntry });
   assert.equal(app.state.adminSection, "users");
   assert.equal(app.state.mainTab, "admin");
+});
+
+test("Connections, Locations and PDU–KVM mapping are no Admin sections any more (Manage replaced them)", () => {
+  const sections = appSource.match(/const ADMIN_SECTIONS = (\[[^\]]+\]);/)?.[1];
+  assert.deepEqual(JSON.parse(sections), ["users", "engineers", "ssh", "assistant", "help"]);
+  for (const gone of ['"connections"', '"locations"', '"mapping"', '"sync"']) {
+    assert.ok(!navigationSource.includes(gone), `navigate() and navigateAdmin() know nothing about ${gone}`);
+    assert.ok(!popSource.includes(gone), `onPop knows nothing about ${gone}`);
+  }
 });
 
 test("the summary helper uses the read-only connections endpoint", async t => {
@@ -195,24 +193,6 @@ test("Connections and Locations share one Export CSV button for the same downloa
     assert.match(pageSource, /<ExportCsvButton\b/, page);
     assert.doesNotMatch(pageSource, /downloadConnectionsCsv/, `${page} downloads only through the shared button`);
   }
-});
-
-test("Locations has its own shareable query and Back restores it", () => {
-  const app = navigationHarness();
-  app.actions().navigateAdmin("locations");
-  assert.equal(new URL(app.window.location.href).searchParams.get("tab"), "locations");
-  assert.equal(app.state.mainTab, "admin");
-  assert.equal(app.state.adminSection, "locations");
-  const locationsEntry = app.history.state;
-  app.actions().navigateAdmin("connections");
-  assert.equal(app.state.adminSection, "connections");
-  app.pop({ state: locationsEntry });
-  assert.equal(app.state.adminSection, "locations");
-  app.pop({ state: null });   // the URL now says ?tab=connections
-  assert.equal(app.state.adminSection, "connections");
-  app.actions().navigate("sync");
-  assert.equal(app.state.mainTab, "admin");
-  assert.equal(app.state.adminSection, "mapping");
 });
 
 test("search ignores hidden device ids such as pdu3 or a uuid (CONN-3)", () => {

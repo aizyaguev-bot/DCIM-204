@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, Fragment, lazy, Suspense } from "react";
-import { api, deviceState, errorMessage } from "./api/client";
+import { api, errorMessage } from "./api/client";
 import Header, { useTabStripCue } from "./components/Header";
 import StatsBar from "./components/StatsBar";
 import PduCard from "./components/PduCard";
@@ -13,13 +13,10 @@ import DcimView from "./pages/DcimView";
 import ManageView from "./pages/ManageView";
 import { LabWindowProvider, WindowBackdrop } from "./window/LabWindowProvider";
 import { assistantDetail, twinOpenRequest } from "./window/windowUrl";
-import SyncView from "./pages/SyncView";
-import LocationsView from "./pages/LocationsView";
-import ConnectionsView from "./pages/ConnectionsView";
 import AssistantKeyView from "./pages/AssistantKeyView";
 import ScanView from "./pages/ScanView";
 import MonitoringView from "./pages/MonitoringView";
-import AddDeviceModal from "./components/AddDeviceModal";
+import AddDeviceDialog from "./devices/AddDeviceDialog";
 import { useAccounts, AccountSettings, UsersView } from "./accounts";
 import { EngineersView } from "./engineers";
 import InlineKvmConsole from "./components/InlineKvmConsole";
@@ -31,17 +28,43 @@ import { pxeApi, errorText as pxeErrorText } from "./api/pxe";
 import AssistantPanel from "./components/assistant/AssistantPanel";
 import useAssistantUseful from "./components/assistant/useAssistantUseful";
 import SshAdmin from "./pages/SshAdmin";
-import RemovedServersView from "./pages/RemovedServersView";
 import { useRemovedServers } from "./removedServers.jsx";
-import { withoutRemovedDevice, withoutRemovedStatus, withoutRemovedStatuses } from "./api/removedServers.js";
+import { withoutRemovedDevice, withoutRemovedStatuses } from "./api/removedServers.js";
 import { twinSrc, linkedTwinRef, isTwinRef, twinSelectMessage, twinRefToReplay, twinSelectedAddress, TWIN_SELECTED_MESSAGE, TWIN_DATA_CHANGED_MESSAGE, TWIN_HIDDEN_KEEP_MS } from "./twinLinks";
 // The terminal page (and xterm) loads only when an SSH tab is opened.
 const SshTerminal = lazy(() => import("./pages/SshTerminal"));
-const ADMIN_SECTIONS = ["devices", "users", "engineers", "removed", "mapping", "locations", "connections", "assistant", "ssh", "help"];
+// The Admin menu (one place, R1): only these sections. Devices, Removed servers, PDU–KVM mapping, Locations and
+// Connections are the Manage tab now, and their old addresses land there (retiredAdminSearch).
+const ADMIN_SECTIONS = ["users", "engineers", "ssh", "assistant", "help"];
 // ?tab=admin&section=<id> opens that Admin sub-page directly (the SSH terminal page links to Admin -> SSH this way).
+// "" (no section, or one that is not in the menu): the first section the account can see.
 function linkedAdminSection(search) {
   const section = new URLSearchParams(search).get("section");
-  return ADMIN_SECTIONS.includes(section) ? section : "devices";
+  return ADMIN_SECTIONS.includes(section) ? section : "";
+}
+// An old Admin page's address -> the Manage address that replaced it (a search string), or null for any other address.
+//   ?tab=admin&section=devices | mapping, ?tab=sync     -> ?tab=inventory&type=pdu,kvm
+//   ?tab=admin&section=removed, show=removed            -> ?tab=inventory&show=deleted (Manage shows it to Operators+)
+//   ?tab=admin&section=locations, ?tab=locations        -> ?tab=inventory&type=server&show=no-location
+//   ?tab=admin&section=connections, ?tab=connections    -> ?tab=inventory&type=server
+// Other parameters (a window's srv= or open=, q=) are kept.
+function retiredAdminSearch(search) {
+  const retired = { devices: { type: "pdu,kvm" }, mapping: { type: "pdu,kvm" }, removed: { show: "deleted" },
+    locations: { type: "server", show: "no-location" }, connections: { type: "server" } };
+  const params = new URLSearchParams(search);
+  const tab = params.get("tab");
+  const removedList = params.get("show") === "removed" && ["admin", "inventory", "manage"].includes(tab);
+  const page = ({ sync: "mapping", locations: "locations", connections: "connections" })[tab]
+    || (removedList ? "removed" : tab === "admin" ? params.get("section") : null);
+  if (!page || !Object.hasOwn(retired, page)) return null;
+  const next = new URLSearchParams({ tab: "inventory", ...retired[page] });
+  for (const [name, value] of params) if (!["tab", "section", "type", "show"].includes(name)) next.append(name, value);
+  return `?${next.toString().replace(/%2C/gi, ",")}`;
+}
+// Before the page reads its address: an old Admin page's address is replaced by its Manage address (no history step).
+function leaveRetiredAdminPage() {
+  const next = retiredAdminSearch(window.location.search);
+  if (next != null) window.history.replaceState(window.history.state, "", `${window.location.pathname}${next}${window.location.hash}`);
 }
 import { dashboardStats } from "./dashboardStats";
 import LabDisplay from "./pages/LabDisplay";
@@ -60,7 +83,7 @@ function LabManagerApp() {
   const [windowTarget, setWindowTarget] = useState(null);
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "dcim" ? "racks" : tab === "manage" ? "inventory" : ["sync", "locations", "connections", "assistant"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
+    return tab === "dcim" ? "racks" : tab === "manage" ? "inventory" : tab === "assistant" ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
   });
   const [pxeConfig, setPxeConfig] = useState(undefined);   // undefined: loading, null: unavailable
   const [pxeConfigError, setPxeConfigError] = useState("");
@@ -77,7 +100,7 @@ function LabManagerApp() {
   const [inlineConsole, setInlineConsole] = useState(null);   // { deviceId, port, url, name, leaseP }
   const inlineConsoleRef = useRef(null);   // the same console, for the history and pagehide listeners
   const kvmTimers = useRef(new Set());
-  const devicesSeq = useRef(0);    // a newer load or a removal makes an older device list response stale
+  const devicesSeq = useRef(0);    // a newer load makes an older device list response stale
   const devicesJson = useRef("");  // unchanged lists keep their array, so status polling is not restarted
   // Rack detail shown on Racks (?rack=); DcimView reads it and reports changes through selectRack.
   const [rackParam, setRackParam] = useState(() => new URLSearchParams(window.location.search).get("rack"));
@@ -87,8 +110,9 @@ function LabManagerApp() {
   const [maintenanceError, setMaintenanceError] = useState("");
   const [maintenanceDialog, setMaintenanceDialog] = useState(null);   // { mode: "shutdown" | "restore", pduId }
   const maintenanceSeq = useRef(0);
-  // Admin sub-pages with their own shareable ?tab= link; the others open from ?tab=admin&section=<id>.
-  const [adminSection, setAdminSection] = useState(() => ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[new URLSearchParams(location.search).get("tab")] || linkedAdminSection(location.search));
+  // The Admin section asked for: AI assistant has its own shareable ?tab= link; the others open from
+  // ?tab=admin&section=<id>. "" or a section this account cannot see shows the first one it can (adminPage).
+  const [adminSection, setAdminSection] = useState(() => ({ assistant: "assistant" })[new URLSearchParams(location.search).get("tab")] || linkedAdminSection(location.search));
   // The 3D twin iframe: mounted when the Twin tab opens, then kept, hidden, for TWIN_HIDDEN_KEEP_MS on the other tabs,
   // so a tab switch or "Show in 3D" does not reload it (hidden, the twin pauses itself: no rendering, no polling). Then
   // it is removed (its WebGL scene would keep the memory) and the next visit loads it again, on the address's ?select=.
@@ -123,13 +147,13 @@ function LabManagerApp() {
     url.searchParams.delete("section");
     // A tab change closes the lab window and forgets a Racks unit and a highlighted row (window/windowUrl.js).
     for (const name of ["srv", "open", "sec", "item", "focus"]) url.searchParams.delete(name);
-    const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
+    const section = ({ assistant: "assistant" })[tab];
     history.pushState({ tab, view: {kind:"dashboard"}, adminSection: section || adminSection }, "", url);
     setView({kind:"dashboard"}); setMainTab(section ? "admin" : tab); setEditMode(false);
     if (section) setAdminSection(section);
   }
   function navigateAdmin(section) {
-    navigate(["locations", "connections", "assistant"].includes(section) ? section : "admin");
+    navigate(section === "assistant" ? section : "admin");
     setAdminSection(section);
     history.replaceState({ ...history.state, adminSection: section }, "");
   }
@@ -168,7 +192,7 @@ function LabManagerApp() {
   useEffect(() => {
     const onPop = event => {
       const tab = event.state?.tab || new URLSearchParams(location.search).get("tab") || "dashboard";
-      const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
+      const section = ({ assistant: "assistant" })[tab];
       const nextTab = tab === "dcim" ? "racks" : tab === "manage" ? "inventory" : section ? "admin" : tab;
       const view = event.state?.view || { kind: "dashboard" };
       // Back / Forward between a rack and all racks stays in Edit mode; anything else leaves it.
@@ -263,19 +287,19 @@ function LabManagerApp() {
   // The Admin sub-tabs scroll on a phone: same fade cue and active-tab-in-view as the main tab strip.
   // `loading` is a dependency because the nav first renders after the device list has loaded.
   const subnavRef = useRef(null);
-  useTabStripCue(subnavRef, [loading, mainTab, view.kind, adminSection, accountMode, canAdmin]);
+  useTabStripCue(subnavRef, [loading, mainTab, view.kind, adminSection, accountMode, canAdmin, canOperate]);
 
   // Returns "popup" | "inline" | "denied" | "cancelled" (the assistant's console button shows it); other callers ignore it.
   function openKvmConsole(deviceId, portNumber) {
     setKvmOpenError("");
     if (!canOperate) {
-      setKvmOpenError("פתיחת KVM דורשת הרשאת Operator או Admin. החשבון הנוכחי הוא לצפייה בלבד.");
+      setKvmOpenError("Opening a KVM console needs the Operator or Admin role. This account is read only.");
       return "denied";
     }
     const name = devices.find(device => device.id === deviceId)?.name || "KVM";
     // Advisory only: someone else may be working on this port. Cancel opens nothing and marks nothing.
     const port = kvmStatuses[deviceId]?.ports?.find(p => String(p.number) === String(portNumber));
-    if (port?.in_use && !window.confirm(`הפורט ${port.label?.trim() || `Port ${portNumber}`} ב-${name} מסומן כבשימוש. ייתכן שמישהו אחר עובד עליו כרגע.\nלפתוח את הקונסול בכל זאת?`)) return "cancelled";
+    if (port?.in_use && !window.confirm(`${port.label?.trim() || `Port ${portNumber}`} on ${name} is marked IN USE. Someone else may be working on it now.\nOpen the console anyway?`)) return "cancelled";
     const base = `/api/kvms/${encodeURIComponent(deviceId)}`;
     const url = `${base}/autologin?port=${encodeURIComponent(portNumber)}`;
     // Keep window.open in the click handler, before any asynchronous request.
@@ -293,7 +317,7 @@ function LabManagerApp() {
         return typeof data?.lease === "string" ? data.lease : "";
       })
       .catch(() => {
-        setKvmOpenError("הקונסול נפתח, אבל סימון הפורט כבשימוש נכשל. בדוק שההתחברות לאתר עדיין בתוקף.");
+        setKvmOpenError("The console opened, but the port could not be marked IN USE. Check that you are still signed in.");
         return null;
       });
     if (popup) {
@@ -543,7 +567,7 @@ function LabManagerApp() {
     const name = devices.find(d => d.id === id)?.name || "KVM";
     const ports = (kvmStatuses[id]?.ports || []).filter(p => p.in_use)
       .map(p => p.label?.trim() ? `${p.label.trim()} (P${p.number})` : `P${p.number}`);
-    if (!window.confirm(`לסמן את ${name} כפנוי?\nסימון "בשימוש" יוסר מכל הפורטים: ${ports.join(", ") || "—"}.\nמי שמחובר לקונסול לא ינותק, אבל הפורט יוצג כפנוי.`)) return;
+    if (!window.confirm(`Mark ${name} free?\nThe IN USE mark is cleared on every port: ${ports.join(", ") || "—"}.\nAnyone on a console stays connected, but the port shows as free.`)) return;
     try {
       await api.markKvmFree(id);
       await loadKvmStatus(id);
@@ -589,35 +613,6 @@ function LabManagerApp() {
     }
   }
 
-  async function handleAddDevice(payload) {
-    try {
-      await api.createDevice(payload);
-      await loadDevices();
-      setAddOpen(false);
-    } catch (e) {
-      alert(`Failed to add device: ${errorMessage(e)}`);
-    }
-  }
-
-  // Returns true only when the device was removed.
-  async function handleDeleteDevice(id) {
-    const name = devices.find(d => d.id === id)?.name || "this device";
-    if (!confirm(`Remove ${name}? This cannot be undone.`)) return false;
-    try {
-      await api.deleteDevice(id);
-    } catch (e) {
-      // 404: someone else already removed it, which is the result that was asked for.
-      if (e.status !== 404) {
-        alert(`Could not remove ${name}: ${errorMessage(e)}`);
-        return false;
-      }
-    }
-    devicesSeq.current++;      // a list fetched before the removal must not bring the device back
-    devicesJson.current = "";
-    setDevices(d => d.filter(x => x.id !== id));
-    return true;
-  }
-
   const match = (d) => {
     if (rackFilter !== "all" && d.rack !== rackFilter) return false;
     if (!search.trim()) return true;
@@ -653,6 +648,10 @@ function LabManagerApp() {
     twin: ["3D Twin", "Explore the lab and its saved rack layout."],
     changelog: ["Changelog", "Changes and releases in Lab Manager."],
   }[mainTab];
+  // The Admin menu (one place, R1): Users, Engineers, SSH, AI assistant and Help & About, each for the roles that use
+  // it. A bare ?tab=admin, or a section this account cannot see, opens the first section it can.
+  const adminMenu = [...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","Engineers"]]:[]),...(canOperate?[["ssh","SSH"]]:[]),...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]];
+  const adminPage = adminMenu.some(([id]) => id === adminSection) ? adminSection : adminMenu[0][0];
   const updatedText = lastUpdated ? `Last updated ${lastUpdated.toLocaleTimeString()}.` : "Waiting for device readings.";
   const visiblePdus = pdus.filter(match);
   const visibleKvms = kvms.filter(match).sort((a, b) => a.name.localeCompare(b.name));
@@ -668,15 +667,15 @@ function LabManagerApp() {
     <LabWindowProvider devices={devices} pduStatuses={pduStatuses} kvmStatuses={kvmStatuses} maintenance={maintenance}
       apiRef={labWindowRef} onWindowChange={setWindowTarget}
       app={{ goTo, outletAction: handleOutletAction, turnOnAll: handleTurnOnAll, openMaintenance: (mode, pduId) => setMaintenanceDialog({ mode, pduId }),
-        saveLabels, markKvmFree: handleMarkKvmFree, openConsole: openKvmConsole, deleteDevice: handleDeleteDevice, switchFeeds,
+        saveLabels, markKvmFree: handleMarkKvmFree, openConsole: openKvmConsole, switchFeeds,
         refresh: async () => { await loadDevices(); await refreshAllStatuses(); } }}>
     <div className={sshPage ? "h-[100dvh] flex flex-col overflow-hidden" : "min-h-screen flex flex-col"}>
       <Header activeTab={mainTab} onNavigate={goTo} summary={summary} editMode={editMode} onEditChange={value => setEditMode(canOperate && value)} onHome={() => goTo("dashboard")}
         onAccount={() => goTo("account")} onUsers={() => navigateAdmin("users")} remoteInstall={pxeConfig?.enabled === true} />
       <WindowBackdrop>
       {deviceError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-rose-900 bg-rose-950/30 p-3 text-sm text-rose-300">Device list could not load: {deviceError}. <button className="underline" onClick={loadDevices}>Retry</button></div>}
-      {kvmOpenError && <div role="alert" dir="rtl" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>סגירה</button></div>}
-      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{[["devices","Devices"],...(accountMode === "accounts" && canAdmin ? [["users","Users"]] : []),...(canAdmin?[["engineers","מהנדסים"],["removed","Removed servers"]]:[]),["mapping","PDU–KVM mapping"],["locations","Locations"],["connections","Connections"],...(canOperate?[["ssh","SSH"]]:[]),...(canAdmin?[["assistant","AI assistant"]]:[]),["help","Help & About"]].map(([id,label])=><button key={id} aria-current={adminSection===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
+      {kvmOpenError && <div role="alert" className="mx-4 mb-4 rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">{kvmOpenError} <button className="underline" onClick={() => setKvmOpenError("")}>Close</button></div>}
+      {mainTab === "admin" && view.kind === "dashboard" && <nav ref={subnavRef} className="app-subnav" aria-label="Administration">{adminMenu.map(([id,label])=><button key={id} aria-current={adminPage===id ? "page" : undefined} onClick={()=>navigateAdmin(id)}>{label}</button>)}</nav>}
       {view.kind === "dashboard" && pageInfo && <div className="page-intro"><h1>{pageInfo[0]}</h1><p>{pageInfo[1]} {updatedText}</p></div>}
       {view.kind === "dashboard" && mainTab === "dashboard" && <StatsBar stats={stats} />}
       {view.kind === "dashboard" && mainTab === "inventory" && (
@@ -730,13 +729,11 @@ function LabManagerApp() {
             </p></main>)}
       {view.kind === "dashboard" && mainTab === "scan" && <ScanView />}
       {view.kind === "dashboard" && mainTab === "account" && <AccountSettings />}
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "users" && canAdmin && <UsersView />}
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "engineers" && canAdmin && <EngineersView />}
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "removed" && canAdmin && <RemovedServersView />}
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "connections" && <ConnectionsView />}
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "assistant" && <AssistantKeyView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminPage === "users" && canAdmin && <UsersView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminPage === "engineers" && canAdmin && <EngineersView />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminPage === "assistant" && <AssistantKeyView />}
       {view.kind === "dashboard" && mainTab === "monitoring" && <MonitoringView />}
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "ssh" && <SshAdmin />}
+      {view.kind === "dashboard" && mainTab === "admin" && adminPage === "ssh" && <SshAdmin />}
       {sshPage && (
         <Suspense fallback={<main className="device-page"><p role="status" className="text-sm text-zinc-400">Loading the terminal…</p></main>}>
           <SshTerminal serverKey={new URLSearchParams(location.search).get("server") || ""} onExit={() => goTo("inventory")} />
@@ -746,19 +743,6 @@ function LabManagerApp() {
       {twinFrameSrc && (
         <iframe ref={twinFrameRef} title="3D Digital Twin" src={twinFrameSrc} hidden={!twinShown} onLoad={twinFrameLoaded}
           className="w-full flex-1 border-0" style={{ minHeight: "calc(100vh - 150px)" }} allow="fullscreen" />
-      )}
-
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "mapping" && (
-        <SyncView
-          devices={devices}
-          pduStatuses={pduStatuses}
-          kvmStatuses={kvmStatuses}
-          onChanged={async () => { await loadDevices(); await refreshAllStatuses(); }}
-        />
-      )}
-
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "locations" && (
-        <LocationsView devices={devices} onChanged={async () => { await loadDevices(); await refreshAllStatuses(); }} />
       )}
 
       {view.kind === "dashboard" && ["dashboard", "power", "consoles"].includes(mainTab) && (
@@ -811,11 +795,7 @@ function LabManagerApp() {
         </main>
       )}
 
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "devices" && <main className="p-4 w-full mx-auto">
-        <div className="flex items-center justify-between mb-5"><div><h1 className="text-xl font-semibold text-white">Devices</h1><p className="text-xs text-zinc-500 mt-1">Manage the connected PDUs and KVMs.</p></div><button disabled={!canAdmin} className="edit-toggle active" onClick={()=>setAddOpen(true)}>+ Add Device</button></div>
-        <div className="border border-zinc-800 rounded-xl overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-zinc-900 text-zinc-500"><tr>{["Name","Type","Address","Rack","Status","Actions"].map(h=><th key={h} className="p-3 font-medium">{h}</th>)}</tr></thead><tbody>{devices.filter(d=>["pdu","kvm"].includes(d.kind)).map(d=><tr key={d.id} className="border-t border-zinc-800"><td className="p-3 font-medium text-white">{d.name}</td><td className="p-3 uppercase">{d.kind}</td><td className="p-3 font-mono">{d.ip}</td><td className="p-3">{d.rack}</td><td className="p-3" title={(pduStatuses[d.id] || kvmStatuses[d.id])?.error || undefined}>{{ online: "Online", offline: "Offline", error: "Error", unavailable: "Status unavailable", unknown: "Pending" }[deviceState(pduStatuses[d.id] || kvmStatuses[d.id])]}</td><td className="p-3 whitespace-nowrap"><button className="text-nv-300 mr-4" onClick={()=>openDetail({kind:d.kind,id:d.id})}>Details</button><button disabled={!canAdmin} className="text-rose-400" onClick={()=>handleDeleteDevice(d.id)}>Remove</button></td></tr>)}</tbody></table></div>
-      </main>}
-      {view.kind === "dashboard" && mainTab === "admin" && adminSection === "help" && <main className="p-6 max-w-3xl text-sm space-y-5">
+      {view.kind === "dashboard" && mainTab === "admin" && adminPage === "help" && <main className="p-6 max-w-3xl text-sm space-y-5">
         <h1 className="text-xl font-semibold text-white">Help & About</h1><p>Lab Manager connects to your Raritan PDUs and KVMs. Device data refreshes every 15 seconds while the page is open.</p>
         <p>Racks opens in view mode. Use Edit to rename assets, assign owners or rearrange shelves. Scan & Track supports equipment, shelf and whole-rack barcodes, including main storage.</p>
         <p>Ping Monitor runs on the backend: every 5 minutes from 07:00–20:00 and every 30 minutes overnight, using Israel time. It includes each server's PDU and KVM connections and email delivery status.</p>
@@ -825,7 +805,8 @@ function LabManagerApp() {
 
       </WindowBackdrop>
 
-      {addOpen && <AddDeviceModal racks={racks} onClose={() => setAddOpen(false)} onAdd={handleAddDevice} />}
+      {/* The Dashboard's Add is Manage's Add device dialog (Manage › + Add is the place to add). */}
+      {addOpen && <AddDeviceDialog racks={racks} onClose={() => setAddOpen(false)} onAdded={() => loadDevices()}/>}
       {inlineConsole && <InlineKvmConsole key={`${inlineConsole.deviceId}:${inlineConsole.port}`} console={inlineConsole} onClose={() => closeInlineConsole()} />}
       {maintenanceDialog && (
         <MaintenanceDialog key={`${maintenanceDialog.mode}-${maintenanceDialog.pduId}`}
@@ -850,7 +831,8 @@ function LabManagerApp() {
 // footer, assistant panel, What's new or dialogs) and reads its own data, so the site's polling does not run behind it.
 const displayRequested = () => new URLSearchParams(window.location.search).get("tab") === "display";
 export default function App() {
-  const [display, setDisplay] = useState(displayRequested);
+  // An old Admin page's address becomes its Manage address before LabManagerApp reads ?tab= (one place, R1).
+  const [display, setDisplay] = useState(() => { leaveRetiredAdminPage(); return displayRequested(); });
   useEffect(() => {
     const followUrl = () => setDisplay(displayRequested());
     window.addEventListener("popstate", followUrl);

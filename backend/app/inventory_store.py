@@ -280,8 +280,9 @@ def _same_u(old, item):
 EDITED_NOTE = "Edited in DCIM or 3D Twin"
 MOVED_WITH_SERVER_NOTE = "Moved with its server in DCIM or 3D Twin"
 # The one delete path (v2 spec §D.5): a whole-list save may not leave out a unit; units are deleted with Delete in their
-# window (POST /api/lab/delete, which passes the ids it deletes as allow_drop). Off until the pages that still drop units
-# (Racks' custom-item delete) are gone; the lead turns it on during integration. Read at call time, so tests can set it.
+# window (POST /api/lab/delete, which passes the ids it deletes as allow_drop). Still off: Scan Undo of a unit the scan
+# just added (frontend api/unitScan.js undoScannedUnit) removes it with a whole-list PUT /api/rack-items, which the
+# guard refuses. Turn it on once that Undo deletes through POST /api/lab/delete. Read at call time, so tests can set it.
 UNIT_DROP_GUARD = False
 UNITS_DROPPED = "Units are deleted with Delete in their window. Nothing was saved."
 
@@ -304,16 +305,12 @@ def checked_items(current, payload, note=EDITED_NOTE, allow_drop=frozenset(), re
     """`payload`, a whole equipment list, as it is saved over `current`: shape, U slot and unit details (422), then
     barcode/serial/MAC uniqueness (409); a linked barcode and the tracking fields are kept, a changed place is recorded
     as "moved" with `note`. Writes nothing (replace_items and save_layouts_with_items write the result).
-    While UNIT_DROP_GUARD is on, a payload that leaves out a current unit whose id is not in `allow_drop` is 422.
+    While UNIT_DROP_GUARD is on, a payload that leaves out a current unit whose id is not in `allow_drop` is 422
+    (after the shape, U slot and detail checks, before uniqueness).
     `restored`: ids of units a Restore puts back (POST /api/lab/restore): new to the list, they keep the tracking fields
     they carry (their own history and last scan) instead of starting without them."""
     incoming = deepcopy(payload)
     previous = {item["id"]: (rack, item) for rack, items in current.items() for item in items}
-    if UNIT_DROP_GUARD and isinstance(incoming, dict):
-        kept = {item.get("id") for items in incoming.values() if isinstance(items, list)
-                for item in items if isinstance(item, dict)}
-        if any(unit_id not in kept and unit_id not in allow_drop for unit_id in previous):
-            raise HTTPException(422, UNITS_DROPPED)
     seen = set()
     # Validate the complete shape before uniqueness checks inspect other racks.
     for rack, items in incoming.items():
@@ -344,6 +341,10 @@ def checked_items(current, payload, note=EDITED_NOTE, allow_drop=frozenset(), re
                         item[field] = value
                     else:
                         item.pop(field, None)
+    # After the shape, U and detail checks (so a malformed list keeps its own reason), before uniqueness: `seen` now
+    # holds every unit id the payload keeps.
+    if UNIT_DROP_GUARD and any(unit_id not in seen and unit_id not in allow_drop for unit_id in previous):
+        raise HTTPException(422, UNITS_DROPPED)
     # Identity keys are final from here on (only tracking fields change below), so one index of the whole
     # list serves every changed unit's check: O(n) instead of a rescan of every unit per changed value.
     # Only changed values are checked, so a legacy collision does not block an unrelated edit.

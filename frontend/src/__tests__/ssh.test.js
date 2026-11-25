@@ -1002,13 +1002,14 @@ test("App: ?tab=ssh is a page, Admin -> SSH is Operator+ and ?tab=admin&section=
   const linked = new Function(`const ADMIN_SECTIONS = ${sections}; ${helper}; return linkedAdminSection;`)();
   assert.equal(linked("?tab=admin&section=ssh"), "ssh");
   assert.equal(linked("?tab=admin&section=assistant"), "assistant");
-  assert.equal(linked("?tab=admin&section=<script>"), "devices");
-  assert.equal(linked("?tab=admin"), "devices");
+  // No section or an unknown one: "" (the first section the account can see; one place, R1).
+  assert.equal(linked("?tab=admin&section=<script>"), "");
+  assert.equal(linked("?tab=admin"), "");
   assert.match(app, /useState\(\(\) => \(\{[^}]+\}\)\[new URLSearchParams\(location\.search\)\.get\("tab"\)\] \|\| linkedAdminSection\(location\.search\)\)/);
   assert.match(app, /setAdminSection\(event\.state\?\.adminSection \|\| section \|\| linkedAdminSection\(location\.search\)\)/);
   assert.match(app, /"changelog", "account", "ssh"\]\.includes\(tab\)/);
   assert.match(app, /\.\.\.\(canOperate\?\[\["ssh","SSH"\]\]:\[\]\)/);
-  assert.match(app, /adminSection === "ssh" && <SshAdmin \/>/);
+  assert.match(app, /adminPage === "ssh" && <SshAdmin \/>/);
   // navigate() never carries the terminal's server id or a section into another page.
   const navigate = app.slice(app.indexOf("  function navigate("), app.indexOf("  function navigateAdmin("));
   assert.match(navigate, /if \(tab !== "ssh"\) url\.searchParams\.delete\("server"\);/);

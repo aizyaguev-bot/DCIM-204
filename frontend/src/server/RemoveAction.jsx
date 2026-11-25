@@ -9,6 +9,7 @@
 // Export shape: window/CONTRACT.md.
 import { useEffect, useRef, useState } from "react";
 import { restoreServer } from "../api/removedServers.js";
+import { restoredText } from "../lab/deletePlan.js";
 import useDialogFocus from "../components/racks/useDialogFocus.js";
 import { useRemovedServers } from "../removedServers.jsx";
 import { callJson, useDeletedEntry as useDeletedItem } from "../units/deletedList.js";
@@ -79,17 +80,21 @@ function RestoreDialog({ record, act, close }) {
     if (busyRef.current) return;
     busyRef.current = true; setBusy(true); setError("");
     try {
+      let restored = null;   // the Deleted-list restore's answer: its items and consequences.servers_restored
       await act.during(async () => {
         if (deleted) {
-          await callJson("POST", "/api/lab/restore", { ...restoreBody, dry_run: false, plan_revision: plan?.plan_revision },
-            deleted.etag ? { "If-Match": deleted.etag } : {});
+          restored = (await callJson("POST", "/api/lab/restore", { ...restoreBody, dry_run: false, plan_revision: plan?.plan_revision },
+            deleted.etag ? { "If-Match": deleted.etag } : {})).data;
         } else {
           await restoreServer(record.key, removedList.etag);
         }
       });
       window.dispatchEvent(new Event("dcim-removed-servers"));
       await Promise.all([removedList.refresh?.().catch(() => {}), lab.reload()]);
-      act.toast(`${name} is back in the lab.`);
+      // A server that was removed from the lab before it was deleted comes back still removed, and the toast says so
+      // (restoredText), so nobody looks for it on the racks. The old removal list's restore brings it back to the lab.
+      act.toast(deleted ? restoredText(Array.isArray(restored?.items) && restored.items.length ? restored
+        : { items: [{ kind: "server", id: record.key, name }], consequences: restored?.consequences }) : `${name} is back in the lab.`);
       close();
     } catch (e) {
       busyRef.current = false; setBusy(false);

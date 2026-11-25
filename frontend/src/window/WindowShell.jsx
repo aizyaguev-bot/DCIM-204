@@ -15,7 +15,8 @@ import useWindowFocus from "./useWindowFocus.js";
 // more        [MenuItem]  ⋯ More: { id, label, onSelect, tone?: "danger", separator?: true (a line before it),
 //             disabled?, title? }
 // deleteTarget / deleteRole   { kind, id } and "operator" | "admin": adds Delete… (act.openDelete) when the role may;
-//             in the bar when maybeGone, else last in More after a line, in red
+//             in the bar when maybeGone, else last in More after a line, in red. A read-only window (can.operate false,
+//             e.g. a removed server's) still shows it, after the read-only text, to a role that may delete.
 // banner      a notice under the header (removed, deleted, gone)
 // can         { operate, admin }
 // size        "normal" | "wide"
@@ -72,7 +73,10 @@ export default function WindowShell({ kind, name, state = null, badges = [], too
                 onClick={() => { setMenuOpen(false); item.onSelect?.(); }}>{item.label}</button>
             </li>)}
           </ul>}
-        </> : <span className="lab-window-readonly">{readOnlyText}</span>}
+        </> : <>
+          <span className="lab-window-readonly">{readOnlyText}</span>
+          {mayDelete && <button type="button" className="lab-window-btn" data-tone="danger" onClick={openDelete}>Delete…</button>}
+        </>}
       </div>
       <div className="lab-window-body">{children}</div>
     </section>

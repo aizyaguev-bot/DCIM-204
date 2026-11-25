@@ -79,6 +79,104 @@ const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:8770';
   await app.locator('main',{hasText:'PDU 02'}).first().waitFor();await app.getByRole('button',{name:/Edit Labels/}).waitFor();
   assert.equal(await app.getByLabel('Label for outlet 1').count(),0,'PDU 02 opens without the PDU 01 label editor');checks.push('a label draft stays with its device across history');
   assert.deepEqual(appWrites,[],'Rack navigation must not write');assert.deepEqual(failures,[]);
+  // One place (R1): the Admin menu is Users, Engineers, SSH, AI assistant and Help & About (each for its roles); a bare
+  // ?tab=admin, or a section the account cannot see, opens the first one it can. Every old Admin page address (Devices,
+  // Removed servers, PDU–KVM mapping, Locations, Connections) lands in Manage with its filter, keeping a window's srv=.
+  const adminNav=p=>p.getByRole('navigation',{name:'Administration'});
+  const menuOf=async p=>{await adminNav(p).getByRole('button').first().waitFor();return (await adminNav(p).getByRole('button').allInnerTexts()).map(t=>t.trim());};
+  const manageTab=p=>p.getByRole('navigation',{name:'Main navigation'}).getByRole('button',{name:'Manage',exact:true});
+  await app.goto(origin+'/?tab=admin');
+  assert.deepEqual(await menuOf(app),['Users','Engineers','SSH','AI assistant','Help & About'],'Admin menu (Admin)');
+  assert.equal(await adminNav(app).getByRole('button',{name:'Users',exact:true}).getAttribute('aria-current'),'page','a bare ?tab=admin opens Users');
+  await app.getByLabel('Role for viewer',{exact:true}).waitFor();
+  for(const role of ['operator','viewer']){
+    const c=await browser.newContext({viewport:{width:1440,height:1000}});
+    await c.route('**/*',r=>r.request().url().startsWith(origin+'/')?r.continue():r.abort());
+    await c.addInitScript(()=>{try{localStorage.setItem('dcim.seenVersion','LOCAL PREVIEW - TEST DATA');}catch{}});
+    assert.equal((await c.request.post(origin+'/api/auth/login',{data:{username:role,password:'test-password-123'}})).status(),200,role+' login');
+    const p=await c.newPage();p.on('pageerror',e=>failures.push(e.message));
+    const roleWrites=[];p.on('request',r=>{if(!['GET','HEAD'].includes(r.method()))roleWrites.push(r.url());});
+    await p.goto(origin+'/?tab=admin&section=users');
+    const want=role==='operator'?['SSH','Help & About']:['Help & About'];
+    assert.deepEqual(await menuOf(p),want,`Admin menu (${role})`);
+    assert.equal(await adminNav(p).getByRole('button',{name:want[0],exact:true}).getAttribute('aria-current'),'page',`${role}: Users is not in its menu, so ${want[0]} opens`);
+    assert.equal(await p.getByLabel('Role for viewer',{exact:true}).count(),0,`${role}: no user table`);
+    if(role==='viewer'){
+      await p.getByRole('heading',{name:'Help & About'}).waitFor();
+      await p.goto(origin+'/?tab=admin&section=removed');await p.locator('main[data-page="manage"]').waitFor();
+      assert.equal(new URL(p.url()).searchParams.get('show'),'deleted');
+      assert.equal(await p.locator('[data-chip="deleted"]').count(),0,'the Deleted list is for Operators and Admins');
+      assert.equal(await p.locator('[data-view="deleted"]').count(),0,'a Viewer gets the whole list instead');
+    }
+    assert.deepEqual(roleWrites,[],role+': the menu writes nothing');
+    await c.close();
+  }
+  checks.push('Admin menu: Admin Users, Engineers, SSH, AI assistant, Help & About; Operator SSH, Help & About; Viewer Help & About; ?tab=admin opens the first');
+  const retired=[['/?tab=admin&section=devices','pdu,kvm',null],['/?tab=admin&section=mapping','pdu,kvm',null],['/?tab=sync','pdu,kvm',null],
+    ['/?tab=admin&section=removed',null,'deleted'],['/?tab=admin&show=removed',null,'deleted'],
+    ['/?tab=admin&section=locations','server','no-location'],['/?tab=locations','server','no-location'],
+    ['/?tab=admin&section=connections','server',null],['/?tab=connections','server',null]];
+  for(const [path,type,show] of retired){
+    await app.goto(origin+path);
+    await app.locator('main[data-page="manage"]').waitFor();
+    const u=new URL(app.url());
+    assert.deepEqual([u.searchParams.get('tab'),u.searchParams.get('type'),u.searchParams.get('show'),u.searchParams.has('section')],['inventory',type,show,false],path);
+    assert.equal(await manageTab(app).getAttribute('aria-current'),'page',path+': the Manage tab');
+    assert.equal(await app.locator('select[aria-label="Type"]').inputValue(),type||'',path+': Type');
+    if(show==='deleted')await app.locator('[data-view="deleted"]').waitFor();
+    if(show==='no-location')assert.equal(await app.locator('select[aria-label="More filters"]').inputValue(),'no-location',path+': More filters');
+    assert.equal(await adminNav(app).count(),0,path+': no Admin page');
+  }
+  await app.goto(origin+'/?tab=connections&srv=opt11');
+  await app.locator('[data-window="server"] h2',{hasText:'OPT11'}).waitFor();
+  await app.locator('main[data-page="manage"]').waitFor();
+  assert.equal(new URL(app.url()).searchParams.get('tab'),'inventory','a window over an old address opens over Manage');
+  await app.keyboard.press('Escape');await app.locator('[data-window]').waitFor({state:'detached'});
+  checks.push('old Admin addresses land in Manage: devices / mapping / sync -> PDUs & KVMs, removed -> Deleted, locations -> Servers + No location, connections -> Servers');
+  assert.deepEqual(appWrites,[],'the menu and the redirects write nothing');
+  // PDU and KVM windows (Admin): ⋯ More › Delete… and the page's Remove device open the one Delete dialog. Only its
+  // preview (a dry run) is sent; Cancel closes it and nothing is deleted.
+  const sent=[];app.on('request',r=>{if(!['GET','HEAD'].includes(r.method()))sent.push({path:new URL(r.url()).pathname,body:(()=>{try{return r.postDataJSON();}catch{return null;}})()});});
+  const deleteDialog=app.locator('[data-dialog="delete"]');
+  for(const [id,kind] of [['pdu1','pdu'],['kvm1','kvm']]){
+    await app.goto(origin+`/?tab=dashboard&open=dev:${id}`);
+    const w=app.locator(`[data-window="${kind}"]`);await w.waitFor();
+    await w.getByRole('button',{name:'⋯ More'}).click();
+    await w.getByRole('menuitem',{name:'Delete…',exact:true}).click();
+    await deleteDialog.waitFor();await deleteDialog.getByRole('button',{name:'Cancel',exact:true}).click();await deleteDialog.waitFor({state:'detached'});
+    await w.getByRole('button',{name:'Remove device',exact:true}).click();
+    await deleteDialog.waitFor();await deleteDialog.getByRole('button',{name:'Cancel',exact:true}).click();await deleteDialog.waitFor({state:'detached'});
+    assert.equal(await w.count(),1,kind+' window stays open after Cancel');
+  }
+  assert.ok(sent.length>0&&sent.every(s=>s.path==='/api/lab/delete'&&s.body?.dry_run===true&&s.body.targets?.[0]?.kind==='device'),'only delete previews: '+JSON.stringify(sent));
+  checks.push('PDU and KVM windows: ⋯ More › Delete… and Remove device open the one Delete dialog (preview only; Cancel deletes nothing)');
+  // A removed server (the one-place fixture's OPT74): its window is read only and still offers an Admin Delete…; a PDU
+  // window shows its name on the outlet as the default name, as the Dashboard card does.
+  const removedDoc=await (await ctx.request.get(origin+'/api/removed-servers')).json();
+  const hiddenKeys=removedDoc.hidden||[];const removedKey=hiddenKeys.includes('opt74')?'opt74':hiddenKeys[0];
+  if(!removedKey)checks.push('SKIPPED: removed-server window cases (no removed server; start the fixture with DCIM_FIXTURE_ONE_PLACE=1)');
+  else{
+    const removedName=removedDoc.servers?.[removedKey]?.name||removedKey.toUpperCase();
+    sent.length=0;
+    await app.goto(origin+`/?tab=dashboard&srv=${encodeURIComponent(removedKey)}`);
+    const sw=app.locator('[data-window="server"]');
+    await sw.getByText('Removed · read only',{exact:true}).waitFor();
+    await sw.getByRole('button',{name:'Delete…',exact:true}).click();
+    await deleteDialog.waitFor();await deleteDialog.getByRole('button',{name:'Cancel',exact:true}).click();await deleteDialog.waitFor({state:'detached'});
+    assert.ok(sent.every(s=>s.path==='/api/lab/delete'&&s.body?.dry_run===true),'only a delete preview: '+JSON.stringify(sent));
+    const devs=await (await ctx.request.get(origin+'/api/devices/')).json();
+    const holder=devs.find(d=>d.kind==='pdu'&&Object.values(d.labels||{}).some(l=>String(l).trim().toLowerCase()===removedName.toLowerCase()));
+    if(holder){
+      const port=Object.entries(holder.labels).find(([,l])=>String(l).trim().toLowerCase()===removedName.toLowerCase())[0];
+      await app.goto(origin+`/?tab=dashboard&open=dev:${holder.id}`);
+      const pw=app.locator('[data-window="pdu"]');await pw.waitFor();
+      await pw.getByText(`Outlet ${port}`,{exact:true}).first().waitFor();
+      assert.equal(await pw.getByText(removedName,{exact:true}).count(),0,`${holder.name} outlet ${port} reads "Outlet ${port}", not ${removedName}`);
+      assert.equal(await app.locator(`section.device-card[aria-label="${holder.name}"]`).getByText(removedName,{exact:true}).count(),0,'and on its Dashboard card');
+    }
+    checks.push(`removed ${removedName}: window read only with Admin Delete… (preview only)${holder?`; ${holder.name} window shows its outlet's default name`:''}`);
+  }
+  assert.deepEqual(failures,[]);
   console.log(JSON.stringify({passed:checks,writes,errors:failures}));
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

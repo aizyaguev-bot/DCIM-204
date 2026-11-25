@@ -54,7 +54,7 @@ const PASSWORD = 'test-password-123';
       const url = new URL(request.url());
       if (['GET', 'HEAD', 'OPTIONS'].includes(request.method())) return route.continue();
       const key = request.method() + ' ' + url.pathname;
-      if (['PATCH /api/devices/pdu1/labels', 'POST /api/devices/rename-opt'].includes(key)) {
+      if (['PATCH /api/devices/pdu1/labels', 'PATCH /api/devices/pdu2/labels', 'POST /api/devices/rename-opt'].includes(key)) {
         sent.push([key, request.postDataJSON()]);
         return route.continue();
       }
@@ -73,14 +73,15 @@ const PASSWORD = 'test-password-123';
 
     const dialog = page.locator('[data-dialog="rename-everywhere"]');
     const input = port => page.getByLabel(`Label for outlet ${port}`, { exact: true });
-    async function editPdu01(port, text) {
+    async function editPdu(pdu, port, text) {
       await page.goto(origin + '/?tab=power');
-      await page.getByRole('region', { name: 'PDU 01' }).getByRole('button', { name: 'Details →' }).click();
+      await page.getByRole('region', { name: pdu }).getByRole('button', { name: 'Details →' }).click();
       await page.getByText('Summary', { exact: true }).waitFor();
       await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.includes('Edit Labels') && !b.disabled));
       await page.getByRole('button', { name: 'Edit Labels' }).click();
       await input(port).fill(text);
     }
+    const editPdu01 = (port, text) => editPdu('PDU 01', port, text);
     const save = () => page.getByRole('button', { name: 'Save', exact: true }).click();
     const settle = () => page.waitForTimeout(700);
     const start = await labels();
@@ -160,25 +161,37 @@ const PASSWORD = 'test-password-123';
     assert.equal(await label('pdu1', 2), 'OPT13');
     checks.push('An existing server name (OPT13 on outlet 2) is saved for that outlet only, without asking');
 
-    // ---- The PDU–KVM mapping page asks the same way: the other feed's KVM port and the rack U follow ----
+    // ---- Another place asks the same way: the other feed's KVM port and the rack U follow. The PDU–KVM mapping page
+    //      (?tab=sync) while it exists; once Admin's mapping page is gone (one-place R1: Manage instead), PDU 02's own
+    //      window (Power › PDU 02 › Details →, open=dev:pdu2) ----
     sent.length = 0;
     await page.goto(origin + '/?tab=sync');
-    await page.getByRole('heading', { name: 'PDU ↔ KVM Sync Map' }).waitFor();
-    await page.getByRole('button', { name: 'Edit PDU 02 outlet 4 (OPT19 (PSU2))', exact: true }).click();
-    await page.getByLabel('OPT label for PDU 02 outlet 4', { exact: true }).fill('OPT17 (PSU2)');
+    const syncPage = await page.getByRole('heading', { name: 'PDU ↔ KVM Sync Map' }).waitFor({ timeout: 15000 }).then(() => true, () => false);
+    if (syncPage) {
+      await page.getByRole('button', { name: 'Edit PDU 02 outlet 4 (OPT19 (PSU2))', exact: true }).click();
+      await page.getByLabel('OPT label for PDU 02 outlet 4', { exact: true }).fill('OPT17 (PSU2)');
+    } else {
+      await editPdu('PDU 02', 4, 'OPT17 (PSU2)');
+    }
     await save();
     await dialog.waitFor();
     assert.equal((await dialog.getByRole('heading').innerText()).trim(), 'Rename OPT19 to OPT17?');
     await dialog.locator('[data-choice="everywhere"]').click();
-    await page.getByRole('button', { name: 'Edit PDU 02 outlet 4 (OPT17 (PSU2))', exact: true }).waitFor();
-    assert.deepEqual(sent.map(([key, body]) => [key, !!body.dry_run]), [['POST /api/devices/rename-opt', true], ['POST /api/devices/rename-opt', false]]);
+    await dialog.waitFor({ state: 'detached' });
+    if (syncPage) {
+      await page.getByRole('button', { name: 'Edit PDU 02 outlet 4 (OPT17 (PSU2))', exact: true }).waitFor();
+      assert.deepEqual(sent.map(([key, body]) => [key, !!body.dry_run]), [['POST /api/devices/rename-opt', true], ['POST /api/devices/rename-opt', false]]);
+    } else {
+      await page.getByRole('button', { name: 'Edit Labels' }).waitFor();
+      assert.deepEqual(sent.map(([key, body]) => [key, !!body.dry_run]), [['POST /api/devices/rename-opt', true], ['POST /api/devices/rename-opt', false], ['PATCH /api/devices/pdu2/labels', false]]);
+    }
     now = await labels();
     assert.deepEqual([now.pdu1['1'], now.pdu2['4'], now.kvm1['1']], ['OPT18', 'OPT17 (PSU2)', 'OPT17']);
     assert.deepEqual(await rackSlots(), { 'Rack-01': { opt17: 3 } });
-    checks.push('Sync page: Rename everywhere of PDU 02 outlet 4 renames KVM 01 port 1 and the Rack-01 U3 entry too (OPT17)');
+    checks.push(`${syncPage ? 'Sync page' : 'PDU 02 window (no mapping page)'}: Rename everywhere of PDU 02 outlet 4 renames KVM 01 port 1 and the Rack-01 U3 entry too (OPT17)`);
 
     assert.deepEqual(errors, [], 'No browser JavaScript errors');
-    assert.deepEqual(unexpectedWrites, [], 'The pages wrote only PDU 01 labels and the rename');
+    assert.deepEqual(unexpectedWrites, [], 'The pages wrote only PDU 01 / PDU 02 labels and the rename');
 
     // Put the fixture back: OPT11 on PDU 01 outlets 1-2, KVM 01 port 1, its monitor/owner; OPT24 on PDU 02 outlet 4.
     await write('POST', '/api/devices/rename-opt', { old_name: 'OPT17', new_name: 'OPT11' });
