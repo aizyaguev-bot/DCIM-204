@@ -2,6 +2,15 @@
 
 Open **Ping Monitor**, or `/?tab=monitoring`, in Lab Manager.
 
+Click a server's name (or **Details**) to open its server window on **Activity**: the
+monitor's status, the PDU/KVM links with each device's check time, the settings, the
+last 60 checks and a timeline of its ping incidents (Admins also see when it was
+removed from the lab or restored, and the units on its floor show when they were
+moved). The same window opens from Racks and every other place that names the
+server, and `/?tab=monitoring&srv=opt11&sec=activity` links straight to it. A monitor
+that is not a server (no server name, for example a printer) opens a side panel
+with the same details and settings instead.
+
 ## Schedule and operation
 
 - Every day, 07:00 through 19:55: checks every 5 minutes.
@@ -36,8 +45,11 @@ failure email had been sent; it never claims a recovery). Monitors added with **
 server** are never deleted by this rule.
 
 Valid names are used as DNS hostnames by default. The Lab Manager host must resolve
-them to the intended server. Choose **Details**, enter an IP or hostname, and save
-to override any address. Computer inventory `ip`/`hostname` fields are imported
+them to the intended server. In the server window's **Activity**, enter an IP or
+hostname and choose **Save settings** to override any address (Operator; the save is
+refused with "Someone else changed this server" when another session saved first,
+and the form then offers the current values or keeps yours). A server without a
+monitor shows **Monitor this server** there, with its name as the address. Computer inventory `ip`/`hostname` fields are imported
 when a monitoring target is first created. Later discovery preserves overrides.
 Use **Add server** for machines without port labels or computer inventory entries.
 
@@ -45,12 +57,13 @@ Discovery retains imported targets and history even if an inventory entry is
 removed. Renaming through Lab Manager's server rename or cascading port label
 editor retains the monitor ID, address, pause state, history and owner. A rename
 that would collide with another monitor or assigned owner is rejected.
-The displayed name follows the current inventory. In **Details**, turn off
-automatic name synchronization to set a display alias, or turn it back on to
-restore the inventory name. Aliases do not change probe addresses or port links.
+The displayed name follows the current inventory. In the settings, untick **Use the
+inventory name** to set a display alias, or tick it again to restore the inventory
+name. Aliases do not change probe addresses or port links.
 This prevents a failed device discovery from silently removing monitoring.
 Pausing or changing an address closes an open incident with that reason, without
-claiming the old address recovered. Old checks retain the address actually tested.
+claiming the old address recovered. Unticking **Monitor this server** asks first for
+that reason; the change applies with **Save settings**. Old checks retain the address actually tested.
 
 ## Results and retention
 
@@ -65,8 +78,8 @@ discovery, with current saved labels taking precedence. A matching rack or a dev
 management address alone never establishes a server-to-port association.
 
 All matching feeds/ports are displayed, including multiple PDU outlets for a server.
-Each entry identifies the device and outlet/port number. **Details** shows its check
-time and explanation. The **Needs attention** filter includes failed, missing,
+Each entry identifies the device and outlet/port number. The server window's
+**Activity** shows its check time and explanation. The **Needs attention** filter includes failed, missing,
 disabled, unverified and overdue connections even when the server answers ping.
 
 - PDU **Power on/off/cycling** describes the actual reported outlet state. It is not
@@ -78,7 +91,7 @@ disabled, unverified and overdue connections even when the server answers ping.
   A static fallback list or an unknown state displays **Port unverified**, never green.
 - **Check failed** can mean a network, authentication or API failure. New checks
   save a sanitized explanation (authentication, connection, timeout or unusable
-  API response), shown directly in the table and in Details. Before the first
+  API response), shown directly in the table and in the server window. Before the first
   new check, old snapshots still show the generic message. The previous
   success is not reused. **Not linked** means no matching port label was found;
   configure the correct server name on its PDU/KVM port in the existing device UI.

@@ -4,7 +4,7 @@ import nvidiaLogo from "../assets/nvidia-logo.svg";
 const tabs = [
   ["dashboard", "Dashboard", "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"],
   ["racks", "Racks", "M4 3h16v7H4zM4 14h16v7H4zM7 6h.01M7 17h.01"],
-  ["inventory", "Inventory", "M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01"],
+  ["inventory", "Manage", "M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01"],
   ["power", "Power", "m13 2-9 12h8l-1 8 9-12h-8z"],
   ["consoles", "Consoles", "M3 4h18v13H3zM8 21h8M12 17v4"],
   ["pxe", "Remote install", "M12 3v12M7 10l5 5 5-5M4 21h16", "operate"],

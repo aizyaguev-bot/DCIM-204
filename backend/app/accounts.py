@@ -193,6 +193,10 @@ def required_role(path, method):
     # Cooling unit history names who saved each version, so its read is Operator too; restoring is an Operator write.
     if path == "/api/chillers/history": return "Operator"
     if path == "/api/chillers/restore": return "Operator"
+    # Delete and restore (v2 spec section D): Operators delete units and 3D-only records, and the handlers ask for an
+    # Admin for servers, PDUs, KVMs, racks and cooling units; the Deleted list's read is Operator; Delete forever is Admin.
+    if path == "/api/lab" or path.startswith("/api/lab/"):
+        return "Admin" if method == "DELETE" else "Operator"
     if method in ("GET", "HEAD", "OPTIONS"): return "Viewer"
     if path in ("/api/auth/logout", "/api/me", "/api/me/password", "/api/me/preferences", "/api/me/end-other-sessions"): return "Viewer"
     if path == "/api/devices" or re.fullmatch(r"/api/devices/[^/]+", path):

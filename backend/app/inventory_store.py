@@ -279,6 +279,11 @@ def _same_u(old, item):
 
 EDITED_NOTE = "Edited in DCIM or 3D Twin"
 MOVED_WITH_SERVER_NOTE = "Moved with its server in DCIM or 3D Twin"
+# The one delete path (v2 spec §D.5): a whole-list save may not leave out a unit; units are deleted with Delete in their
+# window (POST /api/lab/delete, which passes the ids it deletes as allow_drop). Off until the pages that still drop units
+# (Racks' custom-item delete) are gone; the lead turns it on during integration. Read at call time, so tests can set it.
+UNIT_DROP_GUARD = False
+UNITS_DROPPED = "Units are deleted with Delete in their window. Nothing was saved."
 
 
 def replace_items(payload, expected):
@@ -295,12 +300,20 @@ def replace_items(payload, expected):
         return incoming
 
 
-def checked_items(current, payload, note=EDITED_NOTE):
+def checked_items(current, payload, note=EDITED_NOTE, allow_drop=frozenset(), restored=frozenset()):
     """`payload`, a whole equipment list, as it is saved over `current`: shape, U slot and unit details (422), then
     barcode/serial/MAC uniqueness (409); a linked barcode and the tracking fields are kept, a changed place is recorded
-    as "moved" with `note`. Writes nothing (replace_items and save_layouts_with_items write the result)."""
+    as "moved" with `note`. Writes nothing (replace_items and save_layouts_with_items write the result).
+    While UNIT_DROP_GUARD is on, a payload that leaves out a current unit whose id is not in `allow_drop` is 422.
+    `restored`: ids of units a Restore puts back (POST /api/lab/restore): new to the list, they keep the tracking fields
+    they carry (their own history and last scan) instead of starting without them."""
     incoming = deepcopy(payload)
     previous = {item["id"]: (rack, item) for rack, items in current.items() for item in items}
+    if UNIT_DROP_GUARD and isinstance(incoming, dict):
+        kept = {item.get("id") for items in incoming.values() if isinstance(items, list)
+                for item in items if isinstance(item, dict)}
+        if any(unit_id not in kept and unit_id not in allow_drop for unit_id in previous):
+            raise HTTPException(422, UNITS_DROPPED)
     seen = set()
     # Validate the complete shape before uniqueness checks inspect other racks.
     for rack, items in incoming.items():
@@ -339,6 +352,8 @@ def checked_items(current, payload, note=EDITED_NOTE):
         for item in items:
             old_rack, old = previous.get(item["id"], (None, {}))
             for field in TRACKING_FIELDS:
+                if item["id"] in restored and item["id"] not in previous:
+                    break
                 item.pop(field, None)
                 if field in old:
                     item[field] = deepcopy(old[field])
@@ -397,10 +412,23 @@ def save_layouts(entries):
     return save_layouts_with_items(entries)[0]
 
 
-def save_layouts_with_items(entries, items=None, check_only=False):
+def _entry(entry):
+    """(name, path, payload, expected, default, opts) from a 5- or 6-element save_layouts entry."""
+    name, path, payload, expected, default, *rest = entry
+    opts = rest[0] if rest and isinstance(rest[0], dict) else {}
+    return name, path, payload, expected, default, opts
+
+
+def save_layouts_with_items(entries, items=None, check_only=False, items_allow_drop=frozenset(),
+                            items_note=MOVED_WITH_SERVER_NOTE, items_restored=frozenset()):
     """Write several layout stores, and optionally the equipment list, together or not at all.
-    `entries`: [(name, path, payload, expected, default)]. `items`: None, or (payload, expected) for ITEMS_FILE (the
-    units that move with a server), checked exactly as PUT /api/rack-items checks it (checked_items).
+    `entries`: [(name, path, payload, expected, default[, opts])]. `items`: None, or (payload, expected) for ITEMS_FILE
+    (the units that move with a server, or that a lab delete moves or deletes), checked exactly as PUT /api/rack-items
+    checks it (checked_items, with `items_note` on each moved unit and `items_allow_drop` the unit ids it may leave out).
+    opts (the delete path, routers/lab_delete.py): {"ensure_ascii": False} writes the file with readable non-ASCII text
+    (lab-data.json keeps its Hebrew); {"versioned": {"by": who, "action": "deleted" | "restored" | "unassigned"}} writes a
+    versioned store (chillers.json) as save_versioned does: the replaced document goes into its history file first, and
+    both files are put back when a later write fails.
 
     Every file lock is taken first, always in one order (by path). Every If-Match revision is then checked before
     anything is written: one stale or missing revision means nothing is written (409 / 428). The equipment list is
@@ -411,7 +439,8 @@ def save_layouts_with_items(entries, items=None, check_only=False):
     check_only: every check above, then (None, None) with nothing written (a move that also saves port labels checks
     its layout part before it commits them)."""
     from contextlib import ExitStack
-    for _, _, payload, _, _ in entries:
+    entries = [_entry(e) for e in entries]
+    for _, _, payload, _, _, _ in entries:
         reject_non_finite(payload)
     if items is not None:
         reject_non_finite(items[0])
@@ -422,7 +451,8 @@ def save_layouts_with_items(entries, items=None, check_only=False):
         for path, detail in sorted(files, key=lambda f: str(f[0])):
             locks.enter_context(locked_file(path, detail))
         previous = {}
-        for name, path, _, expected, default in entries:
+        versions = {}   # name -> (history path, its previous bytes, the new history document) of a versioned store
+        for name, path, payload, expected, default, opts in entries:
             if not expected:
                 raise HTTPException(428, "Reload the rack layout before saving.")
             if expected != revision(read_layout(path, default)):
@@ -433,6 +463,8 @@ def save_layouts_with_items(entries, items=None, check_only=False):
                 previous[name] = None
             except OSError as exc:
                 raise HTTPException(503, LAYOUT_SAVE_FAILED) from exc
+            if opts.get("versioned"):
+                versions[name] = _planned_version(path, payload, default, opts["versioned"])
         saved_items = None
         if items is not None:
             payload, expected = items
@@ -441,7 +473,8 @@ def save_layouts_with_items(entries, items=None, check_only=False):
             current = read_items()
             if expected != revision(current):
                 raise HTTPException(409, LAYOUT_CONFLICT)
-            saved_items = checked_items(current, payload, MOVED_WITH_SERVER_NOTE)
+            saved_items = checked_items(current, payload, items_note, allow_drop=frozenset(items_allow_drop),
+                                        restored=frozenset(items_restored))
             try:
                 previous[ITEMS_STORE] = ITEMS_FILE.read_bytes()
             except FileNotFoundError:
@@ -452,9 +485,15 @@ def save_layouts_with_items(entries, items=None, check_only=False):
             return None, None
         written = []
         try:
-            for name, path, payload, _, _ in entries:
+            for name, path, payload, _, _, opts in entries:
+                version = versions.get(name)
+                if version is not None:
+                    history, before, document = version
+                    previous["history:" + name] = before
+                    written.append(("history:" + name, history))
+                    write_json(history, document)
                 written.append((name, path))
-                write_json(path, payload)
+                write_json(path, payload, ensure_ascii=opts.get("ensure_ascii", True))
             if saved_items is not None:
                 written.append((ITEMS_STORE, ITEMS_FILE))
                 write_items(saved_items)
@@ -472,7 +511,7 @@ def save_layouts_with_items(entries, items=None, check_only=False):
             if unrestored:
                 raise HTTPException(503, LAYOUT_NOT_RESTORED.format(files=", ".join(unrestored))) from exc
             raise HTTPException(503, LAYOUT_SAVE_FAILED) from exc
-    revisions = {name: revision(payload) for name, _, payload, _, _ in entries}
+    revisions = {name: revision(payload) for name, _, payload, _, _, _ in entries}
     if saved_items is not None:
         revisions[ITEMS_STORE] = revision(saved_items)
     return revisions, saved_items
@@ -594,6 +633,26 @@ def _commit_version(path, current, existed, payload, by, action, restored_from=N
         except Exception:
             pass
         raise
+
+
+def _planned_version(path, payload, default, versioned):
+    """(history path, its current bytes or None, the history document to write) for a versioned store written by
+    save_layouts_with_items: the document `payload` replaces becomes a new version (as _commit_version), or None when
+    there is nothing to keep (no previous file, or the same document again). Called with the store's lock held."""
+    current, existed = _read_store(path, default)
+    if not existed or revision(current) == revision(payload):
+        return None
+    history = _history_for_write(path)
+    number = history["last_revision"] + 1
+    version = {"revision": number, "at": datetime.now(timezone.utc).isoformat(), "by": versioned.get("by"),
+               "action": versioned.get("action") or "save", "units": len(_units(current)),
+               "removed": _removed_units(current, payload), "document": current}
+    target = history_path(path)
+    try:
+        before = target.read_bytes()
+    except FileNotFoundError:
+        before = None
+    return target, before, {"last_revision": number, "versions": _prune([*history["versions"], version])}
 
 
 def _dropped_units(current, payload):

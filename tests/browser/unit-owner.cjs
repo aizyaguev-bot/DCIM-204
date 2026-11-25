@@ -10,7 +10,9 @@
 //      changing the server's owner here (via "Open <server>") updates the unit at once;
 // UO-5 the unit moved to another server's floor shows that server's owner; moved to the rack level (no server) its own
 //      saved owner is back and editable (nothing was migrated);
-// UO-6 a storage-shelf unit keeps its own owner, editable, and shows it in view mode.
+// UO-6 a storage-shelf unit keeps its own owner, editable, and shows it in view mode;
+// UO-7 the unit window (open=unit:<id>) shows the server's owner read-only on its floor, follows a change made in another
+//      session without a reload, and moved to the rack level from the window shows its own owner, editable.
 // Every change it makes (owners, two units) is undone and checked. Only fixture data; no hardware.
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
@@ -200,6 +202,34 @@ const KEYS=[S1_ID,S2_ID,`item:${TRAY}`,`item:${BOX}`];
   await page.keyboard.press('Escape');await details.waitFor({state:'detached'});
   assert.ok(await same(),'no page reload');
   passed.push(`UO-6 ${BOX_NAME} on ${STORE} shelf ${STORE_U} (no server): its own owner ${BOX_OWN}, editable; changed to ${BOX_NEW} (saved, shown in the slot and the view details)`);
+
+  // ── UO-7 the unit window (one-place WP-2): on a server's floor the server's owner, read-only, followed live; moved to
+  //    the rack level from the window, its own saved owner, editable ──
+  await putItems(d=>{d[RACK]=d[RACK].map(i=>i.id===TRAY?{...i,u:u1}:i);});
+  await page.goto(origin+`/?tab=racks&open=unit:${TRAY}`);
+  const uw=page.locator('[data-window="unit"]');
+  await uw.locator('h2',{hasText:TRAY_NAME}).waitFor();
+  const derived=uw.locator('[data-unit-owner="derived"]');
+  await derived.locator('[data-owner-value]').getByText(A,{exact:true}).waitFor();
+  await derived.getByText(`From ${S1}, the server on this floor. Change it on the server.`,{exact:true}).waitFor();
+  assert.equal(await uw.locator(`select[aria-label="Owner for ${TRAY_NAME}"]`).count(),0,'no owner select on a server\'s floor');
+  await page.evaluate(()=>{window.__unitWindowPage=1;});
+  const t3=Date.now();
+  await setOwner(S1_ID,engineer(B),operator);
+  await derived.locator('[data-owner-value]').getByText(B,{exact:true}).waitFor({timeout:30000});
+  const live=Math.round((Date.now()-t3)/1000);
+  assert.equal(await page.evaluate(()=>window.__unitWindowPage),1,'no page reload');
+  await uw.getByRole('button',{name:'Move…',exact:true}).click();
+  const mv=page.locator('[data-dialog="unit-move"]');
+  await mv.getByLabel('Floor').selectOption('0');
+  await mv.getByRole('button',{name:`Move to ${RACK} · rack level`,exact:true}).click();
+  await mv.waitFor({state:'detached'});
+  const ownSelect=uw.locator(`select[aria-label="Owner for ${TRAY_NAME}"]`);
+  await ownSelect.waitFor();
+  assert.equal(await ownSelect.locator('option:checked').innerText(),OWN);
+  assert.equal(find((await items()).data,TRAY).item.u,0);
+  await page.keyboard.press('Escape');await uw.waitFor({state:'detached'});
+  passed.push(`UO-7 unit window: ${TRAY_NAME} on ${S1}'s floor shows ${A} read-only ("From ${S1}, the server on this floor. Change it on the server."); ${S1}'s owner changed in another session reaches it after ${live} s, no reload; moved to the rack level from the window: its own owner ${OWN}, editable`);
 
   assert.deepEqual(errors,[],'no page errors');
  }catch(e){

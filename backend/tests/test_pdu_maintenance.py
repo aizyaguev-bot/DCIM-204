@@ -394,11 +394,8 @@ async def test_address_change_waits_for_shutdown_lock_then_conflicts(mclient, pd
     dev = await db_session.scalar(select(Device).where(Device.id == pdu_id).execution_options(populate_existing=True))
     assert dev.ip == "pdu.example.invalid"
 
-    async with pdu_locks.maintenance_lock(pdu_id):
-        task = asyncio.create_task(mclient.delete(url))
-        await asyncio.sleep(0.2)
-        assert not task.done()
-    assert (await task).status_code == 409
+    # DELETE /api/devices/{id} is retired (v2 spec D.5: POST /api/lab/delete takes this lock itself): always 409.
+    assert (await mclient.delete(url)).status_code == 409
 
 
 async def test_maintenance_uses_address_read_inside_the_lock(mclient, pdu_id, fake, db_session, monkeypatch):
@@ -460,16 +457,17 @@ async def test_device_address_kind_change_and_delete_blocked_during_maintenance(
     url = f"/api/devices/{pdu_id}"
     base = {"name": "PDU-M", "kind": "pdu", "ip": "pdu.example.invalid", "model": "PX4", "rack": "R1", "port_count": 4}
     await shutdown(mclient, pdu_id)
-    for change in ({"ip": "other.example.invalid"}, {"kind": "kvm"}):
-        r = await mclient.put(url, json={**base, **change})
-        assert r.status_code == 409 and r.json()["detail"] == "PDU is in maintenance mode; restore it first"
-    r = await mclient.delete(url)
+    r = await mclient.put(url, json={**base, "ip": "other.example.invalid"})
     assert r.status_code == 409 and r.json()["detail"] == "PDU is in maintenance mode; restore it first"
+    # The kind never changes now (v2 spec D.5), in maintenance or not; the delete path is POST /api/lab/delete, which
+    # refuses a PDU in maintenance in its preview (tests/test_lab_delete.py).
+    r = await mclient.put(url, json={**base, "kind": "kvm"})
+    assert r.status_code == 422
+    assert (await mclient.delete(url)).status_code == 409
     assert (await mclient.put(url, json={**base, "name": "PDU-M renamed"})).status_code == 200
     assert (await mclient.patch(f"{url}/labels", json={"1": "GPU-Node"})).status_code == 200
     await restore(mclient, pdu_id)
     assert (await mclient.put(url, json={**base, "ip": "other.example.invalid"})).status_code == 200
-    assert (await mclient.delete(url)).status_code == 204
 
 
 async def test_unknown_pdu_is_404(mclient, fake):

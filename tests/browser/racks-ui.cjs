@@ -2,7 +2,10 @@
 // and POWER_PROTECTED_OUTLETS=pdu1:4, both required): layout and overflow, row states, search and filters, ON/OFF outside
 // Edit mode with the in-app confirmation (armed against double clicks), cooling units (place, move, take off a shelf,
 // undo, history), keyboard and focus, the ?rack= address and Back, text size and contrast, right-to-left names and the
-// assistant launcher. Every change it makes is undone. Only fixture data is touched; no live site or hardware.
+// assistant launcher. One place (WP-5): a server opens its window in both modes (no rename, no PATCH on a double click),
+// Find server's Enter on one server opens its window, a drag opens the window's move dialog (units_follow, no
+// rack_items), power asks through the provider's dialog (toasts .lab-toast), and a unit is deleted through its window
+// (the one delete dialog, Undo). Every change it makes is undone. Only fixture data is touched; no live site or hardware.
 // RACKS_UI_ONLY=1,4 runs some sections only.
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
@@ -254,7 +257,10 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    assert.equal(await p.locator('.racks-count').innerText(),'1 match in 1 rack');
    await shot(p,'search-opt43');
    await search.press('Enter');
-   await p.waitForFunction(()=>document.activeElement?.matches('button.server-open[aria-label="View OPT43"]'));
+   const found=p.locator('[data-window="server"]');
+   await found.locator('h2.lab-window-name',{hasText:'OPT43'}).waitFor();
+   assert.equal(new URL(p.url()).searchParams.get('srv'),'opt43','Enter on the one server match opens its window');
+   await p.keyboard.press('Escape');await found.waitFor({state:'detached'});
    await search.focus();await search.press('Escape');
    await p.waitForFunction(()=>document.querySelectorAll('.racks-grid > [data-rack-id]').length===9);
    await search.fill('Switch 04');
@@ -276,7 +282,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await setEdit(p,true);
    for(const v of await p.locator('.racks-filter button').evaluateAll(els=>els.map(e=>e.getAttribute('aria-disabled'))))assert.equal(v,'true');
    await setEdit(p,false);await p.close();
-   passed.push('3 search/filter: OPT43 (1 rack, match, Enter focuses it, Escape), Switch 04, Hebrew cooling name in the panel, the panel lists only matches (Chiller-3) and hides for none (zzzz), No reading -> Rack-07, filters off in Edit');
+   passed.push('3 search/filter: OPT43 (1 rack, match, Enter opens its window, Escape), Switch 04, Hebrew cooling name in the panel, the panel lists only matches (Chiller-3) and hides for none (zzzz), No reading -> Rack-07, filters off in Edit');
   }
 
   // ── 4. power with Edit off ──
@@ -284,11 +290,12 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    const v=await open(viewer);
    assert.equal(await v.locator('.power-toggle').count(),0,'Viewer: no power control');
    await shot(v,'viewer-grid-1440');
-   // the Viewer's server details list the feeds (read only)
+   // the Viewer's server window lists the feeds (read only)
    await v.locator('button.server-open[aria-label="View OPT11"]').click();
-   const vd=v.locator('[role="dialog"][data-dialog="server"]');await vd.waitFor();
-   assert.deepEqual((await vd.locator('tbody tr').first().locator('td').allInnerTexts()).map(t=>t.trim()),['PDU 01','1','OPT11','ON']);
-   assert.equal(await vd.locator('.power-btn').count(),0,'Viewer: no power buttons');
+   const vd=v.locator('[data-window="server"]');await vd.locator('h2.lab-window-name',{hasText:'OPT11'}).waitFor();
+   await vd.locator('li.srv-feed[data-feed="pdu1:1"]').waitFor();
+   assert.match(await vd.locator('li.srv-feed[data-feed="pdu1:1"]').innerText(),/OPT11 · PDU 01 · outlet 1 · On/);
+   assert.equal(await vd.locator('.srv-feed-btn').count(),0,'Viewer: no power buttons');
    assert.match(await vd.innerText(),/Viewer · read only/);
    assert.doesNotMatch(await vd.innerText(),/No PDU outlet carries/);
    await shot(v,'viewer-server-details');
@@ -318,7 +325,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     assert.deepEqual(posts,[{url:'/api/pdus/pdu1/outlets/2/power',body:'{"action":"off"}'}]);
     await p.waitForFunction(()=>document.querySelector('.server-cell[data-server="OPT12"]')?.dataset.state==='off');
     assert.equal(await p.locator('.server-cell[data-server="OPT12"] .server-state').innerText(),'OFF');
-    assert.match(await p.locator('.toast').innerText(),/OPT12 is off \(PDU 01 · outlet 2\)/);
+    await p.locator('.lab-toast',{hasText:'OPT12 is off (PDU 01 · outlet 2).'}).waitFor();
     await sw('OPT12').click();await dialog.waitFor();
     assert.equal(await dialog.locator('h2').innerText(),'Power on OPT12?','On asks too (confirm_power defaults to true)');
     await confirmPower(dialog,'Power on','dblclick');await dialog.waitFor({state:'detached'});
@@ -367,40 +374,42 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     await shot(p,'power-mixed-only-this-feed');
     await dialog.getByRole('button',{name:'Cancel'}).click();await dialog.waitFor({state:'detached'});
     assert.equal(posts.length,1);
-    // feed-only requests from the server details: named as a feed, with what keeps the server running
+    // feed-only requests from the server window: named as a feed, with what keeps the server running
     await p.locator('button.server-open[aria-label="View OPT99 (PSU2)"]').click();
-    const det=p.locator('[role="dialog"][data-dialog="server"]');await det.waitFor();
-    await det.locator('tr[data-feed="pdu2:3"]').getByRole('button',{name:'Power on',exact:true}).click();await dialog.waitFor();
+    const det=p.locator('[data-window="server"]');await det.locator('h2.lab-window-name',{hasText:'OPT99'}).waitFor();
+    await det.locator('li.srv-feed[data-feed="pdu2:3"]').getByRole('button',{name:'Power on feed OPT99 (PSU2)',exact:true}).click();await dialog.waitFor();
     assert.equal(await dialog.locator('h2').innerText(),'Power on feed OPT99 (PSU2) of OPT99?');
     await confirmPower(dialog,'Power on');await dialog.waitFor({state:'detached'});
     await p.waitForFunction(()=>document.querySelector('.server-cell[data-server="OPT99 (PSU2)"]')?.dataset.state==='on');
-    await det.locator('tr[data-feed="pdu1:3"]').getByRole('button',{name:'Power off',exact:true}).click();await dialog.waitFor();
+    await det.locator('li.srv-feed[data-feed="pdu1:3"]').getByRole('button',{name:'Power off feed OPT99 (PSU1)',exact:true}).click();await dialog.waitFor();
     assert.equal(await dialog.locator('h2').innerText(),'Power off feed OPT99 (PSU1) of OPT99?');
     assert.match(await dialog.innerText(),/OPT99 stays powered by PDU 02 outlet 3\./);
     assert.doesNotMatch(await dialog.innerText(),/loses power/,'the server keeps running on PSU2');
     await shot(p,'power-feed-only-from-details');
     await confirmPower(dialog,'Power off');await dialog.waitFor({state:'detached'});
-    await p.locator('.toast',{hasText:'OPT99 (PSU1) is off (PDU 01 · outlet 3); OPT99 is still powered by PDU 02 · outlet 3.'}).waitFor();
+    await p.locator('.lab-toast',{hasText:'OPT99 (PSU1) is off (PDU 01 · outlet 3); OPT99 is still powered by PDU 02 · outlet 3.'}).waitFor();
     await p.keyboard.press('Escape');await det.waitFor({state:'detached'});
    }finally{
     await setLabels('pdu1',l1);await setLabels('pdu2',l2);await power('pdu1',3,'on');await power('pdu2',3,'on');
    }
    await p.reload();await settled(p);
-   // Edit mode: no row switch; the edit panel asks in-app; an offline PDU blocks every button
+   // Edit mode: no row switch; a click opens the server window at once, whose Power asks in-app; an offline PDU is
+   // named as the reason on its feed
    posts.length=0;
    await setEdit(p,true);
    assert.equal(await p.locator('.server-cell .power-toggle').count(),0,'no row switch in Edit mode');
    await p.locator('button.server-open[aria-label="View OPT12"]').click();
-   const panel=p.locator('div.fixed.inset-0.z-50.flex.justify-end');
-   await panel.getByRole('button',{name:'Power off'}).click();
+   const panel=p.locator('[data-window="server"]');await panel.locator('h2.lab-window-name',{hasText:'OPT12'}).waitFor();
+   await panel.getByRole('button',{name:'Power ▾'}).click();
+   await panel.getByRole('menuitem',{name:'Power off…'}).click();
    await dialog.waitFor();assert.equal(await dialog.locator('h2').innerText(),'Power off OPT12?');
    assert.match(await dialog.innerText(),/The server loses power immediately/);
    await dialog.getByRole('button',{name:'Cancel'}).click();await dialog.waitFor({state:'detached'});
-   assert.ok(await panel.isVisible(),'Escape/Cancel of the confirmation leaves the panel open');
+   assert.ok(await panel.isVisible(),'Escape/Cancel of the confirmation leaves the window open');
    await p.keyboard.press('Escape');await panel.waitFor({state:'detached'});
    await p.locator('button.server-open[aria-label="View OPT71"]').click();
-   await panel.locator('.power-btn').first().waitFor();
-   for(const a of await panel.locator('.power-btn').evaluateAll(els=>els.map(e=>e.getAttribute('aria-disabled'))))assert.equal(a,'true');
+   await panel.locator('li.srv-feed[data-feed="pdu7:1"] .srv-feed-note').first().waitFor();
+   assert.match(await panel.locator('li.srv-feed[data-feed="pdu7:1"]').innerText(),/unreachable|No reading|did not answer/i,'the unreachable PDU is named on its feed');
    await p.keyboard.press('Escape');await panel.waitFor({state:'detached'});
    await setEdit(p,false);
    assert.equal(posts.length,0);
@@ -428,7 +437,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     await sleep(500);assert.equal(qp.length,0,'nothing switched without the confirmation');
     await d2.getByRole('button',{name:'Cancel'}).click();await q.close();
    }finally{await setPrefs(me.preferences);await power('pdu1',2,'on');}
-   passed.push('4 power: Viewer none (details list the feeds read only); double click on a switch sends 0 and keeps the dialog open at 1440/390/375; OPT12 Off asks (Cancel focused, sends 0), an early click does nothing, Off = 1 POST {"action":"off"} -> OFF, On asks, dblclick = 1 POST; protected OPT14 blocked up front (protection "ok", pdu1:[4]); PSU1/PSU2: title OPT99, whole = 2 POSTs, only this feed = 1 ("stays off"), mixed only-this-feed = "last powered feed" + "Power off this feed", details feed-only titles and "still powered by" toast; Edit panel uses the same dialog; OPT71 blocked; confirm_power=false still asks');
+   passed.push('4 power: Viewer none (details list the feeds read only); double click on a switch sends 0 and keeps the dialog open at 1440/390/375; OPT12 Off asks (Cancel focused, sends 0), an early click does nothing, Off = 1 POST {"action":"off"} -> OFF, On asks, dblclick = 1 POST; protected OPT14 blocked up front (protection "ok", pdu1:[4]); PSU1/PSU2: title OPT99, whole = 2 POSTs, only this feed = 1 ("stays off"), mixed only-this-feed = "last powered feed" + "Power off this feed", window feed-only titles and "still powered by" toast; Edit mode opens the window, whose Power ▾ uses the same dialog; OPT71\'s feed says why it is blocked; confirm_power=false still asks');
   }
 
   // ── 5. cooling units (admin) ──
@@ -618,25 +627,29 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await p.getByRole('button',{name:'All racks'}).click();
    await p.waitForFunction(()=>document.activeElement?.matches('[data-rack-id="Rack-04"] .rack-card-name'));
    const inView=await card(p,'Rack-04').evaluate(e=>{const b=e.getBoundingClientRect();return b.top<innerHeight&&b.bottom>0;});assert.ok(inView,'the card is in view');
-   // dialogs keep focus inside and give it back
+   // the window and its dialogs keep focus inside and give it back
    await p.locator('button.server-open[aria-label="View OPT41"]').click();
-   const details=p.locator('[role="dialog"][data-dialog="server"]');await details.waitFor();
-   await shot(p,'server-details-dialog');
-   for(let i=0;i<20;i++){await p.keyboard.press('Tab');assert.ok(await details.evaluate(d=>d.contains(document.activeElement)),'Tab stays in the details');}
-   await details.getByRole('button',{name:'Power off'}).click();
+   const details=p.locator('[data-window="server"]');await details.locator('h2.lab-window-name',{hasText:'OPT41'}).waitFor();
+   await shot(p,'server-window');
+   for(let i=0;i<20;i++){await p.keyboard.press('Tab');assert.ok(await details.evaluate(d=>d.contains(document.activeElement)),'Tab stays in the window');}
+   await details.getByRole('button',{name:'Power off feed OPT41',exact:true}).click();
    const confirm=p.locator('[role="alertdialog"]');await confirm.waitFor();
    for(let i=0;i<20;i++){await p.keyboard.press('Tab');assert.ok(await confirm.evaluate(d=>d.contains(document.activeElement)),'Tab stays in the confirmation');}
    await p.keyboard.press('Escape');await confirm.waitFor({state:'detached'});
    assert.ok(await details.isVisible(),'Escape closed only the confirmation');
-   assert.equal(await p.evaluate(()=>document.activeElement?.textContent),'Power off','focus back on its opener');
+   assert.equal(await p.evaluate(()=>document.activeElement?.getAttribute('aria-label')),'Power off feed OPT41','focus back on its opener');
    await p.keyboard.press('Escape');await details.waitFor({state:'detached'});
-   assert.equal(await p.evaluate(()=>document.activeElement?.getAttribute('aria-label')),'View OPT41');
-   // Space opens an equipment cell
+   await p.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='View OPT41',null,{timeout:5000});
+   // Space opens an equipment cell: its unit window
    await p.locator('.equipment-cell[aria-label="View Switch 04"]').focus();await p.keyboard.press(' ');
-   await p.locator('[role="dialog"]',{hasText:'Turn on Edit to change this equipment.'}).waitFor();
-   await p.keyboard.press('Escape');
+   const unitWin=p.locator('[data-window="unit"]');await unitWin.locator('h2.lab-window-name',{hasText:'Switch 04'}).waitFor();
+   await p.keyboard.press('Escape');await unitWin.waitFor({state:'detached'});
+   // an old link to a Racks unit (?item=<id>) opens its unit window; the address names the window instead
+   await p.goto(origin+'/?tab=racks&item=ci-4');
+   await unitWin.locator('h2.lab-window-name',{hasText:'Switch 04'}).waitFor({timeout:20000});
+   assert.equal(new URL(p.url()).searchParams.get('open'),'unit:ci-4');assert.equal(new URL(p.url()).searchParams.has('item'),false);
    await p.close();
-   passed.push('6 keyboard: search > filters > rack chips > card; rack opens at its heading with ?rack=Rack-04, browser Back closes it (and keeps Edit mode), "All racks" returns to its card; Tab trapped in details and confirmation, Escape closes one at a time with focus returned; Space opens equipment');
+   passed.push('6 keyboard: search > filters > rack chips > card; rack opens at its heading with ?rack=Rack-04, browser Back closes it (and keeps Edit mode), "All racks" returns to its card; Tab trapped in the server window and the confirmation, Escape closes one at a time with focus returned; Space opens a unit\'s window; ?item=ci-4 opens that unit\'s window (open=unit:ci-4, item dropped)');
   }
 
   // ── 7. text size and contrast ──
@@ -670,8 +683,8 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    };
    assert.ok(await p.locator('.shelf-row[data-auto] .shelf-index').count()>0,'auto shelf numbers are on the page');
    await check('overview');
-   await p.locator('button.server-open[aria-label="View OPT41"]').click();await p.locator('[role="dialog"]').waitFor();
-   await check('server details');
+   await p.locator('button.server-open[aria-label="View OPT41"]').click();await p.locator('[data-window="server"] h2.lab-window-name',{hasText:'OPT41'}).waitFor();
+   await check('server window');
    await p.keyboard.press('Escape');await p.close();
    passed.push('7 contrast: every visible text in cards (auto shelf numbers included), toolbar, summary, attention row, cooling panel and dialogs is 11 px or more and 4.5:1 (3:1 large)');
   }
@@ -745,17 +758,32 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    const keptLayout={};for(const path of ['/api/rack-positions','/api/rack-slots','/api/rack-overrides'])keptLayout[path]=(await layoutOf(path)).data;
    const pduLabels=async()=>((await(await admin.c.request.get(origin+'/api/devices/')).json()).find(d=>d.id==='pdu1')||{}).labels||{};
    const keptLabels=await pduLabels();
+   // Edit mode: a double click on a server name opens its window and renames nothing (no PATCH)
+   const patches=[];const countPatch=r=>{if(r.method()==='PATCH')patches.push(r.url());};p.on('request',countPatch);
+   await card(p,'Rack-01').locator('button.server-open[aria-label="View OPT12"]').dblclick();
+   const win=p.locator('[data-window="server"]');await win.locator('h2.lab-window-name',{hasText:'OPT12'}).waitFor();
+   assert.equal(await card(p,'Rack-01').locator('input').count(),0,'no rename field');
+   await p.keyboard.press('Escape');await win.waitFor({state:'detached'});await sleep(300);
+   p.off('request',countPatch);
+   assert.deepEqual(patches,[],'a double click in Edit mode sends no PATCH');
    let swapped=false;
    try{
     await drag(card(p,'Rack-01').locator('[data-u-slot="4"] .shelf-grip'),card(p,'Rack-01').locator('.server-cell[data-server="OPT11"]'));
+    await win.locator('h2.lab-window-name',{hasText:'OPT14'}).waitFor();
+    assert.equal(new URL(p.url()).searchParams.get('sec'),'move','the drag opens OPT14\'s window on its move dialog');
     const dlg=p.locator('[data-dialog="server-move"]');await dlg.waitFor();
     assert.match(await dlg.locator('h2').innerText(),/^Swap OPT14 and OPT11$/);
     await dlg.locator('[data-action="confirm-move"]:not([disabled])').waitFor({timeout:15000});
     assert.match(await dlg.locator('[data-move-preview]').innerText(),/PDU 01 outlet 1: OPT11 → OPT14/);
     const done=p.waitForResponse(r=>r.url().endsWith('/api/devices/move-server')&&!JSON.parse(r.request().postData()||'{}').dry_run);
     await dlg.locator('[data-action="confirm-move"]').click();
-    assert.equal((await done).status(),200);swapped=true;
+    const applied=await done;
+    assert.equal(applied.status(),200);swapped=true;
+    const body=JSON.parse(applied.request().postData());
+    assert.equal(body.units_follow,true,'the swap sends units_follow');
+    assert.equal('rack_items' in body,false,'and no rack_items (the server moves the units)');
     await dlg.waitFor({state:'detached'});
+    await p.keyboard.press('Escape');await win.waitFor({state:'detached'});
     await card(p,'Rack-01').locator('[data-u-slot="1"] .server-cell[data-server="OPT14"]').waitFor();
     const labels=await pduLabels();
     assert.deepEqual([labels['1'],labels['4']],['OPT14','OPT11'],'OPT14 takes floor 1\'s outlet, OPT11 floor 4\'s');
@@ -765,7 +793,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
     assert.deepEqual(await pduLabels(),keptLabels,'PDU 01 labels restored');
    }
    await setEdit(p,false);await p.close();
-   passed.push('11 Edit-mode drag: a cooling unit onto Rack-05 floor 2 (saved, Undo), not onto a U17 row under Other (nothing saved), OPT14 onto OPT11 in its rack: the swap dialog previews PDU 01 outlet 1 -> OPT14, and the swap gives each the other\'s floor and outlet (restored)');
+   passed.push('11 Edit-mode drag: a cooling unit onto Rack-05 floor 2 (saved, Undo), not onto a U17 row under Other (nothing saved); a double click on OPT12 opens its window and sends no PATCH; OPT14 onto OPT11 in its rack opens OPT14\'s window (sec=move): the swap dialog previews PDU 01 outlet 1 -> OPT14, sends units_follow and no rack_items, and the swap gives each the other\'s floor and outlet (restored)');
   }
 
   // ── 12. Operator outside Edit mode: Place… / Move… turn Edit on; in Edit mode cooling units keep reloading, so Undo
@@ -805,22 +833,38 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    }finally{await putChillers(d=>{const u=d.units.find(x=>x.id==='ch5');u.rack='Rack-05';u.u=3;return d;});}
    assert.equal(await unitCount(),UNITS);
    await setEdit(p,false);await p.close();
-   // equipment: "Delete from rack" asks in the panel (never a native confirm); Cancel keeps the item
-   const a=await open(admin);await setEdit(a,true);
-   const puts=[];a.on('request',r=>{if(r.method()==='PUT'&&/\/api\/rack-items/.test(r.url()))puts.push(r.url());});
-   await a.locator('.equipment-cell[aria-label="View Switch 01"]').click();
-   const side=a.locator('div.fixed.inset-0.z-50.flex.justify-end');await side.waitFor();
-   await side.getByRole('button',{name:'Delete from rack'}).click();
-   const ask=side.getByRole('group',{name:'Delete Switch 01 from Rack-01'});await ask.waitFor();
-   assert.equal(await ask.locator('p').innerText(),'Delete Switch 01 from Rack-01? This removes it from the rack layout.');
+   // a unit is deleted through its window: Delete… (More) opens the one delete dialog (Cancel focused, never a native
+   // confirm); Cancel deletes nothing; "Delete Switch 01" removes it from Racks, the toast's Undo brings it back
+   const a=await open(admin);
+   const writes=[];a.on('request',r=>{if(['PUT','POST'].includes(r.method())&&/\/api\/(rack-items|lab\/delete)/.test(r.url())&&!/dry_run/.test(r.postData()||''))writes.push(r.url());});
+   const switch01=card(a,'Rack-01').locator('.equipment-cell[data-item-id="ci-1"]');
+   await (await shown(switch01)).click();
+   const uw=a.locator('[data-window="unit"]');await uw.locator('h2.lab-window-name',{hasText:'Switch 01'}).waitFor();
+   await uw.getByRole('button',{name:'⋯ More'}).click();
+   await uw.getByRole('menuitem',{name:'Delete…',exact:true}).click();
+   const del=a.locator('[data-dialog="delete"]');await del.waitFor();
+   const go=del.locator('[data-action="delete"]');
+   await a.waitForFunction(()=>!document.querySelector('[data-dialog="delete"] [data-action="delete"]')?.disabled,null,{timeout:15000});
+   assert.equal((await go.innerText()).trim(),'Delete Switch 01');
    assert.equal(await a.evaluate(()=>document.activeElement?.textContent),'Cancel','Cancel has focus');
-   await shot(a,'edit-equipment-delete-confirm');
-   await ask.getByRole('button',{name:'Cancel'}).click();
-   await side.getByRole('button',{name:'Delete from rack'}).waitFor();
-   await a.keyboard.press('Escape');await side.waitFor({state:'detached'});
-   assert.equal(puts.length,0,'Cancel deletes nothing');
-   await setEdit(a,false);await a.close();
-   passed.push('12 Operator: strip Place… and dialog Move… turn Edit on with the Rack select focused; Edit mode shows another session\'s move (floor 4) and Undo returns there; equipment Delete asks in the panel (Cancel focused, nothing saved)');
+   await shot(a,'unit-delete-dialog');
+   await del.getByRole('button',{name:'Cancel'}).click();await del.waitFor({state:'detached'});
+   assert.deepEqual(writes,[],'Cancel deletes nothing');
+   await uw.getByRole('button',{name:'⋯ More'}).click();
+   await uw.getByRole('menuitem',{name:'Delete…',exact:true}).click();await del.waitFor();
+   await a.waitForFunction(()=>!document.querySelector('[data-dialog="delete"] [data-action="delete"]')?.disabled,null,{timeout:15000});
+   await go.click();
+   const deleted=a.locator('.lab-toast',{hasText:'Deleted Switch 01'});await deleted.waitFor({timeout:15000});
+   await uw.waitFor({state:'detached'});
+   await switch01.waitFor({state:'detached',timeout:10000});
+   const itemsNow=async()=>Object.values(await(await admin.c.request.get(origin+'/api/rack-items')).json()).flat().map(i=>i.id);
+   assert.equal((await itemsNow()).includes('ci-1'),false,'Switch 01 is deleted');
+   await deleted.getByRole('button',{name:'Undo'}).click();
+   await a.locator('.lab-toast',{hasText:'Restored Switch 01'}).waitFor({timeout:15000});
+   await switch01.waitFor({state:'attached',timeout:10000});
+   assert.equal((await itemsNow()).includes('ci-1'),true,'Undo brings it back');
+   await a.close();
+   passed.push('12 Operator: strip Place… and dialog Move… turn Edit on with the Rack select focused; Edit mode shows another session\'s move (floor 4) and Undo returns there; a unit is deleted through its window: More › Delete… opens the one delete dialog (Cancel focused; Cancel saves nothing), "Delete Switch 01" removes it from Racks and the toast\'s Undo restores it');
   }
 
   // ── Edit-mode screenshot ──

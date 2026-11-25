@@ -206,7 +206,8 @@ WRITE_DOMAINS = {
     "POST /api/engineers": {"owners"}, "PUT /api/engineers/{engineer_id}": {"owners"},
     # Devices and port labels (a monitor's name and rack follow the labels); renames and moves carry more.
     "POST /api/devices/": SERVER_FOLLOWS, "PUT /api/devices/{device_id}": SERVER_FOLLOWS,
-    "DELETE /api/devices/{device_id}": SERVER_FOLLOWS, "PATCH /api/devices/{device_id}/labels": SERVER_FOLLOWS,
+    "DELETE /api/devices/{device_id}": SERVER_FOLLOWS, "PATCH /api/devices/{device_id}": SERVER_FOLLOWS,
+    "PATCH /api/devices/{device_id}/labels": SERVER_FOLLOWS,
     "PATCH /api/devices/direct-label": SERVER_FOLLOWS, "POST /api/devices/{device_id}/device-names/push": SERVER_FOLLOWS,
     "POST /api/devices/rename-opt": {"devices", "layout", "owners", "monitoring"},
     "POST /api/devices/move-server": {"devices", "layout", "monitoring"},
@@ -217,6 +218,10 @@ WRITE_DOMAINS = {
     # Removed servers: their rack entries, owner and monitor change with them.
     "POST /api/removed-servers": {"removed", "layout", "owners", "monitoring"},
     "POST /api/removed-servers/restore": {"removed", "layout", "owners", "monitoring"},
+    # Delete and restore can touch every store; the Deleted list's own write (Delete forever) only itself.
+    "POST /api/lab/delete": {"devices", "layout", "inventory", "owners", "removed", "monitoring", "twin", "power"},
+    "POST /api/lab/restore": {"devices", "layout", "inventory", "owners", "removed", "monitoring", "twin", "power"},
+    "DELETE /api/lab/deleted/{batch_id}": {"removed"},
     "POST /api/monitoring/check": {"monitoring"}, "POST /api/monitoring/targets": {"monitoring"},
     "PUT /api/monitoring/targets/{target_id}": {"monitoring"},
     "PUT /api/twin-data": {"twin"},

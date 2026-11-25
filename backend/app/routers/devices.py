@@ -8,7 +8,7 @@ from .. import changes as change_feed, inventory_store, name_sync
 from ..database import get_db
 from ..models import Device, PduMaintenance
 from ..pdu_locks import maintenance_lock
-from ..schemas import DeviceCreate, DeviceOut
+from ..schemas import DeviceCreate, DeviceOut, DevicePatch
 from ..crypto import encrypt, decrypt
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
@@ -176,11 +176,51 @@ async def _reject_shared_address(db: AsyncSession, kind: str, ip: str, exclude_i
                                      "Each PDU or KVM needs its own address.")
 
 
+DEVICE_KINDS = ("pdu", "kvm", "rack")
+_KIND_NOUN = {"pdu": "PDU", "kvm": "KVM", "rack": "rack"}
+KIND_INVALID = "The kind of a device is pdu, kvm or rack."
+KIND_LOCKED = "The kind of a device cannot be changed. Add a new device of the other kind instead."
+
+
+def _check_kind(kind):
+    if kind not in DEVICE_KINDS:
+        raise HTTPException(422, KIND_INVALID)
+    return kind
+
+
+def name_key(name) -> str:
+    """A device name as names are compared: trimmed, spaces collapsed, case ignored."""
+    return " ".join(str(name or "").split()).casefold()
+
+
+def name_taken_text(kind, name) -> str:
+    return f"{name} is already the name of another {_KIND_NOUN.get(kind, kind)}. Choose a different name."
+
+
+async def name_owner(db: AsyncSession, kind: str, name: str, exclude_id: str | None = None):
+    """Another device of `kind` whose name equals `name` (name_key), or None. Each PDU, KVM and rack row needs its own
+    name: the 3D twin and the protected-outlets setting find devices by name."""
+    key = name_key(name)
+    if not key:
+        return None
+    rows = (await db.execute(select(Device).where(Device.kind == kind).execution_options(populate_existing=True))).scalars().all()
+    return next((d for d in sorted(rows, key=lambda d: d.id) if d.id != exclude_id and name_key(d.name) == key), None)
+
+
+async def _reject_shared_name(db: AsyncSession, kind: str, name: str, exclude_id: str | None = None):
+    """409 when a new or changed name is already used by another device of that kind (legacy duplicates are only
+    checked when the name itself changes, so they never block an unrelated edit)."""
+    if await name_owner(db, kind, name, exclude_id):
+        raise HTTPException(409, name_taken_text(kind, name.strip()))
+
+
 @router.post("/", response_model=DeviceOut, status_code=201)
 async def create_device(body: DeviceCreate, db: AsyncSession = Depends(get_db)):
+    _check_kind(body.kind)
     name = _check_name(body.name)
     _check_address(body.ip)
     async with _address_lock:
+        await _reject_shared_name(db, body.kind, name)
         await _reject_shared_address(db, body.kind, body.ip)
         dev = Device(
             id=str(uuid.uuid4()),
@@ -220,14 +260,19 @@ async def _locked_device(device_id: str, db: AsyncSession):
 @router.put("/{device_id}", response_model=DeviceOut)
 async def update_device(device_id: str, body: DeviceCreate, db: AsyncSession = Depends(get_db)):
     async with _locked_device(device_id, db) as dev:
+        # The kind is fixed at creation (a PDU's outlets, alerts and maintenance follow its row; v2 spec §D.5).
+        if body.kind != dev.kind:
+            raise HTTPException(422, KIND_LOCKED)
         # An unchanged saved name or address never blocks other edits (legacy rows may hold either).
         name = _check_name(body.name) if body.name != dev.name else dev.name
         if body.ip != dev.ip:
             _check_address(body.ip)
-        readdressed = body.ip != dev.ip or body.kind != dev.kind
+        readdressed = body.ip != dev.ip
         if readdressed:
             await _reject_if_in_maintenance(device_id, db)
         async with _address_lock:  # lock order: the device's maintenance lock, then this one
+            if name_key(name) != name_key(dev.name):
+                await _reject_shared_name(db, dev.kind, name, exclude_id=device_id)
             if readdressed:
                 await _reject_shared_address(db, body.kind, body.ip, exclude_id=device_id)
             dev.name = name
@@ -2036,12 +2081,210 @@ async def _clear(db, server, dry_run: bool, expected: dict | None = None, plan_r
     return result
 
 
+DELETE_MOVED = ("Reload the page: PDUs, KVMs and racks are deleted from their window now, so they can be restored.")
+
+
 @router.delete("/{device_id}", status_code=204)
 async def delete_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    async with _locked_device(device_id, db) as dev:
-        await _reject_if_in_maintenance(device_id, db)
-        await db.delete(dev)
-        await db.commit()
+    """Retired (v2 spec §D.5): every delete goes through POST /api/lab/delete (preview, Deleted list, Restore). A page
+    still built before that answers 409 with what to do; nothing is deleted."""
+    raise HTTPException(409, DELETE_MOVED)
+
+
+# ── PATCH /api/devices/{id}: Edit details and Correct rack (Admin; v2 spec §D.6) ─────────────────────────────────────
+RACK_ALONE = "Change the rack on its own (Correct rack…)."
+CONFIRM_NAME = "Type the device name to confirm."
+PATCH_NEEDS_PREVIEW = "Preview the change first (dry_run), then send its plan_revision."
+PATCH_CHANGED = "The device changed since the preview. Nothing was saved; preview again."
+_PATCH_TEXT_FIELDS = ("name", "ip", "model", "notes")
+
+
+async def _servers_moving(db, dev, new_rack):
+    """[{key, name, from, to}]: the servers whose rack changes when `dev` (a PDU or KVM) moves to `new_rack`. The rack a
+    server is drawn in comes from _position: its rack override, else its first PDU's rack, else the layout files, else
+    its KVM's rack, so a KVM-only server moves with its KVM."""
+    from types import SimpleNamespace
+    if dev.kind not in _PORT_KINDS:
+        return []
+    devices = await _port_devices(db)
+    observed = await _observed_labels(db, devices)
+    labels = {d.id: _effective_labels(d, _saved_labels(d)[0], observed) for d in devices}
+    layouts, _ = _read_layouts(strict=False)
+    index = _layout_ids(layouts)
+    hidden = _hidden_keys(labels)
+    moved = SimpleNamespace(id=dev.id, kind=dev.kind, rack=new_rack, name=dev.name)
+    out = []
+    for key, server in _all_servers(devices, labels, layouts, await _monitor_names(db)).items():
+        if key in hidden or not any(d.id == dev.id for d, _, _ in server["ports"]):
+            continue
+        ids = index.get(key, set())
+        before = _position(server, ids, layouts)["rack"]
+        after = _position({**server, "ports": [(moved if d.id == dev.id else d, p, l) for d, p, l in server["ports"]]},
+                          ids, layouts)["rack"]
+        if before != after:
+            out.append({"key": key, "name": server["name"], "from": before, "to": after})
+    return sorted(out, key=lambda s: (s["name"].casefold(), s["key"]))
+
+
+def _named_ports(dev):
+    """The port numbers whose saved label is a name (not blank, not the default "Outlet N" / "Port N")."""
+    return sorted(int(_number_key(p)) for p, label in _saved_labels(dev)[0].items()
+                  if _short_number(_number_key(p)) and isinstance(label, str) and not _DEFAULT_OUTLET_LABEL.fullmatch(label.strip()))
+
+
+def _protected_names(dev):
+    """The POWER_PROTECTED_OUTLETS entries that name this PDU: ([outlet numbers], named by its name rather than its id)."""
+    from ..config import get_settings
+    raw = str(getattr(get_settings(), "power_protected_outlets", "") or "").strip()
+    outlets, by_name = [], False
+    if not raw or raw.lower() == "none":
+        return outlets, by_name
+    for entry in (part.strip() for part in raw.split(",")):
+        ref, sep, number = entry.rpartition(":")
+        ref = ref.strip()
+        if not sep or ref not in (dev.id, dev.name):
+            continue
+        by_name = by_name or (ref == dev.name and ref != dev.id)
+        if number.strip().isdigit():
+            outlets.append(int(number.strip()))
+    return outlets, by_name
+
+
+def _runs(numbers):
+    return ", ".join(f"{a}–{b}" if a != b else f"{a}" for a, b in _number_runs(numbers))
+
+
+def _number_runs(numbers):
+    runs = []
+    for n in sorted(set(numbers)):
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return runs
+
+
+async def _patch_plan(db, dev, body):
+    """The change a PATCH makes: {changes: [{field, before, after}], servers_moving, blockers: [text], plan_revision}.
+    Raises 422 for a value that can never be saved (blank name, bad address, rack mixed with other fields)."""
+    sent = body.model_dump(exclude_unset=True)
+    if "kind" in sent:
+        raise HTTPException(422, KIND_LOCKED)
+    sent.pop("confirm_name", None)
+    sent.pop("plan_revision", None)
+    if "rack" in sent and len(sent) > 1:
+        raise HTTPException(422, RACK_ALONE)
+    if not sent:
+        raise HTTPException(422, "Nothing to change.")
+    noun = _KIND_NOUN.get(dev.kind, dev.kind)
+    changes, blockers = [], []
+    if "name" in sent:
+        name = _check_name(sent["name"] or "")
+        if name != dev.name:
+            changes.append({"field": "name", "before": dev.name, "after": name})
+            if name_key(name) != name_key(dev.name) and await name_owner(db, dev.kind, name, exclude_id=dev.id):
+                blockers.append(name_taken_text(dev.kind, name))
+            if dev.kind == "pdu" and _protected_names(dev)[1]:
+                blockers.append(f"POWER_PROTECTED_OUTLETS names {dev.name} by its name. Change that server setting first; "
+                                "after a rename the list would be invalid and block every Off and Cycle.")
+    if "ip" in sent:
+        ip = sent["ip"] or ""
+        if ip != dev.ip:
+            _check_address(ip)
+            changes.append({"field": "ip", "before": dev.ip, "after": ip})
+            if await db.get(PduMaintenance, dev.id, populate_existing=True):
+                blockers.append("PDU is in maintenance mode; restore it first")
+            try:
+                await _reject_shared_address(db, dev.kind, ip, exclude_id=dev.id)
+            except HTTPException as exc:
+                blockers.append(str(exc.detail))
+    for field in ("model", "notes"):
+        if field in sent and (sent[field] or "") != (getattr(dev, field) or ""):
+            changes.append({"field": field, "before": getattr(dev, field) or "", "after": sent[field] or ""})
+    for field in ("username", "password"):
+        if sent.get(field):   # blank keeps the stored one
+            changes.append({"field": field, "before": "set" if getattr(dev, field + "_enc") else "not set", "after": "changed"})
+    if "enabled" in sent and sent["enabled"] is not None and bool(sent["enabled"]) != bool(dev.enabled):
+        changes.append({"field": "enabled", "before": bool(dev.enabled), "after": bool(sent["enabled"])})
+    if "port_count" in sent and sent["port_count"] is not None and sent["port_count"] != (dev.port_count or 0):
+        count = sent["port_count"]
+        changes.append({"field": "port_count", "before": dev.port_count or 0, "after": count})
+        if count > 0:
+            word = "outlets" if dev.kind == "pdu" else "ports"
+            one = word[:-1]
+            named = [n for n in _named_ports(dev) if n > count]
+            if len(named) == 1:
+                blockers.append(f"{one.capitalize()} {named[0]} still carries a name; clear it first.")
+            elif named:
+                blockers.append(f"{word.capitalize()} {_runs(named)} still carry names; clear them first.")
+            protected = [n for n in (_protected_names(dev)[0] if dev.kind == "pdu" else []) if n > count]
+            if protected:
+                blockers.append(f"POWER_PROTECTED_OUTLETS names {one if len(protected) == 1 else word} {_runs(protected)} "
+                                f"of {dev.name}; change that setting first.")
+    moving = []
+    if "rack" in sent:
+        rack = " ".join(str(sent["rack"] or "").split())
+        if rack != (dev.rack or ""):
+            changes.append({"field": "rack", "before": dev.rack or "", "after": rack})
+            moving = await _servers_moving(db, dev, rack or None)
+    plan = {"changes": changes, "servers_moving": moving, "blockers": blockers}
+    plan["plan_revision"] = inventory_store.revision({**plan, "device": dev.id, "noun": noun})
+    return plan
+
+
+@router.patch("/{device_id}")
+async def patch_device(device_id: str, body: DevicePatch, dry_run: bool = False, db: AsyncSession = Depends(get_db)):
+    """Edit details or Correct rack (Admin). Body: {name?, ip?, username?, password?, model?, port_count?, notes?,
+    enabled?} (a blank username or password keeps the stored one; kind cannot be patched), or {rack, confirm_name?} on
+    its own (422 when mixed). ?dry_run=true answers {dry_run, changes, servers_moving: [{key, name, from, to}], blockers,
+    plan_revision} and writes nothing. Apply needs that plan_revision (428 without it, 409 when anything changed) and
+    no blockers (409). A rack change also needs confirm_name equal to the device name whenever servers move with it or
+    any port carries a name (422). Locks: the label writer, then the device's maintenance lock, then the address lock.
+    Answers {ok, device, changes, servers_moving}."""
+    async with _labels_lock:
+        async with _locked_device(device_id, db) as dev:
+            async with _address_lock:
+                plan = await _patch_plan(db, dev, body)
+                if dry_run:
+                    change_feed.unchanged()   # a preview writes nothing: open pages need not reload
+                    return {"dry_run": True, **plan}
+                if not body.plan_revision:
+                    raise HTTPException(428, PATCH_NEEDS_PREVIEW)
+                if body.plan_revision != plan["plan_revision"]:
+                    raise HTTPException(409, PATCH_CHANGED)
+                if plan["blockers"]:
+                    raise HTTPException(409, plan["blockers"][0])
+                fields = {c["field"] for c in plan["changes"]}
+                if "rack" in fields and (plan["servers_moving"] or _named_ports(dev)) and \
+                        (body.confirm_name or "").strip() != (dev.name or "").strip():
+                    raise HTTPException(422, CONFIRM_NAME)
+                sent = body.model_dump(exclude_unset=True)
+                if "name" in fields:
+                    dev.name = _check_name(sent["name"])
+                if "ip" in fields:
+                    dev.ip = sent["ip"]
+                for field in ("model", "notes"):
+                    if field in fields:
+                        setattr(dev, field, sent[field] or "")
+                if "username" in fields:
+                    dev.username_enc = encrypt(sent["username"])
+                if "password" in fields:
+                    dev.password_enc = encrypt(sent["password"])
+                if "enabled" in fields:
+                    dev.enabled = bool(sent["enabled"])
+                if "port_count" in fields:
+                    dev.port_count = sent["port_count"]
+                if "rack" in fields:
+                    dev.rack = " ".join(str(sent["rack"] or "").split())
+                await db.commit()
+                if fields & {"ip", "username", "password", "model"}:
+                    # A cached status was read from the previous address / account / model: never show it again.
+                    from . import kvms, pdus
+                    pdus.invalidate(device_id)
+                    kvms._cache.pop(device_id, None)
+    await db.refresh(dev)
+    return {"ok": True, "device": DeviceOut.model_validate(dev).model_dump(),
+            "changes": plan["changes"], "servers_moving": plan["servers_moving"]}
 
 
 async def _get_or_404(device_id: str, db: AsyncSession) -> Device:

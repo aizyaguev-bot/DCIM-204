@@ -225,6 +225,25 @@ async def test_restore_brings_it_back_resumes_the_monitor_and_not_the_placement(
     assert layout(lab) == cleaned and "optn45" not in owners
 
 
+async def test_a_removal_closes_the_network_alert_with_one_closing_email(lab, monkeypatch):
+    """Remove from lab uses the delete path's alert rule (alerts.close_deleted): an alert email that was sent gets one
+    "[DCIM closed]" email (never a "[DCIM recovered]": nothing recovered), and the condition is dropped."""
+    from app import alerts
+    from app.models import AlertCondition, AlertEmail
+    monkeypatch.setattr(alerts, "get_settings", lambda: SimpleNamespace(email_alerts_to="lab@example.test"))
+    async with lab.factory() as db:
+        db.add(AlertCondition(key="network:t45", configuration="[]", started_at=1.0, checked_at=2.0, notified=True))
+        db.add(AlertEmail(id="m1", condition_key="network:t45", created_at=3.0, recipient="lab@example.test",
+                          subject="[DCIM alert] OPTN45: network reachability", body="down", next_attempt_at=3.0))
+        await db.commit()
+    async with signed_in(lab) as c:
+        assert (await remove(c)).status_code == 200
+    async with lab.factory() as db:
+        assert await db.get(AlertCondition, "network:t45") is None
+        subjects = [m.subject for m in (await db.execute(select(AlertEmail).order_by(AlertEmail.created_at))).scalars()]
+    assert subjects == ["[DCIM alert] OPTN45: network reachability", "[DCIM closed] OPTN45: network reachability"]
+
+
 async def test_a_monitor_paused_before_removal_stays_paused_after_restore(lab):
     async with lab.factory() as db:
         (await db.get(PingTarget, "t45")).enabled = False

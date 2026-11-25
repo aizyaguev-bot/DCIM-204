@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { WINDOW_DROP_PARAMS, assistantDetail, legacyViewTarget, parseWindow, sameWindow, twinOpenRequest, windowHref, windowId,
-  windowSearch, windowTarget } from "../window/windowUrl.js";
+import { ADD_SERVER_KIND, ADD_SERVER_PARAMS, WINDOW_DROP_PARAMS, addServerSearch, addServerTarget, assistantDetail, legacyViewTarget,
+  parseAddServer, parseWindow, sameWindow, twinOpenRequest, windowHref, windowId, windowSearch, windowTarget } from "../window/windowUrl.js";
 
 // The window part of the address (v2 §W.1): srv=<key> for servers, open=<kind>:<id> for every other kind, sec=.
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
@@ -69,6 +69,53 @@ test("twin messages: twin:open with a target, v1's twin:open-server, moveTo kept
   assert.equal(twinOpenRequest(null), null);
 });
 
+// v3 shelves (CONTRACT.md §11): ?add=server[&rack=R][&shelf=N] and the twin's add-server target open the add-server
+// dialog. They are not windows: parseWindow never returns them, so the open window stays.
+test("?add=server[&rack=R][&shelf=N] is the add-server request; it is no window", () => {
+  assert.equal(ADD_SERVER_KIND, "add-server");
+  assert.deepEqual(parseAddServer("?add=server"), { kind: "add-server", rack: null, shelf: null });
+  assert.deepEqual(parseAddServer("?tab=racks&rack=Rack-05&add=server&shelf=2"), { kind: "add-server", rack: "Rack-05", shelf: 2 });
+  assert.deepEqual(parseAddServer("?add=Server&rack=%20Rack-05%20&shelf=%2016%20"), { kind: "add-server", rack: "Rack-05", shelf: 16 }, "case and spaces");
+  assert.deepEqual(parseAddServer("?add=server&srv=opt11&rack=Storage-Main&shelf=12"), { kind: "add-server", rack: "Storage-Main", shelf: 12 });
+  for (const bad of ["abc", "0", "-1", "2.5", "100", ""]) assert.equal(parseAddServer(`?add=server&shelf=${bad}`).shelf, null, `shelf=${bad}`);
+  assert.equal(parseAddServer(`?add=server&rack=${"x".repeat(301)}`).rack, null, "an over-long rack name is dropped");
+  for (const none of ["", "?tab=racks&rack=Rack-05&shelf=2", "?add=unit", "?add=", "?open=add-server:Rack-05"]) assert.equal(parseAddServer(none), null, none);
+  assert.equal(parseWindow("?tab=racks&add=server&rack=Rack-05&shelf=2"), null, "not a window");
+  assert.deepEqual(parseWindow("?srv=opt11&add=server&shelf=2"), { kind: "server", id: "opt11" }, "the open window stays");
+  assert.deepEqual(WINDOW_DROP_PARAMS, ["srv", "open", "sec", "item", "focus"], "unchanged");
+});
+
+test("addServerTarget and addServerSearch: write the request, and drop add= and shelf= (rack= stays) when it closes", () => {
+  assert.deepEqual(addServerTarget(), { kind: "add-server", rack: null, shelf: null });
+  assert.deepEqual(addServerTarget({ rack: " Rack-05 ", shelf: "2", seat: 2, name: " OPT55 " }), { kind: "add-server", rack: "Rack-05", shelf: 2, seat: 2, name: "OPT55" });
+  assert.deepEqual(addServerTarget({ rack: "", shelf: 0, seat: "x", name: "x".repeat(81) }), { kind: "add-server", rack: null, shelf: null });
+  assert.deepEqual(ADD_SERVER_PARAMS, ["add", "shelf"]);
+  assert.equal(addServerSearch("?tab=racks&rack=Rack-05&add=server&shelf=2", null), "?tab=racks&rack=Rack-05");
+  assert.equal(addServerSearch("?add=server&shelf=2", null), "");
+  assert.equal(addServerSearch("?tab=racks&srv=opt11&add=server", null), "?tab=racks&srv=opt11", "the window stays");
+  assert.equal(addServerSearch("?tab=dashboard", { rack: "Rack-05", shelf: 2 }), "?tab=dashboard&add=server&rack=Rack-05&shelf=2");
+  assert.equal(addServerSearch("?tab=dashboard&shelf=9", { kind: "add-server" }), "?tab=dashboard&add=server");
+  for (const target of [{ rack: "Rack-05", shelf: 2 }, { rack: "Storage-Main", shelf: null }, { rack: null, shelf: null }]) {
+    assert.deepEqual(parseAddServer(addServerSearch("?tab=racks", target)), { kind: "add-server", ...target }, "a round trip");
+  }
+});
+
+test("the twin's Add server here: twin:open with an add-server target (rack and shelf only)", () => {
+  assert.deepEqual(twinOpenRequest({ type: "twin:open", target: { kind: "add-server", rack: "Rack-05", shelf: 2 } }),
+    { target: { kind: "add-server", rack: "Rack-05", shelf: 2 }, moveTo: null });
+  assert.deepEqual(twinOpenRequest({ type: "twin:open", target: { kind: "add-server", rack: "Rack-05", shelf: "x", id: "evil", moveTo: { rack: "R", u: 1 } } }),
+    { target: { kind: "add-server", rack: "Rack-05", shelf: null }, moveTo: null });
+  assert.deepEqual(twinOpenRequest({ type: "twin:open", target: { kind: "add-server" } }), { target: { kind: "add-server", rack: null, shelf: null }, moveTo: null });
+  assert.equal(twinOpenRequest({ type: "twin:open-server", key: "add-server" }).target.kind, "server", "v1's message is always a server");
+  // App passes the target to the provider's open(), which turns this kind into the add-server dialog.
+  const provider = read("../window/LabWindowProvider.jsx");
+  assert.match(provider, /if \(target\?\.kind === ADD_SERVER_KIND\) \{ openAddServerRef\.current\?\.\(target\); return; \}/);
+  assert.match(app, /labWindowRef\.current\?\.open\(\{ \.\.\.request\.target/);
+  // ?add=server is read on load, on Back / Forward and after every render, and dropped from the address on close.
+  assert.match(provider, /window\.addEventListener\("popstate", readAddUrl\)/);
+  assert.match(provider, /addServerSearch\(window\.location\.search, null\)/);
+});
+
 test("the assistant's context detail follows the open window", () => {
   const devices = [{ id: "pdu1", kind: "pdu" }, { id: "kvm1", kind: "kvm" }, { id: "rack6", kind: "rack" }];
   assert.deepEqual(assistantDetail({ kind: "server", id: "opt11" }, devices), { kind: "server", id: "opt11" });
@@ -122,5 +169,5 @@ test("App mounts the window provider around the page; the twin's open message is
   // Inventory is the Manage page (a stub over today's table until WP-M).
   assert.match(app, /mainTab === "inventory" && \(\n\s*<ManageView /);
   assert.doesNotMatch(app, /\["racks", "inventory", "power", "changelog"\]/);
-  assert.match(read("../pages/ManageView.jsx"), /<DcimView \{\.\.\.props\} section="inventory"\/>/);
+  assert.match(read("../pages/ManageView.jsx"), /export default function ManageView\(\{ editMode = false \}\) \{\r?\n\s*const lab = useLabData\("all"\);/);
 });

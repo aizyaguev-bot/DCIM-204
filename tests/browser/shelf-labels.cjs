@@ -2,8 +2,9 @@
 // LBL-1 a floor's label (project = the unit on the floor, owner = the server's owner, the server), Copy puts exactly its
 // three lines on the clipboard, edits change only the printout, Print prints only the label sheet; LBL-2 a rack's labels
 // (one per server floor) from its card and its detail; LBL-3 the toolbar dialog with "All racks" covers every rack;
-// LBL-4 a storage shelf's number is its label button; LBL-5 a Viewer can open and copy; LBL-6 a 390 px phone: the dialog
-// fits without page scroll. Every change it makes (an owner, two units) is undone. Only fixture data; no hardware.
+// LBL-4 a storage shelf's number is its label button; LBL-5 a Viewer can open and copy, and a label's "Open <server>"
+// opens that server's window (one-place WP-5); LBL-6 a 390 px phone: the dialog fits without page scroll. Every change it
+// makes (an owner, two units) is undone. Only fixture data; no hardware.
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 const origin=process.env.DCIM_PREVIEW_URL||'http://127.0.0.1:9970';
@@ -190,8 +191,17 @@ const STORE='Storage shelf', BOX_NAME='Label QA box';
   await vp.waitForFunction(()=>navigator.clipboard.readText().then(t=>t!=='-'));
   assert.equal(await clipboard(vp),expected,'Copy without the Clipboard API (plain http)');
   assert.equal(await vp.evaluate(()=>document.activeElement?.dataset.action),'copy','focus stays on Copy');
-  await vp.keyboard.press('Escape');await vp.close();
-  passed.push('LBL-5 Viewer opens the floor label and copies the same three lines (Clipboard API, and the copy command as on the plain-http lab site)');
+  // the label's "Open OPT33" opens that server's window; the same click closes the dialog (the window on top, focused)
+  const openOpt=dialogOf(vp).getByRole('button',{name:`Open ${OPT}`,exact:true});
+  await openOpt.waitFor();
+  await openOpt.click();
+  await dialogOf(vp).waitFor({state:'detached'});
+  const win=vp.locator('[data-window="server"]');
+  await win.locator('h2.lab-window-name',{hasText:OPT}).waitFor();
+  assert.equal(new URL(vp.url()).searchParams.get('srv'),OPT_ID,"the window of the label's server");
+  await vp.waitForFunction(()=>document.querySelector('[data-window="server"]')?.contains(document.activeElement),null,{timeout:5000});
+  await vp.keyboard.press('Escape');await win.waitFor({state:'detached'});await vp.close();
+  passed.push(`LBL-5 Viewer opens the floor label and copies the same three lines (Clipboard API, and the copy command as on the plain-http lab site); its "Open ${OPT}" closes the dialog and opens ${OPT}'s window (srv=${OPT_ID}, focus in the window)`);
 
   // ── LBL-6 a 390 px phone: always-visible tags, the dialog fits without page scroll ──
   const phone=await session('viewer',{viewport:{width:390,height:844},isMobile:true,hasTouch:true});

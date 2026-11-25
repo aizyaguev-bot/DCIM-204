@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccounts } from "../accounts.jsx";
 import { useRemovedServers } from "../removedServers.jsx";
 import { useEngineers } from "../engineers.jsx";
 import { api, errorMessage } from "../api/client.js";
 import { loadLayout } from "../api/layout.js";
 import { loadTwinData } from "../api/twinData.js";
+import { loadShelves, placeConflicts, shelvesAvailable, unavailableShelves } from "../api/shelves.js";
 import { useLiveReload } from "../api/useLiveReload.js";
 import { setStorageRacks, storageRacksFromDevices } from "../components/racks/floors.js";
 import { buildLabIndex } from "../lab/labIndex.js";
@@ -18,10 +19,28 @@ import CoolingWindow from "../units/CoolingWindow.jsx";
 import TwinItemWindow from "../lab/TwinItemWindow.jsx";
 import DeleteDialog from "../lab/DeleteDialog.jsx";
 import { LabWindowContext, useLabData, useLabWindow, useServerWindow } from "./labWindowContext.js";
-import { legacyViewTarget, parseWindow, sameWindow, windowHref, windowId, windowTarget } from "./windowUrl.js";
+import { ADD_SERVER_KIND, addServerSearch, addServerTarget, legacyViewTarget, parseAddServer, parseWindow, sameWindow, windowHref, windowId,
+  windowTarget } from "./windowUrl.js";
 import "./window.css";
 
 export { useLabData, useLabWindow, useServerWindow };
+
+// The add-server dialog (v3 spec §7.1; server/AddServerDialog.jsx, WP-5S), loaded when it is first opened. The glob
+// keeps the build working while that file does not exist (no match: a dialog that says so).
+const ADD_SERVER_MODULES = import.meta.glob("../server/AddServerDialog.jsx");
+function AddServerMissing({ onClose }) {
+  return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4" onMouseDown={e => { if (e.target === e.currentTarget) onClose?.(); }}>
+    <section role="dialog" aria-modal="true" aria-label="Add server" className="racks-dialog" data-dialog="add-server">
+      <h2 className="racks-dialog-title">Add server</h2>
+      <p className="racks-dialog-note">Adding a server is not available in this version.</p>
+      <div className="racks-dialog-actions"><button type="button" className="racks-btn" onClick={onClose}>Close</button></div>
+    </section>
+  </div>;
+}
+const AddServerDialog = lazy(() => {
+  const load = Object.values(ADD_SERVER_MODULES)[0];
+  return load ? load() : Promise.resolve({ default: AddServerMissing });
+});
 
 // The stores the windows read, the change-feed domains that reload each, and how each is read (all Viewer reads).
 // Layout-file stores keep { data, etag } (the ETag is a later save's If-Match).
@@ -33,9 +52,14 @@ const STORES = {
   monitoring: { domains: ["monitoring"], load: async () => (await loadLayout("/api/monitoring")).data },
   chillers: { domains: ["inventory"], load: () => loadLayout("/api/chillers") },
   twin: { domains: ["twin"], load: () => loadTwinData() },
+  // v3 shelves (CONTRACT.md §11). Asked only when /locations says the backend has the map (shelves_revision), so an
+  // older backend never gets the request; without it: unavailableShelves(). Before /locations: not yet (undefined).
+  shelves: { domains: ["devices", "layout"], load: ({ locations }) => (locations == null ? Promise.resolve(undefined)
+    : shelvesAvailable(locations) ? loadShelves() : Promise.resolve(unavailableShelves())) },
 };
 const ALL = Object.keys(STORES);
 const SERVERS_ONLY = ["locations"];
+const SHELVES_ONLY = ["locations", "shelves"];
 const LIVE_DOMAINS = ["layout", "inventory", "owners", "devices", "removed", "monitoring", "twin"];
 const TOAST_MS = 15000;
 
@@ -68,6 +92,7 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
   const pushed = useRef(new Set());          // history entries this page pushed for a window (their labWindow token)
   const seq = useRef(0);
   const lastSearch = useRef(window.location.search);
+  const openAddServerRef = useRef(null);       // act.openAddServer, for open() (declared below)
   const adopt = useCallback(next => {
     setCurrent(prev => (prev && next && sameWindow(prev, next) && prev.sec === next.sec ? prev : next));
   }, []);
@@ -90,6 +115,8 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
   useEffect(() => { if (window.location.search !== lastSearch.current) sync(); });
 
   const open = useCallback((target, { replace = false } = {}) => {
+    // The twin's "Add server here" ({ kind: "add-server", rack, shelf }, twinOpenRequest) is the add-server dialog.
+    if (target?.kind === ADD_SERVER_KIND) { openAddServerRef.current?.(target); return; }
     const clean = windowTarget(target?.kind, target?.id, target?.sec);
     if (!clean) return;
     const full = { ...clean, ...(target.moveTo ? { moveTo: target.moveTo } : {}), ...(target.swapWith ? { swapWith: target.swapWith } : {}) };
@@ -127,25 +154,66 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
 
   useEffect(() => { changeRef.current?.(current); }, [current]);
 
+  // ── the add-server dialog (v3 §7.1): act.openAddServer, ?add=server, the twin's add-server target ──
+  // adding: { rack, shelf, seat?, name?, seq, onAdded } | null. Shown to Operators and Admins only.
+  const [adding, setAdding] = useState(null);
+  const addSeq = useRef(0);
+  const openAddServer = useCallback((target = {}, { onAdded = null } = {}) => {
+    const { kind, ...clean } = addServerTarget(target || {});
+    setAdding({ ...clean, seq: ++addSeq.current, onAdded: typeof onAdded === "function" ? onAdded : null });
+  }, []);
+  openAddServerRef.current = openAddServer;
+  // ?add=server[&rack=R][&shelf=N]: opened once per address that names it; closing drops add= and shelf= from it.
+  const addUrlSeen = useRef(null);
+  const readAddUrl = useCallback(() => {
+    const search = window.location.search;
+    const asked = parseAddServer(search);
+    if (!asked) { addUrlSeen.current = null; return; }
+    if (addUrlSeen.current === search) return;
+    addUrlSeen.current = search;
+    openAddServer(asked);
+  }, [openAddServer]);
+  const closeAddServer = useCallback(() => {
+    setAdding(null);
+    if (!parseAddServer(window.location.search)) return;
+    window.history.replaceState(window.history.state, "", `${window.location.pathname}${addServerSearch(window.location.search, null)}${window.location.hash}`);
+    addUrlSeen.current = null;
+    lastSearch.current = window.location.search;
+  }, []);
+  // A Viewer gets no add-server dialog (the backend answers 403 anyway): the request is dropped.
+  useEffect(() => { if (adding && !canOperate) closeAddServer(); }, [adding, canOperate, closeAddServer]);
+  useEffect(() => {
+    readAddUrl();
+    window.addEventListener("popstate", readAddUrl);
+    return () => window.removeEventListener("popstate", readAddUrl);
+  }, [readAddUrl]);
+  // navigate() changes the address without an event: read it after every render, as sync() does for windows.
+  useEffect(() => { if (window.location.search !== addUrlSeen.current && parseAddServer(window.location.search)) readAddUrl(); });
+
   // ── the shared data: loaded while a window is open or a component asks for it (useLabData) ──
-  const [interest, setInterest] = useState({ servers: 0, all: 0 });
+  const [interest, setInterest] = useState({ servers: 0, shelves: 0, all: 0 });
   const want = useCallback(level => {
-    const k = level === "servers" ? "servers" : "all";
+    const k = level === "servers" ? "servers" : level === "shelves" ? "shelves" : "all";
     setInterest(i => ({ ...i, [k]: i[k] + 1 }));
     return () => setInterest(i => ({ ...i, [k]: i[k] - 1 }));
   }, []);
-  const wanted = current || interest.all > 0 ? ALL : interest.servers > 0 ? SERVERS_ONLY : [];
+  const wanted = current || interest.all > 0 ? ALL
+    : interest.shelves > 0 || adding ? SHELVES_ONLY
+    : interest.servers > 0 ? SERVERS_ONLY : [];
   const wantedRef = useRef(wanted);
   wantedRef.current = wanted;
   const [stores, setStores] = useState({});
+  const storesRef = useRef(stores);
+  storesRef.current = stores;
   const [errors, setErrors] = useState({});
   const seqs = useRef({});
   const loadStore = useCallback(async name => {
     const turn = (seqs.current[name] || 0) + 1;
     seqs.current[name] = turn;
     try {
-      const value = await STORES[name].load();
+      const value = await STORES[name].load({ locations: storesRef.current.locations ?? null });
       if (seqs.current[name] !== turn) return;
+      if (value === undefined) return;   // shelves before /locations: read again once it has loaded (below)
       setStores(s => ({ ...s, [name]: value }));
       setErrors(e => { if (!(name in e)) return e; const next = { ...e }; delete next[name]; return next; });
     } catch (e) {
@@ -153,7 +221,12 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
     }
   }, []);
   const wantedKey = wanted.join(",");
-  useEffect(() => { for (const name of wanted) loadStore(name); }, [wantedKey, loadStore]);
+  useEffect(() => { for (const name of wanted) if (name !== "shelves") loadStore(name); }, [wantedKey, loadStore]);
+  // The shelf map follows /locations: read once /locations has loaded, and again when it starts or stops naming
+  // shelves_revision (an upgrade while the page is open). The change feed reloads it with the others (reload).
+  const shelvesSupport = stores.locations == null ? "unknown" : shelvesAvailable(stores.locations) ? "yes" : "no";
+  const shelvesWanted = wanted.includes("shelves");
+  useEffect(() => { if (shelvesWanted && shelvesSupport !== "unknown") loadStore("shelves"); }, [wantedKey, shelvesWanted, shelvesSupport, loadStore]);
   const reload = useCallback(async (domains = null) => {
     const names = wantedRef.current.filter(name => !domains || STORES[name].domains.some(d => domains.includes(d)));
     await Promise.all(names.map(loadStore));
@@ -171,6 +244,7 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
     monitoring: stores.monitoring ?? null,
     chillers: stores.chillers?.data ?? null,
     twin: stores.twin ?? null,
+    shelves: stores.shelves ?? null,
     removed: removed?.data ?? null,
     hidden: removed?.hidden ?? new Set(),
     engineers: directory?.engineers ?? null,
@@ -208,13 +282,15 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
     const list = (Array.isArray(targets) ? targets : [targets]).filter(t => t && t.kind && t.id != null);
     if (list.length) setDeleting({ targets: list, options, onDone });
   }, []);
-  const power = useServerPower({ devices, pduStatuses, maintenance, canOperate, toast,
+  // v3: a server whose name is on outlets of two shelf seats has whole-server power off (spec §7.11).
+  const conflicts = useMemo(() => placeConflicts(stores.locations, stores.shelves), [stores.locations, stores.shelves]);
+  const power = useServerPower({ devices, pduStatuses, maintenance, canOperate, toast, conflicts,
     switchFeeds: (...args) => appRef.current.switchFeeds?.(...args) });
-  const powerApi = useMemo(() => ({ enabled: power.enabled, groupFor: power.groupFor, pending: power.pending, request: power.request }),
-    [power.enabled, power.groupFor, power.pending, power.request]);
+  const powerApi = useMemo(() => ({ enabled: power.enabled, groupFor: power.groupFor, pending: power.pending, request: power.request, blocked: power.blocked }),
+    [power.enabled, power.groupFor, power.pending, power.request, power.blocked]);
 
   const act = useMemo(() => ({
-    open, openServer, close, openDelete, openDialog, closeDialog, toast, showResult, showOnRacks,
+    open, openServer, close, openDelete, openDialog, closeDialog, toast, showResult, showOnRacks, openAddServer,
     during: live.during, reload,
     goTo: (tab, target) => appRef.current.goTo?.(tab, target),
     showIn3d: ref => appRef.current.goTo?.("twin", { ref }),
@@ -230,14 +306,15 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
       switchFeeds: (...a) => appRef.current.switchFeeds?.(...a),
       refresh: (...a) => appRef.current.refresh?.(...a),
     },
-  }), [open, openServer, close, openDelete, openDialog, closeDialog, toast, showResult, showOnRacks, live.during, reload, powerApi]);
+  }), [open, openServer, close, openDelete, openDialog, closeDialog, toast, showResult, showOnRacks, openAddServer, live.during, reload, powerApi]);
 
-  if (apiRef) apiRef.current = { open, openServer, close, current };
+  if (apiRef) apiRef.current = { open, openServer, close, current, openAddServer };
 
   const value = useMemo(() => ({
     open, openServer, close, current, index, twin: stores.twin ?? null, servers, data, ready: data.locations != null, errors,
-    reload, act, can, want, lastChange, dismissLastChange, dialog, closeDialog, mounted: true,
-  }), [open, openServer, close, current, index, stores.twin, servers, data, errors, reload, act, can, want, lastChange, dismissLastChange, dialog, closeDialog]);
+    reload, act, can, want, lastChange, dismissLastChange, dialog, closeDialog, mounted: true, openAddServer, adding,
+  }), [open, openServer, close, current, index, stores.twin, servers, data, errors, reload, act, can, want, lastChange, dismissLastChange, dialog, closeDialog,
+    openAddServer, adding]);
 
   return <LabWindowContext.Provider value={value}>
     {children}
@@ -246,6 +323,11 @@ export function LabWindowProvider({ children, devices = [], pduStatuses = {}, kv
     {deleting && <DeleteDialog targets={deleting.targets} options={deleting.options}
       onClose={() => setDeleting(null)}
       onDone={result => { const done = deleting.onDone; setDeleting(null); done?.(result); reload(); }}/>}
+    {adding && can.operate && <Suspense fallback={null}>
+      <AddServerDialog key={adding.seq} rack={adding.rack} shelf={adding.shelf} seat={adding.seat ?? null} name={adding.name ?? ""}
+        u={adding.shelf} onClose={closeAddServer}
+        onAdded={result => { const added = adding.onAdded; added?.(result); reload(["devices", "layout"]); }}/>
+    </Suspense>}
     {toasts.length > 0 && <div className="lab-toasts" role="status" aria-live="polite">
       {toasts.map(t => <div key={t.id} className="lab-toast" data-tone={t.tone}>
         <span dir="auto">{t.text}</span>

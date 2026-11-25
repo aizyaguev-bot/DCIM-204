@@ -97,13 +97,65 @@ export function assistantDetail(target, devices = []) {
   return null;
 }
 
+// ── Add server (v3 spec §7.1): a dialog, not a window ──
+//   ?…&add=server[&rack=R][&shelf=N]   opens the add-server dialog (Operator and up) over the current tab and window.
+// The provider reads it on load and on every address change, and drops add= and shelf= when the dialog closes (rack=
+// stays: on Racks it is the selected rack). The twin asks with { type: "twin:open", target: { kind: "add-server", rack,
+// shelf } }. parseWindow never returns this kind, so it never replaces the open window.
+export const ADD_SERVER_KIND = "add-server";
+export const ADD_SERVER_PARAMS = ["add", "shelf"];
+const MAX_SHELF = 99;
+const cleanShelf = value => {
+  const n = typeof value === "number" ? value : typeof value === "string" && /^\s*\d+\s*$/.test(value) ? Number(value) : NaN;
+  return Number.isInteger(n) && n >= 1 && n <= MAX_SHELF ? n : null;
+};
+
+// { kind: "add-server", rack, shelf } (rack: a name or null; shelf: 1-99 or null), plus seat (a whole number from 1)
+// and name (trimmed, at most 80 characters) when given. Always a target: every part is optional.
+export function addServerTarget({ rack = null, shelf = null, seat = null, name = null } = {}) {
+  const target = { kind: ADD_SERVER_KIND, rack: cleanId(rack), shelf: cleanShelf(shelf) };
+  const s = cleanShelf(seat);
+  if (s != null) target.seat = s;
+  const n = typeof name === "string" ? name.trim() : "";
+  if (n && n.length <= 80) target.name = n;
+  return target;
+}
+
+// The add-server request an address names ({ kind: "add-server", rack, shelf }), or null without add=server.
+export function parseAddServer(search) {
+  const params = new URLSearchParams(search || "");
+  if ((params.get("add") || "").trim().toLowerCase() !== "server") return null;
+  const { kind, rack, shelf } = addServerTarget({ rack: params.get("rack"), shelf: params.get("shelf") });
+  return { kind, rack, shelf };
+}
+
+// The address's search part with this add-server request (null: without one: add= and shelf= dropped, rack= kept).
+export function addServerSearch(search, target) {
+  const params = new URLSearchParams(search || "");
+  for (const name of ADD_SERVER_PARAMS) params.delete(name);
+  if (target) {
+    const clean = addServerTarget(target);
+    params.set("add", "server");
+    if (clean.rack) params.set("rack", clean.rack);
+    if (clean.shelf != null) params.set("shelf", String(clean.shelf));
+  }
+  const text = params.toString().replace(/%3A/gi, ":");
+  return text ? `?${text}` : "";
+}
+
 // The twin's message asking Lab Manager to open a window (same origin and from the twin's frame only; App checks
 // that): { type: "twin:open", target: { kind, id, sec?, moveTo? } }, or v1's
 // { type: "twin:open-server", key, sec?, moveTo? }. Returns { target, moveTo } or null.
+// An empty shelf's "Add server here" sends { type: "twin:open", target: { kind: "add-server", rack, shelf } }: the
+// target is then addServerTarget's { kind: "add-server", rack, shelf } (App passes it to open(), which opens the dialog).
 export const TWIN_OPEN_TYPES = ["twin:open", "twin:open-server"];
 export function twinOpenRequest(data) {
   if (!data || typeof data !== "object") return null;
   let target = null;
+  if (data.type === "twin:open" && data.target && typeof data.target === "object" && data.target.kind === ADD_SERVER_KIND) {
+    const { kind, rack, shelf } = addServerTarget({ rack: data.target.rack, shelf: data.target.shelf });
+    return { target: { kind, rack, shelf }, moveTo: null };
+  }
   if (data.type === "twin:open" && data.target && typeof data.target === "object") {
     target = windowTarget(data.target.kind, data.target.id, data.target.sec);
   } else if (data.type === "twin:open-server") {

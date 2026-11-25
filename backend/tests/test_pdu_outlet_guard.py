@@ -59,12 +59,15 @@ async def test_disabled_pdu_is_refused(client, pdu_device, db_session):
     await db_session.commit()
     r, factory, _ = await _post(client, pdu_device["id"], 1, "on")
     assert r.status_code == 409 and not factory.called
+    # Admin -> Devices is gone (v2 spec D.6): the PDU window's Edit details enables it.
+    assert r.json()["detail"] == "This PDU is disabled; an Admin can enable it in the PDU window (Edit details)."
 
 
 async def test_unreadable_credentials_are_a_fixed_502(client, pdu_device):
     with patch.object(pdus_module, "get_creds", side_effect=ValueError("bad token secret-x")):
         r, factory, _ = await _post(client, pdu_device["id"], 1, "on")
     assert r.status_code == 502 and "secret-x" not in r.text and not factory.called
+    assert r.json()["detail"] == "Stored PDU credentials could not be read; re-enter them in the PDU window (Edit details)."
 
 
 async def test_an_invalid_protected_list_refuses_off_and_cycle_for_every_outlet(client, pdu_device):

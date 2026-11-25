@@ -24,6 +24,9 @@ backend/rack_slots.json
 backend/switch_assignments.json
 backend/removed_servers.json
 backend/removed_servers.lock
+# The Deleted list (v2 spec D.4.5): restorable snapshots, encrypted device credentials included
+backend/deleted.json
+backend/deleted.lock
 backend/rack_items.json
 backend/rack_items.lock
 backend/changes.json

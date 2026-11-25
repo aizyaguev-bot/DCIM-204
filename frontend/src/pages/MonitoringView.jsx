@@ -4,181 +4,13 @@ import { useRemovedServers } from "../removedServers.jsx";
 import { withoutRemovedTargets } from "../api/removedServers.js";
 import { useLiveReload } from "../api/useLiveReload";
 import { isPlaceholderMonitor } from "../labDisplay.js";
+import { useLabWindow } from "../window/labWindowContext.js";
+import MonitorDetails, { Connections, StatusBadge as Badge, elapsed, lastKnown, monitorRequest as request, when } from "../components/monitoring/MonitorDetails.jsx";
+import TargetSettings from "../components/monitoring/TargetSettings.jsx";
 
 const input = "w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:border-nv-400";
 const button = "rounded-lg border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800 disabled:opacity-40";
 const primary = "rounded-lg bg-nv-400 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-nv-300 disabled:opacity-40";
-const states = {
-  up: ["Reachable", "text-emerald-300 bg-emerald-400/10", "bg-emerald-400"],
-  down: ["No reply", "text-rose-300 bg-rose-400/10", "bg-rose-400"],
-  error: ["Probe error", "text-amber-300 bg-amber-400/10", "bg-amber-400"],
-  stale: ["Overdue", "text-amber-300 bg-amber-400/10", "bg-amber-400"],
-  pending: ["Awaiting check", "text-zinc-400 bg-zinc-800", "bg-zinc-600"],
-  unconfigured: ["Needs address", "text-amber-300 bg-amber-400/10", "bg-amber-400"],
-  paused: ["Paused", "text-zinc-400 bg-zinc-800", "bg-zinc-600"],
-};
-
-async function request(path = "", method = "GET", body, signal) {
-  const response = await fetch(`/api/monitoring${path}`, {
-    method, signal, headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    const detail = typeof data.detail === "string" ? data.detail : data.detail?.map(e => e.msg).join("; ");
-    const error = new Error(detail || `Request failed (${response.status})`);
-    error.status = response.status;
-    throw error;
-  }
-  return response.json();
-}
-
-// An overdue check hides the last ping result from the status; keep a failed reply visible.
-function lastKnown(target) {
-  return target.status === "stale" && target.last_result === "down" ? `Last known: ${states.down[0]}` : "";
-}
-
-function Badge({ status }) {
-  const [label, color, dot] = states[status] || states.pending;
-  return <span className={`inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-xs whitespace-nowrap ${color}`}>
-    <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />{label}
-  </span>;
-}
-
-function when(value, timezone) {
-  return value ? new Date(value).toLocaleString(undefined, { timeZone: timezone, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "—";
-}
-
-function elapsed(seconds) {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-}
-
-const connectionStates = {
-  on: ["Power on", "text-emerald-300 bg-emerald-400/10"],
-  off: ["Power off", "text-rose-300 bg-rose-400/10"],
-  cycling: ["Cycling", "text-amber-300 bg-amber-400/10"],
-  active: ["Port active", "text-emerald-300 bg-emerald-400/10"],
-  idle: ["Port idle", "text-emerald-300 bg-emerald-400/10"],
-  configured: ["Configured · unverified", "text-amber-300 bg-amber-400/10"],
-  empty: ["No target", "text-rose-300 bg-rose-400/10"],
-  error: ["Check failed", "text-rose-300 bg-rose-400/10"],
-  stale: ["Overdue", "text-amber-300 bg-amber-400/10"],
-  unknown: ["Port unverified", "text-amber-300 bg-amber-400/10"],
-  pending: ["Awaiting check", "text-zinc-400 bg-zinc-800"],
-  disabled: ["Disabled", "text-zinc-400 bg-zinc-800"],
-};
-
-function Connections({ links = [], kind, timezone, expanded = false }) {
-  if (!links.length) return <span className="text-xs text-amber-300" title={`No ${kind.toUpperCase()} port label matches this server name.`}>Not linked</span>;
-  return <div className="space-y-3 min-w-40">{links.map(link => {
-    const [label, color] = connectionStates[link.status] || connectionStates.unknown;
-    return <div key={`${link.device_id}-${link.port}`} title={`${link.detail} Checked: ${when(link.checked_at, timezone)}`}>
-      <span className={`inline-block rounded-full px-2.5 py-1 text-xs whitespace-nowrap ${color}`}>{label}</span>
-      <p className="mt-1 text-xs text-zinc-400 break-words">{link.device_name} · {kind === "pdu" ? "Outlet" : "Port"} {link.port}</p>
-      {expanded && <p className="text-xs text-zinc-500 mt-1">{link.device_ip} · Checked {when(link.checked_at, timezone)}</p>}
-      {(expanded || link.status === "error") && <p className="text-xs text-zinc-400 mt-1 max-w-64">{link.detail}</p>}
-    </div>;
-  })}</div>;
-}
-
-const settingsOf = t => ({ name: t.name, syncName: t.name_synced !== false, host: t.host, enabled: t.enabled });
-const sameSettings = (a, b) => a.name === b.name && a.syncName === b.syncName && a.host === b.host && a.enabled === b.enabled;
-
-function TargetSettings({ target, onSaved }) {
-  // base = the server version being edited, draft = what the user typed. Polls never replace a draft:
-  // a clean form follows the server, a dirty one keeps the typed values until saved or discarded.
-  const [base, setBase] = useState(target);
-  const [draft, setDraft] = useState(() => settingsOf(target));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [rejected, setRejected] = useState(false);
-  const hostRef = useRef(null);
-  const saveRef = useRef(null);
-  const loadRef = useRef(null);
-  const pendingFocus = useRef(null);
-  const dirty = !sameSettings(draft, settingsOf(base));
-  // A poll that started before the last save must not move a clean form back to older values.
-  const live = target.revision >= base.revision ? target : base;
-  const current = dirty ? base : live;
-  const value = dirty ? draft : settingsOf(live);
-  // While a save is running, a poll may already carry the revision this save wrote: that is not someone else's change.
-  const conflict = !busy && dirty && (rejected || target.revision > base.revision);
-  const synced = value.syncName && target.source === "inventory";
-
-  // Disabled controls and removed buttons drop focus to BODY; put it back once the form settles.
-  useEffect(() => {
-    if (!pendingFocus.current || busy) return;
-    const next = typeof pendingFocus.current === "function" ? pendingFocus.current() : pendingFocus.current;
-    pendingFocus.current = null;
-    const active = document.activeElement;
-    if (next?.isConnected && !next.disabled && (!active || active === document.body)) next.focus();
-  });
-
-  function edit(patch) {
-    // A new edit starts from the values on screen; a notice about the last save of a clean form no longer applies.
-    if (!dirty) { setBase(live); setRejected(false); setError(""); }
-    setDraft({ ...value, ...patch });
-  }
-  function loadCurrent() {
-    setBase(target); setDraft(settingsOf(target)); setRejected(false); setError("");
-    pendingFocus.current = hostRef.current;
-  }
-  function keepMine() {
-    setBase(target); setRejected(false); setError("");
-    pendingFocus.current = () => saveRef.current;
-  }
-  async function save(event) {
-    event.preventDefault();
-    if (busy || conflict) return;
-    const sent = value;
-    pendingFocus.current = document.activeElement;
-    setBusy(true); setError("");
-    let saved;
-    try {
-      saved = await request(`/targets/${target.id}`, "PUT", { host: sent.host, enabled: sent.enabled, name: sent.name, sync_name: sent.syncName, revision: current.revision });
-    } catch (e) {
-      if (e.status === 409) {
-        // Load the server's current values for the conflict notice; the draft stays as typed.
-        try { await onSaved(); } catch { /* the notice still offers both choices */ }
-        setRejected(true);
-        if (!dirty) setError("Someone else changed this server. The form now shows the current values.");
-        pendingFocus.current = () => loadRef.current || saveRef.current;
-      } else setError(e.message);
-      setBusy(false);
-      return;
-    }
-    const next = { ...current, ...saved, name: saved.name_synced && target.source === "inventory" ? current.inventory_name : saved.name, inventory_name: current.inventory_name };
-    setBase(next); setDraft(settingsOf(next)); setRejected(false);
-    try { await onSaved(); }
-    catch (e) { setError(`Saved. The server list could not refresh: ${e.message}`); }
-    finally { setBusy(false); }
-  }
-  return <form onSubmit={save} className="space-y-3 border-b border-zinc-800 pb-5 mb-5">
-    <label className="block text-xs text-zinc-400"><span dir="rtl">שם השרת לתצוגה</span>
-      <input aria-label="שם השרת לתצוגה" className={`${input} mt-2`} value={synced ? target.inventory_name : value.name} onChange={e => edit({ name: e.target.value })} readOnly={synced} required maxLength={160} disabled={busy}/>
-    </label>
-    {target.source==="inventory"&&<label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={value.syncName} onChange={e => edit({ syncName: e.target.checked, name: current.name })} disabled={busy}/><span dir="rtl">סנכרון שם אוטומטי מהמלאי</span></label>}
-    <p dir="rtl" className="text-xs text-zinc-500">שם התצוגה לא משנה את כתובת הבדיקה או את חיבורי ה־PDU וה־KVM.</p>
-    <label className="block text-xs text-zinc-400">IP address or DNS hostname
-      <input ref={hostRef} aria-label={`Address for ${target.name}`} className={`${input} mt-2`} value={value.host} onChange={e => edit({ host: e.target.value })} maxLength={253} placeholder="e.g. opt133 or 10.7.30.25" disabled={busy} />
-    </label>
-    <div className="flex items-center justify-between gap-3">
-      <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={value.enabled} onChange={e => edit({ enabled: e.target.checked })} disabled={busy} />Monitor this server</label>
-      <button ref={saveRef} className={button} disabled={busy || conflict}>{busy ? "Saving…" : "Save settings"}</button>
-    </div>
-    {conflict && <div role="alert" className="rounded-lg border border-amber-900 bg-amber-950/30 p-3 space-y-2">
-      <p className="text-sm text-amber-300">Someone else changed this server while you were editing. Your changes are not saved yet.</p>
-      <p className="text-xs text-zinc-300 break-words">Current server values: {target.name} · <span className="font-mono">{target.host || "no address"}</span> · {target.enabled ? "monitored" : "paused"}</p>
-      <div className="flex flex-wrap gap-2">
-        <button ref={loadRef} type="button" className={button} onClick={loadCurrent}>Load current values</button>
-        <button type="button" className={button} onClick={keepMine}>Keep my changes</button>
-      </div>
-    </div>}
-    {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
-  </form>;
-}
 
 function AddServer({ onSaved, onClose }) {
   const [name, setName] = useState("");
@@ -203,54 +35,24 @@ function AddServer({ onSaved, onClose }) {
   </form>;
 }
 
+// The side panel of a monitor that is no server (no server_key, e.g. a "device:" target). A server's monitor opens the
+// server window instead (Activity), which shows the same MonitorDetails and TargetSettings.
 function ServerHistory({ target, timezone, onSaved, onClose, panelRef }) {
-  const {canOperate,preferences} = useAccounts();
-  const [history, setHistory] = useState(null);
-  const [error, setError] = useState("");
+  const {canOperate} = useAccounts();
   const headingId = useId();
-  const known = lastKnown(target);
-  useEffect(() => {
-    const controller = new AbortController();
-    let pending = false;
-    async function load() {
-      if (pending) return;
-      pending = true;
-      try { const rows = await request(`/targets/${target.id}/history`, "GET", undefined, controller.signal); if (!controller.signal.aborted) { setHistory(rows); setError(""); } }
-      catch (e) { if (!controller.signal.aborted) setError(e.message); }
-      finally { pending = false; }
-    }
-    load(); const timer = setInterval(load, preferences.refresh_seconds * 1000);
-    return () => { controller.abort(); clearInterval(timer); };
-  }, [target.id, preferences.refresh_seconds]);
   return <aside ref={panelRef} aria-labelledby={headingId} onKeyDown={e => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); onClose(); } }} className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5 min-w-0 scroll-mt-4">
     <div className="flex justify-between items-start mb-4 gap-3">
       <div className="min-w-0"><h2 id={headingId} tabIndex={-1} data-panel-heading className="font-semibold text-lg break-words rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-nv-400/60">{target.name}</h2><p className="text-xs text-zinc-500 mt-1">{target.rack || "No rack"} · <span className="font-mono">{target.host || "Address needed"}</span></p></div>
       <button className={button} onClick={onClose} aria-label="Close server details">×</button>
     </div>
-    <div className="mb-4"><Badge status={target.status} />{known && <p className="text-xs text-rose-300 mt-2">{known}</p>}{target.detail && <p className="text-xs text-zinc-400 mt-2 break-words">{target.detail}</p>}</div>
-    <div className="space-y-4 mb-5 border-b border-zinc-800 pb-5">{["pdu", "kvm"].map(kind => <section key={kind} aria-label={`${kind.toUpperCase()} connections for ${target.name}`}><h3 className="text-sm font-semibold mb-2">{kind.toUpperCase()}</h3><Connections links={target[kind]} kind={kind} timezone={timezone} expanded /></section>)}</div>
-    {canOperate && <TargetSettings key={target.id} target={target} onSaved={onSaved} />}
-    <h3 className="text-sm font-semibold">Recent checks</h3>
-    <p className="text-xs text-zinc-500 mt-1">Latest 200 checks · stored for 30 days</p>
-    {error && <p role="alert" className="text-sm text-rose-300 mt-3">History could not refresh: {error}</p>}
-    {history?.length > 0 && <div className="flex gap-1 h-7 mt-4" aria-label="Last 60 check results, oldest to newest">
-      {history.slice(0, 60).reverse().map(row => <div key={row.id} className={`flex-1 rounded-sm min-w-0 ${states[row.status]?.[2] || "bg-zinc-700"}`} title={`${when(row.checked_at, timezone)} · ${states[row.status]?.[0]}`} />)}
-    </div>}
-    <div className="max-h-[420px] overflow-y-auto mt-4 space-y-3">
-      {history === null && !error && <p className="text-sm text-zinc-500">Loading checks…</p>}
-      {history?.length === 0 && <p className="text-sm text-zinc-500">No checks yet. Save an address, then use “Check all now” or wait for the next scheduled check.</p>}
-      {history?.map(row => <div key={row.id} className="border-b border-zinc-800/60 pb-3">
-        <div className="flex items-center justify-between gap-2 text-xs"><time className="text-zinc-400">{when(row.checked_at, timezone)}</time><Badge status={row.status} /></div>
-        <p className="mt-1 text-xs text-zinc-500 font-mono">{row.host}{row.rtt_ms != null ? ` · ${row.rtt_ms} ms` : ""}</p>
-        {row.detail && <p className="text-xs text-zinc-500 mt-1 break-words">{row.detail}</p>}
-      </div>)}
-    </div>
+    <MonitorDetails target={target} timezone={timezone} settings={canOperate ? <TargetSettings key={target.id} target={target} onSaved={onSaved} /> : null} />
   </aside>;
 }
 
 export default function MonitoringView() {
   const {canOperate,preferences} = useAccounts();
   const { hidden: removedHidden } = useRemovedServers();
+  const { openServer } = useLabWindow();
   const [data, setData] = useState(null);
   const [incidents, setIncidents] = useState([]);
   const [error, setError] = useState("");
@@ -273,7 +75,11 @@ export default function MonitoringView() {
     if (!signal?.aborted && id === latestRefresh.current) { setData(next); setIncidents(events); setError(""); }
   }
 
+  // A server's monitor (server_key) opens the server window on Activity (the monitor, its settings and its history);
+  // a monitor that is no server keeps the side panel here.
   function openDetails(id, event) {
+    const target = (data?.targets || []).find(t => t.id === id);
+    if (target?.server_key) { openServer(target.server_key, { sec: "activity" }); return; }
     openerRef.current = event?.currentTarget || null;
     setSelectedId(id);
     setReveal(n => n + 1);
@@ -366,7 +172,7 @@ export default function MonitoringView() {
           {visible.map(t => <tr key={t.id} className={`border-t border-zinc-800/60 ${selectedId === t.id ? "bg-nv-400/5" : "hover:bg-zinc-900/50"}`}><td className="px-4 py-3"><button onClick={e => openDetails(t.id, e)} className="font-medium text-zinc-100 hover:text-nv-400 text-left" aria-label={`View history for ${t.name}`}>{t.name}</button><div className="font-mono text-xs text-zinc-500 mt-1">{t.host || "Set an address →"}</div></td><td className="px-4 py-3 text-zinc-400 whitespace-nowrap">{t.rack || "—"}</td><td className="px-4 py-3"><Badge status={t.status} />{lastKnown(t) && <div className="text-xs text-rose-300 mt-1 whitespace-nowrap">{lastKnown(t)}</div>}</td>{["pdu", "kvm"].map(kind => <td key={kind} className="px-4 py-3 align-top"><Connections links={t[kind]} kind={kind} timezone={timezone} /></td>)}<td className="px-4 py-3 text-xs text-zinc-400 whitespace-nowrap">{when(t.checked_at, timezone)}</td><td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{t.rtt_ms != null ? `${t.rtt_ms} ms` : "—"}</td><td className="px-4 py-3"><button className="text-xs text-nv-400 hover:underline" onClick={e => openDetails(t.id, e)} aria-label={`Configure ${t.name}`}>Details</button></td></tr>)}
           {!visible.length && <tr><td colSpan={8} className="px-5 py-10 text-center text-zinc-500">{!data ? "Loading monitor…" : targets.length ? "No servers match this filter." : "Servers are imported from PDU/KVM labels and computer inventory during a check. You can also add a server here."}</td></tr>}
         </tbody></table></div>
-        <p className="px-4 py-3 text-xs text-zinc-500 border-t border-zinc-800">Select a server to edit its address, pause checks or inspect its history. All matching outlets and ports are listed. Not linked means no matching port label; configured or unverified KVM ports have no confirmed live state. Details show each device check time.</p>
+        <p className="px-4 py-3 text-xs text-zinc-500 border-t border-zinc-800">Click a server to open its window: its address, pause and check history are under Activity. A monitor that is not a server opens a panel here. All matching outlets and ports are listed. Not linked means no matching port label; configured or unverified KVM ports have no confirmed live state. Details show each device check time.</p>
       </section>
       {selected && <ServerHistory key={selected.id} panelRef={panelRef} target={selected} timezone={timezone} onSaved={refresh} onClose={closeDetails} />}
     </div>

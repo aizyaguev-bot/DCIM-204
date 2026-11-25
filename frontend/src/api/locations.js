@@ -91,7 +91,8 @@ export function groupByDevice(ports) {
 // draft: { mode: "server"|"ports", target, swap, slotSwap, pdu: [ports], kvm: [ports], rack, slot }
 // swap is the "Swap with the target server" box and slotSwap the "If that slot holds another server" box. Each mode
 // sends only its own box, so unticking one never carries over to the other (a draft without slotSwap uses swap).
-export function buildMoveRequest(server, draft, dryRun) {
+// maxSlot: the highest U the form accepts (the Locations page 99; the server window's Choose ports 999, as the server).
+export function buildMoveRequest(server, draft, dryRun, { maxSlot = 99 } = {}) {
   if (!server?.key) return { error: "Choose a server to move." };
   const swap = (draft?.mode === "server" ? draft?.swap : (draft?.slotSwap ?? draft?.swap)) !== false;
   // units_follow: the units on the floor a server leaves go with it to its new floor (the owner's rule, as on Racks).
@@ -109,7 +110,7 @@ export function buildMoveRequest(server, draft, dryRun) {
   let slot = null;
   if (slotText) {
     slot = Number(slotText);
-    if (!Number.isInteger(slot) || slot < 1 || slot > 99) return { error: "Slot must be a whole number from 1 to 99." };
+    if (!Number.isInteger(slot) || slot < 1 || slot > maxSlot) return { error: `Slot must be a whole number from 1 to ${maxSlot}.` };
   }
   const rack = String(draft?.rack || "").trim() || (slot != null ? server.rack : null) || null;
   if (slot != null && !rack) return { error: "Choose a rack for the slot." };
@@ -315,4 +316,40 @@ export function takenPorts(chosen, locations, server, kind, inUse) {
     else if (!free.has(portKey(p))) taken[portKey(p)] = owners.get(portKey(p)) || "another server";
   }
   return taken;
+}
+
+// ---- Clear location (the server window): one atomic POST /api/devices/clear-server ----
+// Every PDU outlet and KVM port that names the server gets its default name in one save; its saved rack place is kept
+// (it is no longer drawn on Racks). The dry run returns the plan ({ changes, positions, unplaced, pins? }) and a
+// plan_revision; the Apply sends it back and is refused (409) when anything changed since. Operator.
+async function postJson(path, body) {
+  const res = await globalThis.fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) {
+    const raw = await res.text();
+    const err = new Error(`${res.status}: ${raw}`);
+    err.status = res.status;
+    try {
+      const detail = JSON.parse(raw).detail;
+      err.detail = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map(e => e?.msg).filter(Boolean).join("; ") || undefined : undefined;
+    } catch {}
+    throw err;
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+export const CLEAR_SERVER_PATH = "/api/devices/clear-server";
+export const previewClear = server => postJson(CLEAR_SERVER_PATH, { server, dry_run: true });
+export const clearServer = (server, planRevision) => postJson(CLEAR_SERVER_PATH, {
+  server, dry_run: false, ...(planRevision ? { plan_revision: planRevision } : {}) });
+
+// The clear-server plan as the dialog shows it: the label changes (as normalizeMoveResult shapes them), the place that
+// is kept, and the other servers whose automatic U is pinned so they stay on their floors.
+export function normalizeClearResult(result) {
+  const position = asArray(result?.positions)[0] || null;
+  return {
+    changes: asArray(result?.changes).map(c => ({ ...c, ...describeChange(c) })),
+    kept: position ? formatLocation(position.after) : "Unplaced",
+    pins: asArray(result?.pins).filter(p => p && p.rack && p.id != null).map(p => ({ rack: String(p.rack), id: String(p.id), slot: p.slot })),
+    planRevision: typeof result?.plan_revision === "string" ? result.plan_revision : null,
+  };
 }

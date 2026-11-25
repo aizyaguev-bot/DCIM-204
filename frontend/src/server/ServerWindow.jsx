@@ -79,7 +79,7 @@ export default function ServerWindow({ target, onClose }) {
     const base = lab.act;
     return {
       ...base,
-      openMove: ({ mode = "move", swapWith = null, moveTo = null } = {}) => base.openDialog("move", { key, mode, swapWith, moveTo }),
+      openMove: ({ mode = "move", swapWith = null, moveTo = null, fixed = null } = {}) => base.openDialog("move", { key, mode, swapWith, moveTo, fixed }),
       openPorts: () => base.openDialog("ports", { key }),
       openClear: () => base.openDialog("clear", { key }),
       rekey: newKey => lab.openServer(newKey, { replace: true }),

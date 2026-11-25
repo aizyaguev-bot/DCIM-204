@@ -44,6 +44,9 @@ DOMAIN TABLE (RULES; the first matching rule wins; the path without its trailing
              POST /api/kvms/{id}/ports/{port}/mark-in-use|mark-free, POST /api/kvms/{id}/mark-free (IN USE marker)
   removed    POST /api/removed-servers, POST /api/removed-servers/restore -> removed + layout + owners + monitoring
              (a removal cleans the server's rack entries and owner and pauses its monitor; a dry run counts nothing)
+             POST /api/lab/delete, POST /api/lab/restore -> devices + layout + inventory + owners + removed +
+                  monitoring + twin + power (one delete can touch every store; a dry run counts nothing);
+             DELETE /api/lab/deleted/{batch_id} (Delete forever) -> removed
   monitoring POST /api/monitoring/targets, PUT /api/monitoring/targets/{id}, POST /api/monitoring/check
   twin       PUT /api/twin-data
   power      POST /api/pdus/{id}/outlets/{n}/power, POST /api/pdus/{id}/maintenance/shutdown|restore
@@ -91,6 +94,8 @@ RULES = tuple((re.compile(pattern), domains) for pattern, domains in (
     (r"/api/devices(/.*)?", ("devices", "monitoring")),
     (r"/api/kvms(/.*)?", ("devices",)),
     (r"/api/removed-servers(/.*)?", ("removed", "layout", "owners", "monitoring")),
+    (r"/api/lab/(delete|restore)", ("devices", "layout", "inventory", "owners", "removed", "monitoring", "twin", "power")),
+    (r"/api/lab/deleted(/.*)?", ("removed",)),
     (r"/api/monitoring(/.*)?", ("monitoring",)),
     (r"/api/twin-data", ("twin",)),
     (r"/api/pdus(/.*)?", ("power",)),

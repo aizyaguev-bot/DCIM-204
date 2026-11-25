@@ -1,8 +1,9 @@
 # Lab windows — the WP-0 contract
 
-This file is the contract that the wave 1 and wave 2 packages build on. It covers WP-1, WP-2, WP-3, WP-D, WP-DW, WP-M, WP-5, WP-7, WP-4 and WP-8.
+This file is the contract that the wave 1 and wave 2 packages build on. It covers WP-1, WP-2, WP-3, WP-D, WP-DW, WP-M, WP-5, WP-7, WP-4 and WP-8, and (section 11, v3 shelves) WP-S, WP-P and WP-5S.
 
 - The specs are `C:/t/one-window-spec.md` (v1) and `C:/t/one-place-spec-v2.md` (v2). v2 is a delta on v1.
+- `C:/t/one-place-spec-v3-shelf-ports.md` (v3) is a delta on both: shelves own the PDU outlets and KVM ports. Its frontend contract is section 11.
 - Where the code and this file disagree, fix one of them in the same change and post the change in `.agents/log.md`.
 - Every name, prop and URL rule below exists in the tree now. The stubs keep their props when you fill them in.
 - English UI text, plain and short. CRLF line endings.
@@ -31,6 +32,7 @@ This file is the contract that the wave 1 and wave 2 packages build on. It cover
 | `lab/twinRecords.js` | `classifyTwin` (full) | WP-0 (done) |
 | `lab/labIndex.js` | the contract plus server rows | WP-M (other kinds) |
 | `api/twinData.js` | `loadTwinData` (full) | WP-0 (done) |
+| `api/shelves.js` | v3 shelves: pure helpers and the `/api/shelves` requests (section 11) | lead (done) |
 | `pages/ManageView.jsx` | stub: today's table via `DcimView section="inventory"` | WP-M |
 | `backend/tests/fixtures/twin_classify.json` | the link rule's cases | WP-0 (WP-7 and WP-D read it) |
 
@@ -39,6 +41,7 @@ The tests are:
 - `__tests__/server-window.test.js`
 - `__tests__/window-url.test.js`
 - `__tests__/twin-classify.test.js` (the frontend copy; WP-7 adds the twin copy)
+- `__tests__/shelves.test.js` (v3, section 11)
 - `tests/browser/server-window-shell.cjs`
 
 ## 2. URL rules (`window/windowUrl.js`)
@@ -140,9 +143,10 @@ App reaches the provider only through `apiRef.current = { open, openServer, clos
 }
 ```
 
-`useLabData(level = "all" | "servers")` returns the same value. While the component is mounted, the provider loads:
+`useLabData(level = "all" | "servers" | "shelves")` returns the same value. While the component is mounted, the provider loads:
 
 - `"servers"`: `GET /api/devices/locations`;
+- `"shelves"`: that and `GET /api/shelves` (v3, section 11);
 - `"all"`: every store in 3.2.
 
 A component that shows lab data outside a window (the Manage page, a `ServerLink`, a search box) calls it. A window does not need it.
@@ -161,6 +165,7 @@ All reads below are Viewer reads.
 | `monitoring` | `GET /api/monitoring` (`targets[].server_key`) |
 | `chillers` | `GET /api/chillers` `{ units, connections }` |
 | `twin` | `{ data, etag }` of `GET /api/twin-data` |
+| `shelves` | `GET /api/shelves` (v3, section 11): `null` while loading, `unavailableShelves()` without the backend |
 | `removed`, `hidden` | `useRemovedServers()` data and its hidden `Set` |
 | `engineers` | `useEngineers()` list |
 | `etags` | `{ rackItems, switches, chillers, twin, removed }`: the If-Match of a later save |
@@ -169,8 +174,8 @@ Stores reload on the change feed:
 
 | Domain | Stores reloaded |
 |---|---|
-| layout | locations, switches |
-| devices | locations |
+| layout | locations, switches, shelves |
+| devices | locations, shelves |
 | removed | locations |
 | monitoring | monitoring, locations |
 | inventory | rackItems, chillers |
@@ -188,15 +193,16 @@ The provider gives the window-agnostic parts. `ServerWindow` adds the server-bou
 open(target, opts), openServer(key, opts), close(),
 openDelete(targets, { options, onDone }),   // the one DeleteDialog (lab/DeleteDialog.jsx), z-[60]
 openDialog(type, props), closeDialog(),     // a window's own dialog; the window renders it (see 5.3)
+openAddServer({ rack, shelf, seat, name }, { onAdded }),   // v3: the add-server dialog (section 11.3)
 toast(text, { undo, tone: "ok" | "error", timeout }),  // provider toasts, 15 s; undo() is the Undo button
 showResult(key, result),                    // the "Last change" panel: result = { title, lines: [text] }
 showOnRacks(rack), goTo(tab, target), showIn3d(ref),
 during(fn), reload(domains?),
-power: { enabled, groupFor(name), pending(key), request(name, action, opener, { scope, feedId }) },
+power: { enabled, groupFor(name), pending(key), request(name, action, opener, { scope, feedId }), blocked(name, scope) },   // blocked: v3, 11.6
 app: { outletAction, turnOnAll, openMaintenance, saveLabels, markKvmFree, openConsole, deleteDevice, switchFeeds, refresh }
 
 // server window (ServerWindow.jsx) on top of the above
-openMove({ mode: "swap" | "move" | "takeover" | "pin", swapWith, moveTo })   // → dialog { type: "move", key, … }
+openMove({ mode: "swap" | "move" | "takeover" | "pin", swapWith, moveTo, fixed })   // → dialog { type: "move", key, … }
 openPorts()  → dialog { type: "ports", key }      openClear() → dialog { type: "clear", key }
 rekey(newKey)            // replaceState to srv=<newKey> (after a rename, before the reload)
 showResult(result)       // bound to this server's key
@@ -473,3 +479,193 @@ The users are `viewer`, `operator` and `admin`, with the password `test-password
 3. **The page behind a window is `aria-hidden` and `inert`.** The header stays outside, so a tab change still closes the window.
 4. **Device details are windows.** The PDU / KVM detail pages render inside the shell (`size="wide"`) until WP-DW. Browser tests now scope the detail selectors to `[data-window]` (`pdu-kvm-detail.cjs`, `kvm-launch.cjs`).
 5. **v1 to v2 names.** v1's `server/ServerWindowProvider.jsx`, `serverWindowUrl.js` and `server-window.css` are `window/LabWindowProvider.jsx`, `windowUrl.js` and `window.css` (v2 §I). v1's `pages/InventoryView.jsx` stub is `pages/ManageView.jsx`.
+
+## 11. Shelves (v3)
+
+The spec is `C:/t/one-place-spec-v3-shelf-ports.md` (v3, a delta on v1 and v2; v3 wins). Shelves own the PDU outlets and KVM ports: the table `shelf_ports` gives each outlet or port at most one place (rack, shelf, seat) plus a feed number, and the label on the port stays the carrier of the server's name. The backend is WP-S (`backend/app/shelves.py`, `backend/app/routers/shelves.py`). This section is the frontend contract; it was built before WP-S, so every part of it fails soft.
+
+**Decision 3: an unavailable or empty map means today's behaviour.**
+
+- Without the backend, `data.shelves` is `{ unavailable: true, … }` (or `null` while it loads), every helper answers `null`, `[]` or `""`, and every caller behaves exactly as before.
+- `hasShelfMap(shelves)` is true only when at least one outlet or port is assigned to a shelf. Use it to choose between the shelf flow and the legacy flow.
+- The UI word is `placeWord(rack)` (`components/racks/floors.js`) until the WP-8 sweep (spec decision 12): "floor" on compute racks today, "shelf" on storage racks. Browser tests match `/(floor|shelf) N/`.
+
+### 11.1 Backend shapes (spec §3.4, §4.1, §6)
+
+**`GET /api/shelves`** (Viewer; never contacts a device; `ETag: <revision>`):
+
+```
+{revision, seeded:{at, finished_at}|null, seed_report:{…}|null,
+ racks:[{rack, storage:bool, shelf_count,
+   shelves:[{shelf, seats:[{seat, status:"used"|"empty"|"no-ports", mapped:bool,
+     server:{key,name}|null, kvm_only:bool, stale_names:[name],
+     pdu:[{device_id,device_name,port,feed,label}], kvm:{device_id,device_name,port,label}|null}]}]}],
+ unmapped:{pdu:[{device_id,device_name,rack,port,label,free}], kvm:[…]},
+ off_shelf:[{key,name,reason:"unplaced"|"monitor-only"|"above-shelves"|"kvm-only"|"not-assigned"|"conflict"}],
+ problems:[{code,text,key?,place?}]}
+```
+
+- `free`: the label is blank, a default name or a placeholder (`empty|free|spare|n/a|-`). "KVM Power" and "PDU" are never free.
+- Power state, watts and KVM in-use are not included: join them from `data.pduStatuses` / `data.kvmStatuses`.
+- A conflict problem is code `"split"` with `key` (or `"split:<key>"`), with `places` or `place`.
+
+**Changed endpoints** (WP-S):
+
+| Endpoint | Adds |
+|---|---|
+| `GET /api/devices/locations` | each row: `place` = `{rack, shelf, seat, source: "shelf" \| "conflict", places?}` or `null`; each row port may carry `place` (or `null`: not a shelf port); `empty_ports.pdu[]/kvm[]`: `place`; top level: `shelves_revision` (**always present**, also for an empty map: the provider uses it to detect the backend) |
+| `GET /api/devices` | each pdu/kvm: `places: {"<port>": {rack, shelf, seat, feed}}` |
+| `POST /api/devices/move-server` | `target_place: {rack, shelf, seat?}` (WP-P) |
+
+**`PUT /api/shelves/ports`** (Admin): `{revision, dry_run, plan_revision?, changes:[{device_id, port, place:{rack,shelf,seat,feed?}|null}]}`. The dry run answers `{plan_revision, changes:[{device_id,device_name,kind,port,label,before,after}], servers_moving:[{key,name,before,after}], warnings:[text]}`; the apply answers `{revision, changes}` (428 without `plan_revision`, 409 when stale or when the §4.3 guard refuses).
+
+**`POST /api/shelves/add-server`** (Operator; Admin for `assign`, a new seat or `reuse_deleted`): `{name, rack, shelf, seat?, owner_id?, assign?:{pdu:[{device_id,port}], kvm:{device_id,port}|null}, reuse_deleted?, dry_run, plan_revision?}`.
+
+- The dry run answers `{plan_revision, place:{rack,shelf,seat}, ports:[{device_id,device_name,kind,port,feed,before,after}], assigned:[…], monitor:"new"|"kept"|"resumed", owner:{id,name}|null, warnings:[text]}`.
+- The apply answers `{key, name, place, ports, names}`.
+- Refusals: 422 (name), 409 with a code (`deleted` with `{key, name, deleted_at, batch}`, `exists`, `taken`, `no_ports`), 403 (an Operator with `assign` or `reuse_deleted`).
+
+**Refusal bodies.** `detail` is a string, a pydantic list, or an object `{code, text | message, …}`. The request helpers turn each into an `Error` (see 11.2).
+
+### 11.2 `api/shelves.js` (pure helpers and request helpers; node --test imports it)
+
+```js
+// places and texts
+normalizePlace(place) -> {rack, shelf, seat, feed?, source?, places?} | null     // seat defaults to 1
+portKey(port) -> "3"                                  // decimal text without a leading zero
+seatLetter(seat) -> "A" | "B" | … | "AA" | ""
+placeText(place, { seats }) -> "Rack-05 · floor 3" | "Rack-06 · floor 1 · B" | ""   // seats > 1: seat 1 reads "· A"
+shelfTag(place) -> "R05·S3" | "Storage-Main·S3" | "R06·S1·B" | ""                  // a rack without digits keeps its name
+portPlace(device, port) -> {rack, shelf, seat, feed} | null                         // device.places of GET /api/devices
+isFreePortLabel(label) -> bool                         // §6.1 free
+seatPortsText(seat) -> "PDU 05 · outlets 3 and 4 · KVM 02 · port 3" | ""            // feed order
+
+// the document
+loadShelves() -> {revision, seeded, seed_report, racks, unmapped, off_shelf, problems, etag}   // 404 / not JSON: unavailableShelves()
+unavailableShelves() -> {unavailable: true, revision: null, …, racks: [], unmapped: {pdu: [], kvm: []}, off_shelf: [], problems: [], etag: null}
+normalizeShelves(body, etag) ; shelvesAvailable(locations) -> bool (shelves_revision is present) ; hasShelfMap(shelves) -> bool
+findRack(shelves, rack) ; findSeat(shelves, { rack, shelf, seat = 1 }) -> seat | null
+serverSeat(shelves, key) -> {rack, shelf, seat, seats, status, mapped, kvm_only} | null    // the seat that shows the server
+
+// Add server and Assign (§7.1, §7.10)
+pduServes(pdu, rack) -> bool                           // its own rack or "shared:<rack>" in its notes (split on ",", trimmed, exact)
+freeShelfCandidates({devices, pduStatuses, shelves, rack, shelf}) -> {pdu:[…], kvm:[…], suggested:{pdu, kvm}}
+//   candidate = { value: "<device_id>:<port>", kind, device_id, device_name, rack, port, label, own, text: "PDU 05 · outlet 2 · Spare" }
+//   pdu: free unmapped outlets of the PDUs that serve the rack (own first, then shared); kvm: free unmapped ports of every KVM
+//   (the rack's own first). From shelves.unmapped (free only); without it (no backend), from the devices (ports with no
+//   places entry). A reachable PDU whose live name of the outlet is a server, "KVM Power" or "PDU" never offers it.
+//   suggested.pdu: the one candidate whose label is a placeholder ("Spare", "empty") and whose number is the shelf's (the
+//   old floorOutlet rule, shared PDUs included); null when none or two match. suggested.kvm: the same among the rack's own KVMs.
+addServerBody(input) -> {name, rack, shelf, seat?, owner_id?, assign?, reuse_deleted?}   // accepts candidates and "<id>:<port>"
+shelfPortChanges(changes) -> [{device_id, port, place|null}]
+
+// requests (fetch; the account transport adds the CSRF header)
+previewAddServer(body) ; addServer(body, planRevision)                       // POST /api/shelves/add-server, dry_run true / false
+previewShelfPorts(changes, revision) ; saveShelfPorts(changes, revision, planRevision)   // PUT /api/shelves/ports
+shelfError(status, body) -> Error { message, status, detail?, code?, info?, unavailable? }
+//   message: the server's text (detail, or detail.text / detail.message); code and info: an object detail;
+//   unavailable: a 404 "Not found" (the backend has no such route yet), message UNAVAILABLE_TEXT
+
+// conflicts (§4.1 source "conflict", §7.11, §8.3)
+placeConflicts(locations, shelves) -> Map key -> {key, name, places}       // rows with source "conflict", then "split" problems
+conflictOf(conflicts, key) -> conflict | null                              // a Map, a plain object or a Set
+conflictPowerReason(conflict) -> "Its outlets are on two floors; switch single outlets from the PDU window."
+conflictBannerText(name, conflict) -> "OPT53's name is on outlets of two floors (Rack-05 · floor 3 and Rack-05 · floor 4). Whole-server power is off until this is fixed: open the PDU and assign or clear the outlet."
+placePowerBlock(conflict, scope = "server") -> reason | null              // scope "feed" (one outlet) is never blocked
+withPlaceConflict(group, conflict) -> {...group, placeConflict, wholeServerBlocked} | group
+```
+
+### 11.3 Provider (`window/LabWindowProvider.jsx`)
+
+**`data.shelves`**
+
+- A new store, `shelves`, reloaded on the `devices` and `layout` domains (the backend's `/api/shelves` rule records devices, layout, owners and monitoring).
+- It is loaded lazily, like the others: while a window is open, under `useLabData("all")`, under the new level `useLabData("shelves")` (that is `locations` and `shelves`), and while the add-server dialog is open.
+- `GET /api/shelves` is sent only when the `/locations` body names `shelves_revision`. Without it `data.shelves` is `unavailableShelves()`, with no request, so an older backend never logs a 404. It is `null` until `/locations` has loaded.
+- A failure is `errors.shelves`; the previous document stays.
+
+**`act.openAddServer({ rack, shelf, seat, name }, { onAdded })`**
+
+- It opens the add-server dialog. Every part is optional (`windowUrl.js` `addServerTarget` cleans it). It is also `openAddServer` on the context value, and `apiRef.current.openAddServer`.
+- `open({ kind: "add-server", rack, shelf })` does the same, so App's twin listener needs no change.
+- The context value also has `adding`: the open request `{ rack, shelf, seat?, name?, seq }` or `null`.
+- The dialog is shown to Operators and Admins only. A Viewer's request is dropped (and its `?add=server` removed from the address).
+- The dialog is not a window: the open window stays, and the dialog sits above it (`z-[60]`).
+
+**The dialog component** is WP-5S's `server/AddServerDialog.jsx`.
+
+- The provider renders its default export lazily (`import.meta.glob`, so the build works without the file), with props `{ rack, shelf, seat, name, onClose, onAdded }`. It also passes `u` (= shelf) for WP-5's current dialog, which reads `{ rack, u }`.
+- `data-dialog="add-server"`, `useDialogFocus`, a portal to `document.body`.
+- On success the dialog shows the toast (§8.1), calls `onAdded(result)`, then `onClose()`, then `act.openServer(key)`. The provider's `onAdded` calls the opener's `onAdded` and reloads `devices` and `layout`.
+- WP-5S reads `data.shelves` (call `useLabData("shelves")`) and uses `previewAddServer` / `addServer`, and `freeShelfCandidates` for the Admin assign sub-form.
+
+**Power.** The provider passes `conflicts = placeConflicts(locations, shelves)` to `useServerPower` and adds `blocked` to `act.power`.
+
+### 11.4 URL (`window/windowUrl.js`)
+
+- `?…&add=server[&rack=R][&shelf=N]` opens the add-server dialog over the current tab and window. The provider reads it on load, on Back / Forward and after every render.
+- Closing the dialog removes `add=` and `shelf=` from the address with `replaceState`. `rack=` stays, because on Racks it is the selected rack.
+- `parseWindow` never returns this kind and `WINDOW_DROP_PARAMS` is unchanged.
+
+```js
+ADD_SERVER_KIND = "add-server" ; ADD_SERVER_PARAMS = ["add", "shelf"]
+addServerTarget({ rack, shelf, seat, name }) -> { kind: "add-server", rack | null, shelf (1-99) | null, seat?, name? (≤ 80) }
+parseAddServer(search) -> { kind: "add-server", rack, shelf } | null
+addServerSearch(search, target | null) -> "?…"          // writes the request, or drops add= and shelf=
+twinOpenRequest({ type: "twin:open", target: { kind: "add-server", rack, shelf } }) -> { target: { kind: "add-server", rack, shelf }, moveTo: null }
+```
+
+The twin's "Add server here" (WP-7) sends that message; App passes the target to `open()`.
+
+### 11.5 Server record (`server/serverRecord.js`)
+
+`buildRecord` adds these fields. Every one is `null` without the shelf backend or with an empty map (no outlet or port assigned to any shelf: `hasShelfMap` false; decision 3), and the rest of the record is unchanged.
+
+| Field | Meaning |
+|---|---|
+| `place` | the row's `place` (`normalizePlace`): `{ rack, shelf, seat, source, places? }` or `null` |
+| `placeConflict` | `{ key, name, places, text, reason }` when the server's name is on outlets of more than one seat (the row's `source: "conflict"`, or a `split` problem of `/api/shelves`), else `null`. `text` is the §8.3 banner and `reason` the power reason |
+| `shelfSeat` | `serverSeat(data.shelves, key)`: the seat that shows the server, with `seats` (how many seats that shelf has) and `mapped`. `null` while the map is empty, where the backend lists every drawn server as `mapped: false` |
+| `pdu[i].place`, `kvm[i].place` | `{ rack, shelf, seat, feed }` or `null`: the port's `place` in the row, else `device.places` |
+| `powerGroup` | on a conflict it also carries `placeConflict` and `wholeServerBlocked` (the reason) |
+
+`placeText(record)`:
+
+- A server on one seat reads that seat: "Rack-05 · floor 3", or "Rack-06 · floor 1 · B" on a shared shelf.
+- A legacy server drawn on a shelf whose outlets are not assigned to it reads "Rack-01 · floor 2 · outlets not assigned to this floor". Never on a storage rack (its shelves have no outlets by nature), and never while the map is empty.
+- A conflict keeps the drawn place; the banner (WP-P) explains it.
+- Without the backend, or with an empty map, the text is as before.
+
+### 11.6 Power (`server/useServerPower.js`)
+
+`useServerPower({ …, conflicts })` keeps every earlier field, and turns whole-server power off for a server whose outlets are on two seats (§7.11):
+
+- `blocked(name, scope = "server")` returns the reason, or `null`.
+- `groupFor(name)` returns the group with `placeConflict` and `wholeServerBlocked`, so the menus and the Racks pill can show the reason.
+- `request(name, action, opener, { scope: "server" })` opens no confirmation. It shows the reason as an error toast and answers `"blocked"` (not `false`, so callers do not add "no PDU outlet").
+- The switch checks again on the latest map and refuses: "… — nothing was switched."
+- One outlet (`scope: "feed"`) stays switchable.
+
+WP-P disables the whole-server items in `PowerAction` and `PowerBlock` with `record.placeConflict.reason` (or `act.power.group.wholeServerBlocked`), and shows the banner `record.placeConflict.text`.
+
+### 11.7 Who uses what (spec §13)
+
+| Package | Uses |
+|---|---|
+| WP-S | builds the backend shapes of 11.1 (`shelves_revision` always on `/locations`) |
+| WP-P | `record.place`, `placeConflict`, `pdu[i].place`, `act.power.blocked`; `target_place` moves |
+| WP-5S | the dialog props of 11.3, `useLabData("shelves")`, `previewAddServer`, `addServer`, `freeShelfCandidates`, `seatPortsText`, `act.openAddServer` everywhere |
+| WP-DW | `portPlace`, `placeText`, `findSeat`, `previewShelfPorts`, `saveShelfPorts`, `act.openAddServer({ rack, shelf, seat })` |
+| WP-M | `data.shelves` (`off_shelf`, `problems`, `seed_report`), `act.openAddServer({})` |
+| WP-7 | the twin message of 11.4 |
+| WP-4 | `shelfTag(portPlace(device, port))` |
+| lead | `tests/browser/preview-server.py` `DCIM_FIXTURE_SHELVES=1`, after WP-S |
+
+### 11.8 Interpretations made by the lead
+
+1. **Detecting the backend.** The provider asks `GET /api/shelves` only when `/locations` names `shelves_revision` (spec §3.3), so today's fixture and an older VM never see a 404 in the console. `loadShelves()` called directly still turns a 404 into `unavailableShelves()`.
+2. **Add server is a dialog, not a window.** It opens over the open window, and the server window opens after a successful add. `parseWindow` ignores `add=`.
+3. **Conflict power.** Only whole-server requests are refused, as the spec's "whole-server power" says; a single feed stays switchable in the server window too. The refusal is a toast, because `PowerConfirmDialog` (WP-5's file) has no room for an outside reason.
+4. **Seat letters.** `placeText` shows the letter for seat 2 and up, and for seat 1 only when it is told the shelf has more than one seat. `shelfTag` writes "R06·S1·B".
+5. **Pre-selection.** `suggested.pdu` follows the old `floorOutlet` rule over the PDUs that serve the rack, shared ones included, so two matches (one on a shared PDU) pre-select nothing. `suggested.kvm` looks at the rack's own KVMs only.
+6. **An empty map is no map.** With WP-S installed but nothing in `shelf_ports`, `GET /api/shelves` lists every drawn server as `used, mapped: false`. Screens use `hasShelfMap` before acting on `mapped: false` (the record's `shelfSeat` is `null` then), so the fixture without `DCIM_FIXTURE_SHELVES` reads exactly as before.

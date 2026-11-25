@@ -7,6 +7,7 @@ import { buildRecord, dcimIdsOf, drawnOf, placeText, serverList } from "../serve
 import { parseWindow, windowSearch } from "../window/windowUrl.js";
 import { buildLabIndex, filterRows, PROBLEMS, TYPES } from "../lab/labIndex.js";
 import { storageRacksFromDevices } from "../components/racks/floors.js";
+import { conflictOf, placeConflicts, placePowerBlock } from "../api/shelves.js";
 
 // The server window's foundation (v1 WP-0 / v2 WP-0): keys, owners and switch across feeds, the record, the URL and
 // the roles every action needs.
@@ -94,8 +95,8 @@ test("buildRecord: a drawn server with its ports, owner, switch, monitor, floor 
   assert.equal(r.name, "OPT11");
   assert.deepEqual(r.dcim_ids, ["opt11"]);
   assert.deepEqual(r.drawn, { rack: "Rack-01", u: 1, auto: true });
-  assert.deepEqual(r.pdu, [{ device_id: "pdu1", device_name: "PDU 01", port: "1", label: "OPT11", state: "on", watts: 100, pduIp: "192.0.2.1" }]);
-  assert.deepEqual(r.kvm, [{ device_id: "kvm1", device_name: "KVM 01", port: "1", label: "OPT11", inUse: true }]);
+  assert.deepEqual(r.pdu, [{ device_id: "pdu1", device_name: "PDU 01", port: "1", label: "OPT11", state: "on", watts: 100, pduIp: "192.0.2.1", place: null }]);
+  assert.deepEqual(r.kvm, [{ device_id: "kvm1", device_name: "KVM 01", port: "1", label: "OPT11", inUse: true, place: null }]);
   assert.equal(r.owner.value, "Fixture owner");
   assert.deepEqual(r.switch.value, { switch: "SW-01", port: "1" });
   assert.equal(r.monitor.id, "t11");
@@ -166,7 +167,8 @@ test("the server list for pickers leaves removed servers out unless the viewer i
 test("server rows of the Manage index: badges, problems and who may select them", () => {
   const items = { ...data.rackItems, "Rack-03": [{ id: "u-pc300", type: "computer", name: "OPT300", u: 2 }] };
   const locations = { ...data.locations, servers: [...data.locations.servers, { key: "opt300", name: "opt300", rack: null, pdu: [], kvm: [], kept_position: null }] };
-  const { rows, counts } = buildLabIndex({ ...data, rackItems: items, locations }, "operator");
+  const { rows: everyRow, counts } = buildLabIndex({ ...data, rackItems: items, locations }, "operator");
+  const rows = everyRow.filter(r => r.kind === "server");   // WP-M adds rows of the other kinds
   const row = key => rows.find(r => r.id === key);
   assert.deepEqual(TYPES, ["server", "pdu", "kvm", "unit", "cooling", "rack", "other"]);
   assert.equal(PROBLEMS.length, 9);
@@ -181,15 +183,151 @@ test("server rows of the Manage index: badges, problems and who may select them"
   assert.ok(row("opt96").problems.has("no-location"));
   assert.equal(row("opt11").address, "opt11", "Operators see the server address");
   assert.equal(buildLabIndex(data, "viewer").rows.find(r => r.id === "opt11").address, "", "Viewers do not");
-  assert.equal(counts.types.server, rows.length);
-  assert.deepEqual(filterRows(rows, { problem: "no-location" }).map(r => r.id).sort(), ["opt300", "opt96", "optn85"]);
-  assert.deepEqual(filterRows(rows, { q: "fixture owner" }).map(r => r.id), ["opt11"]);
-  assert.deepEqual(filterRows(rows, { rack: "Rack-05" }).map(r => r.id), ["opt53"]);
+  // WP-M adds rows of the other kinds (PDUs, KVMs, units, racks …) with the same shape: these checks are about servers.
+  const serverRows = rows.filter(r => r.type === "server");
+  assert.equal(counts.types.server, serverRows.length);
+  assert.deepEqual(filterRows(serverRows, { problem: "no-location" }).map(r => r.id).sort(), ["opt96", "optn85"]);
+  assert.deepEqual(filterRows(serverRows, { q: "fixture owner" }).map(r => r.id), ["opt11"]);
+  assert.deepEqual(filterRows(serverRows, { rack: "Rack-05" }).map(r => r.id), ["opt53"]);
 });
 
 test("storage racks come from the device list too (Main storage and racks whose first device is Storage)", () => {
   assert.deepEqual(storageRacksFromDevices([{ kind: "rack", rack: "Storage shelf", model: "Storage" }, { kind: "pdu", rack: "Rack-01", model: "PX4" },
     { kind: "rack", rack: "Rack-01", model: "Storage" }, { kind: "kvm", rack: "Rack-02", model: "Storage" }]), ["Storage-Main", "Storage shelf"]);
+});
+
+// ── v3 shelves (CONTRACT.md §11): place, placeConflict, each port's place; whole-server power off on a conflict ──
+// The UI word is the rack's (floors.js placeWord) until the WP-8 sweep, so texts match floor or shelf.
+const W = "(?:floor|shelf)", WS = "(?:floors|shelves)";
+const v3 = () => {
+  const servers = data.locations.servers.map(row => {
+    if (row.key === "opt11") return { ...row, place: { rack: "Rack-01", shelf: 1, seat: 1, source: "shelf" },
+      pdu: row.pdu.map(p => ({ ...p, place: { rack: "Rack-01", shelf: 1, seat: 1, feed: 1 } })), kvm: row.kvm.map(p => ({ ...p, place: null })) };
+    if (row.key === "opt53") return { ...row, place: { rack: "Rack-05", shelf: 3, seat: 1, source: "conflict",
+      places: [{ rack: "Rack-05", shelf: 3, seat: 1 }, { rack: "Rack-05", shelf: 4, seat: 1 }] } };
+    return { ...row, place: null };
+  });
+  const devices = data.devices.map(d => (d.id === "pdu5" ? { ...d, places: { 3: { rack: "Rack-05", shelf: 3, seat: 1, feed: 1 }, 4: { rack: "Rack-05", shelf: 4, seat: 1, feed: 1 } } } : d));
+  return { ...data, devices, locations: { ...data.locations, shelves_revision: "r1", servers } };
+};
+
+test("buildRecord v3: the place of a server and of each of its ports; without the shelf backend nothing changes", () => {
+  const r = buildRecord("opt11", v3());
+  assert.deepEqual(r.place, { rack: "Rack-01", shelf: 1, seat: 1, source: "shelf" });
+  assert.deepEqual(r.pdu[0].place, { rack: "Rack-01", shelf: 1, seat: 1, feed: 1 }, "the row's own port place");
+  assert.equal(r.kvm[0].place, null, "the row says this KVM port is not a shelf port");
+  assert.deepEqual([r.placeConflict, r.shelfSeat], [null, null]);
+  assert.match(placeText(r), new RegExp(`^Rack-01 · ${W} 1$`));
+  assert.equal("wholeServerBlocked" in r.powerGroup, false);
+  // Before v3 (no place on the rows, no shelves): the record is what it was.
+  const old = buildRecord("opt11", data);
+  assert.deepEqual([old.place, old.placeConflict, old.shelfSeat, old.pdu[0].place, old.kvm[0].place], [null, null, null, null, null]);
+  assert.deepEqual(Object.keys(old.powerGroup).sort(), ["feeds", "key", "name", "state"]);
+  assert.equal(placeText(old), "Rack-01 · floor 1");
+  const unavailable = buildRecord("opt53", { ...data, shelves: { unavailable: true, racks: [], problems: [] } });
+  assert.deepEqual([unavailable.place, unavailable.placeConflict, unavailable.shelfSeat], [null, null, null]);
+});
+
+test("buildRecord v3: a second seat reads its letter; a legacy server says its outlets are not assigned to the shelf", () => {
+  const rows = [
+    { key: "opt61", name: "OPT61", rack: "Rack-06", slot: 1, pdu: [], kvm: [], drawn: { rack: "Rack-06", u: 1, auto: false }, place: { rack: "Rack-06", shelf: 1, seat: 1, source: "shelf" } },
+    { key: "opt62", name: "OPT62", rack: "Rack-06", slot: 1, pdu: [], kvm: [], drawn: { rack: "Rack-06", u: 1, auto: false }, place: { rack: "Rack-06", shelf: 1, seat: 2, source: "shelf" } },
+  ];
+  const base = { ...data, locations: { ...data.locations, shelves_revision: "r1", servers: [...data.locations.servers, ...rows] } };
+  assert.match(placeText(buildRecord("opt62", base)), new RegExp(`^Rack-06 · ${W} 1 · B$`));
+  assert.match(placeText(buildRecord("opt61", base)), new RegExp(`^Rack-06 · ${W} 1$`), "seat 1 without the shelves document");
+  const shelves = { racks: [
+    { rack: "Rack-06", shelves: [{ shelf: 1, seats: [{ seat: 1, status: "used", mapped: true, server: { key: "opt61", name: "OPT61" }, pdu: [{ device_id: "pdu6", port: "1" }] },
+      { seat: 2, status: "used", mapped: true, server: { key: "opt62", name: "OPT62" }, pdu: [{ device_id: "pdu6", port: "2" }] }] }] },
+    { rack: "Rack-01", shelves: [{ shelf: 1, seats: [{ seat: 1, status: "used", mapped: false, server: { key: "opt12", name: "OPT12" }, pdu: [], kvm: null }] }] },
+  ], problems: [] };
+  const opt61 = buildRecord("opt61", { ...base, shelves });
+  assert.deepEqual(opt61.shelfSeat, { rack: "Rack-06", shelf: 1, seat: 1, seats: 2, status: "used", mapped: true, kvm_only: false });
+  assert.match(placeText(opt61), new RegExp(`^Rack-06 · ${W} 1 · A$`), "seat A of a shared shelf");
+  assert.match(placeText(buildRecord("opt12", { ...base, shelves })), new RegExp(`^Rack-01 · ${W} 1 · outlets not assigned to this ${W}$`));
+});
+
+test("buildRecord v3: an empty map reads exactly as today (decision 3); a storage shelf never says its outlets are not assigned", () => {
+  // WP-S with nothing in shelf_ports: /locations names shelves_revision, every place is null, and GET /api/shelves lists each
+  // drawn server as seat 1 `used, mapped: false` (spec §4.2). Nothing on screen may change (server-window-shell.cjs asserts
+  // the exact "Rack-01 · floor 1").
+  const legacySeat = (key, name) => ({ seat: 1, status: "used", mapped: false, server: { key, name }, kvm_only: false, stale_names: [], pdu: [], kvm: null });
+  const empty = { revision: "e0", racks: [{ rack: "Rack-01", storage: false, shelf_count: 4, shelves: [{ shelf: 1, seats: [legacySeat("opt11", "OPT11")] }] }],
+    unmapped: { pdu: [], kvm: [] }, off_shelf: [], problems: [] };
+  const base = { ...data, locations: { ...data.locations, shelves_revision: "e0", servers: data.locations.servers.map(row => ({ ...row, place: null })) } };
+  const r = buildRecord("opt11", { ...base, shelves: empty });
+  assert.deepEqual([r.place, r.placeConflict, r.shelfSeat], [null, null, null], "no shelf map yet: no seat either");
+  assert.equal(placeText(r), "Rack-01 · floor 1", "exactly today's text");
+  // A map exists (Rack-06 has mapped outlets), and a server sits on Storage-Main shelf 3: storage shelves have no outlets by
+  // nature (decision 6), so it is not "outlets not assigned".
+  const storageRow = { key: "opt200", name: "OPT200", rack: "Storage-Main", slot: 3, kept_position: null, pdu: [], kvm: [],
+    drawn: { rack: "Storage-Main", u: 3, auto: false }, place: null };
+  const mapped = { revision: "m1", unmapped: { pdu: [], kvm: [] }, off_shelf: [], problems: [], racks: [
+    { rack: "Rack-06", storage: false, shelf_count: 4, shelves: [{ shelf: 1, seats: [{ seat: 1, status: "used", mapped: true,
+      server: { key: "opt61", name: "OPT61" }, pdu: [{ device_id: "pdu6", device_name: "PDU 06", port: "1", feed: 1 }], kvm: null }] }] },
+    { rack: "Storage-Main", storage: true, shelf_count: 16, shelves: [{ shelf: 3, seats: [legacySeat("opt200", "OPT200")] }] },
+    { rack: "Rack-01", storage: false, shelf_count: 4, shelves: [{ shelf: 1, seats: [legacySeat("opt11", "OPT11")] }] }] };
+  const withStorage = { ...base, locations: { ...base.locations, servers: [...base.locations.servers, storageRow] }, shelves: mapped };
+  const storage = buildRecord("opt200", withStorage);
+  assert.equal(storage.shelfSeat.mapped, false);
+  assert.equal(placeText(storage), "Storage-Main · shelf 3");
+  assert.match(placeText(buildRecord("opt11", withStorage)), new RegExp(`^Rack-01 · ${W} 1 · outlets not assigned to this ${W}$`), "a compute shelf with a map does");
+});
+
+test("buildRecord v3: a server on two seats has placeConflict, the banner text and whole-server power off", () => {
+  const d = v3();
+  const r = buildRecord("opt53", d);
+  assert.equal(r.place.source, "conflict");
+  assert.deepEqual(r.pdu.map(p => p.place), [{ rack: "Rack-05", shelf: 3, seat: 1, feed: 1 }, { rack: "Rack-05", shelf: 4, seat: 1, feed: 1 }], "device.places of GET /api/devices");
+  assert.deepEqual(r.placeConflict.places, [{ rack: "Rack-05", shelf: 3, seat: 1 }, { rack: "Rack-05", shelf: 4, seat: 1 }]);
+  assert.match(r.placeConflict.text, new RegExp(`^OPT53's name is on outlets of two ${WS} \\(Rack-05 · ${W} 3 and Rack-05 · ${W} 4\\)\\. Whole-server power is off until this is fixed: open the PDU and assign or clear the outlet\\.$`));
+  assert.match(r.placeConflict.reason, new RegExp(`^Its outlets are on two ${WS}; switch single outlets from the PDU window\\.$`));
+  assert.equal(r.powerGroup.wholeServerBlocked, r.placeConflict.reason, "the menus read the reason from the power group");
+  assert.equal(r.powerGroup.feeds.length, 2, "both feeds stay listed (one outlet stays switchable)");
+  assert.equal(placeText(r), "Rack-05 · floor 3", "a conflict keeps the drawn place; the banner explains");
+  // useServerPower's rule: whole-server requests are refused with that reason, one feed is not.
+  const conflicts = placeConflicts(d.locations, null);
+  assert.equal(placePowerBlock(conflictOf(conflicts, "opt53"), "server"), r.placeConflict.reason);
+  assert.equal(placePowerBlock(conflictOf(conflicts, "opt53"), "feed"), null);
+  assert.equal(placePowerBlock(conflictOf(conflicts, "opt11"), "server"), null);
+  // A conflict listed only by GET /api/shelves (problem "split") counts too.
+  const viaShelves = buildRecord("opt12", { ...data, shelves: { racks: [], problems: [{ code: "split", key: "opt12",
+    places: [{ rack: "Rack-01", shelf: 1 }, { rack: "Rack-01", shelf: 2 }] }] } });
+  assert.match(viaShelves.placeConflict.reason, /^Its outlets are on two/);
+});
+
+test("useServerPower: whole-server power is refused for a server on two seats, before asking and again before switching", () => {
+  const hook = read("../server/useServerPower.js");
+  assert.match(hook, /import \{ conflictOf, placePowerBlock, withPlaceConflict \} from "\.\.\/api\/shelves\.js";/);
+  const run = hook.slice(hook.indexOf("const run = useCallback("), hook.indexOf("const request = useCallback("));
+  const request = hook.slice(hook.indexOf("const request = useCallback("), hook.indexOf("const groupNow"));
+  assert.match(request, /const placeBlock = placePowerBlock\(conflictOf\(conflictsRef\.current, group\.key\), scope\);\n\s*if \(placeBlock\) \{ toast\?\.\(`\$\{serverDisplayName\(name\)\}: \$\{placeBlock\}`, \{ tone: "error" \}\); return "blocked"; \}\n\s*setDialog\(/,
+    "no confirmation opens: the reason is a toast");
+  assert.ok(run.indexOf("placePowerBlock(") > 0 && run.indexOf("placePowerBlock(") < run.indexOf("planServerPower("), "checked on the latest map first");
+  assert.match(run, /if \(placeBlock\) throw new Error\(`\$\{placeBlock\} — nothing was switched\.`\);/);
+  assert.match(hook, /const groupFor = useCallback\(name => withPlaceConflict\(serverPowerGroup\(name, ctx\), conflictOf\(conflicts, serverIdentity\(name\)\)\), \[ctx, conflicts\]\);/);
+  assert.match(hook, /return \{ enabled, groupFor, pending, request, blocked, element \};/);
+  const provider = read("../window/LabWindowProvider.jsx");
+  assert.match(provider, /const conflicts = useMemo\(\(\) => placeConflicts\(stores\.locations, stores\.shelves\), \[stores\.locations, stores\.shelves\]\);/);
+  assert.match(provider, /useServerPower\(\{ devices, pduStatuses, maintenance, canOperate, toast, conflicts,/);
+  assert.match(provider, /request: power\.request, blocked: power\.blocked \}/);
+});
+
+test("provider v3: data.shelves only after /locations names shelves_revision; act.openAddServer opens WP-5S's dialog", () => {
+  const provider = read("../window/LabWindowProvider.jsx");
+  assert.match(provider, /shelves: \{ domains: \["devices", "layout"\], load: \(\{ locations \}\) => \(locations == null \? Promise\.resolve\(undefined\)\n\s*: shelvesAvailable\(locations\) \? loadShelves\(\) : Promise\.resolve\(unavailableShelves\(\)\)\) \},/);
+  assert.match(provider, /shelves: stores\.shelves \?\? null,/);
+  assert.match(provider, /const SHELVES_ONLY = \["locations", "shelves"\];/);
+  assert.match(provider, /level === "shelves" \? "shelves"/);
+  assert.match(provider, /const ADD_SERVER_MODULES = import\.meta\.glob\("\.\.\/server\/AddServerDialog\.jsx"\);/);
+  assert.match(provider, /\{adding && can\.operate && <Suspense fallback=\{null\}>/);
+  assert.match(provider, /<AddServerDialog key=\{adding\.seq\} rack=\{adding\.rack\} shelf=\{adding\.shelf\} seat=\{adding\.seat \?\? null\} name=\{adding\.name \?\? ""\}/);
+  assert.match(provider, /onClose=\{closeAddServer\}/);
+  assert.match(provider, /onAdded=\{result => \{ const added = adding\.onAdded; added\?\.\(result\);/);
+  assert.match(provider, /showResult, showOnRacks, openAddServer,/);
+  assert.match(provider, /apiRef\.current = \{ open, openServer, close, current, openAddServer \}/);
+  assert.match(read("../server/AddServerDialog.jsx"), /export default function AddServerDialog\(/, "the dialog the provider loads");
+  assert.match(read("../window/labWindowContext.js"), /openAddServer: noop, adding: null,/);
 });
 
 test("URL rules: srv= opens a server window over any tab; v1's alias and the window components keep their names", () => {

@@ -11,9 +11,18 @@
 //   switches       GET /api/switch-assignments  { dcim id: { switch, port } }
 //   monitoring     GET /api/monitoring  { targets: [{ id, server_key, ... }] }
 //   removed        GET /api/removed-servers  { servers: [{ key, name, ports, active, ... }], hidden, log? }
+//   shelves        GET /api/shelves (v3, CONTRACT.md §11): null while loading, { unavailable: true } without the backend
+//
+// v3 shelves (CONTRACT.md §11): a /locations row's place ({ rack, shelf, seat, source: "shelf" | "conflict", places? },
+// spec §4.1) becomes record.place; source "conflict" also gives record.placeConflict (whole-server power is off). Each
+// port gets its own place (the port's place in the row, else device.places of GET /api/devices). Without the shelf
+// backend (or with an empty map: no outlet or port assigned to any shelf) every one of these is null and the record is
+// exactly what it was before (spec decision 3).
 import { serverIdentity } from "../api/locations.js";
-import { placeWord, validFloor } from "../components/racks/floors.js";
-import { serverPowerGroup } from "../components/racks/serverPower.js";
+import { conflictBannerText, conflictOf, conflictPowerReason, hasShelfMap, normalizePlace, placeConflicts, placeText as shelfPlaceText,
+  portPlace, serverSeat, withPlaceConflict } from "../api/shelves.js";
+import { isStorageRack, placeWord, validFloor } from "../components/racks/floors.js";
+import { serverDisplayName, serverPowerGroup } from "../components/racks/serverPower.js";
 import { productName } from "../shelfLabels.js";
 import { windowKey } from "./serverKey.js";
 import { ownerOf, switchOf } from "./ownerKey.js";
@@ -56,13 +65,23 @@ export function locationRow(locations, key) {
   return asArray(locations?.servers).find(row => row && (row.key === key || windowKey(row.name) === key)) || null;
 }
 
+// A port's shelf place (v3): the one the /locations row gives it (null there: not a shelf port), else the device's
+// places map (GET /api/devices), else null. Only { rack, shelf, seat, feed }.
+function portPlaceOf(p, device) {
+  if (p && Object.prototype.hasOwnProperty.call(p, "place")) {
+    const place = normalizePlace(p.place);
+    return place ? { rack: place.rack, shelf: place.shelf, seat: place.seat, feed: place.feed ?? null } : null;
+  }
+  return portPlace(device, p?.port);
+}
+
 function pduPorts(ports, { devices, pduStatuses }) {
   return asArray(ports).map(p => {
     const outlet = asArray(pduStatuses?.[p.device_id]?.outlets).find(o => String(o.number) === String(p.port));
     const device = asArray(devices).find(d => d.id === p.device_id);
     return { device_id: text(p.device_id), device_name: text(p.device_name || device?.name || p.device_id), port: text(p.port),
       label: text(p.label), state: outlet?.state || "unknown", watts: Number.isFinite(outlet?.watts) ? outlet.watts : null,
-      pduIp: device?.ip || "" };
+      pduIp: device?.ip || "", place: portPlaceOf(p, device) };
   });
 }
 
@@ -71,7 +90,7 @@ function kvmPorts(ports, { devices, kvmStatuses }) {
     const port = asArray(kvmStatuses?.[p.device_id]?.ports).find(x => String(x.number) === String(p.port));
     const device = asArray(devices).find(d => d.id === p.device_id);
     return { device_id: text(p.device_id), device_name: text(p.device_name || device?.name || p.device_id), port: text(p.port),
-      label: text(p.label), inUse: !!port?.in_use };
+      label: text(p.label), inUse: !!port?.in_use, place: portPlaceOf(p, device) };
   });
 }
 
@@ -115,13 +134,37 @@ export function buildRecord(key, data = {}) {
     .filter(other => { const d = drawnOf(other); return d && d.rack === drawn.rack && d.u === drawn.u; })
     .map(other => text(other.name)) : [];
   record.project = record.units.length ? productName(record.units[0]) : "";
-  record.powerGroup = serverPowerGroup(name, { devices: data.devices, pduStatuses: data.pduStatuses, maintenance: data.maintenance });
+  // v3 shelves: the row's place (§4.1), the seat of GET /api/shelves that shows it, and a conflict (its name on outlets of
+  // more than one seat), read from the row or from the shelves' "split" problems (api/shelves.js placeConflicts).
+  record.place = row ? normalizePlace(row.place) : null;
+  // Only once at least one outlet or port is assigned to a shelf: an empty map lists every drawn server as `mapped: false`,
+  // and an empty map must read exactly as today (spec decision 3).
+  record.shelfSeat = hasShelfMap(data.shelves) ? serverSeat(data.shelves, key) : null;
+  const conflict = record.place?.source === "conflict" || data.shelves?.problems?.length
+    ? conflictOf(placeConflicts(data.locations, data.shelves), key) : null;
+  record.placeConflict = conflict ? { ...conflict, text: conflictBannerText(serverDisplayName(name), conflict), reason: conflictPowerReason(conflict) } : null;
+  record.powerGroup = withPlaceConflict(serverPowerGroup(name, { devices: data.devices, pduStatuses: data.pduStatuses, maintenance: data.maintenance }),
+    record.placeConflict);
   return record;
 }
 
 // "Rack-01 · floor 3", "Storage-Main · shelf 3", "Rack-01 · U 7, above the floors", "Not on a rack".
+// v3 shelves: a server whose outlets are on one seat reads that seat ("Rack-06 · floor 1 · B" for a second seat), and a
+// server drawn on a shelf whose outlets are not assigned to it there reads "Rack-01 · floor 2 · outlets not assigned to
+// this floor" (spec §8.3; the rack's word until the WP-8 sweep; never on a storage rack, whose shelves have no outlets).
+// Without the shelf backend, or with an empty map: as before.
 export function placeText(record) {
+  const place = record?.place;
+  if (place && place.source !== "conflict") {
+    const seats = record.shelfSeat && record.shelfSeat.rack === place.rack && record.shelfSeat.shelf === place.shelf ? record.shelfSeat.seats : null;
+    const shown = shelfPlaceText(place, { seats });
+    if (shown) return shown;
+  }
   const d = record?.drawn;
+  const seat = record?.shelfSeat;
+  if (d?.rack && validFloor(d.u, d.rack) && !isStorageRack(d.rack) && seat && seat.mapped === false && seat.rack === d.rack && seat.shelf === d.u) {
+    return `${d.rack} · ${placeWord(d.rack)} ${d.u} · outlets not assigned to this ${placeWord(d.rack)}`;
+  }
   if (d?.rack) {
     if (d.u == null) return `${d.rack} · no floor`;
     if (validFloor(d.u, d.rack)) return `${d.rack} · ${placeWord(d.rack)} ${d.u}`;

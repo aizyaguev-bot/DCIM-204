@@ -112,6 +112,47 @@ const skipFocusTrap = process.env.DCIM_SKIP_FOCUS_TRAP === '1';
     checks.push('Mark KVM free asks first, lists the ports it clears, and Cancel keeps the marks');
     await admin.context.close();
 
+    // The server window's Console (one-place WP-3): it opens the same autologin console, marks the port IN USE, and asks
+    // first when the port is already IN USE (Cancel opens and marks nothing).
+    {
+      const op = await login('operator');
+      await op.page.goto(origin + '/?tab=consoles&srv=opt11');
+      const serverWindow = op.page.locator('[data-window="server"]');
+      await serverWindow.locator('h2', { hasText: 'OPT11' }).waitFor();
+      const tool = serverWindow.locator('[data-tool="console"]');
+      await tool.waitFor();
+      assert.equal(await tool.getAttribute('data-in-use'), 'false');
+      const popupReady = op.context.waitForEvent('page');
+      const used = marking(op.page, 'mark-in-use');
+      await tool.click();
+      const popup = await popupReady;
+      await popup.getByRole('heading', { name: 'Console preview' }).waitFor();
+      assert.equal(new URL(popup.url()).pathname, '/api/kvms/kvm1/autologin');
+      assert.equal(new URL(popup.url()).searchParams.get('port'), '1');
+      const lease = await leaseOf(await used);
+      await serverWindow.locator('[data-tool="console"][data-in-use="true"]').waitFor({ timeout: 2000 });
+      await serverWindow.locator('[data-tool="console"]').getByText('IN USE', { exact: true }).waitFor();
+      const again = [];
+      op.page.on('request', request => { if (new URL(request.url()).pathname.endsWith('/mark-in-use')) again.push(request.url()); });
+      const pages = op.context.pages().length;
+      const asked = op.dialogs.messages.length;
+      op.dialogs.answer = false;
+      await tool.click();
+      await op.page.waitForTimeout(500);
+      assert.equal(op.dialogs.messages.length, asked + 1, 'it asks when the port is IN USE');
+      assert.match(op.dialogs.messages.at(-1), /OPT11/);
+      assert.deepEqual(again, [], 'Cancel marks nothing');
+      assert.equal(op.context.pages().length, pages, 'Cancel opens nothing');
+      op.dialogs.answer = true;
+      const freed = marking(op.page, 'mark-free');
+      await popup.close();
+      assertFreedWith(await freed, lease);
+      await serverWindow.locator('[data-tool="console"][data-in-use="false"]').waitFor({ timeout: 4000 });
+      assert.equal(await serverWindow.count(), 1, 'the window stays open');
+      checks.push('Server window Console: autologin popup on KVM 01 port 1, IN USE within 2 s, asks when IN USE (Cancel sends nothing), closing frees it');
+      await op.context.close();
+    }
+
     const operator = await login('operator', { blockPopup: true });
     for (const source of ['card', 'details']) {
       if (source === 'details') {

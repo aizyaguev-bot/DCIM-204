@@ -10,9 +10,17 @@ import { floorsFor, placesWord } from "./floors.js";
 // A unit saved on a place its rack does not offer (old data: U17, 99, "x") keeps that value unless a floor is chosen:
 // its rack offers it as its own choice, selected, with a hint, and choosing the rack again brings it back. A unit with
 // no rack has no floors, so its saved u gets no hint (and keeps none: updateChiller). A rename changes only the name.
+// embedded (the cooling unit's window, units/CoolingWindow.jsx): the same form inside the window instead of over the
+// page: no overlay, no title (the window names the unit), no focus trap of its own (the window's), no Close / Cancel
+// (the window's ×), and it stays open after a save. Without it the dialog behaves exactly as before.
 const KEPT = "saved";   // the select value of a bad saved place that is not U1-42 (99, "x")
+const noFocus = () => {};
 
-export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsFor, canOperate, onRequestEdit = null, onSave, onTakeOffShelf, onClose }) {
+export default function CoolingUnitDialog({ embedded = false, ...props }) {
+  return <CoolingUnitPanel key={embedded ? "embedded" : "dialog"} embedded={embedded} {...props}/>;
+}
+
+function CoolingUnitPanel({ embedded, mode, unit, rackNames, floorOptionsFor, canOperate, onRequestEdit = null, onSave, onTakeOffShelf, onClose }) {
   const editing = mode === "edit" || mode === "create";
   const initialRack = unit?.rack ?? "";
   const hasU = unit?.u != null && unit?.u !== "";
@@ -32,7 +40,9 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
   const closeRef = useRef(null);
   const moveRef = useRef(null);
   const errorRef = useRef(null);
-  useDialogFocus(panelRef, { initialRef: editing ? rackRef : onRequestEdit ? moveRef : closeRef, busyRef, onEscape: onClose });
+  // A key decides embedded (CoolingUnitDialog), so this instance always calls the same hook.
+  const useFocus = embedded ? noFocus : useDialogFocus;
+  useFocus(panelRef, { initialRef: editing ? rackRef : onRequestEdit ? moveRef : closeRef, busyRef, onEscape: onClose });
 
   const knownRack = !initialRack || rackNames.includes(initialRack);
   const word = placeWord(rack || initialRack);
@@ -59,6 +69,7 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
       return;
     }
     busyRef.current = false;
+    if (embedded) setBusy(false);   // the form stays open after a save
   }
 
   function save(e) {
@@ -71,9 +82,8 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
     run(() => onSave({ name: trimmed, rack: rack || null, u }));
   }
 
-  return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !busyRef.current) onClose(); }}>
-    <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="racks-dialog" data-dialog="cooling">
-      <h2 id={titleId} dir="auto" className="racks-dialog-title">{mode === "create" ? "Add cooling unit" : <>Cooling unit <bdi>{unit.name}</bdi></>}</h2>
+  const content = <>
+      {!embedded && <h2 id={titleId} dir="auto" className="racks-dialog-title">{mode === "create" ? "Add cooling unit" : <>Cooling unit <bdi>{unit.name}</bdi></>}</h2>}
       {!editing ? <>
         <dl className="racks-dl">
           <div><dt>Name</dt><dd dir="auto">{unit.name}</dd></div>
@@ -81,12 +91,12 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
           <div><dt>{placeWord(unit.rack) === "floor" ? "Floor" : "Shelf"}</dt><dd>{describeFloor(unit)}</dd></div>
           <div><dt>Id</dt><dd className="racks-mono">{unit.id}</dd></div>
         </dl>
-        <p className="racks-dialog-note">{onRequestEdit ? "This turns on Edit mode, where changes save immediately." : canOperate ? "Turn on Edit to move this unit." : "Viewer · read only"}</p>
-        <div className="racks-dialog-actions racks-dialog-actions-primary-first">
+        {!embedded && <p className="racks-dialog-note">{onRequestEdit ? "This turns on Edit mode, where changes save immediately." : canOperate ? "Turn on Edit to move this unit." : "Viewer · read only"}</p>}
+        {!embedded && <div className="racks-dialog-actions racks-dialog-actions-primary-first">
           {onRequestEdit && <button ref={moveRef} type="button" className="racks-btn racks-btn-primary" onClick={onRequestEdit}>
             {unit.rack && validShelf(unit.u) && knownRack ? "Move…" : "Place…"}</button>}
           <button ref={closeRef} type="button" className="racks-btn" onClick={onClose}>Close</button>
-        </div>
+        </div>}
       </> : <form onSubmit={save} noValidate>
         <div className="racks-field">
           <label htmlFor="cooling-name">Name</label>
@@ -117,10 +127,15 @@ export default function CoolingUnitDialog({ mode, unit, rackNames, floorOptionsF
           <button type="submit" className="racks-btn racks-btn-primary" disabled={busy || !changed}>{busy ? "Saving…" : mode === "create" ? "Add" : "Save"}</button>
           {mode === "edit" && initialRack && hasU && <button type="button" className="racks-btn" disabled={busy}
             aria-describedby="cooling-offshelf-hint" onClick={() => run(onTakeOffShelf)}>Take off {placeWord(unit.rack)}</button>}
-          <button type="button" className="racks-btn" disabled={busy} onClick={onClose}>Cancel</button>
+          {!embedded && <button type="button" className="racks-btn" disabled={busy} onClick={onClose}>Cancel</button>}
         </div>
         {mode === "edit" && initialRack && hasU && <p id="cooling-offshelf-hint" className="racks-field-hint">Take off {placeWord(unit.rack)} keeps it in <bdi>{unit.rack}</bdi>, not on a {placeWord(unit.rack)}.</p>}
       </form>}
+  </>;
+  if (embedded) return <div ref={panelRef} className="cooling-embedded" data-cooling-form={mode}>{content}</div>;
+  return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !busyRef.current) onClose(); }}>
+    <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="racks-dialog" data-dialog="cooling">
+      {content}
     </section>
   </div>;
 }

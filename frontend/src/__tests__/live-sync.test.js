@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createLiveReload } from "../api/liveReload.js";
 import {
-  unitFloor, unitsOnFloor, serversOnFloor, swapMoves, unitsMovingWith, applyUnitMoves, firstFreeFloor,
-  placeText, unitNames, isFreeOutletLabel, rackPdus, freeOutlets, floorOutlet, moveServerBody, portsAfterMove,
-  labelChangeText, moveWithUnits, unitsConflict, uncheckedText, takesOverText,
+  unitFloor, unitsOnFloor, serversOnFloor, swapMoves, firstFreeFloor,
+  placeText, unitNames, isFreeOutletLabel, rackPdus, freeOutlets, floorOutlet, moveServerBody,
+  labelChangeText, unitsConflict, uncheckedText, takesOverText,
 } from "../components/racks/serverMove.js";
 
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
@@ -118,69 +118,8 @@ test("swapMoves: each server takes the other's place; none without a place", () 
   assert.equal(swapMoves("opt12", "opt99", { ...placements, opt99: { rack: "Rack-01", u: null } }), null);
 });
 
-test("unitsMovingWith: a move takes the units of the floor it leaves to the floor it goes to", () => {
-  const moving = unitsMovingWith([{ id: "opt12", toRack: "Rack-02", toU: 3 }], placements, items, floor);
-  assert.equal(moving.length, 1);
-  assert.deepEqual({ ...moving[0], units: moving[0].units.map(u => u.id) },
-    { id: "opt12", fromRack: "Rack-01", fromU: 2, toRack: "Rack-02", toU: 3, units: ["sw1", "nic1"] });
-  assert.deepEqual(unitNames(moving[0].units), ["Switch 01", "NIC 1"]);
-  // a server whose floor has no units, a move that stays put, a server with no floor: nothing moves
-  assert.deepEqual(unitsMovingWith([{ id: "opt11", toRack: "Rack-01", toU: 4 }], placements, items, floor), []);
-  assert.deepEqual(unitsMovingWith([{ id: "opt12", toRack: "Rack-01", toU: 2 }], placements, items, floor), []);
-  assert.deepEqual(unitsMovingWith([{ id: "x", toRack: "Rack-01", toU: 4 }], { x: { rack: "Rack-01", u: null } }, items, floor), []);
-});
-
-test("unitsMovingWith: a swap swaps both floors' units (worked out on the floors as they are now)", () => {
-  const moving = unitsMovingWith(swapMoves("opt12", "opt21", placements), placements, items, floor);
-  assert.deepEqual(moving.map(m => [m.id, m.fromRack, m.fromU, m.toRack, m.toU, m.units.map(u => u.id)]), [
-    ["opt12", "Rack-01", 2, "Rack-02", 1, ["sw1", "nic1"]],
-    ["opt21", "Rack-02", 1, "Rack-01", 2, ["sw2"]],
-  ]);
-  const same = unitsMovingWith(swapMoves("opt12", "opt13", placements), placements, items, floor);
-  assert.deepEqual(same.map(m => [m.id, m.fromU, m.toU, m.units.map(u => u.id)]), [["opt12", 2, 3, ["sw1", "nic1"]], ["opt13", 3, 2, ["f3"]]]);
-});
-
-test("unitsMovingWith: units of a floor shared with a server that stays do not move", () => {
-  const shared = { ...placements, opt14: { rack: "Rack-01", u: 2, auto: false } };
-  assert.deepEqual(unitsMovingWith([{ id: "opt12", toRack: "Rack-01", toU: 4 }], shared, items, floor), []);
-});
-
-test("applyUnitMoves: only u changes, every other field stays; the input is not changed", () => {
-  const moving = unitsMovingWith(swapMoves("opt12", "opt21", placements), placements, items, floor);
-  const before = JSON.stringify(items);
-  const next = applyUnitMoves(items, moving);
-  assert.equal(JSON.stringify(items), before);
-  assert.deepEqual(next["Rack-01"].map(i => [i.id, i.u]), [["lvl", 0], ["f3", "3"], ["sw2", 2]]);
-  assert.deepEqual(next["Rack-02"].map(i => [i.id, i.u]), [["sw1", 1], ["nic1", 1]]);
-  const sw1 = next["Rack-02"].find(i => i.id === "sw1");
-  assert.deepEqual(sw1, { ...items["Rack-01"][0], u: 1 }, "serial, barcode, shelf position and tracking stay with the unit");
-});
-
-test("applyUnitMoves: a unit that is not where the preview found it refuses the whole save (409)", () => {
-  const moving = unitsMovingWith([{ id: "opt12", toRack: "Rack-02", toU: 3 }], placements, items, floor);
-  const elsewhere = { ...items, "Rack-01": items["Rack-01"].map(i => (i.id === "nic1" ? { ...i, u: 4 } : i)) };
-  assert.throws(() => applyUnitMoves(elsewhere, moving), e => e.status === 409 && e.conflict === true);
-  const gone = { ...items, "Rack-01": items["Rack-01"].filter(i => i.id !== "sw1") };
-  assert.throws(() => applyUnitMoves(gone, moving), e => e.status === 409);
-});
-
-test("unitsMovingWith: a move to a rack level (no floor) takes no units along", () => {
-  assert.deepEqual(unitsMovingWith([{ id: "opt12", toRack: "Rack-02", toU: 0 }], placements, items, floor), []);
-});
-
-test("moveWithUnits: one move-server request carries the plan revision and the units with the list's ETag", () => {
-  const body = { server: "OPT12", target_server: "OPT21", swap: true };
-  assert.deepEqual(moveWithUnits(body, "p1", null, []), { ...body, dry_run: false, plan_revision: "p1" }, "no units: no rack_items");
-  const moving = unitsMovingWith(swapMoves("opt12", "opt21", placements), placements, items, floor);
-  const sent = moveWithUnits(body, "p1", { data: items, etag: '"i1"' }, moving);
-  assert.equal(sent.plan_revision, "p1");
-  assert.equal(sent.dry_run, false);
-  assert.equal(sent.rack_items.if_match, '"i1"');
-  assert.deepEqual(sent.rack_items.data, applyUnitMoves(items, moving));
-  assert.throws(() => moveWithUnits(body, "p1", { data: items, etag: null }, moving), e => e.status === 428, "no ETag: nothing sent");
-  const elsewhere = { ...items, "Rack-01": items["Rack-01"].map(i => ({ ...i, u: 4 })) };
-  assert.throws(() => moveWithUnits(body, "p1", { data: elsewhere, etag: '"i2"' }, moving), e => e.status === 409 && e.conflict);
-});
+// unitsMovingWith, applyUnitMoves, moveWithUnits and portsAfterMove were removed with Racks' own move dialog (one-place
+// WP-5): the server window's MoveDialog sends units_follow and the server moves the units (backend/tests/test_devices.py).
 
 test("unitsConflict: only the server's 'units changed' 409 is worth sending again", () => {
   assert.equal(unitsConflict({ status: 409, detail: "The units on these floors were changed in another session. Nothing was moved; check the move and confirm again." }), true);
@@ -238,11 +177,8 @@ test("uncheckedText and takesOverText", () => {
 
 test("moveServerBody: a swap names the other server; a move names the ports, rack and floor", () => {
   assert.deepEqual(moveServerBody({ name: "OPT13", swapWith: "OPT11" }), { server: "OPT13", target_server: "OPT11", swap: true });
-  const row = { pdu: [{ device_id: "pdu1", port: "3", label: "OPT13" }], kvm: [{ device_id: "kvm1", port: "3", label: "OPT13" }] };
-  assert.deepEqual(portsAfterMove(row, null), [{ device_id: "pdu1", port: "3" }, { device_id: "kvm1", port: "3" }], "keep its own outlet and KVM port");
-  assert.deepEqual(portsAfterMove(row, { pduId: "pdu2", outlet: 4 }), [{ device_id: "pdu2", port: "4" }, { device_id: "kvm1", port: "3" }], "the floor's outlet; the KVM port stays");
-  assert.deepEqual(portsAfterMove(null, null, [{ device_id: "pdu1", port: 3, kind: "pdu" }]), [{ device_id: "pdu1", port: "3" }], "the page's own data without a locations row");
-  assert.deepEqual(moveServerBody({ name: "OPT13", rack: "Storage shelf", floor: 9, ports: portsAfterMove(row, null) }), {
+  const ports = [{ device_id: "pdu1", port: 3 }, { device_id: "kvm1", port: "3" }];
+  assert.deepEqual(moveServerBody({ name: "OPT13", rack: "Storage shelf", floor: 9, ports }), {
     server: "OPT13", target_ports: [{ device_id: "pdu1", port: "3" }, { device_id: "kvm1", port: "3" }], target_rack: "Storage shelf", target_slot: 9, swap: false });
 });
 
@@ -271,17 +207,16 @@ test("App and the lab display start the change feed; App forwards every change t
   assert.match(app, /postMessage\(\{ type: TWIN_DATA_CHANGED_MESSAGE, domains \}, location\.origin\)/);
 });
 
-test("Racks moves are one move-server step: port labels, layout and the units (rack_items) together", () => {
+test("Racks moves go through the server window's move dialog: one move-server step with units_follow", () => {
   const view = read("../pages/DcimView.jsx");
-  const dialog = read("../components/racks/ServerMoveDialog.jsx");
-  assert.match(view, /api\.moveServer\(moveWithUnits\(body, planRevision, items, unitMoves\)\)/, "applied with the preview's plan revision and the units");
-  assert.match(view, /loadLayout\("\/api\/rack-items"\)/, "the equipment list read fresh with its ETag");
+  const dialog = read("../server/MoveDialog.jsx");
+  // A drag opens the server's window on its move dialog (a swap with the server dropped on, or a move to the rack).
+  assert.match(view, /openServer\(key, other \? \{ sec: "move", swapWith: other\.name \} : \{ sec: "move", moveTo: toRack \? \{ rack: toRack \} : null \}\)/);
+  assert.doesNotMatch(view, /api\.moveServer|moveWithUnits|rack_items|ServerMoveDialog/, "Racks itself never writes a move");
   assert.doesNotMatch(view, /saveRackLayout|reverseUnitMoves|cleanLayoutKeys/, "no second request that could leave a move half done");
   assert.doesNotMatch(view, /CrossRackMoveModal|onRackOverrideChange|applyServerMoves/, "no move writes the layout alone any more");
-  assert.match(dialog, /Moves with it/);
-  assert.match(dialog, /Move the units on this floor with the server/);
-  assert.match(dialog, /Which PDU outlet feeds/);
-  assert.match(dialog, /preview\(/);
+  assert.match(dialog, /api\.moveServer\(sent\)/, "the dialog applies the previewed body with its plan revision");
+  assert.match(read("../server/moveModel.js"), /units_follow: !!unitsFollow/, "the units go along unless the box is cleared");
 });
 
 test("every view that shows servers, racks, units or owners reloads on its domains", () => {

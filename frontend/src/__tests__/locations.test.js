@@ -7,7 +7,7 @@ import {
   normalizeMoveResult, moveResultIsEmpty, moveErrorText, labelMoveHints, portKey,
   syncClearPlan, locationClearPlan, clearPorts, clearFailureText, clearAsResult, applyBody,
   feedSuffix, labelEditState, labelChanges, labelPatchBody, defaultPortLabel, parsePortInUse, takenPorts,
-  sameLocation, clearSummary,
+  sameLocation, clearSummary, previewClear, clearServer, normalizeClearResult, CLEAR_SERVER_PATH,
 } from "../api/locations.js";
 
 const realFetch = globalThis.fetch;
@@ -433,4 +433,48 @@ test("Move dialog: a taken slot is offered as a swap with its server; there is n
   const server = normalizeLocations(sample).servers[0];
   const ports = [{ device_id: "pa", device_name: "PDU-A", port: "2" }];
   assert.equal(buildMoveRequest(server, { mode: "ports", pdu: ports, slot: "3", swap: true, slotSwap: false }, true).body.swap, false);
+});
+
+// ── the server window: Clear location is one previewed clear-server request; Choose ports takes a U up to 999 ──
+
+test("Clear location: the dry run and the Apply are one POST /api/devices/clear-server each, with the plan revision", async t => {
+  const calls = stubFetch(t, { body: { ok: true, dry_run: true, changes: [], positions: [], unplaced: [], plan_revision: "rev-1" } });
+  assert.equal(CLEAR_SERVER_PATH, "/api/devices/clear-server");
+  assert.equal((await previewClear("OPT12")).plan_revision, "rev-1");
+  await clearServer("OPT12", "rev-1");
+  await clearServer("OPT12");
+  assert.deepEqual(calls, [
+    { url: "/api/devices/clear-server", method: "POST", body: { server: "OPT12", dry_run: true } },
+    { url: "/api/devices/clear-server", method: "POST", body: { server: "OPT12", dry_run: false, plan_revision: "rev-1" } },
+    { url: "/api/devices/clear-server", method: "POST", body: { server: "OPT12", dry_run: false } },
+  ]);
+});
+
+test("Clear location: a refused clear keeps the status and the server's detail", async t => {
+  stubFetch(t, { status: 409, body: { detail: "Changed since the preview. Preview again." } });
+  await assert.rejects(clearServer("OPT12", "old"), e => e.status === 409 && /^Changed since the preview/.test(e.detail));
+  stubFetch(t, { status: 403, body: { detail: [{ msg: "Operator role required" }] } });
+  await assert.rejects(previewClear("OPT12"), e => e.status === 403 && e.detail === "Operator role required");
+});
+
+test("Clear location: the plan lists each port's default name, the place it keeps and the servers pinned on their floors", () => {
+  const plan = normalizeClearResult({
+    changes: [{ device_id: "pdu1", device_name: "PDU 01", kind: "pdu", port: "2", before: "OPT12", after: "Outlet 2" },
+      { device_id: "kvm1", device_name: "KVM 01", kind: "kvm", port: "2", before: "OPT12", after: "Port 2" }],
+    positions: [{ server: "OPT12", before: { rack: "Rack-01", slot: 2 }, after: { rack: "Rack-01", slot: 2 } }],
+    unplaced: [], pins: [{ rack: "Rack-01", id: "opt13", slot: 3 }, { rack: "Rack-01", id: "opt14", slot: 4 }], plan_revision: "rev-2",
+  });
+  assert.deepEqual(plan.changes.map(c => `${c.where}: ${c.before} → ${c.after}`), ["PDU 01 outlet 2: OPT12 → Outlet 2", "KVM 01 port 2: OPT12 → Port 2"]);
+  assert.equal(plan.kept, "Rack-01 · U2");
+  assert.deepEqual(plan.pins, [{ rack: "Rack-01", id: "opt13", slot: 3 }, { rack: "Rack-01", id: "opt14", slot: 4 }]);
+  assert.equal(plan.planRevision, "rev-2");
+  assert.deepEqual(normalizeClearResult(null), { changes: [], kept: "Unplaced", pins: [], planRevision: null });
+});
+
+test("Choose ports takes a U above the floors (up to 999, as the server); the Locations page keeps 99", () => {
+  const server = normalizeLocations(sample).servers[0];
+  const ports = [{ device_id: "pa", device_name: "PDU-A", port: "2" }];
+  assert.equal(buildMoveRequest(server, { mode: "ports", pdu: ports, slot: "120" }, true, { maxSlot: 999 }).body.target_slot, 120);
+  assert.match(buildMoveRequest(server, { mode: "ports", pdu: ports, slot: "1000" }, true, { maxSlot: 999 }).error, /from 1 to 999/);
+  assert.match(buildMoveRequest(server, { mode: "ports", pdu: ports, slot: "120" }, true).error, /from 1 to 99\./);
 });

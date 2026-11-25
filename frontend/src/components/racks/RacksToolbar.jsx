@@ -35,10 +35,12 @@ export function RackKpis({ loading, totalKw, totalA, partial, serversOn, servers
   </>;
 }
 
-// Desktop: row 1 search and count; row 2 filters and options; row 3 every rack as a chip (wrapping, never cut).
-// Phone: row 1 the search box at full width (the count inside it); row 2 Show, Jump to rack and the cooling button.
+// Desktop: row 1 search, count and "+ Add server" (Operator); row 2 filters and options; row 3 every rack as a chip
+// (wrapping, never cut). Phone: row 1 the search box at full width (the count inside it); row 2 Show, Jump to rack and the
+// cooling button (the page puts "+ Add server" under the toolbar on a phone). Enter on a single server match opens its
+// window (the page's onSearchKey).
 export function RacksToolbar({ phone, loading = false, searchRef, query, onQuery, onSearchKey, count, filter, onFilter, filterCounts, editMode,
-  rackChips, onJump, allCollapsed, onToggleAll, coolingOpen, onToggleCooling, coolingTotal, coolingNeeds }) {
+  rackChips, onJump, allCollapsed, onToggleAll, coolingOpen, onToggleCooling, coolingTotal, coolingNeeds, onAddServer = null }) {
   const filterOff = editMode ? "Filters are off in Edit mode so every shelf stays a drop target" : undefined;
   const coolingLabel = `Cooling units ${coolingTotal}${coolingNeeds ? `, ${coolingNeeds} need a place` : ""}`;
   const chipLoading = r => r.status === "loading";
@@ -69,6 +71,8 @@ export function RacksToolbar({ phone, loading = false, searchRef, query, onQuery
     <div className="racks-toolbar-row">
       {search}
       <span className="racks-count" aria-live="polite">{count}</span>
+      {onAddServer && <button type="button" className="racks-btn racks-btn-sm racks-btn-accent" data-action="add-server" style={{ marginLeft: "auto" }}
+        title="Add a new server to a rack: its floor, PDU outlet, name and KVM port" onClick={onAddServer}>+ Add server</button>}
     </div>
     <div className="racks-toolbar-row racks-toolbar-wrap">
       <div role="group" aria-label="Show servers" className="racks-filter" aria-busy={loading ? "true" : undefined}>

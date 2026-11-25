@@ -9,8 +9,8 @@
 //   when known, else the one the person chose, else its own; its KVM port stays). The server also leaves "empty",
 //   "KVM Power" and other placeholder labels out of rack_slots / rack_positions / rack_overrides when it writes them.
 // - Everything on the floor moves with the server: the units (rack items) on the floor it leaves go to the floor it
-//   lands on (a swap swaps both floors' units), unless the person turned that off. They travel in the same
-//   move-server request (moveWithUnits: "rack_items" with the ETag of GET /api/rack-items).
+//   lands on (a swap swaps both floors' units), unless the person turned that off. The server works them out itself
+//   (units_follow in the move-server request; the server window's MoveDialog sends it).
 //
 // placements: { [serverId]: { rack, u, auto } } where every server is drawn now. u is its floor (a storage rack: its
 // shelf) as the rack card shows it, auto-placed ones included: a whole number from 0, or null when its saved U is not
@@ -39,65 +39,6 @@ export function swapMoves(a, b, placements) {
   const pa = placements?.[a], pb = placements?.[b];
   if (!pa?.rack || !pb?.rack || pa.u == null || pb.u == null || a === b) return null;
   return [{ id: a, toRack: pb.rack, toU: pb.u }, { id: b, toRack: pa.rack, toU: pa.u }];
-}
-
-// The units that move with the servers: every unit on a floor that a moving server leaves, when that server had the
-// floor to itself (the units of a floor it shares with a server that stays belong to that one as well). They go to
-// the floor the server goes to. Worked out on the floors as they are now, so a swap swaps both floors' units.
-// Returns [{ id, fromRack, fromU, toRack, toU, units: [item] }], only for servers that take units along.
-export function unitsMovingWith(moves, placements, items, isFloor) {
-  const out = [];
-  for (const m of moves || []) {
-    const from = placements?.[m.id];
-    if (!from || from.u == null || !isFloor(from.rack, from.u) || m.toU == null || !isFloor(m.toRack, m.toU)) continue;
-    if (from.rack === m.toRack && from.u === m.toU) continue;
-    if (serversOnFloor(placements, from.rack, from.u).some(id => id !== m.id)) continue;
-    const units = unitsOnFloor(items, from.rack, from.u);
-    if (units.length) out.push({ id: m.id, fromRack: from.rack, fromU: from.u, toRack: m.toRack, toU: m.toU, units });
-  }
-  return out;
-}
-
-// A save found the units somewhere else than the preview showed (another session moved one meanwhile).
-export function unitsChangedError() {
-  const error = new Error("A unit on this floor was moved or removed in another session. The page shows the latest now; check the move and confirm again.");
-  error.status = 409;
-  error.conflict = true;
-  return error;
-}
-
-// The rack items document with those units on their new floors. Every other field of a unit (serial number, barcode,
-// shelf position, tracking) stays as it is; the input is not changed. A unit that is no longer where the plan found it
-// is refused (unitsChangedError), so a save never moves something nobody saw.
-export function applyUnitMoves(doc, unitMoves) {
-  const next = { ...(doc && typeof doc === "object" ? doc : {}) };
-  const pulled = [];
-  for (const move of unitMoves || []) {
-    for (const unit of move.units) {
-      const list = Array.isArray(next[move.fromRack]) ? next[move.fromRack] : [];
-      const at = list.findIndex(item => item && String(item.id) === String(unit.id));
-      if (at < 0 || unitFloor(list[at]) !== move.fromU) throw unitsChangedError();
-      pulled.push({ item: list[at], rack: move.toRack, u: move.toU });
-      next[move.fromRack] = list.filter((_, i) => i !== at);
-    }
-  }
-  for (const { item, rack, u } of pulled) next[rack] = [...(Array.isArray(next[rack]) ? next[rack] : []), { ...item, u }];
-  return next;
-}
-
-// The move-server Apply request: the previewed body with the preview's plan revision and, when units go along, the
-// equipment list (items: { data, etag } read fresh from GET /api/rack-items) with those units on their new floors and
-// that ETag, so the server saves the labels, the layout and the units in one step. Throws a 409 (unitsChangedError)
-// when a unit is no longer where the preview found it, and a 428 without an ETag: then nothing is sent.
-export function moveWithUnits(body, planRevision, items, unitMoves) {
-  const send = { ...body, dry_run: false, plan_revision: planRevision };
-  if (!unitMoves?.length) return send;
-  if (!items?.etag) {
-    const error = new Error("The units came without a revision. Reload the page and try again.");
-    error.status = 428;
-    throw error;
-  }
-  return { ...send, rack_items: { data: applyUnitMoves(items.data, unitMoves), if_match: items.etag } };
 }
 
 // The server's 409 when the equipment list changed since the ETag a move sent (backend devices._ITEMS_CHANGED):
@@ -169,16 +110,6 @@ export function moveServerBody({ name, swapWith = null, rack, floor, ports = [] 
   if (swapWith) return { server: name, target_server: swapWith, swap: true };
   return { server: name, target_ports: ports.map(p => ({ device_id: String(p.device_id), port: String(p.port) })),
     target_rack: rack, target_slot: floor, swap: false };
-}
-
-// A server's ports after a move to an empty floor: the outlet chosen for the floor (outlet: { pduId, outlet }) in place
-// of its PDU outlets, or its own outlets (null); its KVM ports always stay. row: its GET /api/devices/locations entry
-// ({ pdu: [...], kvm: [...] }); fallback: [{ device_id, port, kind }] from the page when there is none.
-export function portsAfterMove(row, outlet, fallback = []) {
-  const pdu = Array.isArray(row?.pdu) ? row.pdu : fallback.filter(p => p.kind !== "kvm");
-  const kvm = Array.isArray(row?.kvm) ? row.kvm : fallback.filter(p => p.kind === "kvm");
-  const power = outlet ? [{ device_id: outlet.pduId, port: String(outlet.outlet) }] : pdu;
-  return [...power, ...kvm].map(p => ({ device_id: String(p.device_id), port: String(p.port) }));
 }
 
 // One port label change of a move preview: "PDU 01 outlet 3: OPT13 → OPT11".

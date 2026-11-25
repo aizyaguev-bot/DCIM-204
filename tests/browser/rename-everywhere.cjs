@@ -189,6 +189,52 @@ const PASSWORD = 'test-password-123';
     assert.deepEqual(await labels(), original, 'every label is put back');
     assert.equal((await monitor('t11'))?.name, 'OPT11');
     assert.equal((await get('/api/opt-owners')).opt11, 'Fixture owner');
+
+    // ---- The server window's Rename… (one-place WP-2): every port, the rack place, monitor and owner, then back ----
+    sent.length = 0;
+    tokens.length = 0;
+    const win = page.locator('[data-window="server"]');
+    const renameDialog = page.locator('[data-dialog="rename"]');
+    async function renameInWindow(from, to) {
+      await win.locator('h2', { hasText: new RegExp(`^${from}$`) }).waitFor();
+      await win.getByRole('button', { name: 'Rename…', exact: true }).click();
+      await renameDialog.waitFor();
+      await renameDialog.getByLabel('New name').fill(to);
+      await renameDialog.getByRole('button', { name: 'Preview', exact: true }).click();
+      await renameDialog.locator('[data-rename-preview]').waitFor();
+      const shown = await renameDialog.locator('[data-rename-preview]').innerText();
+      await renameDialog.getByRole('button', { name: `Rename to ${to}`, exact: true }).click();
+      await renameDialog.waitFor({ state: 'detached' });
+      await win.locator('h2', { hasText: new RegExp(`^${to}$`) }).waitFor();
+      return shown;
+    }
+    await page.goto(origin + '/?tab=dashboard&srv=opt11');
+    const shownWin = await renameInWindow('OPT11', 'OPT19');
+    for (const line of ['PDU 01 outlet 1: OPT11 → OPT19', 'KVM 01 port 1: OPT11 → OPT19', 'OPT11 → OPT19', 'Fixture owner (kept)']) {
+      assert.ok(shownWin.includes(line), `the window's preview lists "${line}": ${shownWin}`);
+    }
+    assert.equal(new URL(page.url()).searchParams.get('srv'), 'opt19', 'the window follows the new key');
+    assert.deepEqual(sent.map(([key, body]) => [key, body.dry_run === true]), [['POST /api/devices/rename-opt', true], ['POST /api/devices/rename-opt', false]]);
+    assert.equal(sent[1][1].plan_revision, tokens.at(-1), 'the window applies the token of the preview it showed');
+    now = await labels();
+    assert.deepEqual([now.pdu1['1'], now.kvm1['1']], ['OPT19', 'OPT19']);
+    assert.equal((await monitor('t11'))?.name, 'OPT19');
+    assert.equal((await get('/api/opt-owners')).opt19, 'Fixture owner');
+    // A name that already exists: refused, with Swap with offered (not clicked: this check allows no move).
+    await win.getByRole('button', { name: 'Rename…', exact: true }).click();
+    await renameDialog.getByLabel('New name').fill('OPT12');
+    await renameDialog.getByRole('button', { name: 'Preview', exact: true }).click();
+    await renameDialog.getByRole('alert').getByText('OPT12 already exists', { exact: false }).waitFor();
+    await renameDialog.getByRole('button', { name: 'Swap with OPT12', exact: true }).waitFor();
+    await renameDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await renameDialog.waitFor({ state: 'detached' });
+    await renameInWindow('OPT19', 'OPT11');
+    assert.deepEqual(await labels(), original, 'renamed back from the window: every label as it was');
+    assert.equal((await monitor('t11'))?.name, 'OPT11');
+    assert.equal((await get('/api/opt-owners')).opt11, 'Fixture owner');
+    assert.deepEqual(errors, [], 'No browser JavaScript errors in the window');
+    assert.deepEqual(unexpectedWrites, [], 'The window wrote only the rename');
+    checks.push('Server window Rename…: OPT11 → OPT19 previews PDU 01 outlet 1, KVM 01 port 1, monitor and owner and applies with its plan_revision (srv=opt19); OPT12 is refused with Swap with OPT12; renamed back to OPT11');
     console.log(JSON.stringify({ passed: checks, errors }, null, 2));
   } finally {
     for (const context of contexts) await context.close().catch(() => {});

@@ -2,12 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import useDialogFocus from "./useDialogFocus.js";
 import { LABEL_NONE, labelLines, labelsText, labelWhere, withEdits } from "../../shelfLabels.js";
+import { useLabData } from "../../window/labWindowContext.js";
+import { windowKey } from "../../server/serverKey.js";
 
 // Shelf labels: the three-line labels (project, owner, server) of one floor, of one rack, or of every rack (with a rack
 // choice), each one editable for this printout only (nothing is saved), with Copy and Print. Print prints only the
 // label sheet (index.css @media print hides everything else while this dialog is open). Every role can use it.
 // groups: [{ rack, labels }] for every rack (shelfLabels.buildShelfLabels per rack), recomputed by the page as its data
-// changes; scope: { rack, u } (u: one floor; rack null: every rack, with the rack choice); onClose().
+// changes; scope: { rack, u } (u: one floor; rack null: every rack, with the rack choice); onClose(). A label's server
+// opens its window ("Open <server>"; the same click closes the dialog, so the window is on top and gets the focus).
 
 const FIELDS = [["project", "Project", "project:"], ["owner", "Owner", "owner:"], ["server", "Server", ""]];
 
@@ -30,7 +33,20 @@ async function copyText(text, host) {
   return ok;
 }
 
+// "Open <server>" under a label: that server's window, for a server the lab knows (as ServerLink: windowKey in the
+// provider's server list), else nothing. One click closes the dialog and opens the window in the same update. (A
+// ServerLink here cannot work: closing the dialog in the capture phase removes the link before its own click runs.)
+function OpenServer({ label, servers, onOpen }) {
+  const key = windowKey(label);
+  if (!key || !servers.some(s => s.key === key)) return null;
+  return <span className="shelf-label-open">
+    <button type="button" className="racks-link" data-server-link={key} dir="auto" title={`Open ${label}`} onClick={() => onOpen(key)}>
+      Open <bdi>{label}</bdi></button></span>;
+}
+
 export default function ShelfLabelsDialog({ groups, scope, onClose }) {
+  const { servers, openServer } = useLabData("servers");
+  const openWindow = key => { onClose(); openServer(key); };
   const panelRef = useRef(null);
   const copyRef = useRef(null);
   const closeRef = useRef(null);
@@ -119,6 +135,7 @@ export default function ShelfLabelsDialog({ groups, scope, onClose }) {
               <input value={label[field] === LABEL_NONE ? "" : label[field]} placeholder={LABEL_NONE} dir="auto" aria-label={word} spellCheck={false} autoComplete="off"
                 className={field === "server" ? "shelf-label-server" : undefined} onChange={e => edit(label.key, field, e.target.value)}/>
             </label>)}
+            {server && server !== LABEL_NONE && <OpenServer label={server} servers={servers} onOpen={openWindow}/>}
           </li>;
         })}
       </ul> : <p className="racks-muted shelf-labels-empty" role="status">{emptyText}</p>}

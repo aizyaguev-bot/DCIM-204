@@ -1,5 +1,8 @@
-// DCIM Racks view on the isolated fixture (tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1):
-// RACK-1 stale equipment panel after a 409, RACK-2 U validation, RACK-3 equipment reload, RACK-4 phone width,
+// DCIM Racks view on the isolated fixture (tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1). Since one-place
+// WP-5 a unit opens its unit window and a server its server window (both modes); the unit form's own checks (409, owner,
+// Move, Delete) are tests/browser/unit-window.cjs.
+// RACK-1 the unit window saves only its own changes / a unit deleted elsewhere, RACK-2 U validation, RACK-3 equipment
+// reload, RACK-4 phone width,
 // RACK-5 non-server labels, LOC-3 Main storage shelves, CONN-4 auto-placed shelves, TPL-1..5 the floor template (one size for
 // every floor, fixed labelled unit slots, +N, no wrapping; every rack of type Storage has 16 shelves; names, P/N, S/N,
 // watts and PDU feeds readable at 1366), SCAN-1..13 Scan barcode (add units to a
@@ -58,42 +61,41 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
   await page.locator('button.edit-toggle').click();
   assert.equal(await page.locator('button.edit-toggle').getAttribute('aria-pressed'),'true');
 
-  // ── RACK-1: the open panel saves only its own changes, and is refreshed after a 409 ──
-  const panel=page.locator('div.fixed.inset-0.z-50.flex.justify-end');
+  // ── RACK-1: a unit's click opens its unit window (Edit mode too); it saves only its own changes ──
+  const panel=page.locator('[data-window="unit"]');
   await cell('B08 Switch').locator('.slot-field[data-field="part_number"]').click();
-  await panel.getByText('Save changes').waitFor();
-  const save=panel.getByRole('button',{name:/Save changes|Saved/});
+  await panel.locator('#unit-form-notes').waitFor();
+  assert.equal(new URL(page.url()).searchParams.get('open'),`unit:${ITEM}`,'the unit window, over Racks');
+  const save=panel.locator('[data-action="save-unit"]');
   let before=puts.length;
   await save.click();await panel.getByText('No changes to save.').waitFor();await page.waitForTimeout(300);
-  assert.equal(puts.length,before,'An unchanged panel must not save');
+  assert.equal(puts.length,before,'An unchanged form must not save');
   await scan(`/${ITEM}/barcode`,{code:'B08-BC-1'});
   await scan(`/${ITEM}/location`,{rack:'Rack-05',u:4,position:'L'});
   const scanned=find((await items()).data,ITEM).item;assert.equal(moved(scanned),1);
   const historyBefore=scanned.tracking_history.length;
-  await panel.locator('textarea').fill('after B08');
+  // the change feed brings the scans into the open window (the fields nobody typed in follow the saved unit)
+  await page.waitForFunction(()=>document.querySelector('#unit-form-barcode')?.value==='B08-BC-1'&&document.querySelector('#unit-form-position')?.value==='L',null,{timeout:20000});
+  assert.equal(await panel.locator('#unit-form-u').inputValue(),'4');
+  await panel.locator('#unit-form-notes').fill('after B08');
   let answer=page.waitForResponse(r=>r.url().endsWith('/api/rack-items')&&r.request().method()==='PUT');
   await save.click();
-  assert.equal((await answer).status(),409,'The stale panel save is refused');
-  await panel.getByText('Barcode:').waitFor();
-  assert.match(await panel.innerText(),/Barcode: B08-BC-1/);
-  assert.match(await panel.innerText(),/Rack-05 · U4/);
-  assert.match(await panel.innerText(),/Position: L/);
-  assert.equal(await panel.locator('textarea').inputValue(),'after B08','The edit made before the conflict is kept');
-  assert.equal(await panel.locator('input[aria-label="U slot"]').inputValue(),'4');
-  assert.ok(await panel.getByRole('status').filter({hasText:'changed in another session'}).isVisible());
-  assert.ok(dialogs.some(m=>/changed in another session/.test(m)),dialogs.join(' | '));
-  answer=page.waitForResponse(r=>r.url().endsWith('/api/rack-items')&&r.request().method()==='PUT');
-  await save.click();
-  assert.equal((await answer).status(),200);
+  let status=(await answer).status();
+  if(status===409){   // a save that raced the reload: refused, the edit kept; the next one goes through
+   assert.equal(await panel.locator('#unit-form-notes').inputValue(),'after B08','The edit is kept');
+   answer=page.waitForResponse(r=>r.url().endsWith('/api/rack-items')&&r.request().method()==='PUT');
+   await save.click();status=(await answer).status();
+  }
+  assert.equal(status,200);
   await panel.getByText('Saved').waitFor();
   let saved=find((await items()).data,ITEM);
   assert.equal(saved.rack,'Rack-05');assert.equal(saved.item.barcode,'B08-BC-1');assert.equal(saved.item.u,4);
   assert.equal(saved.item.shelf_position,'L');assert.equal(saved.item.notes,'after B08');
   assert.equal(saved.item.tracking_history.length,historyBefore,'The save adds no movement event');assert.equal(moved(saved.item),1);
-  passed.push('RACK-1 409 refreshes the panel; the next save keeps barcode, U and position');
+  passed.push('RACK-1 a unit click in Edit mode opens its unit window; an unchanged Save sends nothing; scans saved elsewhere reach the open window and its save keeps barcode, U and position');
 
   // ── RACK-2: U must be a whole number from 0 to 42 ──
-  const uInput=panel.locator('input[aria-label="U slot"]');
+  const uInput=panel.locator('#unit-form-u');
   before=puts.length;
   for(const bad of ['-1','43','1.5']){
    await uInput.fill(bad);
@@ -104,7 +106,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
   }
   await page.waitForTimeout(400);assert.equal(puts.length,before,'An invalid U is never sent');
   await uInput.fill('4');assert.equal(await panel.getByRole('alert').count(),0);
-  await page.keyboard.press('Escape');await panel.waitFor({state:'detached'});
+  await panel.locator('.lab-window-close').click();await panel.waitFor({state:'detached'});
   await card('Rack-05').locator('.rack-card-name').click();
   await page.getByRole('button',{name:'All racks'}).waitFor();
   await page.getByRole('button',{name:'Equipment',exact:true}).click();
@@ -134,19 +136,17 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
   await shelf('Rack-05',7,'B08 Switch').waitFor({timeout:4000});
   passed.push(`RACK-3 scan move shown after ${Math.round(pollMs/1000)} s and right after Power -> Racks`);
 
-  // ── RACK-1: the open item was deleted in another session: the 409 closes its panel and reloads resume ──
+  // ── RACK-1: the open unit was deleted in another session: its window says so, and equipment reloads go on ──
   if(await page.locator('button.edit-toggle').getAttribute('aria-pressed')!=='true')await page.locator('button.edit-toggle').click();
   await cell('B08 Switch').locator('.slot-field[data-field="part_number"]').click();
-  await panel.getByText('Save changes').waitFor();
+  await panel.locator('#unit-form-notes').waitFor();
   await putItems(dropOwn);
-  await panel.locator('textarea').fill('deleted meanwhile');
-  answer=page.waitForResponse(r=>r.url().endsWith('/api/rack-items')&&r.request().method()==='PUT');
-  await save.click();
-  assert.equal((await answer).status(),409);
-  await panel.waitFor({state:'detached',timeout:4000});
+  await panel.getByText('This unit is no longer in Lab Manager.').waitFor({timeout:20000});
+  assert.equal(await panel.locator('#unit-form-notes').count(),0,'nothing left to save');
+  await panel.locator('.lab-window-close').click();await panel.waitFor({state:'detached'});
   await putItems(d=>{d['Rack-05']=[...(d['Rack-05']||[]),{id:ITEM,name:'B08 Switch',type:'switch',u:3,notes:'back'}];});
   await shelf('Rack-05',3,'B08 Switch').waitFor({timeout:20000});
-  passed.push('RACK-1 item deleted elsewhere: the 409 closes its panel and equipment reloads resume');
+  passed.push('RACK-1 unit deleted elsewhere: its open window says "This unit is no longer in Lab Manager." and equipment reloads go on');
 
   // ── RACK-5: an outlet renamed to "empty" is not an OPT anywhere ──
   const kpi=async()=>{const t=await page.locator('.rack-kpi',{has:page.locator('span',{hasText:/^Servers on$/})}).locator('strong').innerText();const [on,all]=t.split('/').map(Number);return{on,all};};
@@ -240,7 +240,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.match(await dialog.innerText(),/Units go to Main storage · shelf 7\./);
     await page.waitForFunction(()=>document.activeElement?.name==='unit-barcode');
     await page.keyboard.type(code);await page.keyboard.press('Enter');
-    await page.locator('.toast-region .toast').filter({hasText:`Added Switch (SN ${code}) to Main storage · shelf 7.`}).waitFor();
+    await page.locator('.toast-region .toast, .lab-toast').filter({hasText:`Added Switch (SN ${code}) to Main storage · shelf 7.`}).waitFor();
     const saved=Object.entries((await items()).data).flatMap(([rack,list])=>list.map(i=>({...i,rack}))).filter(i=>i.serial_number===code||i.barcode===code);
     assert.deepEqual(saved.map(i=>[i.rack,i.u,i.serial_number,i.name]),[['Storage-Main',7,code,'Switch']]);
     await dialog.getByRole('button',{name:'Done'}).click();await dialog.waitFor({state:'detached'});
@@ -371,8 +371,8 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await more1.click();
     await f1.locator('[data-floor-more="servers"] > .floor-more-list .server-cell[data-server="OPT62"]').waitFor();
     await f1.locator('[data-floor-more="servers"] > .floor-more-list button.server-open[aria-label="View OPT62"]').click();
-    await tp.getByRole('dialog',{name:'OPT62'}).waitFor();
-    await tp.keyboard.press('Escape');await tp.getByRole('dialog',{name:'OPT62'}).waitFor({state:'detached'});
+    await tp.locator('[data-window="server"] h2.lab-window-name',{hasText:'OPT62'}).waitFor();
+    await tp.keyboard.press('Escape');await tp.locator('[data-window="server"]').waitFor({state:'detached'});
     await tp.mouse.click(5,5);
     // search finds a unit behind "+N": Enter opens the list and focuses it
     const search=tp.getByRole('searchbox',{name:/Find server/});
@@ -400,12 +400,12 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     const scanDialog=tp.getByRole('dialog',{name:'Scan unit barcode'});await scanDialog.waitFor();
     assert.match(await scanDialog.innerText(),/Units go to Storage shelf · shelf 9\./);
     await scanDialog.getByRole('button',{name:'Close'}).click();await scanDialog.waitFor({state:'detached'});
-    // the server details name its shelf (was "U3")
+    // the server window names its shelf (was "U3")
     await st.locator('button.server-open[aria-label="View OPT72"]').click();
-    const det=tp.getByRole('dialog',{name:'OPT72'});await det.waitFor();
-    assert.equal(await det.locator('dt',{hasText:/^Shelf$/}).locator('xpath=..').locator('dd').innerText(),'Shelf 3');
+    const det=tp.locator('[data-window="server"]');await det.locator('h2.lab-window-name',{hasText:'OPT72'}).waitFor();
+    await det.locator('[data-facts]',{hasText:'Storage shelf · shelf 3'}).waitFor();
     await tp.keyboard.press('Escape');await det.waitFor({state:'detached'});
-    passed.push('TPL-3 "Storage shelf" (rack type Storage) draws shelves 1-16 + whole storage, a + per shelf, one slot per shelf (name + P/N, "+3"), no server-beside layout; its + scans onto "Storage shelf · shelf 9"; OPT72\'s details say Shelf 3');
+    passed.push('TPL-3 "Storage shelf" (rack type Storage) draws shelves 1-16 + whole storage, a + per shelf, one slot per shelf (name + P/N, "+3"), no server-beside layout; its + scans onto "Storage shelf · shelf 9"; OPT72\'s window says "Storage shelf · shelf 3"');
 
     // TPL-4: Edit mode: its cooling dialog and selects follow it (16 shelves), the server panel says Shelf, and
     //        "Move to rack" a storage rack offers its shelves and saves the shelf chosen
@@ -413,10 +413,13 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
      await tp.waitForFunction(v=>document.querySelector('button.edit-toggle')?.getAttribute('aria-pressed')===String(v),on);};
     await edit(true);
     await st.locator('button.server-open[aria-label="View OPT72"]').click();
-    const side=tp.locator('div.fixed.inset-0.z-50.flex.justify-end');await side.getByText('Remove from DCIM').waitFor();
-    assert.match(await side.innerText(),/Shelf\s+Shelf 3/,'the edit panel header says Shelf 3');
-    assert.equal(await side.locator('select[aria-label="Shelf"] option').count(),16,'its Shelf select offers shelves 1-16');
-    await tp.keyboard.press('Escape');await side.waitFor({state:'detached'});
+    const side=tp.locator('[data-window="server"]');await side.locator('h2.lab-window-name',{hasText:'OPT72'}).waitFor();
+    await side.locator('[data-action="move-to"]').click();
+    const mv=tp.locator('[data-dialog="server-move"]');await mv.waitFor();
+    assert.equal(await mv.getByLabel('Rack',{exact:true}).inputValue(),'Storage shelf');
+    assert.equal(await mv.getByLabel('Shelf',{exact:true}).locator('option').count(),16,'its move offers shelves 1-16');
+    await mv.getByRole('button',{name:'Cancel'}).click();await mv.waitFor({state:'detached'});
+    await side.locator('.lab-window-close').click();await side.waitFor({state:'detached'});
     await tp.goto(origin+'/?tab=racks&rack=Storage%20shelf');await tp.locator('#rack-detail-title').waitFor();await edit(true);
     await tp.locator('.rack-detail [data-rack-id="Storage shelf"] [data-u-slot="0"] .equipment-cell').waitFor();
     assert.equal(await tp.locator('.rack-detail [data-rack-id="Storage shelf"] .rack-shelves > [data-u-slot]').count(),17);
@@ -435,14 +438,17 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await tp.goto(origin+'/?tab=racks&rack=Rack-05');await tp.locator('#rack-detail-title').waitFor();await edit(true);
     await tp.locator('.rack-detail .equipment-cell[data-item-id="ci-tpl-move"]').waitFor();
     await tp.locator('.rack-detail .equipment-cell[data-item-id="ci-tpl-move"] .slot-field[data-field="part_number"]').click();
-    await side.getByText('Save changes').waitFor();
-    await side.getByLabel('Move to rack').selectOption('Storage shelf');
-    await side.getByLabel('Shelf in Storage shelf').selectOption('9');
-    await side.getByRole('button',{name:'Move',exact:true}).click();await side.waitFor({state:'detached'});
+    const uwin=tp.locator('[data-window="unit"]');await uwin.locator('[data-action="move-unit"]').waitFor();
+    await uwin.locator('[data-action="move-unit"]').click();
+    const um=tp.locator('[data-dialog="unit-move"]');await um.waitFor();
+    await um.getByLabel('Rack',{exact:true}).selectOption('Storage shelf');
+    await um.getByLabel('Shelf',{exact:true}).selectOption('9');
+    await um.locator('[data-action="move-unit"]').click();await um.waitFor({state:'detached'});
+    await uwin.locator('.lab-window-close').click();await uwin.waitFor({state:'detached'});
     let movedItem;for(let i=0;i<30;i++){movedItem=find((await items()).data,'ci-tpl-move');if(movedItem?.rack==='Storage shelf')break;await tp.waitForTimeout(150);}
     assert.deepEqual([movedItem?.rack,movedItem?.item.u],['Storage shelf',9],'moved onto shelf 9');
     await edit(false);
-    passed.push('TPL-4 Edit mode on "Storage shelf": the OPT panel says Shelf 3 and offers shelves 1-16, its detail has 16 shelves + whole storage and a Shelf column, the cooling dialog and Add equipment offer shelves 1-16, Move to rack onto it saves the shelf chosen (u 9)');
+    passed.push('TPL-4 Edit mode on "Storage shelf": OPT72\'s window Move to… offers shelves 1-16, its detail has 16 shelves + whole storage and a Shelf column, the cooling dialog and Add equipment offer shelves 1-16, a unit window\'s Move… onto it saves the shelf chosen (u 9)');
 
     // TPL-5: what the floor template must keep readable at 1366x768 (the common laptop) and wider: storage names and the
     //        end of their P/N, a compute S/N whole, the watts on every floor, the PDU feeds next to a 40-character owner
@@ -546,14 +552,15 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     const op=await operator.c.newPage();op.on('pageerror',e=>errors.push(e.message));
     op.on('request',r=>{const u=new URL(r.url());if(!['GET','HEAD','OPTIONS'].includes(r.method())&&u.pathname!=='/api/auth/login')writes.push(`${r.method()} ${u.pathname}`);});
     const wedge=async code=>{await op.keyboard.type(code);await op.keyboard.press('Enter');};
-    const toast=op.locator('.toast-region .toast');
+    // Racks' own toasts (.toast-region) and the provider's (a scan from the server window: .lab-toast)
+    const toast=op.locator('.toast-region .toast, .lab-toast');
     await op.goto(origin+'/?tab=racks');
     const opt=op.locator('[data-rack-id="Rack-02"] .server-cell[data-server="OPT22"]');
     await opt.waitFor();
     const floor=Number(await opt.evaluate(e=>e.closest('[data-u-slot]').dataset.uSlot));
     assert.ok(floor>=1,'OPT22 has a floor');
     await op.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').click();
-    const details=op.getByRole('dialog',{name:'OPT22'});
+    const details=op.getByRole('dialog',{name:'OPT22'});   // the server window (labelled by its name)
     await details.getByRole('button',{name:'Scan barcode'}).click();
     const dialog=op.getByRole('dialog',{name:'Scan unit barcode'});
     await dialog.waitFor();
@@ -570,7 +577,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     assert.deepEqual([found[0].rack,found[0].u,found[0].type,found[0].name,found[0].serial_number],['Rack-02',floor,'switch','Quantum QM8700 switch',A]);
     await op.locator(`[data-rack-id="Rack-02"] [data-u-slot="${floor}"] .equipment-cell[data-item-id="${found[0].id}"][aria-label="View Quantum QM8700 switch"]`).waitFor({state:'attached'});
     assert.equal(await op.evaluate(()=>document.activeElement?.name),'unit-barcode','Focus stays in the scan field');
-    passed.push(`SCAN-1 server dialog -> Scan barcode: GS1 serial added as a switch on OPT22 floor ${floor}, shown on the floor, focus kept`);
+    passed.push(`SCAN-1 server window -> Units on this floor -> Scan barcode: GS1 serial added as a switch on OPT22 floor ${floor}, shown on the floor, focus kept`);
 
     // SCAN-2: back-to-back scans while saving, including repeats: one row per code, never a second one.
     const B=`SNB${run}`;
@@ -703,7 +710,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     passed.push('SCAN-5 location label, ambiguous code (both listed) and part-number-only code are refused, nothing written');
     passed.push('SCAN-12 a label whose MAC matches a unit but whose serial number differs is refused with both values; the unit is listed and unchanged');
 
-    // Escape closes only the scan dialog; focus goes back to its button in the server dialog.
+    // Escape closes only the scan dialog; focus goes back to its button in the server window.
     await op.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
     await details.waitFor();
     assert.equal(await op.evaluate(()=>document.activeElement?.textContent),'Scan barcode');
@@ -727,60 +734,56 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await op.locator('[data-rack-id="Rack-02"] button.server-open[aria-label="View OPT22"]').first().click();
     await op.getByRole('dialog',{name:'OPT22'}).getByRole('button',{name:'Scan barcode'}).waitFor();
     await op.keyboard.press('Escape');
-    passed.push('SCAN-6 Edit mode: Scan barcode in + Equipment (floor 3 chosen), in the rack actions and in the server edit panel');
+    passed.push('SCAN-6 Edit mode: Scan barcode in + Equipment (floor 3 chosen), in the rack actions and in the server window');
 
-    // SCAN-10: the unit's panels show the four fields: editable in Edit mode (Operator), read-only otherwise.
+    // SCAN-10: the unit window shows the four fields, editable for an Operator (its form), read-only for a Viewer.
     await op.getByRole('dialog',{name:'OPT22'}).waitFor({state:'detached'});
-    const equip=op.locator('div.fixed.inset-0.z-50.flex.justify-end');
+    const equip=op.locator('[data-window="unit"]');
+    const saveUnit=equip.locator('[data-action="save-unit"]');
     const F_ID=(await withCode(F))[0].id;
     await revealId(op,F_ID);
     await op.locator(`.equipment-cell[data-item-id="${F_ID}"] .slot-field[data-field="part_number"]`).first().click();
-    await equip.getByText('Save changes').waitFor();
+    await saveUnit.waitFor();
     const field=label=>equip.getByRole('textbox',{name:label,exact:true});
     assert.deepEqual(await Promise.all(['Serial number','Part number','Model','MAC address'].map(l=>field(l).inputValue())),[F,'MQM8790-HS2F','QM8790',MAC1]);
-    // Save stays in view on a 1536x864 screen, below the scrolling fields.
     await op.setViewportSize({width:1536,height:864});
-    const saveBox=await equip.getByRole('button',{name:'Save changes'}).boundingBox();
-    assert.ok(saveBox&&saveBox.y+saveBox.height<=864,`Save changes is in view at 1536x864 (y=${saveBox&&saveBox.y})`);
     // A MAC or serial number of another unit is refused with that reason at the field, not as a change elsewhere.
     const opDialogs=[];op.on('dialog',d=>{opDialogs.push(d.message());d.dismiss().catch(()=>{});});
     for(const [label,value,reason] of [['MAC address',MAC3.toLowerCase().replace(/:/g,'-'),'This MAC address already belongs to another item.'],['Serial number',G.toLowerCase(),'This barcode or serial number already belongs to another item.']]){
       const original=await field(label).inputValue();
       await field(label).fill(value);
       const refused=op.waitForResponse(r=>r.url().endsWith('/api/rack-items')&&r.request().method()==='PUT');
-      await equip.getByRole('button',{name:'Save changes'}).click();
+      await saveUnit.click();
       assert.equal((await refused).status(),409);
       await equip.getByRole('alert').filter({hasText:reason}).waitFor();
-      assert.equal(await equip.getByRole('button',{name:'Save changes'}).isDisabled(),true,'the taken value cannot be saved again');
+      assert.equal(await saveUnit.isDisabled(),true,'the taken value cannot be saved again');
       assert.equal(await equip.getByRole('status').filter({hasText:'changed in another session'}).count(),0);
       assert.equal(await field(label).getAttribute('aria-invalid'),'true');
       await field(label).fill(original);
       await equip.getByRole('alert').filter({hasText:reason}).waitFor({state:'detached'});
     }
-    assert.deepEqual(opDialogs,[],'a taken value is shown in the panel, never as a browser alert');
+    assert.deepEqual(opDialogs,[],'a taken value is shown in the window, never as a browser alert');
     await op.setViewportSize({width:1440,height:1000});
     await field('MAC address').fill('12:34');
     await equip.getByRole('alert').filter({hasText:'MAC address must be six pairs of hex digits'}).waitFor();
-    assert.equal(await equip.getByRole('button',{name:'Save changes'}).isDisabled(),true,'a bad MAC cannot be saved');
+    assert.equal(await saveUnit.isDisabled(),true,'a bad MAC cannot be saved');
     const MAC4=macOf('0E');
     await field('MAC address').fill(MAC4.toLowerCase().replace(/:/g,'-'));
     await field('Part number').fill('MQM8790-HS2R');
     await field('Model').fill('');
-    await equip.getByRole('button',{name:'Save changes'}).click();
-    await equip.getByRole('button',{name:'Saved'}).waitFor();
+    await saveUnit.click();
+    await equip.getByText('Saved',{exact:true}).waitFor();
     found=await withCode(F);
     assert.deepEqual([found[0].serial_number,found[0].part_number,'model' in found[0],found[0].mac],[F,'MQM8790-HS2R',false,MAC4]);
-    await op.keyboard.press('Escape');await equip.waitFor({state:'detached'});
+    await equip.locator('.lab-window-close').click();await equip.waitFor({state:'detached'});
     await op.locator('button.edit-toggle').click();
     await revealId(op,F_ID);
     await op.locator(`.equipment-cell[data-item-id="${F_ID}"] .slot-field[data-field="part_number"]`).first().click();
     const shown=op.getByRole('dialog',{name:'QM8790',exact:true});
     await shown.waitFor();
-    const text=await shown.innerText();
-    for(const part of ['Serial number',F,'Part number','MQM8790-HS2R','MAC address',MAC4])assert.ok(text.includes(part),`details show ${part}`);
-    assert.equal(await shown.getByRole('textbox').count(),0,'the view is read-only outside Edit');
-    await op.keyboard.press('Escape');await shown.waitFor({state:'detached'});
-    passed.push('SCAN-10 the four fields are shown and edited in the equipment panel (Save in view at 1536x864, a taken MAC or serial shown at its field, bad MAC refused, MAC cleaned, blank clears) and shown read-only outside Edit');
+    assert.deepEqual(await Promise.all(['Serial number','Part number','MAC address'].map(l=>shown.getByRole('textbox',{name:l,exact:true}).inputValue())),[F,'MQM8790-HS2R',MAC4],'the same window outside Edit mode');
+    await shown.locator('.lab-window-close').click();await shown.waitFor({state:'detached'});
+    passed.push('SCAN-10 the four fields are shown and edited in the unit window (a taken MAC or serial shown at its field, bad MAC refused, MAC cleaned, blank clears), Edit mode or not');
 
     // SCAN-14: a Serial number typed into the equipment panel of a generic unit (type Other, named "Unit") marks it as a
     // switch, with a hint, by the scan's rule; a model that names a server, or a unit that says what it is, stays Other.
@@ -789,23 +792,23 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await putItems(d=>{d['Rack-02']=[...(d['Rack-02']||[]),...[[PG,'Unit'],[PS,'Unit'],[PU,`UPS box ${run}`],[PO,'Unit']].map(([code,name])=>({id:`ci-${code.toLowerCase()}`,name,type:'other',barcode:code,u:floor,shelf_position:''}))];});
     await op.reload();await op.locator(`[data-rack-id="Rack-02"] .equipment-cell[data-item-id="ci-${PG.toLowerCase()}"]`).first().waitFor({state:'attached'});
     if(await op.locator('button.edit-toggle').getAttribute('aria-pressed')!=='true')await op.locator('button.edit-toggle').click();
-    const typeSelect=equip.locator('select').filter({has:op.locator('option[value="patchpanel"]')});
+    const typeSelect=equip.locator('#unit-form-type');
     for(const [code,model,want,serial=`SN${code}`] of [[PG,'','switch'],[PS,'DGX H100','other'],[PU,'','other'],[PO,'','other',`900-9X766-003N-SQ${run}`]]){
       // one unit slot per floor: the others are behind the floor's "+N" chip
       await op.locator(`.equipment-cell[data-item-id="ci-${code.toLowerCase()}"]`).first().evaluate(e=>{if(!e.offsetParent)e.closest('.floor-more:not([data-open])')?.querySelector(':scope > .floor-more-toggle')?.click();});
       await op.locator(`.equipment-cell[data-item-id="ci-${code.toLowerCase()}"] .slot-field[data-field="part_number"]`).first().click();
-      await equip.getByText('Save changes').waitFor();
+      await saveUnit.waitFor();
       assert.equal(await typeSelect.inputValue(),'other');
       if(model)await field('Model').fill(model);
       await field('Serial number').fill(serial);
       assert.equal(await typeSelect.inputValue(),want,`${code}: type after typing a serial number`);
       assert.equal(await equip.getByText('Marked as a switch').count(),want==='switch'?1:0);
-      await equip.getByRole('button',{name:'Save changes'}).click();await equip.getByRole('button',{name:'Saved'}).waitFor();
+      await saveUnit.click();await equip.getByText('Saved',{exact:true}).waitFor();
       const [i]=await withCode(serial);
       assert.deepEqual([i.type,i.name],[want,code===PG?'Switch':code===PU?`UPS box ${run}`:'Unit'],`${code} saved`);
-      await op.keyboard.press('Escape');await equip.waitFor({state:'detached'});
+      await equip.locator('.lab-window-close').click();await equip.waitFor({state:'detached'});
     }
-    passed.push('SCAN-14 typing a Serial number for a generic "Unit" in the equipment panel marks it as a switch named Switch (with a hint); a DGX model, a named UPS box or an NVIDIA board OPN typed as the serial stays Other');
+    passed.push('SCAN-14 typing a Serial number for a generic "Unit" in the unit window marks it as a switch named Switch (with a hint); a DGX model, a named UPS box or an NVIDIA board OPN typed as the serial stays Other');
 
     const unexpected=writes.filter(w=>!SCAN_WRITE.test(w.split(' ')[1]));
     assert.deepEqual(unexpected,[],'Scanning writes only inventory registrations, locations and the equipment list (Undo)');
@@ -828,7 +831,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     await camDialog.locator('video').waitFor();
     const K=`SNK${run}`;
     await cam.evaluate(code=>{window.__cameraCode=code;},K);
-    await cam.locator('.toast-region .toast').filter({hasText:`Added Switch (SN ${K}) to OPT22 · floor ${floor}.`}).waitFor();
+    await cam.locator('.toast-region .toast, .lab-toast').filter({hasText:`Added Switch (SN ${K}) to OPT22 · floor ${floor}.`}).waitFor();
     await cam.waitForTimeout(700);
     assert.equal((await withCode(K)).length,1,'The code held in view is saved once');
     assert.equal(await camDialog.locator('.scan-unit-log > li').count(),1,'The code held in view is read once');
@@ -876,7 +879,7 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
     for(const part of ['Serial number','MT2245X01234','Part number','MCX75310AAS-NEAT'])assert.ok(nicText.includes(part),`NIC panel shows ${part}`);
     assert.equal(await vp.locator('button.edit-toggle').count(),0,'Viewer has no Edit mode');
     await viewer.c.close();
-    passed.push('SCAN-8 Viewer: no Scan barcode in the server dialog or the rack; unit details read-only');
+    passed.push('SCAN-8 Viewer: no Scan barcode in the server window or the rack; the unit window read-only');
    }finally{await putItems(dropScans);}
   }
 
@@ -892,17 +895,18 @@ const ITEM='ci-b08-rack1', SPARE='ci-b08-spare', NIC='ci-st16-nic', OLD='ci-st16
   assert.equal(await width(),375,'Edit on');
   const inside=async locator=>{const b=await locator.boundingBox();assert.ok(b,'visible');assert.ok(b.x>=0&&b.x+b.width<=375,`${b.x}+${b.width} within 375`);};
   await phone.locator('.equipment-cell[aria-label="View B08 Switch"] .slot-field[data-field="part_number"]').click();
-  const phonePanel=phone.locator('div.fixed.inset-0.z-50.flex.justify-end');
-  await phonePanel.getByText('Save changes').waitFor();
-  await inside(phonePanel.getByRole('button',{name:'Close'}));
-  await inside(phonePanel.getByRole('button',{name:'Move',exact:true}));
-  assert.equal(await width(),375,'Equipment panel open');
-  await phone.keyboard.press('Escape');await phonePanel.waitFor({state:'detached'});
+  const phonePanel=phone.locator('[data-window="unit"]');
+  await phonePanel.locator('[data-action="save-unit"]').waitFor();
+  await inside(phonePanel.getByRole('button',{name:'Close',exact:true}));
+  await inside(phonePanel.getByRole('button',{name:'Move…',exact:true}));
+  assert.equal(await width(),375,'unit window open');
+  await phonePanel.locator('.lab-window-close').click();await phonePanel.waitFor({state:'detached'});
   await phone.locator('[data-rack-id="Rack-05"] button.server-open[aria-label="View OPT51"]').click();
-  await phonePanel.getByText('Remove from DCIM').waitFor();
-  await inside(phonePanel.getByRole('button',{name:'Close'}));
-  await phone.keyboard.press('Escape');
-  passed.push('RACK-4 rack detail at 375 px: no page scroll with Edit off and on; Close and Move inside the screen');
+  const phoneServer=phone.locator('[data-window="server"]');await phoneServer.locator('h2.lab-window-name',{hasText:'OPT51'}).waitFor();
+  await inside(phoneServer.getByRole('button',{name:'Close',exact:true}));
+  assert.equal(await width(),375,'server window open');
+  await phoneServer.locator('.lab-window-close').click();
+  passed.push('RACK-4 rack detail at 375 px: no page scroll with Edit off and on; the unit window\'s Close and Move… and the server window\'s Close inside the screen');
 
   await cleanup();cleanup=null;
   assert.deepEqual(errors,[]);

@@ -57,7 +57,7 @@ function LabManagerApp() {
   const [windowTarget, setWindowTarget] = useState(null);
   const [mainTab, setMainTab] = useState(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "dcim" ? "racks" : ["sync", "locations", "connections", "assistant"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
+    return tab === "dcim" ? "racks" : tab === "manage" ? "inventory" : ["sync", "locations", "connections", "assistant"].includes(tab) ? "admin" : ["dashboard", "racks", "inventory", "power", "consoles", "pxe", "scan", "monitoring", "twin", "admin", "changelog", "account", "ssh"].includes(tab) ? tab : preferences.start_page;
   });
   const [pxeConfig, setPxeConfig] = useState(undefined);   // undefined: loading, null: unavailable
   const [pxeConfigError, setPxeConfigError] = useState("");
@@ -166,7 +166,7 @@ function LabManagerApp() {
     const onPop = event => {
       const tab = event.state?.tab || new URLSearchParams(location.search).get("tab") || "dashboard";
       const section = ({ sync: "mapping", locations: "locations", connections: "connections", assistant: "assistant" })[tab];
-      const nextTab = tab === "dcim" ? "racks" : section ? "admin" : tab;
+      const nextTab = tab === "dcim" ? "racks" : tab === "manage" ? "inventory" : section ? "admin" : tab;
       const view = event.state?.view || { kind: "dashboard" };
       // Back / Forward between a rack and all racks stays in Edit mode; anything else leaves it.
       // The open rack itself is re-read from ?rack= by onHistory below.
@@ -642,7 +642,7 @@ function LabManagerApp() {
 
   const pageInfo = {
     racks: ["Racks", "Shelf layout, equipment and power across Lab 204."],
-    inventory: ["Inventory", "Servers with their rack, power outlet, switch port and owner."],
+    inventory: ["Manage", "Everything in the lab in one list: servers, PDUs, KVMs, units, racks and cooling. Open a row to change, move or delete it; + Add to add."],
     twin: ["3D Twin", "Explore the lab and its saved rack layout."],
     changelog: ["Changelog", "Changes and releases in Lab Manager."],
   }[mainTab];

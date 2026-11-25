@@ -144,9 +144,14 @@ ROUTE_ROLES = {
     "GET /api/engineers": "Viewer", "POST /api/engineers": "Admin", "PUT /api/engineers/{engineer_id}": "Admin",
     # Removed servers: every page reads the list to hide them; removing and restoring a server are Admin only.
     "GET /api/removed-servers": "Viewer", "POST /api/removed-servers": "Admin", "POST /api/removed-servers/restore": "Admin",
+    # Delete and restore (v2 spec D.1): Operator routes (the handlers ask for an Admin for servers, PDUs, KVMs, racks and
+    # cooling units); the Deleted list is an Operator read; Delete forever is Admin.
+    "POST /api/lab/delete": "Operator", "POST /api/lab/restore": "Operator", "GET /api/lab/deleted": "Operator",
+    "DELETE /api/lab/deleted/{batch_id}": "Admin",
     # Devices: configuration is Admin, labels/moves are Operator, the connection export is Operator even to read.
     "GET /api/devices/": "Viewer", "POST /api/devices/": "Admin", "PUT /api/devices/{device_id}": "Admin",
-    "DELETE /api/devices/{device_id}": "Admin", "PATCH /api/devices/{device_id}/labels": "Operator",
+    "DELETE /api/devices/{device_id}": "Admin", "PATCH /api/devices/{device_id}": "Admin",
+    "PATCH /api/devices/{device_id}/labels": "Operator",
     "PATCH /api/devices/direct-label": "Operator", "POST /api/devices/rename-opt": "Operator",
     "POST /api/devices/move-server": "Operator", "POST /api/devices/clear-server": "Operator",
     "GET /api/devices/locations": "Viewer", "GET /api/devices/sync-map": "Viewer",

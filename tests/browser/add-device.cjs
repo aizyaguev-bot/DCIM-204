@@ -236,9 +236,15 @@ const C4_DETAIL = 'PDU 01 (PDU) already uses this address. Each PDU or KVM needs
     assert.deepEqual(unexpectedWrites, [], 'only device writes');
     assert.deepEqual(errors, [], 'no page errors');
   } finally {
+    // Devices are deleted through the one delete path now (POST /api/lab/delete: preview, then apply; the old
+    // DELETE /api/devices/{id} answers 409).
     for (const id of created) {
       try {
-        const response = await context.request.delete(origin + DEVICES + id, { headers: { 'x-dcim-csrf': csrf } });
+        const body = { targets: [{ kind: 'device', id }] };
+        const preview = await context.request.post(origin + '/api/lab/delete', { headers: { 'x-dcim-csrf': csrf }, data: { ...body, dry_run: true } });
+        const plan = preview.ok() ? await preview.json() : null;
+        const response = plan ? await context.request.post(origin + '/api/lab/delete',
+          { headers: { 'x-dcim-csrf': csrf }, data: { ...body, plan_revision: plan.plan_revision } }) : preview;
         if (![200, 204, 404].includes(response.status())) { errors.push(`cleanup ${response.status()}`); process.exitCode = 1; }
       } catch (error) { errors.push('cleanup ' + error.message); process.exitCode = 1; }
     }

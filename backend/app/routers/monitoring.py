@@ -89,7 +89,7 @@ def shown_rack(target, racks):
     return (racks.get(key) or target.rack) if key else target.rack
 
 
-def target_view(target, tz, *, name_override="", inventory_name=None, racks=None):
+def target_view(target, tz, *, name_override="", inventory_name=None, racks=None, hidden=None):
     status = target.status
     if not target.enabled:
         status = "paused"
@@ -104,6 +104,8 @@ def target_view(target, tz, *, name_override="", inventory_name=None, racks=None
         "source": target.source, "enabled": target.enabled, "revision": target.revision,
         # The server identity this monitor belongs to (pages hide the monitors of servers removed from the lab).
         "server_key": target.source_key.removeprefix("server:") if target.source_key.startswith("server:") else None,
+        # True while that server is removed from the lab (removed_servers.hidden_keys): every screen hides this monitor.
+        "removed": target.source_key.startswith("server:") and target.source_key.removeprefix("server:") in (hidden or ()),
         "status": status, "last_result": target.status, "checked_at": iso(target.checked_at),
         "last_up_at": iso(target.last_up_at), "rtt_ms": target.rtt_ms, "detail": target.detail,
     }
@@ -127,6 +129,8 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
     response.headers["Cache-Control"] = "no-store"
     connections = await connection_index(db, tz, now)
     racks = await current_racks(db)
+    from .removed_servers import hidden_keys
+    hidden = await hidden_keys(db)
     from ..alerts import overview as alert_overview
     return {
         "email_alerts": await alert_overview(db, settings),
@@ -138,7 +142,7 @@ async def overview(response: Response, db: AsyncSession = Depends(get_db)):
         "error": state.error if state else "",
         "targets": [{**target_view(t, tz, name_override=overrides.get(t.id,""),
                      inventory_name=sources.get(t.source_key.removeprefix("server:"), (None,))[0] if t.source=="inventory" else None,
-                     racks=racks),
+                     racks=racks, hidden=hidden),
                      **connections.get(t.source_key, {"pdu": [], "kvm": []})} for t in targets],
     }
 
@@ -175,7 +179,8 @@ async def create_target(body: TargetCreate, db: AsyncSession = Depends(get_db)):
         await db.rollback()
         raise HTTPException(409, "This server already exists. Edit its address in the list.") from exc
     await db.refresh(target)
-    return target_view(target, zone(), racks=await current_racks(db))
+    from .removed_servers import hidden_keys
+    return target_view(target, zone(), racks=await current_racks(db), hidden=await hidden_keys(db))
 
 
 @router.put("/targets/{target_id}")
@@ -207,8 +212,9 @@ async def edit_target(target_id: str, body: TargetEdit, db: AsyncSession = Depen
                 db.add(name_record)
             name_record.override = "" if body.sync_name else (body.name or target.name)
     await db.commit()
+    from .removed_servers import hidden_keys
     return target_view(target, zone(), name_override=name_record.override if name_record else "",
-                       racks=await current_racks(db))
+                       racks=await current_racks(db), hidden=await hidden_keys(db))
 
 
 def incident_view(incident, target, name=None, racks=None):

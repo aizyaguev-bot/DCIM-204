@@ -229,6 +229,60 @@ const SERVER = 'OPT11', KEY = 'opt11';
     assert.deepEqual((await removed()).hidden, []);
     checks.push('Operator and Viewer: no Remove from lab, no Removed servers page, 403 on remove / restore');
 
+    // ── The server window (one-place WP-2): Delete… opens the one delete dialog; the removed window is read only;
+    //    Restore… in its banner brings it back. Operators and Viewers have no Delete… there. ──
+    {
+      const w = p.locator('[data-window="server"]');
+      await p.goto(origin + '/?tab=racks&srv=opt11');
+      await w.locator('h2', { hasText: SERVER }).waitFor();
+      await w.getByRole('button', { name: '⋯ More', exact: true }).click();
+      await w.getByRole('menuitem', { name: 'Delete…', exact: true }).click();
+      const lab = p.locator('[data-dialog="delete"]');
+      await lab.or(dlg).first().waitFor();
+      let via;
+      if (await dlg.count()) {   // today's RemoveServerDialog, until WP-D's DeleteDialog
+        via = 'RemoveServerDialog';
+        await dlg.locator('[data-list="cleaned"] li').first().waitFor();
+        await dlg.locator('button[data-action="remove-server"]').click();
+        await dlg.waitFor({ state: 'detached' });
+      } else {
+        via = 'DeleteDialog';
+        await p.waitForFunction(() => document.querySelector('[data-dialog="delete"]')?.getAttribute('aria-busy') === 'false', null, { timeout: 20000 });
+        await lab.getByText(SERVER, { exact: false }).first().waitFor();
+        const typed = lab.locator('#lab-delete-confirm');
+        if (await typed.count()) await typed.fill((await lab.locator('label[for="lab-delete-confirm"]').innerText()).replace(/^Type (.+) to delete.*$/, '$1'));
+        await lab.locator('button[data-action="delete"]').click();
+        await lab.waitFor({ state: 'detached' });
+      }
+      // The removed server's window (DeleteDialog closes the window it was opened from; open it again).
+      await p.goto(origin + '/?tab=racks&srv=opt11');
+      await w.locator('[data-removed-banner]').filter({ hasText: 'by admin' }).waitFor();
+      await w.getByText('Removed · read only', { exact: true }).waitFor();
+      assert.deepEqual((await removed()).hidden, [KEY]);
+      await w.getByRole('button', { name: 'Restore…', exact: true }).click();
+      const restore = p.locator('[data-dialog="restore-server"]');
+      await restore.getByText('Its rack place, switch port and owner do not come back.', { exact: true }).waitFor();
+      await restore.getByRole('button', { name: 'Restore', exact: true }).click();
+      await restore.waitFor({ state: 'detached' });
+      await p.locator('.lab-toast').filter({ hasText: `${SERVER} is back in the lab.` }).waitFor();
+      await w.locator('[data-removed-banner]').waitFor({ state: 'detached' });
+      assert.deepEqual((await removed()).hidden, []);
+      assert.equal((await monitor('t11')).enabled, true, 'Restore resumes the monitor');
+      for (const s of [operator, viewer]) {
+        const sw = s.page.locator('[data-window="server"]');
+        await s.page.goto(origin + '/?tab=racks&srv=opt11');
+        await sw.locator('h2', { hasText: SERVER }).waitFor();
+        assert.equal(await sw.getByRole('button', { name: 'Delete…', exact: true }).count(), 0, `${s.username} has no Delete… in the bar`);
+        const more = sw.getByRole('button', { name: '⋯ More', exact: true });
+        if (await more.count()) {
+          await more.click();
+          assert.equal(await sw.getByRole('menuitem', { name: 'Delete…', exact: true }).count(), 0, `${s.username} has no Delete…`);
+          await s.page.keyboard.press('Escape');
+        }
+      }
+      checks.push(`server window: Admin More › Delete… (${via}) removes ${SERVER}; the window turns read only with its banner; Restore… brings it back with its monitor; Operator and Viewer have no Delete…`);
+    }
+
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ passed: checks, errors }));
   } finally {

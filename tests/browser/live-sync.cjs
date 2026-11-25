@@ -5,17 +5,20 @@
 //
 // The PDU outlet and KVM port belong to the FLOOR: a server that lands on a floor takes over that floor's outlet and
 // port (the labels are rewritten; the PDU and KVM devices never move), and the units on the floor it leaves go with it.
+// On Racks (one-place WP-5) a drag opens the server's window on its move dialog and a click opens the window; the dialog
+// saves with units_follow (the server moves the units), and each step closes the window before the next drag.
 // Checks: (1) a swap inside Rack-01 that takes a floor's units along: the dialog previews the PDU / KVM label changes
-// and "Moves with it: Switch 01", ONE POST /api/devices/move-server that carries the units (rack_items) too, no other write;
+// and "Moves with it: Switch 01", ONE POST /api/devices/move-server with units_follow (no rack_items), no other write;
 // PDU outlet and KVM port labels swapped, the Dashboard PDU card shows each server on its new floor's outlet, PDU / KVM
 // devices and the 3D twin data unchanged; (2) the same with "Move the units on this floor with the server" cleared: the
-// units stay; (3) a swap between racks (Racks, Dashboard, Server health Rack column); (4) Move to rack onto an empty
-// storage shelf from the server's panel: "Which PDU outlet feeds shelf 9?" keeps its outlet by default (Racks, Server
+// units stay; (3) a swap between racks (Racks, Dashboard, Server health Rack column); (4) Move to… onto an empty
+// storage shelf from the server's window: "Which PDU outlet feeds shelf 9?" keeps its outlet by default (Racks, Server
 // health, lab display); (5) a move onto an empty floor whose PDU outlet is labelled "empty": that outlet is chosen, the
 // KVM port stays, and an "empty" key in rack_slots is cleaned out; (5b) a change elsewhere between the preview and
 // Confirm: 409, nothing at all was written (the units travel in the refused request), the dialog stays open and
 // previews again; (6) a unit move and an owner change, and the twin
-// iframe message; (7) open edit forms in context 2 keep their typed text. Everything is undone and checked.
+// iframe message; (7) an open unit window in context 2 keeps its typed text; (8) a swap made in the server window (no Edit
+// mode) and its Undo show on context 2's Racks and Dashboard. Everything is undone and checked.
 //
 // Fixture: tests/browser/preview-server.py with DCIM_TEST_ACCOUNTS=1 (run_suite.sh sets it); needs the backend change
 // feed (GET /api/changes) and the monitor's current rack. Only fixture data is touched; no live site or hardware.
@@ -85,6 +88,8 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
  }
  const applied=p=>p.waitForResponse(r=>r.url().endsWith('/api/devices/move-server')&&r.request().method()==='POST'&&!JSON.parse(r.request().postData()||'{}').dry_run,{timeout:20000});
  const moveDialog=p=>p.locator('[data-dialog="server-move"]');
+ // The server window a click or a drag opened: closed with its × before the next step (the page behind is inert).
+ async function closeWindow(p){const win=p.locator('[data-window]');if(await win.count()){await win.locator('.lab-window-close').click();await win.waitFor({state:'detached'});}}
  // The dialog's preview (the server's dry run) is shown and Confirm is enabled.
  async function previewed(dlg){
   await dlg.locator('[data-list="places"]').waitFor({timeout:15000});
@@ -150,7 +155,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   for(const p of [racks2,dash2,health2,display2])assert.equal(await p.evaluate(()=>document.visibilityState),'visible','every watching page is visible (the feed polls only then)');
   await dash2.locator('section.device-card[aria-label="KVM 01"]').first().waitFor({timeout:30000}).catch(()=>{});
   original.ports={};
-  {const loc=await locations();for(const name of ['OPT11','OPT12','OPT13','OPT14','OPT21','OPT71','OPT74'])original.ports[name]=portsOf(loc,name);}
+  {const loc=await locations();for(const name of ['OPT11','OPT12','OPT13','OPT14','OPT21','OPT31','OPT33','OPT71','OPT74'])original.ports[name]=portsOf(loc,name);}
   assert.deepEqual(original.ports.OPT12,{rack:'Rack-01',pdu:['pdu1:2'],kvm:['kvm1:2']},'start: OPT12 on PDU 01 outlet 2 and KVM 01 port 2');
   // ── context 1 (Admin): Racks in Edit mode, tall enough for Rack-01 and Rack-02 side by side ──
   const p1=await open(s1,'/?tab=racks',{height:1300});
@@ -164,23 +169,23 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   // ── 1. a swap inside Rack-01 that takes a floor's units along; the outlets and KVM ports stay with the floors ──
   {
    await drag(p1,grip(p1,'Rack-01','OPT12'),cell(p1,'Rack-01','OPT14'));
+   await p1.locator('[data-window="server"] h2.lab-window-name',{hasText:'OPT12'}).waitFor();
    const dlg=moveDialog(p1);await dlg.waitFor();
    assert.match(await dlg.locator('h2').innerText(),/^Swap OPT12 and OPT14$/);
-   assert.match(await dlg.locator('[data-units-follow]').innerText(),/Moves with it: Switch 01/);
    assert.equal(await dlg.getByLabel('Move the units on this floor with the server').isChecked(),true,'checked by default');
    const plan=await previewed(dlg);
+   assert.match(await dlg.locator('[data-units-follow]').innerText(),/Moves with it: Switch 01/);
    for(const line of ['PDU 01 outlet 2: OPT12 → OPT14','PDU 01 outlet 4: OPT14 → OPT12','KVM 01 port 2: OPT12 → OPT14','KVM 01 port 4: OPT14 → OPT12'])assert.ok(plan.includes(line),`the preview lists "${line}":\n${plan}`);
    const before={layout:w.layout.length,moves:w.moves.length};
    const done=applied(p1);
    await dlg.locator('[data-action="confirm-move"]').click();
    assert.equal((await done).status(),200);const t=Date.now();
-   await dlg.waitFor({state:'detached'});
+   await dlg.waitFor({state:'detached'});await closeWindow(p1);
    assert.deepEqual(w.layout.slice(before.layout),[],'no PUT /api/rack-layout: the units travel in the move itself');
    assert.equal(w.moves.length-before.moves,1,'one move-server for the servers, their ports and the units');
    const sent=w.moves.at(-1);
-   assert.deepEqual({...sent,rack_items:undefined},{server:'OPT12',target_server:'OPT14',swap:true,dry_run:false,plan_revision:sent.plan_revision,rack_items:undefined});
-   assert.ok(sent.plan_revision&&sent.rack_items?.if_match,'the preview\'s plan revision and the equipment list\'s ETag');
-   assert.equal(findItem(sent.rack_items.data,'ci-1').item.u,4,'the request moves Switch 01 to floor 4');
+   assert.deepEqual(sent,{server:'OPT12',target_server:'OPT14',swap:true,units_follow:true,dry_run:false,plan_revision:sent.plan_revision});
+   assert.ok(sent.plan_revision,'the preview\'s plan revision');
    const pdu1=await labelsOf('pdu1');
    assert.deepEqual([pdu1['2'],pdu1['4']],['OPT14','OPT12'],'PDU 01 outlets 2 and 4 swapped names');
    const loc=await locations();
@@ -191,7 +196,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await sameDevices('swap inside Rack-01');await sameTwin('swap inside Rack-01');
    fast('swap inside a rack (Racks)',await within('swap inside a rack (Racks)',t,async()=>await serverAt(racks2,'Rack-01',4,'OPT12')&&await unitAt(racks2,'Rack-01',4,'ci-1')&&await serverAt(racks2,'Rack-01',2,'OPT14')));
    fast('swap inside a rack (Dashboard)',await within('swap inside a rack (Dashboard)',t,async()=>JSON.stringify(await outlets(dash2,'PDU 01'))===JSON.stringify(['OPT11','OPT14','OPT13','OPT12'])));
-   passed.push('1 drag OPT12 onto OPT14 (Rack-01): the dialog previews PDU 01 outlets 2/4 and KVM 01 ports 2/4 and "Moves with it: Switch 01" (box checked); ONE move-server carrying rack_items, no rack-layout request; labels and KVM ports swapped, Switch 01 on floor 4, no PDU/KVM moved, twin data untouched; context 2 Racks and the Dashboard PDU 01 card follow');
+   passed.push('1 drag OPT12 onto OPT14 (Rack-01) opens OPT12\'s window: the dialog previews PDU 01 outlets 2/4 and KVM 01 ports 2/4 and "Moves with it: Switch 01" (box checked); ONE move-server with units_follow (no rack_items), no rack-layout request; labels and KVM ports swapped, Switch 01 on floor 4, no PDU/KVM moved, twin data untouched; context 2 Racks and the Dashboard PDU 01 card follow');
   }
 
   // ── 2. the same with the box cleared: the servers swap (with their floors' outlets), the units stay ──
@@ -199,15 +204,17 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await drag(p1,grip(p1,'Rack-01','OPT11'),cell(p1,'Rack-01','OPT12'));
    const dlg=moveDialog(p1);await dlg.waitFor();
    assert.match(await dlg.locator('h2').innerText(),/^Swap OPT11 and OPT12$/);
+   await previewed(dlg);
    assert.match(await dlg.locator('[data-units-follow]').innerText(),/Moves with OPT12: Switch 01/);
    await dlg.getByLabel('Move the units on this floor with the server').uncheck();
    await previewed(dlg);
    const before=w.layout.length,done=applied(p1);
    await dlg.locator('[data-action="confirm-move"]').click();
    assert.equal((await done).status(),200);const t=Date.now();
-   await dlg.waitFor({state:'detached'});
+   await dlg.waitFor({state:'detached'});await closeWindow(p1);
    assert.equal(w.layout.length,before,'no units: no rack-layout request');
    assert.equal('rack_items' in w.moves.at(-1),false,'no units in the move either');
+   assert.equal(w.moves.at(-1).units_follow,false,'units_follow false: the units stay');
    assert.equal(findItem((await get('/api/rack-items')).data,'ci-1').item.u,4,'Switch 01 stayed on floor 4');
    const pdu1=await labelsOf('pdu1');
    assert.deepEqual([pdu1['1'],pdu1['4']],['OPT12','OPT11']);
@@ -225,7 +232,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    const done=applied(p1);
    await dlg.locator('[data-action="confirm-move"]').click();
    assert.equal((await done).status(),200);const t=Date.now();
-   await dlg.waitFor({state:'detached'});
+   await dlg.waitFor({state:'detached'});await closeWindow(p1);
    assert.equal((await labelsOf('pdu2'))['1'],'OPT14');assert.equal((await labelsOf('pdu1'))['2'],'OPT21');
    await sameDevices('swap between racks');
    fast('swap between racks (Racks)',await within('swap between racks (Racks)',t,async()=>await serverAt(racks2,'Rack-02',1,'OPT14')&&await serverAt(racks2,'Rack-01',2,'OPT21')));
@@ -238,14 +245,14 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   {
    const shownBefore=await display2.locator('[data-rack="Rack-01"] .ld-rack-servers').innerText();
    await cell(p1,'Rack-01','OPT13').locator('button.server-open').click();
-   const side=p1.locator('div.fixed.inset-0.z-50.flex.justify-end');await side.getByText('Remove from DCIM').waitFor();
-   await side.getByLabel('Move OPT13 to rack').selectOption('Storage shelf');
-   await side.getByRole('button',{name:'Move…'}).click();
+   const side=p1.locator('[data-window="server"]');await side.locator('h2.lab-window-name',{hasText:'OPT13'}).waitFor();
+   await side.locator('[data-action="move-to"]').click();
    const dlg=moveDialog(p1);await dlg.waitFor();
-   assert.match(await dlg.locator('h2').innerText(),/^Move OPT13$/);
+   await dlg.getByLabel('Rack',{exact:true}).selectOption('Storage shelf');
    await dlg.getByLabel('Shelf',{exact:true}).selectOption('9');
+   assert.match(await dlg.locator('h2').innerText(),/^Move OPT13$/,'an empty shelf: a move, not a swap');
    const ask=dlg.locator('[data-floor-outlet]');
-   assert.equal(await ask.locator('label').innerText(),'Which PDU outlet feeds shelf 9?');
+   assert.equal(await ask.locator('legend').innerText(),'Which PDU outlet feeds shelf 9?');
    assert.equal(await ask.locator('select').inputValue(),'keep','default: keep its current outlet');
    assert.match(await ask.locator('select option:checked').innerText(),/^Keep PDU 01 · outlet 3$/);
    const plan=await previewed(dlg);
@@ -253,13 +260,13 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    const done=applied(p1);
    await dlg.locator('[data-action="confirm-move"]').click();
    assert.equal((await done).status(),200);const t=Date.now();
-   await dlg.waitFor({state:'detached'});await side.waitFor({state:'detached'});
+   await dlg.waitFor({state:'detached'});await closeWindow(p1);
    assert.deepEqual(portsOf(await locations(),'OPT13'),{rack:'Storage shelf',pdu:['pdu1:3'],kvm:['kvm1:3']},'it keeps PDU 01 outlet 3 and KVM 01 port 3');
    await sameDevices('move to a storage shelf');
    fast('Move to rack (Racks)',await within('Move to rack (Racks)',t,async()=>await serverAt(racks2,'Storage shelf',9,'OPT13')));
    fast('Move to rack (Server health)',await within('Move to rack (Server health)',t,async()=>(await rackOf('OPT13'))==='Storage shelf'));
    fast('Move to rack (lab display)',await within('Move to rack (lab display)',t,async()=>/^3\s*\/\s*3/.test(await display2.locator('[data-rack="Rack-01"] .ld-rack-servers').innerText())));
-   passed.push(`4 OPT13's panel: Move to rack "Storage shelf", shelf 9: "Which PDU outlet feeds shelf 9?" keeps PDU 01 outlet 3 by default; context 2 Racks, the Server health Rack column and the lab display (Rack-01 "${shownBefore.replace(/\s+/g,' ')}" -> 3 / 3 on) follow`);
+   passed.push(`4 OPT13's window: Move to… "Storage shelf", shelf 9: "Which PDU outlet feeds shelf 9?" keeps PDU 01 outlet 3 by default; context 2 Racks, the Server health Rack column and the lab display (Rack-01 "${shownBefore.replace(/\s+/g,' ')}" -> 3 / 3 on) follow`);
   }
 
   // ── 5. onto an empty floor whose outlet the PDU labels "empty": that outlet feeds it; an "empty" key is cleaned ──
@@ -267,11 +274,14 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await setLabels('pdu7',{...original.labels.pdu7,4:'empty'});   // Rack-07 floor 4 is empty now
    await put('/api/rack-slots',d=>({...d,'Rack-07':{...(d['Rack-07']||{}),empty:4}}));   // old data: a placeholder as a server
    await within('Rack-07 floor 4 empty (context 1)',Date.now(),async()=>(await card(p1,'Rack-07').locator('.server-cell[data-server="OPT74"]').count())===0,LIVE_MS);
+   // A window opened again first shows the lab data of the last one: wait for its fresh read of the server list.
+   const fresh=p1.waitForResponse(r=>r.url().endsWith('/api/devices/locations')&&r.request().method()==='GET');
    await card(p1,'Storage shelf').locator('.server-cell[data-server="OPT13"] button.server-open').click();
-   const side=p1.locator('div.fixed.inset-0.z-50.flex.justify-end');await side.getByText('Remove from DCIM').waitFor();
-   await side.getByLabel('Move OPT13 to rack').selectOption('Rack-07');
-   await side.getByRole('button',{name:'Move…'}).click();
+   const side=p1.locator('[data-window="server"]');await side.locator('h2.lab-window-name',{hasText:'OPT13'}).waitFor();
+   await fresh;await sleep(300);
+   await side.locator('[data-action="move-to"]').click();
    const dlg=moveDialog(p1);await dlg.waitFor();
+   await dlg.getByLabel('Rack',{exact:true}).selectOption('Rack-07');
    assert.equal(await dlg.getByLabel('Floor',{exact:true}).inputValue(),'4','the first free floor');
    const ask=dlg.locator('[data-floor-outlet]');
    await ask.locator('select:not([disabled])').waitFor();
@@ -282,7 +292,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    const done=applied(p1);
    await dlg.locator('[data-action="confirm-move"]').click();
    assert.equal((await done).status(),200);const t=Date.now();
-   await dlg.waitFor({state:'detached'});await side.waitFor({state:'detached'});
+   await dlg.waitFor({state:'detached'});await closeWindow(p1);
    assert.deepEqual(portsOf(await locations(),'OPT13'),{rack:'Rack-07',pdu:['pdu7:4'],kvm:['kvm1:3']},'PDU 07 outlet 4 feeds it; its KVM port stays');
    assert.equal((await labelsOf('pdu1'))['3'],'Outlet 3','its old outlet is free');
    let slots;for(let i=0;i<30;i++){slots=(await get('/api/rack-slots')).data;if(!('empty' in (slots['Rack-07']||{})))break;await sleep(150);}
@@ -297,10 +307,10 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    await drag(p1,grip(p1,'Rack-01','OPT11'),cell(p1,'Rack-01','OPT12'));
    const dlg=moveDialog(p1);await dlg.waitFor();
    assert.match(await dlg.locator('h2').innerText(),/^Swap OPT11 and OPT12$/);
-   assert.match(await dlg.locator('[data-units-follow]').innerText(),/Moves with it: Switch 01/);
    // This tab hears of the other change only through the refused save (its change feed is held for this step).
    await p1.route('**/api/changes',r=>r.fulfill({status:503,contentType:'application/json',body:'{}'}));
    const plan=await previewed(dlg);
+   assert.match(await dlg.locator('[data-units-follow]').innerText(),/Moves with it: Switch 01/);
    assert.ok(plan.includes('KVM 01 port 1: OPT12 → OPT11'),plan);
    // The page's periodic device reload (App: every refresh_seconds) would also preview the latest before Confirm:
    // held from here until the refused save, so Confirm sends the preview made before the change elsewhere.
@@ -324,7 +334,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    done=applied(p1);
    await dlg.locator('[data-action="confirm-move"]').click();
    assert.equal((await done).status(),200);const t=Date.now();
-   await dlg.waitFor({state:'detached'});
+   await dlg.waitFor({state:'detached'});await closeWindow(p1);
    assert.equal(findItem((await get('/api/rack-items')).data,'ci-1').item.u,1,'Switch 01 went to floor 1 with OPT11');
    assert.deepEqual(portsOf(await locations(),'OPT11'),{rack:'Rack-01',pdu:['pdu1:1'],kvm:[]},'OPT11 takes floor 1\'s outlet (its KVM port was cleared elsewhere)');
    fast('swap after a refused save (Racks)',await within('swap after a refused save (Racks)',t,async()=>await serverAt(racks2,'Rack-01',1,'OPT11')&&await unitAt(racks2,'Rack-01',1,'ci-1')&&await serverAt(racks2,'Rack-01',4,'OPT12')));
@@ -355,29 +365,50 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    passed.push(`6 a unit move (Switch 05 to floor 3) and an owner change (OPT52 -> ${person.name}) show in context 2; the twin iframe gets {type: "twin:data-changed", domains}`);
   }
 
-  // ── 7. open edit forms in context 2 keep what is typed when a change arrives ──
+  // ── 7. an open unit window in context 2 keeps what is typed when a change arrives (Racks' unit click opens it) ──
   {
-   await setEdit(racks2,true);
-   await card(racks2,'Rack-06').locator('.equipment-cell[data-item-id="ci-6"]').click();
-   const side=racks2.locator('div.fixed.inset-0.z-50.flex.justify-end');await side.getByText('Save changes').waitFor();
-   await side.locator('textarea').fill('typed in context 2');
+   const unit=card(racks2,'Rack-06').locator('.equipment-cell[data-item-id="ci-6"]');
+   if(!(await unit.isVisible()))await unit.evaluate(e=>e.closest('.floor-more:not([data-open])')?.querySelector(':scope > .floor-more-toggle')?.click());
+   await unit.click();
+   const side=racks2.locator('[data-window="unit"]');await side.locator('#unit-form-notes').waitFor();
+   const notesBefore=await side.locator('#unit-form-notes').inputValue();
+   await side.locator('#unit-form-notes').fill('typed in context 2');
    const t=await put('/api/rack-items',doc=>{findItem(doc,'ci-6').item.serial_number='LIVE-SN-6';return doc;});
-   fast('equipment form keeps typed text',await within('equipment form keeps typed text',t,async()=>/changed in another session/.test(await side.innerText())&&(await side.getByLabel('Serial number').inputValue())==='LIVE-SN-6'));
-   assert.equal(await side.locator('textarea').inputValue(),'typed in context 2','the typed notes are kept');
-   assert.match(await side.innerText(),/with your edits kept/);
-   await racks2.keyboard.press('Escape');await side.waitFor({state:'detached'});
+   fast('unit window keeps typed text',await within('unit window keeps typed text',t,async()=>/changed in another session/.test(await side.innerText())&&(await side.locator('#unit-form-serial_number').inputValue())==='LIVE-SN-6'));
+   assert.equal(await side.locator('#unit-form-notes').inputValue(),'typed in context 2','the typed notes are kept');
+   await side.locator('#unit-form-notes').fill(notesBefore);   // leave without changing anything
+   await closeWindow(racks2);
+   passed.push('7 context 2: the open unit window (opened from its Racks slot) shows the new serial saved in another session and keeps its typed notes, saying "changed in another session"');
+  }
 
-   await card(racks2,'Rack-06').locator('button.server-open[aria-label="View OPT61"]').click();
-   await side.getByText('Remove from DCIM').waitFor();
-   await side.getByPlaceholder('Switch name').fill('SW-typed');
-   const t2=await put('/api/switch-assignments',doc=>({...doc,opt61:{switch:'SW-LIVE',port:7}}));
-   fast('server form keeps typed text',await within('server form keeps typed text',t2,async()=>(await side.locator('[data-changed-elsewhere]').count())>0&&(await side.getByPlaceholder('Port').inputValue())==='7'));
-   assert.equal(await side.getByPlaceholder('Switch name').inputValue(),'SW-typed','the typed switch name is kept');
-   assert.match(await side.locator('[data-changed-elsewhere]').innerText(),/with your edits kept/);
-   await side.getByPlaceholder('Switch name').fill('SW-LIVE');   // leave without changing anything
-   await racks2.keyboard.press('Escape');await side.waitFor({state:'detached'});
-   await setEdit(racks2,false);
-   passed.push('7 context 2 in Edit mode: the open equipment panel reopens on the saved unit (new serial) with its typed notes kept; the open server panel follows the new port and keeps its typed switch name; both say "changed in another session"');
+  // ── 8. the server window (one place for every server change): a swap and its Undo reach context 2 ──
+  {
+   const w1=await open(s1,'/?tab=dashboard&srv=opt31',{ready:'[data-window="server"] [data-section="place"]'});
+   const win=w1.locator('[data-window="server"]');
+   await win.getByRole('button',{name:'Swap with…'}).click();
+   const dlg=moveDialog(w1);await dlg.waitFor();
+   await dlg.getByRole('combobox').fill('OPT33');
+   await dlg.getByRole('option').first().waitFor();
+   await dlg.getByRole('combobox').press('Enter');
+   const plan=await previewed(dlg);
+   assert.ok(plan.includes('PDU 03 outlet 1: OPT31 → OPT33')&&plan.includes('PDU 03 outlet 3: OPT33 → OPT31'),plan);
+   let done=applied(w1);
+   await dlg.locator('[data-action="confirm-move"]').click();
+   assert.equal((await done).status(),200);let t=Date.now();
+   await dlg.waitFor({state:'detached'});
+   fast('window swap (Racks)',await within('window swap (Racks)',t,async()=>await serverAt(racks2,'Rack-03',3,'OPT31')&&await serverAt(racks2,'Rack-03',1,'OPT33')));
+   fast('window swap (Dashboard)',await within('window swap (Dashboard)',t,async()=>JSON.stringify(await outlets(dash2,'PDU 03'))===JSON.stringify(['OPT33','OPT32','OPT31','OPT34'])));
+   const toast=w1.locator('.lab-toast',{hasText:'OPT31 and OPT33 swapped places.'});await toast.waitFor();
+   done=applied(w1);
+   await toast.getByRole('button',{name:'Undo'}).click();
+   assert.equal((await done).status(),200);t=Date.now();
+   fast('window Undo (Racks)',await within('window Undo (Racks)',t,async()=>await serverAt(racks2,'Rack-03',1,'OPT31')&&await serverAt(racks2,'Rack-03',3,'OPT33')));
+   fast('window Undo (Dashboard)',await within('window Undo (Dashboard)',t,async()=>JSON.stringify(await outlets(dash2,'PDU 03'))===JSON.stringify(['OPT31','OPT32','OPT33','OPT34'])));
+   const loc=await locations();
+   for(const name of ['OPT31','OPT33'])assert.deepEqual(portsOf(loc,name),original.ports[name],`${name} back on its ports after Undo`);
+   await sameDevices('window swap and Undo');
+   await w1.close();
+   passed.push(`8 the server window (Dashboard, no Edit mode): OPT31 › Swap with › "OPT33" previews PDU 03 outlets 1/3; Swap and the toast's Undo each show on context 2's Racks and Dashboard PDU 03 card within the limit; no PDU/KVM moved`);
   }
 
   for(const p of [racks2,dash2,health2,display2])assert.ok(await kept(p),'context 2 pages were never reloaded');

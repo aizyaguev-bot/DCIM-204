@@ -237,19 +237,23 @@ async def test_concurrent_label_saves_with_one_revision_cannot_both_win(tmp_path
     await engine.dispose()
 
 
-# ── Delete ────────────────────────────────────────────────────────────────────
+# ── Delete (retired: POST /api/lab/delete, v2 spec D.5) ──────────────────────────────────────────────────────────
 
-async def test_delete_device(client):
+async def test_the_old_delete_answers_409_and_deletes_nothing(client):
+    """Every delete is previewed and restorable now (POST /api/lab/delete). A page built before that gets a 409 that says
+    what to do, and the device stays."""
     dev_id = (await _create(client, _PDU_PAYLOAD))["id"]
     r = await client.delete(f"/api/devices/{dev_id}")
-    assert r.status_code == 204
+    assert r.status_code == 409
+    assert r.json()["detail"] == ("Reload the page: PDUs, KVMs and racks are deleted from their window now, so they can "
+                                  "be restored.")
     ids = [d["id"] for d in (await client.get("/api/devices/")).json()]
-    assert dev_id not in ids
+    assert dev_id in ids
 
 
-async def test_delete_device_not_found(client):
+async def test_the_old_delete_answers_409_for_an_unknown_id_too(client):
     r = await client.delete("/api/devices/no-such-id")
-    assert r.status_code == 404
+    assert r.status_code == 409
 
 
 # ── Credential helpers (pure unit — no HTTP) ──────────────────────────────────
@@ -350,17 +354,17 @@ async def test_a_legacy_duplicate_keeps_saving_while_its_address_and_kind_stay(c
     body = {"name": "PDU-B", "kind": "pdu", "ip": "192.0.2.7", "rack": "R2"}
     r = await client.put("/api/devices/old-2", json=body)
     assert r.status_code == 200 and r.json()["rack"] == "R2"
-    # Changing the kind is a new claim on the address.
+    # The kind of a device never changes (v2 spec D.5): a PDU's outlets, alerts and maintenance follow its row.
     r = await client.put("/api/devices/old-2", json={**body, "kind": "kvm"})
-    assert r.status_code == 409 and r.json() == {"detail": f"PDU-A (PDU) {SHARED}"}
+    assert r.status_code == 422 and r.json() == {"detail": devices.KIND_LOCKED}
 
 
-async def test_turning_a_rack_row_into_a_pdu_on_a_taken_address_is_409(client):
+async def test_a_rack_row_never_turns_into_a_pdu(client):
     await _create(client, {**_PDU_PAYLOAD, "ip": "192.0.2.1"})
     rack = await _create(client, {"name": "Rack-01", "kind": "rack", "ip": "192.0.2.1", "rack": "Rack-01"})
     r = await client.put(f"/api/devices/{rack['id']}",
                          json={"name": "Rack-01", "kind": "pdu", "ip": "192.0.2.1", "rack": "Rack-01"})
-    assert r.status_code == 409 and r.json() == {"detail": f"PDU-1 (PDU) {SHARED}"}
+    assert r.status_code == 422 and r.json() == {"detail": devices.KIND_LOCKED}
     assert ("Rack-01", "rack", "192.0.2.1", "Rack-01") in await _devices(client)
 
 

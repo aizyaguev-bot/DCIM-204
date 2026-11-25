@@ -1,8 +1,7 @@
 import { sumKnown, reading } from "../power";
 import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, useId, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
-import { loadRackItems, saveRackItems, rememberRackItems, MAIN_STORAGE, UNIT_DETAILS, unitDetailChanges, detailText, duplicateField } from "../api/inventory";
-import { GENERIC_UNIT_NAME, isGenericUnit, serialUnitType, unitTypeLabel } from "../api/scanParse.js";
+import { loadRackItems, saveRackItems, MAIN_STORAGE, detailText } from "../api/inventory";
 import { loadLayout, saveLayout } from "../api/layout";
 import { useLiveReload } from "../api/useLiveReload.js";
 import { splitSections, sectionHeading, versionOf } from "../api/changelog";
@@ -12,39 +11,38 @@ import {OwnerSelect, useEngineers} from "../engineers";
 import SshButton, { useSshStatus } from "../components/SshButton";
 import { findServer } from "../api/ssh";
 import { serverIdentity } from "../api/locations";
-import { api, deviceState } from "../api/client";
+import { deviceState } from "../api/client";
 import { serverVisualState, rackSummary, maintenanceFor, withCoolingRows, compactRows, rackFloors, RACK_FLOORS, buildSearchIndex, searchIndex, matchesFilter, floorOptions,
   FLOOR_UNIT_SLOTS, SHELF_SLOTS, splitSlots, moreText, serverFacts, midSplit } from "../components/racks/rackView.js";
 import { STORAGE_SHELVES, floorsFor, placesWord, rackHasFloors, validFloor, setStorageRacks, storageRackNames } from "../components/racks/floors.js";
-import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, validPlace, shelfLabel, placeWord, floorLabel, sameDocument } from "../components/racks/chillers.js";
-import { BLOCK, serverPowerGroup, planServerPower, sameTargets, serverDisplayName } from "../components/racks/serverPower.js";
-import ServerPowerControl, { PowerActionButtons } from "../components/racks/ServerPowerControl.jsx";
-import PowerConfirmDialog from "../components/racks/PowerConfirmDialog.jsx";
+import { normalizeChillers, groupChillers, updateChiller, placeChiller, addChiller, newChillerId, assertKeepsUnits, describePlace, coolingChange, undoCoolingChange, validShelf, validPlace, placeWord, sameDocument } from "../components/racks/chillers.js";
+import { BLOCK } from "../components/racks/serverPower.js";
+import ServerPowerControl from "../components/racks/ServerPowerControl.jsx";
 import CoolingUnitDialog from "../components/racks/CoolingUnitDialog.jsx";
 import { CoolingChip, CoolingStrip, CoolingPanel } from "../components/racks/CoolingUnits.jsx";
 import { RackKpis, RacksToolbar, filterEmptyText } from "../components/racks/RacksToolbar.jsx";
-import ServerDetailsDialog from "../components/racks/ServerDetailsDialog.jsx";
-import RemoveServerDialog from "../components/racks/RemoveServerDialog.jsx";
 import { useRemovedServers } from "../removedServers.jsx";
-import { withoutRemoved, restoreServer } from "../api/removedServers.js";
+import { withoutRemoved } from "../api/removedServers.js";
 import UndoToast from "../components/racks/UndoToast.jsx";
 import ScanUnitDialog from "../components/racks/ScanUnitDialog.jsx";
-import ServerMoveDialog from "../components/racks/ServerMoveDialog.jsx";
-import { moveWithUnits, serversOnFloor, unitNames, unitsConflict, unitsMovingWith, unitsOnFloor } from "../components/racks/serverMove.js";
 import ShelfLabelsDialog from "../components/racks/ShelfLabelsDialog.jsx";
 import { buildShelfLabels } from "../shelfLabels.js";
-import { floorServer, rowsUnitOwners, unitOwners, withUnitOwners, ownerOfUnit, ownerFromText, itemOwnerKey } from "../unitOwner.js";
-import useDialogFocus from "../components/racks/useDialogFocus.js";
+import { floorServer, rowsUnitOwners, unitOwners, withUnitOwners, ownerOfUnit, ownerFromText } from "../unitOwner.js";
 import { useStoredState, useMediaQuery, useDebounced, flash, prefersReducedMotion } from "../components/racks/hooks.js";
 import { mergeServerFeeds } from "../labDisplay.js";
-import { serverRef, itemRef, rackRef } from "../twinLinks.js";
+import { rackRef } from "../twinLinks.js";
+// The lab windows (window/CONTRACT.md): a server opens its window, a unit its unit window, a PDU or KVM its device
+// window; a drag opens the server window on its move dialog; power goes through the provider's one power hook.
+import { useLabWindow } from "../window/labWindowContext.js";
+import { windowKey } from "../server/serverKey.js";
+import AddServerDialog from "../server/AddServerDialog.jsx";
 
 const EditContext = createContext(false);
 // Server actions in the rack views: the KVM port of each server (by server identity), the console opener and SSH
-// (sshFor, drawn through the SSH slot renderSsh), and the server's power (feeds, pending request, the request that
-// opens the in-app confirmation).
+// (sshFor, drawn through the SSH slot renderSsh), the server's power (feeds, pending request, the request that opens
+// the in-app confirmation), scanning units onto a floor and adding a server ({ rack, u }: AddServerDialog).
 const ServerActionsContext = createContext({ kvmFor: () => null, openConsole: null, sshFor: () => null, canOperate: false,
-  powerFor: null, powerPending: () => null, requestPower: null, waitingFor: () => false, renderSsh: null, scanUnit: null });
+  powerFor: null, powerPending: () => null, requestPower: null, waitingFor: () => false, renderSsh: null, scanUnit: null, addServer: null });
 
 // Small KVM button for a server row: opens that server's KVM console (Operator and up).
 function KvmButton({ server, compact = false }) {
@@ -82,12 +80,11 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-// "Show in 3D" (every role): opens the 3D Twin tab on this rack, server or unit (App's goTo("twin", { ref })).
-// Nothing when DcimView has no twin link. The text button shows its whole name, "Show Rack-03 in 3D" (label in name).
-// blocked: why it cannot leave Racks now (an edit panel with unsaved changes); it stays focusable, aria-disabled,
-// and a click calls onBlocked instead, so the panel can say why.
+// "Show in 3D" (every role): opens the 3D Twin tab on this rack (App's goTo("twin", { ref })). Nothing when DcimView
+// has no twin link. The text button shows its whole name, "Show Rack-03 in 3D" (label in name). Servers and units show
+// in 3D from their windows. blocked: why it cannot leave Racks now; it stays focusable, aria-disabled, and a click calls
+// onBlocked instead.
 const TwinLinkContext = createContext(null);
-const PANEL_ICON_BTN = "flex items-center justify-center w-7 h-7 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-100 transition border border-zinc-700/50 flex-shrink-0 aria-disabled:opacity-40 aria-disabled:cursor-not-allowed";
 function ShowIn3dButton({ target, name, text = false, className = "icon-btn show-3d", blocked = null, onBlocked = null }) {
   const showIn3d = useContext(TwinLinkContext);
   if (!showIn3d || !target) return null;
@@ -98,16 +95,6 @@ function ShowIn3dButton({ target, name, text = false, className = "icon-btn show
     ? <button {...props} title={blocked || undefined}>{Icon.cube} Show <bdi>{name}</bdi> in 3D</button>
     : <button {...props} aria-label={label} title={blocked ? `${label}: ${blocked}` : label}>{Icon.cube}</button>;
 }
-// An edit panel's Show in 3D: blocked while the panel has unsaved or saving changes. Returns the note to show after a
-// blocked click ("" otherwise; it goes once the changes are saved or undone) and the onBlocked handler.
-const TWIN_UNSAVED = "Save or undo your changes first: Show in 3D leaves Racks.";
-const TWIN_SAVING = "Your change is still being saved. Show in 3D when it is done.";
-function useTwinBlockedNote(blocked) {
-  const [asked, setAsked] = useState(false);
-  useEffect(() => { if (!blocked) setAsked(false); }, [blocked]);
-  return [asked && blocked ? blocked : "", () => setAsked(true)];
-}
-
 // ─── icons ───────────────────────────────────────────────────────────────────
 const I = ({ d, size = 14, sw = 1.8 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -292,45 +279,11 @@ function useEscClose(onClose) {
 const SLOT_H = 48;   // height of an occupied U row
 const EMPTY_H = 20;  // height of an empty U row
 
-// Module-level: rows remount when their shelf changes, which must not drop or orphan a pending open.
-let pendingOpen = null;
-
-// Inline-rename text span
-function InlineName({ value, onRename, onOpen, className, mid = false }) {
-  const editMode = useContext(EditContext);
-  const [editing, setEditing] = useState(false);
-  const [draft,   setDraft]   = useState(value);
-  const ref = useRef(null);
-
-  useEffect(() => { if (editing) { setDraft(value); ref.current?.select(); } }, [editing]);
-
-  function commit() {
-    const v = draft.trim();
-    if (editMode && v && v !== value) onRename?.(v);
-    setEditing(false);
-  }
-
-  if (editing && editMode) {
-    return (
-      <input ref={ref} value={draft} onChange={e => setDraft(e.target.value)}
-        onKeyDown={e => { e.stopPropagation(); if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
-        onBlur={commit} onClick={e => e.stopPropagation()} dir="auto" aria-label={`Rename ${value}`}
-        className="flex-1 min-w-0 bg-transparent border-b border-nv-400/70 outline-none text-[11px] font-mono text-zinc-100"/>
-    );
-  }
-  return (
-    <span onDoubleClick={e => { e.stopPropagation(); clearTimeout(pendingOpen); if (editMode) setEditing(true); }}
-      onClick={e => {
-        if (!editMode) return;
-        // Opening waits out the double-click window so a double-click still renames.
-        e.stopPropagation(); clearTimeout(pendingOpen);
-        if (onOpen) pendingOpen = setTimeout(onOpen, 250);
-      }}
-      title={editMode ? "Click to open · double-click to rename" : value} dir="auto"
-      className={`${className}${mid ? " mid-text" : ""} cursor-text select-none`}>
-      {mid ? <MidText text={value} keep={6}/> : value}
-    </span>
-  );
+// A unit's name in its slot (the slot itself is the button that opens the unit window).
+function InlineName({ value, className, mid = false }) {
+  return <span title={value} dir="auto" className={`${className}${mid ? " mid-text" : ""} select-none`}>
+    {mid ? <MidText text={value} keep={6}/> : value}
+  </span>;
 }
 
 // ─── server row ───────────────────────────────────────────────────────────────
@@ -355,29 +308,12 @@ function RowPower({ server }) {
     onRequest={(action, el) => requestPower(server, action, el)}/>;
 }
 
-// The server's name is its open button (so Power, KVM and SSH are sibling buttons, never nested). In Edit mode a
-// click opens after the double-click window and a double-click renames. hint: more about the server for its tooltip.
-function ServerName({ server, onOpen, onRename, hint = "" }) {
-  const editMode = useContext(EditContext);
-  const [editing, setEditing] = useState(false);
-  const [draft,   setDraft]   = useState(server.name);
-  const ref = useRef(null);
-  useEffect(() => { if (editing) { setDraft(server.name); ref.current?.select(); } }, [editing]);
-  useEffect(() => { if (!editMode) setEditing(false); }, [editMode]);
-  function commit() {
-    const v = draft.trim();
-    if (editMode && v && v !== server.name) onRename?.(v);
-    setEditing(false);
-  }
-  if (editing && editMode) {
-    return <input ref={ref} dir="auto" aria-label={`Rename ${server.name}`} value={draft} onChange={e => setDraft(e.target.value)}
-      onKeyDown={e => { e.stopPropagation(); if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
-      onBlur={commit} onClick={e => e.stopPropagation()} className="server-rename"/>;
-  }
+// The server's name is its open button (so Power, KVM and SSH are sibling buttons, never nested): a click opens the
+// server window at once, in Edit mode too (no rename here: the window renames). hint: more about it for its tooltip.
+function ServerName({ server, onOpen, hint = "" }) {
   return <button type="button" className="server-open" aria-label={`View ${server.name}`}
-    title={`${server.name}${hint ? ` · ${hint}` : ""}${editMode ? " · click to open · double-click to rename" : ""}`}
-    onClick={e => { e.stopPropagation(); clearTimeout(pendingOpen); if (editMode) pendingOpen = setTimeout(onOpen, 250); else onOpen(); }}
-    onDoubleClick={e => { e.stopPropagation(); clearTimeout(pendingOpen); if (editMode) setEditing(true); }}>
+    title={`${server.name}${hint ? ` · ${hint}` : ""}`}
+    onClick={e => { e.stopPropagation(); onOpen(); }}>
     <span dir="auto" className="server-name">{server.name}</span>
   </button>;
 }
@@ -440,7 +376,7 @@ function revealInFloor(el) {
 // holds more servers (old data), at the end of line 2.
 // variant "chip": a storage shelf's unit slot (the same two lines, no actions; the details have them).
 // data-feeds="partial": its feeds disagree (one on, one off), shown in amber like its Mixed switch.
-function ServerCell({ server, sw, owner, onSelect, onRename, overlay = false, dragHandleProps = null, variant = "floor", more = null }) {
+function ServerCell({ server, sw, owner, onSelect, overlay = false, dragHandleProps = null, variant = "floor", more = null }) {
   const editMode = useContext(EditContext);
   const { visualFor, matchKeys } = useContext(RackViewContext);
   const { powerFor, feedsFor, kvmFor, canOperate, renderSsh } = useContext(ServerActionsContext);
@@ -471,7 +407,7 @@ function ServerCell({ server, sw, owner, onSelect, onRename, overlay = false, dr
     <span className="server-led" aria-hidden="true"/>
     <div className="unit-head">
       {editMode && !overlay && <div {...(dragHandleProps || {})} tabIndex={-1} className="shelf-grip" aria-label={`Move ${server.name}`} title="Drag to move" onClick={e => e.stopPropagation()}>{Icon.grip}</div>}
-      <ServerName server={server} onOpen={open} onRename={onRename} hint={hint}/>
+      <ServerName server={server} onOpen={open} hint={hint}/>
       <span className="unit-state">
         <span className="server-state" data-state={visual.state} title={visual.title}>{visual.word}</span>
         {!chip && visual.maintenance && <span className="maint-badge" title={BLOCK.maintenance}>Maintenance</span>}
@@ -535,7 +471,7 @@ function EmptySlot({ lines = 3 }) {
 // (and in its tooltip); model and MAC address are in its tooltip and its details. Enter or Space opens it.
 // owner: its owner by the lab's rule (unitOwner.js); ownerFrom: the server on its floor it comes from. Both are in its
 // tooltip and its accessible description (the slot keeps its fixed lines; the server beside it shows the same owner).
-function EquipCell({ item, onSelect, onRename, lines = 3, owner = "", ownerFrom = null }) {
+function EquipCell({ item, onSelect, lines = 3, owner = "", ownerFrom = null }) {
   const meta = ITEM_TYPES[item.type] || ITEM_TYPES.other;
   const { matchKeys } = useContext(RackViewContext);
   const ownerId = useId();
@@ -552,7 +488,7 @@ function EquipCell({ item, onSelect, onRename, lines = 3, owner = "", ownerFrom 
     {ownerText && <span id={ownerId} className="sr-only" dir="auto">{ownerText}</span>}
     <span className="slot-line slot-name">
       {lines > 2 && <span className="slot-label">Name</span>}
-      <InlineName value={item.name} onRename={onRename} onOpen={() => onSelect?.(item)} className="equipment-name" mid/>
+      <InlineName value={item.name} className="equipment-name" mid/>
     </span>
     <span className="slot-line"><SlotField field="part_number" label="P/N" value={detailText(item, "part_number")}/></span>
     {lines > 2 && <span className="slot-line"><SlotField field="serial_number" label="S/N" value={serial}/></span>}
@@ -597,9 +533,10 @@ function shelfIndex(u, floors, auto) {
 // place and its labels. More units than slots: every slot shows a unit and a small "+N" chip at the end of the last
 // slot's first line opens the rest. A storage shelf (floors false) is one row of `slots` unit slots for everything on
 // it, servers and units alike ("+N" on the last); never servers | units.
-function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSelectServer, onSelectCustom, onRenameServer, onRenameCustom, sortable = false, floors = true, slots = SHELF_SLOTS.card, unitSlots = FLOOR_UNIT_SLOTS.card }) {
+function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSelectServer, onSelectCustom, sortable = false, floors = true, slots = SHELF_SLOTS.card, unitSlots = FLOOR_UNIT_SLOTS.card }) {
   const { coolingByRack, coolingDrop, matchKeys, onShelfLabels } = useContext(RackViewContext);
-  const { scanUnit } = useContext(ServerActionsContext);
+  const { scanUnit, addServer } = useContext(ServerActionsContext);
+  const editMode = useContext(EditContext);
   const cooling = u > 0 ? coolingByRack?.[rack]?.placed?.[u] || [] : [];
   // Only a place the cooling dialog offers takes a cooling drop: floors 1-RACK_FLOORS (a storage rack: shelves
   // 1-STORAGE_SHELVES), never a row on the card's "Other" line (old data above them).
@@ -634,12 +571,12 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
   const empty = !items.length && !cooling.length;
   const Row = sortable ? SortableServerRow : ServerCell;
   const serverRow = (data, variant, more = null) => <Row key={data.id} server={data} sw={switchAssignments[data.id]} owner={optOwners?.[data.id]}
-    onSelect={onSelectServer} onRename={v => onRenameServer?.(data, v)} variant={variant} more={more}/>;
+    onSelect={onSelectServer} variant={variant} more={more}/>;
   // Each unit as a slot (lines: 3 on a floor, 2 on a storage shelf; the "+N" list shows all 3). optOwners is the shown
   // map (withUnitOwners): a unit's owner is the owner of the server on this floor (ownerServer), else its own.
   const ownerServer = floorServer({ u, items });
   const units = [
-    ...equipment.map(({ data }) => ({ key: `e:${data.id}`, el: lines => <EquipCell key={data.id} item={data} lines={lines} onSelect={onSelectCustom} onRename={v => onRenameCustom?.(data, v)}
+    ...equipment.map(({ data }) => ({ key: `e:${data.id}`, el: lines => <EquipCell key={data.id} item={data} lines={lines} onSelect={onSelectCustom}
       owner={ownerOfUnit(optOwners, data.id)} ownerFrom={ownerServer}/> })),
     ...cooling.map(unit => ({ key: `c:${unit.id}`, el: lines => <RackCoolingChip key={unit.id} unit={unit} variant="slot" lines={lines}/> })),
   ];
@@ -676,7 +613,10 @@ function USlotGroup({ rack, u, items, auto, switchAssignments, optOwners, onSele
     {indexCell}
     <div className="floor-servers" data-more-servers={extra.length ? "" : undefined}>
       {first ? serverRow(first.data, "floor", moreServers)
-        : <span className={empty ? "shelf-empty-line" : "floor-no-server"} title={u ? `No server on ${where}` : "Equipment for the whole rack, on no floor"}>{u ? "Free" : "Rack level"}</span>}
+        : editMode && addServer && validFloor(u, rack)
+          ? <button type="button" className={empty ? "shelf-empty-line" : "floor-no-server"} data-action="add-server-floor" data-floor={u}
+              aria-label={`Add a server on ${where} of ${rack}`} title={`Add a server on ${where} of ${rack}`} onClick={() => addServer({ rack, u })}>+ Add server</button>
+          : <span className={empty ? "shelf-empty-line" : "floor-no-server"} title={u ? `No server on ${where}` : "Equipment for the whole rack, on no floor"}>{u ? "Free" : "Rack level"}</span>}
     </div>
     <div className="floor-units" role="list" aria-label={`Units on ${where}`} style={{ "--slots": unitSlots }}>
       {shown.map((x, i) => <div key={x.key} role="listitem" className="floor-unit" data-more={more > 0 && i === last ? "" : undefined}>
@@ -765,7 +705,7 @@ const slug = text => String(text).toLowerCase().replace(/[^a-z0-9]+/g, "-").repl
 // on a U above floor 4, and the rack level) and the rack's cooling units that are not on a floor. Every floor is the same
 // fixed template (USlotGroup), so the floors of all cards line up. A storage rack draws its 16 shelves the same way, each
 // shelf one line of chips. In the rack detail (detail) the header is plain text and the template is larger.
-function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onHeaderClick, onEdit, fixed = false, external = false, externalActiveId = null, detail = false, collapsed = false, onToggleCollapse = null }) {
+function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, onReorder, onSelect, onSelectCustom, onHeaderClick, onEdit, fixed = false, external = false, externalActiveId = null, detail = false, collapsed = false, onToggleCollapse = null }) {
   const {canAdmin} = useAccounts();
   const editMode = useContext(EditContext);
   const view = useContext(RackViewContext);
@@ -812,7 +752,7 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
         return <div key={`gap-${entry.from}`} className="shelf-gap" role="note" data-from={entry.from} data-to={entry.to} data-reason={entry.reason}>{range} · {entry.reason === "filtered" ? "hidden by filter" : "empty"}</div>;
       }
       const {u, items, auto} = entry.row;
-      const props = {rack: r.rack, u, items, auto, floors, slots, unitSlots, switchAssignments, optOwners, onSelectServer: onSelect, onSelectCustom, onRenameServer, onRenameCustom};
+      const props = {rack: r.rack, u, items, auto, floors, slots, unitSlots, switchAssignments, optOwners, onSelectServer: onSelect, onSelectCustom};
       return items.some(i => i.kind === "server") ? <SortableURow key={u} {...props} isDragging={editMode && items.some(i => i.data.id === activeId)}/> : <USlotGroup key={u} {...props}/>;
     })}
     {!rows.length && <p className="text-xs text-zinc-400 py-12 text-center">No equipment stored here</p>}
@@ -846,66 +786,6 @@ function RackDiagram({ r, rackSlots, switchAssignments, rackOrder, customItems, 
       onOpen={view.onOpenCooling} onAdd={view.onAddCooling} dropRef={view.coolingDrop ? strip.setNodeRef : null} isOver={strip.isOver}
       renderChip={unit => <RackCoolingChip key={unit.id} unit={unit} variant="strip"/>}/>}
   </section>;
-}
-
-// ─── ADD OPT MODAL ────────────────────────────────────────────────────────────
-// Rendered OUTSIDE any DnD context (at RacksView level) — this is the fix for close not working
-function AddOptModal({ rack, onClose, onSave }) {
-  useEscClose(onClose);
-  const [pduId, setPduId]   = useState(rack.pdus[0]?.id || "");
-  const [outlet, setOutlet] = useState("");
-  const [name,   setName]   = useState("");
-  const [busy,   setBusy]   = useState(false);
-  const [error,  setError]  = useState("");
-  const pdu = rack.pdus.find(p => p.id === pduId);
-
-  async function submit() {
-    if (!outlet || !name.trim()) return;
-    setBusy(true); setError("");
-    try { await onSave(pduId, parseInt(outlet, 10), name.trim(), pdu?.labels || {}); }
-    catch (e) { setError("Save failed — check PDU connection."); setBusy(false); }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/85"
-      onClick={onClose}>
-      <div className="bg-zinc-900 border border-zinc-700/60 rounded-2xl shadow-2xl w-80 overflow-hidden"
-        onClick={e => e.stopPropagation()}>
-        <div className="px-5 py-3.5 border-b border-zinc-800/60 flex items-center justify-between">
-          <span className="text-sm font-bold text-zinc-100">Add OPT — {rack.rack}</span>
-          <CloseBtn onClose={onClose}/>
-        </div>
-        <div className="px-5 py-4 space-y-3">
-          {rack.pdus.length > 1 && (
-            <div><SL>PDU</SL>
-              <select value={pduId} onChange={e => setPduId(e.target.value)}
-                className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50">
-                {rack.pdus.map(p => <option key={p.id} value={p.id}>{p.name} — {p.ip}</option>)}
-              </select>
-            </div>
-          )}
-          <div><SL>Outlet number</SL>
-            <input type="number" min="1" max="48" value={outlet} onChange={e => setOutlet(e.target.value)}
-              placeholder="1 – 48"
-              className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
-          </div>
-          <div><SL>OPT name</SL>
-            <input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()}
-              placeholder="e.g. Opt106"
-              className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
-          </div>
-          {error && <div className="text-[10px] text-rose-400">{error}</div>}
-        </div>
-        <div className="px-5 pb-4 flex gap-2">
-          <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-500 border border-zinc-700/40 rounded-lg hover:text-zinc-300 transition">Cancel</button>
-          <button onClick={submit} disabled={!outlet || !name.trim() || busy}
-            className="flex-1 py-2 text-sm font-bold bg-nv-400 text-zinc-950 rounded-lg disabled:opacity-40 flex items-center justify-center gap-2 transition">
-            {busy && <Spinner/>}Add OPT
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 // A storage rack's place select for equipment (storageShelfOptions).
@@ -988,471 +868,6 @@ function AddEquipmentModal({ rackName, onClose, onSave, onScan = null }) {
   );
 }
 
-// ─── EDIT EQUIPMENT PANEL (custom items) ──────────────────────────────────────
-// `item` is always the latest saved record. After another session changed it (a rejected save reloads the list) the
-// panel is opened again on the fresh record; `draft` then refills the fields this person had changed.
-// owner: its owner by the lab's rule (unitOwner.js). ownerFrom: the server on its floor it takes the owner from (then the
-// field is read-only and onOpenServer opens that server, where the owner is changed; offered only while nothing here is
-// unsaved, since it closes this panel); null: its own owner, editable.
-function EditEquipmentPanel({ item, draft, reloaded, rackName, allRacks, owner, ownerFrom = null, onOpenServer = null, ownersLoaded, onOwnerChange, onClose, onSave, onDelete, onMove, draftRef = null }) {
-  useEscClose(onClose);
-  const [name,      setName]      = useState(draft?.name ?? item.name);
-  const [type,      setType]      = useState(draft?.type ?? (item.type || "other"));
-  const [u,         setU]         = useState(String(draft?.u ?? item.u ?? 0));
-  const [notes,     setNotes]     = useState(draft?.notes ?? (item.notes || ""));
-  // Serial number, part number, model and MAC address: separate fields, each saved only when edited here.
-  const [details,   setDetails]   = useState(() => Object.fromEntries(UNIT_DETAILS.map(([field]) => [field, draft?.[field] ?? detailText(item, field)])));
-  // Chosen here by hand: then the serial number rule below never changes them.
-  const [typeTouched, setTypeTouched] = useState(draft?.type !== undefined);
-  const [nameTouched, setNameTouched] = useState(draft?.name !== undefined);
-  const [busy,      setBusy]      = useState(false);
-  const [saved,     setSaved]     = useState(false);
-  const [moveRack,  setMoveRack]  = useState("");
-  // Moving to a storage rack: onto one of its shelves (or the whole storage, "0"); to a rack: its rack level, as before.
-  const [moveShelf, setMoveShelf] = useState("0");
-  const [moving,    setMoving]    = useState(false);
-  const [unchanged, setUnchanged] = useState(false);
-  // A serial number or MAC address that already names another unit: the server's reason, shown at that field.
-  const [taken,     setTaken]     = useState(null);
-  // Delete is asked in the panel itself (never window.confirm), the same two steps as "Remove from DCIM".
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const deleteCancelRef = useRef(null);
-  const deleteOpenRef = useRef(null);
-  useEffect(() => { if (confirmDelete) deleteCancelRef.current?.focus(); }, [confirmDelete]);
-  function cancelDelete() { setConfirmDelete(false); requestAnimationFrame(() => deleteOpenRef.current?.focus()); }
-  async function doDelete() {
-    if (deleting) return;
-    setDeleting(true);
-    try { await onDelete(item); onClose(); }
-    catch { /* the save already told the user why */ }
-    finally { setDeleting(false); }
-  }
-
-  // Only the fields changed here are saved, so a barcode, shelf position or move saved meanwhile elsewhere is kept.
-  // An old U outside 0-42 (a storage rack: outside its shelves) that nobody touches is left as it is.
-  const storage = !rackHasFloors(rackName);
-  const slot = parseUSlot(u);
-  const uChanged = u.trim() !== String(item.u ?? 0);
-  const uError = uChanged && slot === null ? U_SLOT_ERROR : "";
-  // The lab owner's rule, as a scan applies it (serialUnitType): a serial number entered for a generic unit (type
-  // Other, named "Unit" or after its own code) that has none yet marks it as a switch, unless its part number or model
-  // names another product, or the serial (or its barcode) is an NVIDIA board OPN. A unit identified as something else,
-  // or a type chosen here, is never changed.
-  const autoSwitch = !typeTouched && isGenericUnit(item) && !detailText(item, "serial_number").trim() && details.serial_number.trim() !== ""
-    && serialUnitType({ part_number: details.part_number, model: details.model, code: [details.serial_number, item.barcode].filter(Boolean).join(" ") }) === "switch";
-  const shownType = autoSwitch ? "switch" : type;
-  const shownName = autoSwitch && !nameTouched && String(item.name || "").trim().toLowerCase() === GENERIC_UNIT_NAME.toLowerCase() ? unitTypeLabel("switch") : name;
-  const changes = {};
-  if (shownName.trim() && shownName.trim() !== item.name) changes.name = shownName.trim();
-  if (shownType !== (item.type || "other")) changes.type = shownType;
-  if (uChanged && slot !== null && slot !== (item.u ?? 0)) changes.u = slot;
-  if (notes.trim() !== (item.notes || "")) changes.notes = notes.trim();
-  const { changes: detailChanges, errors: detailErrors } = unitDetailChanges(item, details);
-  Object.assign(changes, detailChanges);
-  // The refusal stays until that field is edited again.
-  if (taken && details[taken.field] === taken.value) detailErrors[taken.field] = detailErrors[taken.field] || taken.message;
-  const detailError = Object.keys(detailErrors).length > 0;
-  const dirty = Object.keys(changes).length > 0;
-  // The fields changed here, for the page: when another session changes this unit, the panel reopens on the saved
-  // record with these kept (the live reload never drops what is being typed).
-  if (draftRef) draftRef.current = changes;
-  // Show in 3D leaves Racks: blocked while this panel has unsaved changes or a save, move or delete is running.
-  const twinBlocked = busy || moving || deleting ? TWIN_SAVING : dirty ? TWIN_UNSAVED : null;
-  const [twinNote, twinBlockedClick] = useTwinBlockedNote(twinBlocked);
-
-  async function submit() {
-    if (busy || uError || detailError || !shownName.trim()) return;
-    if (!dirty) { setUnchanged(true); return; }
-    setBusy(true); setUnchanged(false);
-    try { await onSave(item.id, changes); setSaved(true); setTimeout(()=>setSaved(false),2000); }
-    catch (e) {
-      // Other refusals were already reported (a stale list reopens this panel on the saved values).
-      const field = duplicateField(e);
-      if (field) {
-        setTaken({ field, value: details[field], message: e.message });
-        document.querySelector(`[data-detail="${field}"]`)?.focus();
-        requestAnimationFrame(() => document.getElementById(`edit-equipment-${field}-error`)?.scrollIntoView({ block: "nearest" }));
-      }
-    }
-    finally { setBusy(false); }
-  }
-
-  async function doMove() {
-    if (!moveRack) return;
-    setMoving(true);
-    const toStorage = !rackHasFloors(moveRack);
-    try { await onMove(item, moveRack, toStorage ? Number(moveShelf) || 0 : 0); onClose(); }
-    catch { /* the save already told the user why */ }
-    finally { setMoving(false); }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
-      <div className="h-full w-[300px] bg-zinc-950 border-l border-zinc-800/80 shadow-2xl flex flex-col"
-        onClick={e => e.stopPropagation()}>
-        <div className="px-5 py-4 border-b border-zinc-800/60 bg-zinc-900/60 flex items-start justify-between gap-3">
-          <div>
-            <div className="text-sm font-bold text-zinc-100">{item.name}</div>
-            <div className="text-[10px] text-zinc-600 mt-0.5">{(ITEM_TYPES[item.type]||ITEM_TYPES.other).label} · {rackName} · {storage ? (item.u ? `Shelf ${item.u}` : "Whole storage unit") : `U${item.u}`}</div>
-          </div>
-          <div className="flex items-start gap-2 flex-shrink-0">
-            <ShowIn3dButton target={itemRef(item.id)} name={item.name} className={PANEL_ICON_BTN} blocked={twinBlocked} onBlocked={twinBlockedClick}/>
-            <CloseBtn onClose={onClose}/>
-          </div>
-        </div>
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          {twinNote && <div role="status" data-note="show-in-3d" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">{twinNote}</div>}
-          {reloaded && <div role="status" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-            This equipment was changed in another session. The panel now shows the saved values{draft ? " with your edits kept" : ""}. Review them and save again.
-          </div>}
-          <div><SL>Owner / Engineer</SL>{ownerFrom ? <>
-            <input type="text" readOnly value={owner || (ownersLoaded ? "No owner" : "Loading…")} aria-label={`Owner for ${item.name}`} aria-describedby="edit-equipment-owner-from"
-              data-owner-from={ownerFrom.name} dir="auto"
-              className="w-full bg-zinc-900/40 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-300 cursor-default focus:outline-none focus:border-nv-400/50"/>
-            <p id="edit-equipment-owner-from" className="mt-1 text-[11px] text-zinc-400" dir="auto">
-              {ownerFromText(ownerFrom, storage)} Change it on the server.
-            </p>
-            {onOpenServer && !dirty && !busy && !moving && <button type="button" onClick={onOpenServer} data-action="open-owner-server"
-              className="mt-1 text-[11px] text-nv-300 underline hover:text-nv-200">Open <bdi>{ownerFrom.name}</bdi></button>}
-          </> : <OwnerSelect owner={owner} disabled={!ownersLoaded} label={`Owner for ${item.name}`} onChange={id=>onOwnerChange(itemOwnerKey(item.id),id)}/>}</div>
-          <div><SL>Name</SL>
-            <input value={shownName} onChange={e=>{ setName(e.target.value); setNameTouched(true); }}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
-          </div>
-          <div><SL>Type</SL>
-            <select value={shownType} onChange={e=>{ setType(e.target.value); setTypeTouched(true); }}
-              aria-describedby={autoSwitch ? "edit-equipment-type-hint" : undefined}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50">
-              {Object.entries(ITEM_TYPES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
-            </select>
-            {autoSwitch && <div id="edit-equipment-type-hint" className="mt-1 text-[11px] text-cyan-300">Marked as a switch: a unit with a serial number and no other product is most likely a switch. Choose another type if it is not.</div>}
-          </div>
-          {storage ? <div><SL>Shelf</SL>
-            <StorageShelfSelect value={u} onChange={setU} className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
-          </div> : <div><SL>U slot (0 = whole rack)</SL>
-            <input type="number" min="0" max="42" step="1" value={u} onChange={e=>setU(e.target.value)}
-              onKeyDown={e=>e.key==="Enter"&&submit()}
-              aria-label="U slot" aria-invalid={uError ? true : undefined} aria-describedby={uError ? "edit-equipment-u-error" : undefined}
-              className={`w-full bg-zinc-900 border rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none ${uError ? "border-rose-700 focus:border-rose-500" : "border-zinc-800 focus:border-nv-400/50"}`}/>
-            {uError && <div id="edit-equipment-u-error" role="alert" className="mt-1 text-[11px] text-rose-400">{uError}</div>}
-          </div>}
-          <div><SL>Notes</SL>
-            <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 resize-none"/>
-          </div>
-          {UNIT_DETAILS.map(([field, label]) => <div key={field}><SL>{label}</SL>
-            <input value={details[field]} onChange={e => { const value = e.target.value; setDetails(d => ({ ...d, [field]: value })); }}
-              onKeyDown={e=>e.key==="Enter"&&submit()} spellCheck={false} autoComplete="off" data-detail={field} dir="auto"
-              aria-label={label} aria-invalid={detailErrors[field] ? true : undefined} aria-describedby={detailErrors[field] ? `edit-equipment-${field}-error` : undefined}
-              placeholder={field === "mac" ? "00:1A:2B:3C:4D:5E" : "Not recorded"}
-              className={`w-full bg-zinc-900 border rounded-lg px-3 py-2 text-sm font-mono text-zinc-200 focus:outline-none ${detailErrors[field] ? "border-rose-700 focus:border-rose-500" : "border-zinc-800 focus:border-nv-400/50"}`}/>
-            {detailErrors[field] && <div id={`edit-equipment-${field}-error`} role="alert" className="mt-1 text-[11px] text-rose-400">{detailErrors[field]}</div>}
-          </div>)}
-          <div className="text-xs text-zinc-400 space-y-1">
-            {item.barcode && <div>Barcode: <span className="font-mono">{item.barcode}</span></div>}
-            {item.shelf_position && <div>Position: {item.shelf_position}</div>}
-            <div className="text-zinc-500">Use Scan & Track for barcode linking and shelf positions.</div>
-          </div>
-          {allRacks && allRacks.filter(r => r !== rackName).length > 0 && (
-            <div><SL>Move to rack</SL>
-              <div className="flex gap-2">
-                <select value={moveRack} onChange={e => { setMoveRack(e.target.value); setMoveShelf("0"); }} aria-label="Move to rack"
-                  className="flex-1 min-w-0 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50">
-                  <option value="">Select rack…</option>
-                  {allRacks.filter(r => r !== rackName).map(r => <option key={r} value={r}>{r}</option>)}
-                </select>
-                <button onClick={doMove} disabled={moving || !moveRack}
-                  className="px-3 py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-lg transition disabled:opacity-40">
-                  {moving ? "…" : "Move"}
-                </button>
-              </div>
-              {moveRack && !rackHasFloors(moveRack) && <div className="mt-2">
-                <StorageShelfSelect value={moveShelf} onChange={setMoveShelf} label={`Shelf in ${moveRack}`}
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
-              </div>}
-            </div>
-          )}
-        </div>
-        {/* Save stays in view below the scrolling fields, so a short screen never hides it. */}
-        <div className="px-5 py-4 border-t border-zinc-800/40 space-y-3">
-          <button onClick={submit} disabled={busy || !shownName.trim() || !!uError || detailError}
-            className={`w-full py-2 text-sm font-bold rounded-lg transition flex items-center justify-center gap-2
-              ${saved?"bg-emerald-900/50 text-emerald-400 border border-emerald-800/50":"bg-nv-400 text-zinc-950 disabled:opacity-40"}`}>
-            {busy?<Spinner/>:saved?Icon.check:null}{saved?"Saved":"Save changes"}
-          </button>
-          {unchanged && !dirty && <div role="status" className="text-[11px] text-zinc-400 text-center">No changes to save.</div>}
-          {confirmDelete ? <div role="group" aria-label={`Delete ${item.name} from ${rackName}`} className="space-y-2"
-            onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); cancelDelete(); } }}>
-            <p className="text-xs text-rose-300" dir="auto">Delete <bdi>{item.name}</bdi> from <bdi>{rackName}</bdi>? This removes it from the rack layout.</p>
-            <div className="flex gap-2">
-              <button ref={deleteCancelRef} type="button" onClick={cancelDelete} disabled={deleting} className="flex-1 py-2 text-xs font-medium text-zinc-300 border border-zinc-700 rounded-lg">Cancel</button>
-              <button type="button" onClick={doDelete} disabled={deleting} className="equipment-delete-confirm flex-1 py-2 text-xs font-bold text-white rounded-lg">{deleting ? "Deleting…" : "Delete"}</button>
-            </div>
-          </div> : <button ref={deleteOpenRef} type="button" onClick={() => setConfirmDelete(true)}
-            className="w-full py-2 text-xs font-medium text-rose-400 hover:text-rose-300 border border-rose-900/40 hover:border-rose-800/60 rounded-lg transition">
-            Delete from rack
-          </button>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── MOVE OPT SECTION (inside ServerEditPanel) ────────────────────────────────
-// "Move to rack": Move… opens the move dialog (ServerMoveDialog) for that rack: the floor, a swap with the server there
-// (each takes the other's PDU outlet and KVM port), the outlet of an empty floor and the units that go along.
-function MoveOptSection({ server, pdus, rackDevices, onRequestMove }) {
-  const allRacks = [...new Set((rackDevices || pdus).map(p => p.rack).filter(Boolean))].sort();
-  const [targetRack, setTargetRack] = useState("");
-  const sel = "flex-1 min-w-0 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50";
-  return (
-    <div>
-      <SL>Move to rack</SL>
-      <div className="flex gap-2">
-        <select value={targetRack} onChange={e => setTargetRack(e.target.value)} aria-label={`Move ${server.name} to rack`} className={sel}>
-          <option value="">Select rack…</option>
-          {allRacks.filter(r => r !== server.rack).map(r => <option key={r} value={r}>{r}</option>)}
-        </select>
-        <button type="button" onClick={() => onRequestMove?.({ id: server.id, rack: targetRack })} disabled={!targetRack || !onRequestMove}
-          className="px-3 py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-lg transition disabled:opacity-40">Move…</button>
-      </div>
-      <div className="mt-1 text-[11px] text-zinc-400">Next: choose the floor, swap with the server there and take the floor's units along.</div>
-    </div>
-  );
-}
-
-// ─── SERVER EDIT PANEL ────────────────────────────────────────────────────────
-// onRemoveFromLab (Admin only): "Remove from lab" (RemoveServerDialog) hides the server everywhere and keeps its PDU label,
-// unlike "Remove from DCIM", which clears the label on the PDU.
-// floorUnits: the units on its floor that go with it when it moves (its floor's units, when it has the floor to itself).
-// onRequestMove({ id, rack, floor }) opens the move dialog: a new U / shelf here, or Move… to another rack (the server
-// takes over the new floor's PDU outlet and KVM port; the dialog previews it and asks about the units). Another
-// session's change to this server shows here at once: fields not edited here follow the saved values, typed ones are
-// kept, and the panel says so.
-function ServerEditPanel({ server, pdus, rackDevices, rackSlots, switchAssignments, optOwners, ownersLoaded, onOwnerChange, onScanUnit = null, onClose, onLabelChange, onRenameOpt, onSwitchSave, powerGroup, powerPending, onRequestPower, onRemoveFromLab = null, floorUnits = [], floor = null, onRequestMove = null }) {
-  const panelRef = useRef(null);
-  useDialogFocus(panelRef, { onEscape: onClose });
-  const pdu   = pdus.find(p => p.id === server.pduId);
-  const curU  = (rackSlots[server.rack] || {})[server.id];
-  const curSw = switchAssignments[server.id] || {};
-
-  const [name,   setName]   = useState(server.name);
-  const [outlet, setOutlet] = useState(server.outlet != null ? String(server.outlet) : "");
-  const [uSlot,  setUSlot]  = useState(curU != null ? String(curU) : "");
-  const [swName, setSwName] = useState(curSw.switch || "");
-  const [swPort, setSwPort] = useState(curSw.port != null ? String(curSw.port) : "");
-  const [doing,  setDoing]  = useState(null);
-  const [saved,  setSaved]  = useState(null);
-  const [error,  setError]  = useState("");
-  // Show in 3D leaves Racks: blocked while a field differs from its saved value (being saved, or not saved yet).
-  const unsaved = name.trim() !== server.name || outlet !== (server.outlet != null ? String(server.outlet) : "")
-    || uSlot !== (curU != null ? String(curU) : "") || swName.trim() !== (curSw.switch || "") || swPort !== (curSw.port != null ? String(curSw.port) : "");
-  const twinBlocked = unsaved ? (doing ? TWIN_SAVING : TWIN_UNSAVED) : null;
-  const [twinNote, twinBlockedClick] = useTwinBlockedNote(twinBlocked);
-
-  // The saved values the fields started from (base) and the values this panel's own saves wrote (own): a change to the
-  // record that is neither is another session's. Fields still showing their base value follow it; typed ones stay.
-  const record = { name: server.name, outlet: server.outlet != null ? String(server.outlet) : "", uSlot: curU != null ? String(curU) : "",
-    swName: curSw.switch || "", swPort: curSw.port != null ? String(curSw.port) : "" };
-  const baseRef = useRef(record);
-  const own = useRef({});
-  const [changedElsewhere, setChangedElsewhere] = useState(false);
-  const [keptEdits, setKeptEdits] = useState(false);
-  useEffect(() => {
-    const base = baseRef.current;
-    const fields = { name: [name, setName], outlet: [outlet, setOutlet], uSlot: [uSlot, setUSlot], swName: [swName, setSwName], swPort: [swPort, setSwPort] };
-    let elsewhere = false, kept = false;
-    for (const [key, [value, set]] of Object.entries(fields)) {
-      if (record[key] === base[key]) continue;
-      if (own.current[key] === record[key]) { delete own.current[key]; continue; }
-      elsewhere = true;
-      if (value === base[key]) set(record[key]); else if (value !== record[key]) kept = true;
-    }
-    baseRef.current = record;
-    if (elsewhere) { setChangedElsewhere(true); setKeptEdits(kept); }
-  }, [record.name, record.outlet, record.uSlot, record.swName, record.swPort]);
-
-  const isOn = server.state==="on", isOff=server.state==="off";
-  const led  = isOn?"bg-nv-400 shadow-[0_0_7px_#76b900]":isOff?"bg-red-700":"bg-zinc-700";
-  function tick(k){setSaved(k);setTimeout(()=>setSaved(s=>s===k?null:s),2000);}
-  // A failed save shows the server's reason, never the success tick, and frees the buttons again.
-  // expect: the record values this save writes, so the panel does not call them another session's change.
-  async function attempt(key,action,expect){setDoing(key);setError("");if(expect)Object.assign(own.current,expect);try{await action();tick(key);return true;}catch(e){if(expect)for(const k of Object.keys(expect))delete own.current[k];setError(e.detail||e.message||"The change was not saved.");return false;}finally{setDoing(null);}}
-
-  const feedId = `${server.pduId}:${server.outlet}`;
-  async function saveName(){if(!name.trim())return;await attempt("name",async()=>{if(onRenameOpt&&name.trim()!==server.name){await onRenameOpt(server.name,name.trim());}else if(pdu&&onLabelChange){await onLabelChange(server.pduId,{...pdu.labels,[String(server.outlet)]:name.trim()});}});}
-  async function saveOutlet(){const n=parseInt(outlet,10);if(isNaN(n)||n<1||!pdu||!onLabelChange)return;if(n===server.outlet)return;const updated={...pdu.labels};delete updated[String(server.outlet)];updated[String(n)]=name.trim()||server.name;await attempt("outlet",()=>onLabelChange(server.pduId,updated),{outlet:String(n)});}
-  // A new U (floor) moves the server there: the move dialog previews it (the new floor's outlet and KVM port, a swap with
-  // the server on it, the units that go along) and saves it; the field shows the saved floor again until then.
-  const shown = floor ?? curU;
-  function moveTo(value){const u=parseInt(value,10);setUSlot(curU!=null?String(curU):"");if(isNaN(u)||u<1||u===shown||!onRequestMove)return;onRequestMove({id:server.id,rack:server.rack,floor:u});}
-  function saveSlot(){moveTo(uSlot);}
-  // A storage rack: a server is put on one of its shelves 1-STORAGE_SHELVES (a saved shelf above them stays until changed).
-  const storage = !rackHasFloors(server.rack);
-  function saveShelf(value){moveTo(value);}
-  async function saveSw(){const value=swName.trim()||swPort?{switch:swName.trim(),port:swPort?parseInt(swPort,10):null}:null;await attempt("sw",()=>onSwitchSave(server.id,value),{swName:value?.switch||"",swPort:value?.port!=null?String(value.port):""});}
-  const [confirmRemove, setConfirmRemove] = useState(false);
-  // Asked in the panel itself (never window.confirm); the second click removes.
-  async function remove(){if(!pdu||!onLabelChange)return;const l={...pdu.labels};delete l[String(server.outlet)];if(await attempt("remove",()=>onLabelChange(server.pduId,l)))onClose();}
-
-  const SetBtn=({id,onClick,disabled})=>(
-    <button onClick={onClick} disabled={disabled||doing===id}
-      className={`px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border flex items-center gap-1 transition
-        ${saved===id?"bg-emerald-900/40 text-emerald-400 border-emerald-800/50":"bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700/50 disabled:opacity-40"}`}>
-      {doing===id?<Spinner/>:saved===id?Icon.check:"Set"}
-    </button>
-  );
-
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
-      <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="server-edit-title" tabIndex={-1}
-        className="h-full w-[320px] max-w-full bg-zinc-950 border-l border-zinc-800/80 shadow-2xl flex flex-col"
-        onClick={e=>e.stopPropagation()}>
-        <div className="px-5 py-4 border-b border-zinc-800/60 bg-zinc-900/60">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className={`w-3 h-3 rounded-full flex-shrink-0 mt-0.5 ${led}`} aria-hidden="true"/>
-              <div className="min-w-0">
-                <h2 id="server-edit-title" dir="auto" className="text-sm font-bold text-zinc-100 truncate">{server.name}</h2>
-                <div className={`text-[11px] mt-0.5 ${isOn?"text-nv-400":isOff?"text-red-400":"text-zinc-400"}`}>
-                  {server.state||"unknown"}{` · ${reading(server.watts, 0, " W")}`}
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0"><SshSlot server={server} size="md"/>
-              <ShowIn3dButton target={serverRef(server.name)} name={server.name} className={PANEL_ICON_BTN} blocked={twinBlocked} onBlocked={twinBlockedClick}/>
-              <CloseBtn onClose={onClose}/></div>
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1">
-            {[["Rack",server.rack||"—"],["Outlet",server.outlet!=null?`#${server.outlet}`:"—"],storage?["Shelf",curU!=null?(curU>0?`Shelf ${curU}`:"Whole storage"):"Auto"]:["U",curU!=null?`U${curU}`:"auto"],["PDU",pdu?.name||"—"]].map(([k,v])=>(
-              <div key={k} className="flex items-baseline gap-1">
-                <span className="text-[11px] text-zinc-400 w-10 flex-shrink-0">{k}</span>
-                <span className="text-[11px] font-mono text-zinc-300 truncate">{v}</span>
-              </div>
-            ))}
-          </div>
-          {onScanUnit && <button type="button" onClick={onScanUnit} className="racks-btn racks-btn-sm racks-btn-accent mt-3"
-            title="Add a unit to this server's floor by scanning its barcode">Scan barcode</button>}
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-          {changedElsewhere&&<div role="status" data-changed-elsewhere="" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-            This server was changed in another session. The panel now shows the saved values{keptEdits ? " with your edits kept" : ""}. Review them and save again.
-            <button type="button" className="ml-1 underline" onClick={()=>setChangedElsewhere(false)}>Dismiss</button>
-          </div>}
-          {error&&<div role="alert" className="rounded-lg border border-rose-900/60 bg-rose-950/30 px-3 py-2 text-xs text-rose-300 break-words">{error}</div>}
-          {twinNote&&<div role="status" data-note="show-in-3d" className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">{twinNote}</div>}
-          {powerGroup&&onRequestPower&&server.pduId&&server.outlet!=null&&(
-            <div><SL>Power control · this outlet</SL>
-              <PowerActionButtons group={powerGroup} actions={["on","off","cycle"]} scope="feed" feedId={feedId} pending={powerPending}
-                label={`Power ${server.name}`} onRequest={(a, el) => onRequestPower(a, el, {scope:"feed", feedId})}/>
-            </div>
-          )}
-
-          <div><SL>Name</SL>
-            <div className="relative">
-              <input value={name} onChange={e=>setName(e.target.value)}
-                onKeyDown={e=>e.key==="Enter"&&saveName()}
-                onBlur={saveName}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50"/>
-              {saved==="name"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-emerald-400">{Icon.check}</span>}
-            </div>
-          </div>
-
-          <div><SL>PDU outlet</SL>
-            <div className="relative">
-              <input type="number" min="1" max="48" value={outlet} onChange={e=>setOutlet(e.target.value)}
-                onKeyDown={e=>e.key==="Enter"&&saveOutlet()}
-                placeholder="Outlet number"
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
-              {saved==="outlet"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-emerald-400">{Icon.check}</span>}
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-400">Press Enter to move the label to this outlet</div>
-          </div>
-
-          {storage ? <div><SL>Shelf</SL>
-            <div className="relative">
-              <select value={uSlot} onChange={e=>saveShelf(e.target.value)} aria-label="Shelf" disabled={doing==="slot"}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50">
-                {uSlot===""&&<option value="">Auto (next free shelf)</option>}
-                {Array.from({length:STORAGE_SHELVES},(_,i)=>String(i+1)).map(v=><option key={v} value={v}>Shelf {v}</option>)}
-                {uSlot!==""&&!(Number(uSlot)>=1&&Number(uSlot)<=STORAGE_SHELVES)&&<option value={uSlot}>{`U${uSlot} · saved, not one of shelves 1–${STORAGE_SHELVES}`}</option>}
-              </select>
-              {saved==="slot"&&<span className="absolute right-8 top-1/2 -translate-y-1/2 text-[11px] text-emerald-400">{Icon.check}</span>}
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-400">{curU!=null?`Currently shelf ${curU}`:"Auto-assigned"}</div>
-          </div> : <div><SL>Rack unit (U)</SL>
-            <div className="relative">
-              <input type="number" min="1" max="42" value={uSlot} onChange={e=>setUSlot(e.target.value)} aria-label="Floor (U)"
-                onKeyDown={e=>e.key==="Enter"&&saveSlot()}
-                placeholder={curU!=null?`U${curU}`:"auto"}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700"/>
-              {saved==="slot"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-emerald-400">{Icon.check}</span>}
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-400">{curU!=null?`Currently U${curU}`:"Auto-assigned"}{onRequestMove?" · press Enter to move it there":""}</div>
-          </div>}
-          {floorUnits.length>0&&<div className="units-follow" role="note" data-units-follow="">
-            <p><span className="units-follow-label">Moves with it:</span> <bdi>{unitNames(floorUnits).join(", ")}</bdi></p>
-            <p className="racks-muted">{`When it moves to another ${storage ? "shelf" : "floor"}, these units go with it (the move asks first).`}</p>
-          </div>}
-
-          <div><SL>Network switch</SL>
-            <div className="space-y-2">
-              <input value={swName} onChange={e=>setSwName(e.target.value)} placeholder="Switch name"
-                onBlur={saveSw}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-cyan-700/50 placeholder:text-zinc-700"/>
-              <div className="relative">
-                <input type="number" min="1" max="96" value={swPort} onChange={e=>setSwPort(e.target.value)} placeholder="Port"
-                  onKeyDown={e=>e.key==="Enter"&&saveSw()}
-                  onBlur={saveSw}
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-cyan-700/50 placeholder:text-zinc-700"/>
-                {saved==="sw"&&<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-emerald-400">{Icon.check}</span>}
-              </div>
-              {curSw.switch&&<div className="text-[11px] text-cyan-300">{curSw.switch}{curSw.port?` · port ${curSw.port}`:""}</div>}
-            </div>
-          </div>
-
-          <div><SL>Connection</SL>
-            <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/40 divide-y divide-zinc-800/40">
-              {[["Rack",server.rack||"—"],["PDU",pdu?.name||"—"],["PDU IP",pdu?.ip||"—"],["Outlet",server.outlet!=null?`#${server.outlet}`:"—"],["Switch",curSw.switch?`${curSw.switch}${curSw.port?`·${curSw.port}`:""}` :"—"]].map(([k,v])=>(
-                <div key={k} className="flex items-center px-3 py-1.5 gap-3">
-                  <span className="text-[11px] text-zinc-400 uppercase tracking-wide w-14 flex-shrink-0">{k}</span>
-                  <span className="text-[11px] font-mono text-zinc-400 break-all">{v}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div><SL>Owner / Engineer</SL>
-            <OwnerSelect owner={optOwners?.[server.id]||""} disabled={!ownersLoaded} label={`Owner for ${server.name}`} onChange={id=>onOwnerChange(server.id,id)}/>
-            {optOwners?.[server.id]&&<div className="mt-1 text-[11px] text-purple-300">{optOwners[server.id]}</div>}
-          </div>
-
-          <MoveOptSection server={server} pdus={pdus} rackDevices={rackDevices} onRequestMove={onRequestMove}/>
-        </div>
-
-        <div className="px-5 py-4 border-t border-zinc-800/40 bg-zinc-900/30">
-          {confirmRemove ? <div role="group" aria-label={`Remove ${server.name} from DCIM`} className="space-y-2">
-            <p className="text-xs text-rose-300" dir="auto">Remove <bdi>{server.name}</bdi> from DCIM? Its label is cleared from {pdu?.name || "the PDU"} outlet {server.outlet}; the server keeps its power.</p>
-            <div className="flex gap-2">
-              <button type="button" onClick={()=>setConfirmRemove(false)} className="flex-1 py-2 text-xs font-medium text-zinc-300 border border-zinc-700 rounded-lg">Cancel</button>
-              <button type="button" onClick={remove} disabled={doing==="remove"} className="flex-1 py-2 text-xs font-bold text-white bg-rose-900 border border-rose-800 rounded-lg">{doing==="remove"?"Removing…":"Remove"}</button>
-            </div>
-          </div> : <button type="button" onClick={()=>setConfirmRemove(true)} className="w-full py-2 text-xs font-medium text-rose-400 hover:text-rose-300 border border-rose-900/40 hover:border-rose-800/60 rounded-lg transition">
-            Remove from DCIM
-          </button>}
-          {onRemoveFromLab && !confirmRemove && <button type="button" data-action="open-remove-server" onClick={onRemoveFromLab}
-            className="mt-2 w-full py-2 text-xs font-bold text-white bg-rose-900 hover:bg-rose-800 border border-rose-800 rounded-lg transition">
-            Remove from lab (Admin)
-          </button>}
-          {onRemoveFromLab && !confirmRemove && <p className="mt-1 text-[11px] text-zinc-500">Hides a server that is no longer in the lab from every page. The PDU label stays.</p>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── RACK DETAIL VIEW ─────────────────────────────────────────────────────────
 // A rack's page: heading, figures, PDUs, the shelves diagram and one table of everything in U order (servers before
 // equipment on the same U, rack level last), then its cooling units. Phones get a List | Diagram switch.
@@ -1467,7 +882,8 @@ function equipmentU(item) {
 }
 const Dash = () => <span className="racks-dash">—</span>;
 
-function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, onBack, onReorder, onSelect, onSelectCustom, onRenameServer, onRenameCustom, onRequestAddOpt, onRequestAddEquip, onEdit, phone, detailView, onDetailView }) {
+// kvms: the rack's KVMs ({ id, name, ip, status }); its PDUs and KVMs open their device windows (onOpenDevice(id)).
+function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItems, optOwners, onBack, onReorder, onSelect, onSelectCustom, onAddServer = null, kvms = [], onOpenDevice = null, onRequestAddEquip, onEdit, phone, detailView, onDetailView }) {
   const { rows, uMap, sorted } = useMemo(
     () => buildRackRows(r.servers, r.rack, { [r.rack]: rackOrder[r.rack] }, { [r.rack]: rackSlots[r.rack] }, customItems),
     [r.servers, r.rack, rackOrder, rackSlots, customItems]
@@ -1512,14 +928,17 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
       </div>
       <RackFigures r={r} summary={summary} equipment={equipment.length} itemsError={view.itemsError} detail/>
       <LoadBar r={r}/>
-      {pdus.length > 0 && <ul className="rack-detail-pdus" aria-label="PDUs">
-        {pdus.map(p => { const d = r.pduData.find(x => x.id === p.id); const st = d?.reachable === true ? "online" : d?.reachable === false ? "offline" : "unknown";
-          return <li key={p.id} data-status={st}><span className="dot" aria-hidden="true"/><bdi>{p.name}</bdi> · {st === "online" ? "Online" : st === "offline" ? "Offline" : "No reading"} · <span className="racks-mono">{p.ip}</span></li>; })}
+      {pdus.length + kvms.length > 0 && <ul className="rack-detail-pdus" aria-label="PDUs and KVMs">
+        {[...pdus.map(p => { const d = r.pduData.find(x => x.id === p.id); return { id: p.id, name: p.name, ip: p.ip, kind: "PDU", st: d?.reachable === true ? "online" : d?.reachable === false ? "offline" : "unknown" }; }),
+          ...kvms.map(k => ({ id: k.id, name: k.name, ip: k.ip, kind: "KVM", st: k.status }))].map(dev =>
+          <li key={dev.id} data-status={dev.st} data-device={dev.id} data-kind={dev.kind.toLowerCase()}><span className="dot" aria-hidden="true"/>
+            {onOpenDevice ? <button type="button" className="racks-link" data-action="open-device" title={`Open ${dev.name}`} onClick={() => onOpenDevice(dev.id)}><bdi>{dev.name}</bdi></button> : <bdi>{dev.name}</bdi>}
+            {" "}· {dev.st === "online" ? "Online" : dev.st === "offline" ? "Offline" : "No reading"} · <span className="racks-mono">{dev.ip}</span></li>)}
       </ul>}
       {editMode && <div className="rack-detail-actions">
         <button type="button" onClick={() => onRequestAddEquip(r.rack)} className="racks-btn">{Icon.plus} Equipment</button>
         {scanUnit && <button type="button" onClick={() => scanUnit({ rack: r.rack })} className="racks-btn racks-btn-accent">Scan barcode</button>}
-        {r.pduData.length > 0 && <button type="button" onClick={() => onRequestAddOpt(r)} className="racks-btn racks-btn-accent">{Icon.plus} OPT</button>}
+        {onAddServer && r.pduData.length > 0 && <button type="button" data-action="add-server-rack" onClick={() => onAddServer(r.rack)} className="racks-btn racks-btn-accent">{Icon.plus} Server</button>}
         {view.coolingEditable && <button type="button" onClick={e => view.onAddCooling(r.rack, e.currentTarget)} className="racks-btn">{Icon.plus} Cooling unit</button>}
       </div>}
       {phone && !editMode && <div role="group" aria-label="Rack view" className="racks-segment">
@@ -1531,7 +950,6 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
         {!listMode && <RackDiagram r={r} rackSlots={rackSlots} switchAssignments={switchAssignments}
           rackOrder={rackOrder} customItems={customItems} optOwners={optOwners}
           onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
-          onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
           fixed detail/>}
 
         {/* Right panel: full width in the phone column, so its table scrolls inside instead of widening the page */}
@@ -1618,166 +1036,28 @@ function RackDetailView({ r, rackSlots, switchAssignments, rackOrder, customItem
   );
 }
 
-// ─── ADD RACK MODAL ───────────────────────────────────────────────────────────
+// ─── EDIT RACK MODAL ──────────────────────────────────────────────────────────
 const inputCls = "w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-nv-400/50 placeholder:text-zinc-700";
 
-function AddRackModal({ onClose, onSave }) {
-  const [rackName,  setRackName]  = useState("");
-  const [rackType,  setRackType]  = useState("Compute");
-  const [pduName,   setPduName]   = useState("");
-  const [pduIp,     setPduIp]     = useState("");
-  const [pduUser,   setPduUser]   = useState("");
-  const [pduPass,   setPduPass]   = useState("");
-  const [saving,    setSaving]    = useState(false);
-  const [err,       setErr]       = useState("");
+// Rename a rack and set its type: every device of the rack is saved with the new rack name, the type is the rack row's
+// model. PDUs and KVMs are changed in their own windows; a rack is added in Manage. Delete rack… (onDelete) opens the
+// one delete dialog, which previews what goes with the rack.
+function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave, onDelete }) {
   useEscClose(onClose);
-
-  async function handleSave() {
-    if (!rackName.trim()) { setErr("Rack name is required."); return; }
-    setSaving(true); setErr("");
-    try {
-      const res = await fetch("/api/devices/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name:     pduName.trim() || `${rackType}-${rackName.trim()}`,
-          kind:     "rack",          // Inventory only; Storage also appears on Dashboard.
-          model:    rackType,        // "Compute" or "Storage"
-          ip:       pduIp.trim()   || "0.0.0.0",
-          rack:     rackName.trim(),
-          username: pduUser.trim(),
-          password: pduPass,
-        }),
-      });
-      if (!res.ok) { const t = await res.text(); throw new Error(t || res.status); }
-      await onSave();
-      onClose();
-    } catch (e) {
-      setErr(e.message || "Failed to add rack.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50">
-          <span className="text-sm font-bold text-zinc-100">Add Rack</span>
-          <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition">{Icon.x}</button>
-        </div>
-        <div className="px-5 py-4 space-y-3">
-          <div>
-            <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-1">Rack name <span className="text-nv-400">*</span></div>
-            <input autoFocus value={rackName} onChange={e => setRackName(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && handleSave()}
-              placeholder="e.g. Rack-08" className={inputCls}/>
-          </div>
-          <div>
-            <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 mb-2">Rack type</div>
-            <div className="grid grid-cols-2 gap-2">
-              {["Compute", "Storage"].map(t => (
-                <button key={t} onClick={() => setRackType(t)}
-                  className={`py-2 text-sm font-semibold rounded-xl border transition
-                    ${rackType === t
-                      ? t === "Storage"
-                        ? "bg-cyan-900/40 border-cyan-600/60 text-cyan-300"
-                        : "bg-nv-400/15 border-nv-400/60 text-nv-400"
-                      : "border-zinc-800 text-zinc-600 hover:border-zinc-600 hover:text-zinc-400"}`}>
-                  {t === "Compute" ? "⚡ Compute" : "💾 Storage"}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="pt-1 border-t border-zinc-800/40">
-            <div className="text-[10px] text-zinc-700 mb-2">PDU — optional</div>
-            <div className="space-y-2">
-              <input value={pduName} onChange={e => setPduName(e.target.value)}
-                placeholder="PDU name" className={inputCls}/>
-              <input value={pduIp} onChange={e => setPduIp(e.target.value)}
-                placeholder="PDU IP" className={inputCls}/>
-              <div className="grid grid-cols-2 gap-2">
-                <input value={pduUser} onChange={e => setPduUser(e.target.value)}
-                  placeholder="Username" className={inputCls}/>
-                <input type="password" value={pduPass} onChange={e => setPduPass(e.target.value)}
-                  placeholder="Password" className={inputCls}/>
-              </div>
-            </div>
-          </div>
-          {err && <div className="text-xs text-red-400 bg-red-950/30 border border-red-900/40 rounded-lg px-3 py-2">{err}</div>}
-        </div>
-        <div className="flex gap-2 px-5 pb-4">
-          <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-xl transition">Cancel</button>
-          <button onClick={handleSave} disabled={saving}
-            className="flex-1 py-2 text-sm font-semibold text-zinc-950 bg-nv-400 hover:bg-nv-300 rounded-xl transition disabled:opacity-50">
-            {saving ? "Adding…" : "Add Rack"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── EDIT RACK MODAL ──────────────────────────────────────────────────────────
-function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
-  useEscClose(onClose);
-  const pdus = rackDevs.filter(d => d.kind === "pdu");
-
-  const [name,       setName]       = useState(rackName);
-  const [type,       setType]       = useState(rackType === "storage" ? "Storage" : "Compute");
-  // pduEdits: { [id]: { name, ip, username, password } }
-  const [pduEdits,   setPduEdits]   = useState(() =>
-    Object.fromEntries(pdus.map(p => [p.id, { name: p.name, ip: p.ip, username: "", password: "" }]))
-  );
-  // new PDU fields (only used when rack has no PDU yet)
-  const [newPdu, setNewPdu] = useState({ name: "", ip: "", username: "", password: "" });
-  const [saving,     setSaving]     = useState(false);
-  const [deleting,   setDeleting]   = useState(false);
-  const [confirmDel, setConfirmDel] = useState(false);
-  const [err,        setErr]        = useState("");
-
-  function setPduField(id, field, val) {
-    setPduEdits(prev => ({ ...prev, [id]: { ...prev[id], [field]: val } }));
-  }
+  const [name,   setName]   = useState(rackName);
+  const [type,   setType]   = useState(rackType === "storage" ? "Storage" : "Compute");
+  const [saving, setSaving] = useState(false);
+  const [err,    setErr]    = useState("");
 
   async function handleSave() {
     if (!name.trim()) { setErr("Rack name is required."); return; }
     setSaving(true); setErr("");
     try {
-      // Update existing devices
-      await Promise.all(rackDevs.map(d => {
-        const e = pduEdits[d.id];
-        const body = {
-          ...d,
-          rack:  name.trim(),
-          model: d.kind === "rack" ? type : d.model,
-          ...(e ? { name: e.name.trim() || d.name, ip: e.ip.trim() || d.ip } : {}),
-          ...(e?.username ? { username: e.username } : {}),
-          ...(e?.password ? { password: e.password } : {}),
-        };
-        return fetch(`/api/devices/${d.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }).then(r => { if (!r.ok) throw new Error(`Failed to update ${d.name}`); });
-      }));
-      // Create new PDU if fields filled (rack has no PDU yet)
-      if (pdus.length === 0 && newPdu.ip.trim()) {
-        const res = await fetch("/api/devices/", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name:     newPdu.name.trim() || `PDU-${name.trim()}`,
-            kind:     "pdu",
-            model:    "Raritan PDU",
-            ip:       newPdu.ip.trim(),
-            rack:     name.trim(),
-            username: newPdu.username || "",
-            password: newPdu.password || "",
-          }),
-        });
-        if (!res.ok) throw new Error("Failed to create PDU.");
-      }
+      await Promise.all(rackDevs.map(d => fetch(`/api/devices/${d.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...d, rack: name.trim(), model: d.kind === "rack" ? type : d.model }),
+      }).then(r => { if (!r.ok) throw new Error(`Failed to update ${d.name}`); })));
       await onSave();
       onClose();
     } catch (e) {
@@ -1785,132 +1065,42 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
     } finally { setSaving(false); }
   }
 
-  async function handleDelete() {
-    setDeleting(true); setErr("");
-    try {
-      await Promise.all(rackDevs.map(d =>
-        fetch(`/api/devices/${d.id}`, { method: "DELETE" })
-          .then(r => { if (!r.ok) throw new Error(`Failed to delete ${d.name}`); })
-      ));
-      await onSave();
-      onClose();
-    } catch (e) {
-      setErr(e.message || "Delete failed.");
-    } finally { setDeleting(false); setConfirmDel(false); }
-  }
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-label={`Edit ${rackName}`} data-dialog="edit-rack"
+        className="bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-2xl w-full max-w-sm max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50 sticky top-0 bg-zinc-950 z-10">
           <span className="text-sm font-bold text-zinc-100">Edit Rack — {rackName}</span>
-          <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition">{Icon.x}</button>
+          <button onClick={onClose} aria-label="Close" className="text-zinc-400 hover:text-zinc-200 transition">{Icon.x}</button>
         </div>
-
-        {/* Rack fields */}
         <div className="px-5 py-4 space-y-4">
           <div>
-            <label className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-1 block">Rack Name</label>
-            <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="e.g. Rack-09"
+            <label htmlFor="edit-rack-name" className="text-[11px] font-mono text-zinc-400 uppercase tracking-widest mb-1 block">Rack Name</label>
+            <input id="edit-rack-name" value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="e.g. Rack-09"
               onKeyDown={e => e.key === "Enter" && handleSave()}/>
           </div>
           <div>
-            <label className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-1.5 block">Type</label>
-            <div className="flex gap-2">
+            <div className="text-[11px] font-mono text-zinc-400 uppercase tracking-widest mb-1.5">Type</div>
+            <div className="flex gap-2" role="group" aria-label="Rack type">
               {["Compute", "Storage"].map(t => (
-                <button key={t} onClick={() => setType(t)}
+                <button key={t} type="button" aria-pressed={type === t} onClick={() => setType(t)}
                   className={`flex-1 py-2 text-sm rounded-xl border transition ${type === t
                     ? (t === "Storage" ? "border-cyan-500/60 text-cyan-400 bg-cyan-950/30" : "border-nv-400/60 text-nv-400 bg-nv-400/10")
-                    : "border-zinc-800 text-zinc-500 hover:border-zinc-600"}`}>
+                    : "border-zinc-800 text-zinc-400 hover:border-zinc-600"}`}>
                   {t}
                 </button>
               ))}
             </div>
           </div>
+          <p className="text-[12px] text-zinc-400">PDUs and KVMs are changed in their own windows: click one in the rack's detail.</p>
         </div>
-
-        {/* PDU section — add PDU when none exists */}
-        {pdus.length === 0 && (
-          <div className="border-t border-zinc-800/50 px-5 py-4 space-y-3">
-            <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">Add PDU <span className="text-zinc-700 normal-case tracking-normal">(optional)</span></div>
-            <div>
-              <label className="text-[10px] text-zinc-600 mb-1 block">PDU Name</label>
-              <input value={newPdu.name} onChange={e => setNewPdu(p => ({ ...p, name: e.target.value }))} className={inputCls} placeholder={`PDU-${name || rackName}`}/>
-            </div>
-            <div>
-              <label className="text-[10px] text-zinc-600 mb-1 block">IP Address</label>
-              <input value={newPdu.ip} onChange={e => setNewPdu(p => ({ ...p, ip: e.target.value }))} className={inputCls} placeholder="e.g. 10.7.30.200"/>
-            </div>
-            <div>
-              <label className="text-[10px] text-zinc-600 mb-1 block">Username <span className="text-zinc-700">(optional)</span></label>
-              <input value={newPdu.username} onChange={e => setNewPdu(p => ({ ...p, username: e.target.value }))} className={inputCls} placeholder="ftlab" autoComplete="off"/>
-            </div>
-            <div>
-              <label className="text-[10px] text-zinc-600 mb-1 block">Password <span className="text-zinc-700">(optional)</span></label>
-              <input type="password" value={newPdu.password} onChange={e => setNewPdu(p => ({ ...p, password: e.target.value }))} className={inputCls} placeholder="optional" autoComplete="new-password"/>
-            </div>
-          </div>
-        )}
-
-        {/* PDU section — edit existing PDUs */}
-        {pdus.length > 0 && (
-          <div className="border-t border-zinc-800/50">
-            {pdus.map((p, i) => {
-              const e = pduEdits[p.id] || {};
-              return (
-                <div key={p.id} className="px-5 py-4 space-y-3">
-                  <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
-                    PDU{pdus.length > 1 ? ` ${i + 1}` : ""}
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-zinc-600 mb-1 block">Name</label>
-                    <input value={e.name} onChange={ev => setPduField(p.id, "name", ev.target.value)} className={inputCls} placeholder={p.name}/>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-zinc-600 mb-1 block">IP Address</label>
-                    <input value={e.ip} onChange={ev => setPduField(p.id, "ip", ev.target.value)} className={inputCls} placeholder={p.ip}/>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-zinc-600 mb-1 block">Username <span className="text-zinc-700">(leave blank to keep current)</span></label>
-                    <input value={e.username} onChange={ev => setPduField(p.id, "username", ev.target.value)} className={inputCls} placeholder="unchanged" autoComplete="off"/>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-zinc-600 mb-1 block">Password <span className="text-zinc-700">(leave blank to keep current)</span></label>
-                    <input type="password" value={e.password} onChange={ev => setPduField(p.id, "password", ev.target.value)} className={inputCls} placeholder="unchanged" autoComplete="new-password"/>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {err && <div className="px-5 pb-2 text-xs text-red-400">{err}</div>}
-
-        {/* Delete */}
-        <div className="px-5 pb-2">
-          {!confirmDel ? (
-            <button onClick={() => setConfirmDel(true)}
-              className="w-full flex items-center justify-center gap-1.5 py-2 text-sm text-red-500 border border-red-900/40 hover:border-red-700/60 hover:bg-red-950/20 rounded-xl transition">
-              {Icon.trash} Delete Rack
-            </button>
-          ) : (
-            <div className="bg-red-950/20 border border-red-900/50 rounded-xl p-3 space-y-2">
-              <div className="text-xs text-red-400">
-                {pdus.length
-                  ? `This will permanently delete ${rackDevs.length} device(s) including PDU(s). Cannot be undone.`
-                  : "Delete this rack permanently? Cannot be undone."}
-              </div>
-              <div className="flex gap-2">
-                <button onClick={() => setConfirmDel(false)} className="flex-1 py-1.5 text-xs text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-lg transition">Cancel</button>
-                <button onClick={handleDelete} disabled={deleting}
-                  className="flex-1 py-1.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-600 rounded-lg transition disabled:opacity-50">
-                  {deleting ? "Deleting…" : "Confirm Delete"}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-
+        {err && <div role="alert" className="px-5 pb-2 text-xs text-red-400">{err}</div>}
+        {onDelete && <div className="px-5 pb-2">
+          <button type="button" data-action="delete-rack" onClick={onDelete}
+            className="w-full flex items-center justify-center gap-1.5 py-2 text-sm text-red-400 border border-red-900/40 hover:border-red-700/60 hover:bg-red-950/20 rounded-xl transition">
+            {Icon.trash} Delete rack…
+          </button>
+        </div>}
         <div className="flex gap-2 px-5 py-4">
           <button onClick={onClose} className="flex-1 py-2 text-sm text-zinc-400 border border-zinc-800 hover:border-zinc-600 rounded-xl transition">Cancel</button>
           <button onClick={handleSave} disabled={saving}
@@ -1927,18 +1117,18 @@ function EditRackModal({ rackName, rackType, rackDevs, onClose, onSave }) {
 // The overview (summary, find / filter / jump toolbar, cooling units panel, rack cards) or one rack's detail.
 // base: visualFor, summaryFor, maintenance, itemsError from DcimView; cooling: the cooling units and their actions.
 // onReorder(rack, ids, drop): a drag inside a rack (drop: { activeId, overId }, the server dropped onto: a swap);
-// onRequestMove({ id, rack, swapWith, fixed }): a server dropped onto another rack's card (choose the floor) or onto a
-// server in another rack (fixed: a swap with it); both open the move dialog.
-function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onRequestMove, onSelect, onSelectCustom, onLabelChange, onSlotsChange, onRenameServer, onRenameCustom, onSaveItems, onRefresh, pdus, rackDevices, optOwners, pduStatuses, base, cooling }) {
-  const {canAdmin} = useAccounts();
+// onRequestMove({ id, rack, swapWith }): a server dropped onto another rack's card (a move to that rack) or onto a server
+// in another rack (a swap with it); both open the server's window on its move dialog. onSelect / onSelectCustom open the
+// server / unit window; onAddServer({ rack?, u? }) opens Add server (Operator); kvmsByRack and onOpenDevice: the rack
+// detail's PDU and KVM links (device windows).
+function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots, rackOrder, switchAssignments, customItems, onReorder, onRequestMove, onSelect, onSelectCustom, onSaveItems, onRefresh, rackDevices, kvmsByRack = {}, onOpenDevice = null, onAddServer = null, optOwners, pduStatuses, base, cooling }) {
+  const { act } = useLabWindow();
   // With onSelectRack the App owns the open rack (?rack= in the address, so Back and Forward work);
   // without it the open rack is local state that starts from ?rack=, as before.
   const [localRack,      setLocalRack]      = useState(() => onSelectRack ? null : new URLSearchParams(location.search).get("rack"));
   const selectedRack    = onSelectRack ? (rackProp || null) : localRack;
   const setSelectedRack = onSelectRack || setLocalRack;
-  const [addOptFor,      setAddOptFor]      = useState(null);
   const [addEquipFor,    setAddEquipFor]    = useState(null);
-  const [addRackOpen,    setAddRackOpen]    = useState(false);
   const [editRackTarget, setEditRackTarget] = useState(null); // rack name string
   const [activeId,       setActiveId]       = useState(null);
   const [coolingActive,  setCoolingActive]  = useState(null);
@@ -2061,6 +1251,11 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
     e.preventDefault();
     const list = searchIndex(index, query).ordered;
     if (!list.length) return;
+    // One server found: Enter opens its window (the one place for that server).
+    if (list.length === 1 && list[0].kind === "server") {
+      const server = allServers.find(x => `s:${x.id}` === list[0].key);
+      if (server && onSelect) { setQ(query); onSelect(server); return; }
+    }
     setQ(query);
     matchAt.current = (matchAt.current + (e.shiftKey ? -1 : 1) + list.length) % list.length;
     const entry = list[matchAt.current];
@@ -2171,11 +1366,6 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
     cooling.place(id.slice(8), rack, u);
   }
 
-  async function handleSaveOpt(pduId, outlet, name, existing) {
-    try { await onLabelChange(pduId, { ...existing, [String(outlet)]: name }); }
-    finally { setAddOptFor(null); }
-  }
-
   async function handleSaveEquip(rackName, item) {
     await onSaveItems({ ...customItems, [rackName]: [...(customItems[rackName]||[]), item] });
     setAddEquipFor(null);
@@ -2237,25 +1427,25 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
           switchAssignments={switchAssignments} customItems={customItems} optOwners={optOwners}
           onBack={() => setSelectedRack(null)}
           onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
-          onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
-          onRequestAddOpt={setAddOptFor}
+          onAddServer={onAddServer ? rackName => onAddServer({ rack: rackName }) : null}
+          kvms={kvmsByRack[r.rack] || []} onOpenDevice={onOpenDevice}
           onRequestAddEquip={setAddEquipFor}
           onEdit={() => setEditRackTarget(r.rack)}
           phone={phone} detailView={detailView} onDetailView={setDetailView}/>
       ) : (
         <>
           {editMode && <div role="status" className="edit-mode-notice">
-            <p><strong>Edit mode — changes save immediately.</strong> Drag the grip ⠿ to move an OPT to another shelf or rack, or open it to set its U and rack. Click a cooling unit to place or move it. Power on/off is in each server's panel.</p>
-            {canAdmin && <button type="button" onClick={() => setAddRackOpen(true)} className="racks-btn racks-btn-accent">{Icon.plus} Add Rack</button>}
+            <p><strong>Edit mode.</strong> Drag the grip ⠿ onto another server to swap the two, or onto another rack to move it there; every move asks first. "+ Add server" on a free floor adds a server there. Click a cooling unit to place or move it. Click a server to open its window.</p>
           </div>}
           <RackKpis {...kpis}/>
           <RacksToolbar phone={phone} loading={kpis.loading} searchRef={searchRef} query={query} onQuery={setQuery} onSearchKey={onSearchKey} count={countText}
             filter={editMode ? "all" : filter} onFilter={setFilter} filterCounts={filterCounts} editMode={editMode}
             rackChips={rackChips} onJump={jumpTo}
             allCollapsed={allCollapsed} onToggleAll={toggleAll} coolingOpen={showPanel} onToggleCooling={() => toggleCooling()}
-            coolingTotal={coolingTotal} coolingNeeds={coolingNeeds}/>
+            coolingTotal={coolingTotal} coolingNeeds={coolingNeeds} onAddServer={onAddServer ? () => onAddServer({}) : null}/>
           <div className="racks-phone-options" data-desktop={phone ? undefined : ""}>
             {phone && <button type="button" className="racks-chip" onClick={toggleAll}>{allCollapsed ? "Expand all" : "Collapse all"}</button>}
+            {phone && onAddServer && <button type="button" className="racks-chip" data-action="add-server" onClick={() => onAddServer({})}>{Icon.plus} Add server</button>}
             <button type="button" className="racks-chip" data-action="shelf-labels" onClick={() => setLabelsScope({ rack: null })}>{Icon.tag} Shelf labels</button>
           </div>
           {hiding && hiddenRacks > 0 && visibleRacks.length > 0 && <p className="racks-hidden-note">
@@ -2268,7 +1458,7 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
             matchKeys={searching ? search.keys : null} onOpen={cooling.open} onPlace={cooling.edit} onAdd={cooling.add} onUndo={cooling.undoLast}
             onRetry={cooling.retry} onClose={() => toggleCooling(false)} history={cooling.history}
             phone={phone} expanded={panelExpanded} onExpand={setPanelExpanded}/>}
-          {!rackStats.length && <p className="racks-empty">No racks yet. Add a PDU in Admin → Devices, or turn on Edit to add a rack (Admin).</p>}
+          {!rackStats.length && <p className="racks-empty">No racks yet. Add a rack or PDU in Manage (Admin).</p>}
           <DndContext sensors={crossSensors} collisionDetection={collision}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
@@ -2280,7 +1470,6 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
                   switchAssignments={switchAssignments} customItems={customItems}
                   optOwners={optOwners}
                   onReorder={onReorder} onSelect={onSelect} onSelectCustom={onSelectCustom}
-                  onRenameServer={onRenameServer} onRenameCustom={onRenameCustom}
                   onHeaderClick={() => setSelectedRack(rs.rack)}
                   onEdit={() => setEditRackTarget(rs.rack)}
                   collapsed={isCollapsed(rs.rack)} onToggleCollapse={() => toggleCollapse(rs.rack)}
@@ -2301,21 +1490,11 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
 
 
       {/* Modals rendered via Portal — completely outside DOM tree, immune to any stacking context */}
-      {addOptFor && (
-        <Portal>
-          <AddOptModal rack={addOptFor} onClose={() => setAddOptFor(null)} onSave={handleSaveOpt}/>
-        </Portal>
-      )}
       {addEquipFor && (
         <Portal>
           <AddEquipmentModal rackName={addEquipFor} onClose={() => setAddEquipFor(null)}
             onSave={item => handleSaveEquip(addEquipFor, item)}
             onScan={scanUnit ? u => { const rack = addEquipFor; setAddEquipFor(null); scanUnit({ rack, u }); } : null}/>
-        </Portal>
-      )}
-      {addRackOpen && (
-        <Portal>
-          <AddRackModal onClose={() => setAddRackOpen(false)} onSave={async () => { await onRefresh?.(); }}/>
         </Portal>
       )}
       {editRackTarget && (() => {
@@ -2328,7 +1507,8 @@ function RacksView({ selectedRack: rackProp, onSelectRack, rackStats, rackSlots,
               rackType={rs.rackType}
               rackDevs={devs}
               onClose={() => setEditRackTarget(null)}
-              onSave={async () => { await onRefresh?.(); if (selectedRack) setSelectedRack(null); }}/>
+              onSave={async () => { await onRefresh?.(); if (selectedRack) setSelectedRack(null); }}
+              onDelete={act.openDelete ? () => { const name = editRackTarget; setEditRackTarget(null); act.openDelete([{ kind: "rack", id: name }]); } : null}/>
           </Portal>
         ) : null;
       })()}
@@ -2500,24 +1680,17 @@ function KpiBar({servers,rackStats,pdus,pduStatuses}) {
   </div>;
 }
 
-// owner: a unit's owner by the lab's rule (unitOwner.js); ownerFrom: the server on its floor it comes from (named under it).
-function ReadOnlyAsset({ item, owner, ownerFrom = null, onClose, sshName }) {
-  const panelRef = useRef(null);
-  useDialogFocus(panelRef, { onEscape: onClose });
-  return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
-    <section ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="asset-details-title" tabIndex={-1} onClick={e=>e.stopPropagation()} className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-6">
-      <div className="flex justify-between gap-3"><h2 id="asset-details-title" dir="auto" className="font-mono text-xl text-white break-all">{item.name}</h2><div className="flex items-start gap-2 flex-shrink-0">{sshName&&<SshButton name={sshName} size="md"/>}<ShowIn3dButton target={itemRef(item.id)} name={item.name} className={PANEL_ICON_BTN}/><CloseBtn onClose={onClose}/></div></div>
-      <dl className="grid grid-cols-2 gap-3 text-sm my-6">{Object.entries({Type:item.type||"Server", Rack:item.rack, State:item.state, "Power (W)":item.watts??"\u2014", "Serial number":item.serial_number, "Part number":item.part_number, Model:item.model, "MAC address":item.mac, Barcode:item.barcode, Shelf:item.u, Owner:ownerFrom ? <span data-owner-from={ownerFrom.name}>{owner||"No owner"}<span className="block mt-0.5 text-xs text-zinc-400">{ownerFromText(ownerFrom, !rackHasFloors(item.rack))}</span></span> : owner||"Owner not set", PDU:item.pduName, Outlet:item.outlet}).filter(([,v])=>v!=null&&v!=="").map(([key,value])=><div key={key}><dt className="text-xs text-zinc-500">{key}</dt><dd className="mt-1 break-words" dir="auto">{value}</dd></div>)}</dl>
-      <p className="text-xs text-zinc-400">Turn on Edit to change this equipment.</p>
-    </section>
-  </div>;
-}
-
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, onOpenConsole, section: controlledSection, editMode = false, onSummary, maintenance, onSwitchFeeds, onRequestEdit, onShowIn3d = null, rack, onRackChange}) {
-  const {canOperate, canAdmin, preferences} = useAccounts();
+// Racks is one of the views of the one place: a server opens its window (both modes), a unit its unit window, a PDU or KVM
+// its device window; a drag opens the server window on its move dialog; power asks through the provider's power hook;
+// Add server (Operator) is AddServerDialog. item: ?item=<unit id> (an old link to a Racks unit) opens its unit window.
+// onOutletAction, onLabelChange, onRenameOpt and onSwitchFeeds are App's props, no longer read here (ManageView passes
+// the same props; it renders the server table, section "inventory").
+export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction,onLabelChange,onRenameOpt,onRefresh, onOpenConsole, section: controlledSection, editMode = false, onSummary, maintenance, onSwitchFeeds, onRequestEdit, onShowIn3d = null, item = null, rack, onRackChange}) {
+  const {canOperate, preferences} = useAccounts();
   const {revision: engineerRevision} = useEngineers();
-  const {hidden: removedHidden, refresh: refreshRemoved} = useRemovedServers();
+  const {hidden: removedHidden} = useRemovedServers();
+  const lab = useLabWindow();
   const [localSection, setSection] = useState("racks");
   const section = controlledSection || localSection;
   const [rackOrder,         setRackOrder]         = useState({});
@@ -2529,25 +1702,18 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [ownersLoaded,      setOwnersLoaded]      = useState(false);
   const [chillers,          setChillers]          = useState({units:[],connections:[]});
   const [chillersLoaded,    setChillersLoaded]    = useState(false);
-  const [selectedServerId,  setSelectedServerId]  = useState(null);
-  const [selectedCustomId,  setSelectedCustomId]  = useState(null);
-  // epoch reopens the equipment panel on the fresh record after another session's change was reloaded;
-  // draft: the fields this person had changed in it; notice: the panel says why it was reopened.
-  const [customPanel,       setCustomPanel]       = useState({epoch:0, draft:null, notice:false});
   const [layoutError,       setLayoutError]       = useState("");
-  const selectCustom = useCallback(item => { setSelectedCustomId(item?.id ?? null); setCustomPanel({epoch:0, draft:null, notice:false}); }, []);
+  const [addServerTarget,   setAddServerTarget]   = useState(null);   // Add server: { rack, u } (null: closed)
 
   // The rack layout (positions, U slots, overrides, equipment, owners, cooling units) is reloaded on the dashboard's
   // refresh interval, when the tab becomes visible again and when the DCIM tab changes, so moves made in Locations, the
   // 3D Twin, the assistant or another session show here without a page reload. One reload path for every store.
-  // While editing, the layout stores pause, so a reload never replaces what is being edited; equipment keeps reloading
-  // (B08 RACK-3) except while an equipment panel is open, whose form is based on the record it opened with. itemsSeq
-  // drops an equipment answer that a save, or a newer reload, overtook. A failed reload keeps what is shown.
+  // While editing, the periodic reload leaves the layout stores alone; equipment keeps reloading (B08 RACK-3; units are
+  // edited in their unit window). itemsSeq drops an equipment answer that a save, or a newer reload, overtook. A failed
+  // reload keeps what is shown.
   // Live sync (the change feed, ../api/changes.js): a change saved anywhere reloads the stores of its domains at once,
   // in Edit mode too (every edit here is saved at once, so no unsaved layout is lost; a reload waits while a save of this
-  // page runs, live.during). An open equipment panel keeps what is typed in it: when its unit changed, the panel reopens
-  // on the saved record with the typed fields kept ("changed in another session"); an open cooling dialog holds the
-  // cooling store until it closes.
+  // page runs, live.during). An open cooling dialog holds the cooling store until it closes.
   const editingRef = useRef(editMode);
   editingRef.current = editMode;
   const itemsSeq = useRef(0);
@@ -2568,14 +1734,6 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   // does not stop an earlier one that arrives after it. (A save is followed by the change feed's reload.)
   const layoutSeq = useRef(0);
   const layoutShown = useRef(0);
-  const holdItems = selectedCustomId != null;
-  const holdItemsRef = useRef(holdItems);
-  holdItemsRef.current = holdItems;
-  const selectedCustomIdRef = useRef(selectedCustomId);
-  selectedCustomIdRef.current = selectedCustomId;
-  const customItemsRef = useRef(customItems);
-  customItemsRef.current = customItems;
-  const customDraftRef = useRef(null);   // the open equipment panel's changed fields (EditEquipmentPanel draftRef)
   // loadErrors: the stores whose last load failed ({ items, cooling, layout: message }), shown as banners with Retry.
   const [loadErrors, setLoadErrors] = useState({});
   // initial: the first load (a failed store starts empty, as before). force: Retry (also while editing or hidden).
@@ -2584,7 +1742,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     if (!initial && !force && !live && document.hidden) return Promise.resolve();
     const want = store => !live || live.has(store);
     const editing = !initial && !force && !live && editingRef.current;
-    const itemsTurn = !want("items") || (holdItemsRef.current && !live) ? null : ++itemsSeq.current;
+    const itemsTurn = !want("items") ? null : ++itemsSeq.current;
     const holdCooling = !initial && !force && holdCoolingRef.current;
     if (live && want("cooling") && holdCooling) coolingMissed.current = true;
     const coolingTurn = !want("cooling") || holdCooling ? null : ++coolingSeq.current;
@@ -2611,20 +1769,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       coolingTurn == null ? Promise.resolve(null) : fetchStore("cooling", "/api/chillers"),
     ]).then(([order,slots,sw,items,overrides,owners,chill])=>{
       const itemsCurrent = itemsTurn != null && itemsTurn === itemsSeq.current;
-      if (itemsCurrent && (items || initial)) {
-        // The unit in the open equipment panel was changed elsewhere: the panel reopens on the saved record, keeping
-        // the fields typed in it, and says so (the same note as after a refused save).
-        const openId = holdItemsRef.current ? selectedCustomIdRef.current : null;
-        if (openId != null && items) {
-          const find = doc => Object.values(doc || {}).flat().find(i => i?.id === openId);
-          const was = find(customItemsRef.current), now = find(items);
-          if (was && now && !same(was, now)) {
-            const draft = customDraftRef.current && Object.keys(customDraftRef.current).length ? { ...customDraftRef.current } : null;
-            setCustomPanel(p => ({ epoch: p.epoch + 1, draft, notice: true }));
-          }
-        }
-        keep(setCustomItems)(items||{});
-      }
+      if (itemsCurrent && (items || initial)) keep(setCustomItems)(items||{});
       const coolingCurrent = coolingTurn != null && coolingTurn === coolingSeq.current && (initial || force || !holdCoolingRef.current);
       const layoutCurrent = layoutTurn != null && layoutTurn > layoutShown.current;
       setLoadErrors(prev => {
@@ -2649,13 +1794,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     });
   },[]);
   useEffect(()=>{ reloadLayouts(true); },[reloadLayouts]);
-  // Opening an equipment panel drops an equipment answer still on its way; closing it or changing the DCIM tab reloads.
+  // Changing the DCIM tab reloads.
   const reloadTrigger = useRef(false);
   useEffect(()=>{
-    if (holdItems) { itemsSeq.current++; return; }
     if (reloadTrigger.current) reloadLayouts();
     reloadTrigger.current = true;
-  },[section, holdItems, reloadLayouts]);
+  },[section, reloadLayouts]);
   const refreshSeconds = Math.max(5, Number(preferences?.refresh_seconds) || 15);
   useEffect(()=>{
     const timer = setInterval(() => reloadLayouts(), refreshSeconds * 1000);
@@ -2691,27 +1835,6 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
   const [toast, setToast] = useState(null);
   const showToast = useCallback((text, tone = "ok", onUndo = null) => setToast({ id: `${Date.now()}-${Math.random()}`, text, tone, onUndo }), []);
   const dismissToast = useCallback(id => setToast(t => (t?.id === id ? null : t)), []);
-
-  // ── remove a server from the lab (Admin): RemoveServerDialog, then a toast whose Undo restores it ──
-  const [removeTarget, setRemoveTarget] = useState(null);   // the server's name
-  const afterRemovedChange = useCallback(() => { refreshRemoved().catch(() => {}); reloadLayouts(false, true); }, [refreshRemoved, reloadLayouts]);
-  // Undo restores against the revision the removal returned: if another session changed the list since, it is a 409.
-  const undoRemove = useCallback(async (key, name, revision) => {
-    try {
-      await restoreServer(key, revision);
-      afterRemovedChange();
-      showToast(<><bdi>{name}</bdi> is back in the lab. Its rack position, switch port and owner were not restored.</>);
-    } catch (e) {
-      showToast(<><bdi>{name}</bdi> was not restored: {e.message}</>, "error");
-    }
-  }, [afterRemovedChange, showToast]);
-  const serverRemoved = useCallback(result => {
-    const { key, name } = result.removed;
-    setRemoveTarget(null);
-    setSelectedServerId(null);
-    afterRemovedChange();
-    showToast(<><bdi>{name}</bdi> was removed from the lab.</>, "ok", () => undoRemove(key, name, result.revision));
-  }, [afterRemovedChange, showToast, undoRemove]);
 
   // ── cooling units: never deleted; every edit is checked (assertKeepsUnits) and saved against the latest document ──
   const chillersRef = useRef(chillers);
@@ -2750,15 +1873,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     showToast(<><bdi>{change.name}</bdi> {!change.after.rack ? "has no rack now" : stayed ? `renamed; it stays in ${describePlace(change.after)}` : `moved to ${describePlace(change.after)}`}.</>, "ok", () => undoCooling(change));
   }, [showToast, undoCooling]);
 
-  const handleSwitchSave = useCallback((id, value) => {
-    const edit = doc => { const next = { ...doc }; if (value) next[id] = value; else delete next[id]; return next; };
-    const previous = switchAssignments;
-    setSwitchAssignments(edit(switchAssignments));
-    return persistLayout("/api/switch-assignments", edit, setSwitchAssignments, previous);
-  }, [switchAssignments, persistLayout]);
-
-  // inventory.js reports a rejected equipment save; a stale list is replaced by the reloaded one, and an open
-  // equipment panel is reopened on its fresh record (it closes if the item was deleted meanwhile).
+  // inventory.js reports a rejected equipment save; a stale list is replaced by the reloaded one.
   const saveItems = useCallback((updated, options) => live.during(async () => {
     itemsSeq.current++;
     try {
@@ -2766,10 +1881,7 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
       setCustomItems(saved);
       return saved;
     } catch (e) {
-      if (e.reloaded) {
-        setCustomItems(e.reloaded);
-        setCustomPanel(p => ({epoch: p.epoch + 1, draft: null, notice: true}));
-      }
+      if (e.reloaded) setCustomItems(e.reloaded);
       throw e;
     } finally {
       itemsSeq.current++;
@@ -2797,6 +1909,15 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     });
     return map;
   },[devices,kvmStatuses]);
+  // The KVMs of each rack for the rack detail's device links ({ id, name, ip, status }).
+  const kvmsByRack = useMemo(() => {
+    const map = {};
+    devices.filter(d => d.kind === "kvm" && d.rack).forEach(k => {
+      const st = kvmStatuses?.[k.id];
+      (map[k.rack] ||= []).push({ id: k.id, name: k.name, ip: k.ip, status: st?.reachable === true ? "online" : st?.reachable === false ? "offline" : "unknown" });
+    });
+    return map;
+  }, [devices, kvmStatuses]);
   // Inventory racks have no device status; Dashboard links to their saved layout.
   const rackDevices = devices.filter(d=>d.kind==="pdu"||d.kind==="rack");
   const racks = useMemo(()=>[...new Set([...rackDevices.map(d=>d.rack).filter(Boolean), ...Object.keys(customItems)])].sort(),[rackDevices, customItems]);
@@ -3013,87 +2134,37 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     retry: () => reloadLayouts(false, true), history: canOperate ? coolingHistory : null,
   }), [chillerDoc, coolingGroups, chillersLoaded, loadErrors.cooling, coolingEditable, canOperate, canPlaceCooling, lastCooling, openCooling, editCooling, addCooling, placeCooling, undoCooling, reloadLayouts, coolingHistory]);
 
-  // ── power: the row switch, the details dialog and the edit panel all go through requestPower ──
-  const powerCtx = useMemo(() => ({ devices, pduStatuses, maintenance }), [devices, pduStatuses, maintenance]);
-  const powerLatest = useRef(powerCtx);
-  powerLatest.current = powerCtx;
+  // ── power: every row switch asks through the window provider's one power hook (server/useServerPower.js): the in-app
+  // confirmation names the outlets (Power on included, whatever confirm_power says), the plan is checked again on the
+  // latest readings before anything switches, and the result is a provider toast ──
+  const power = lab.act?.power || null;
+  const groupFor = power?.groupFor || null;
   const powerGroups = useMemo(() => {
     const map = new Map();
-    servers.forEach(s => { const key = serverIdentity(s.name); if (key && !map.has(key)) map.set(key, serverPowerGroup(s.name, powerCtx)); });
+    if (!groupFor) return map;
+    servers.forEach(s => { const key = serverIdentity(s.name); if (key && !map.has(key)) map.set(key, groupFor(s.name)); });
     return map;
-  }, [servers, powerCtx]);
-  const [powerPendingMap, setPowerPendingMap] = useState({});
-  const [powerDialog, setPowerDialog] = useState(null);
-  const powerEnabled = !!canOperate && !!onSwitchFeeds;
+  }, [servers, groupFor]);
+  const powerEnabled = !!canOperate && !!power?.enabled;
   const powerFor = useCallback(s => (powerEnabled ? powerGroups.get(serverIdentity(s.name)) || null : null), [powerEnabled, powerGroups]);
-  const powerPending = useCallback(s => powerPendingMap[serverIdentity(s.name)] || null, [powerPendingMap]);
+  const pendingOf = power?.pending || null;
+  const powerPending = useCallback(s => pendingOf?.(serverIdentity(s.name)) || null, [pendingOf]);
   const waitingFor = useCallback(s => pduStatuses[s.pduId] === undefined, [pduStatuses]);
-  // After a feed-only request on a multi-feed server the toast says what still powers the server (a cycle of one feed
-  // does not power-cycle a server that another feed keeps running).
-  const powerToast = useCallback((serverName, action, results, { scope = "server", group = null } = {}) => {
-    const server = serverDisplayName(serverName);
-    const failed = (results || []).filter(r => !r.ok);
-    const done = (results || []).filter(r => r.ok);
-    const where = done.map(r => `${r.pduName} · outlet ${r.outlet}`).join(", ");
-    if (failed.length) {
-      showToast(<>Some outlets of <bdi>{server}</bdi> were not switched: {failed.map(r => `${r.pduName} outlet ${r.outlet}${r.error ? ` (${r.error})` : ""}`).join(", ")}.</>, "error");
-      return;
-    }
-    const switched = new Set(done.map(r => `${r.pduId}:${r.outlet}`));
-    const powered = scope === "feed" && action !== "on" ? (group?.feeds || []).filter(f => !switched.has(f.id) && f.state === "on") : [];
-    if (powered.length && done.length === 1) {
-      const still = powered.map(f => `${f.pduName} · outlet ${f.outlet}`).join(", ");
-      showToast(action === "cycle"
-        ? <><bdi>{done[0].label}</bdi> was power-cycled ({where}); <bdi>{server}</bdi> stayed powered by {still}, so it was not power-cycled.</>
-        : <><bdi>{done[0].label}</bdi> is off ({where}); <bdi>{server}</bdi> is still powered by {still}.</>);
-      return;
-    }
-    if (scope === "feed" && action === "on" && done.length === 1 && (group?.feeds.length || 0) > 1) {
-      showToast(<><bdi>{done[0].label}</bdi> is on ({where}).</>);
-      return;
-    }
-    showToast(<><bdi>{server}</bdi> is {action === "cycle" ? "power-cycled" : action} ({where}).</>);
-  }, [showToast]);
-  // The plan is checked again against the latest PDU readings; if the outlets changed, nothing is switched.
-  const runPower = useCallback(async ({ serverName, action, scope, feedId, plan }) => {
-    if (!powerEnabled) throw new Error("Viewer account: read only");
-    const fresh = planServerPower(serverPowerGroup(serverName, powerLatest.current), action, scope, feedId);
-    // A feed that became blocked (maintenance, protected outlet) refuses the whole request before any outlet switches.
-    if (fresh.disabledReason) throw new Error(`${fresh.disabledReason} — nothing was switched.`);
-    if (!sameTargets(plan, fresh)) throw new Error("The outlet mapping changed while the dialog was open — nothing was switched.");
-    const key = serverIdentity(serverName);
-    setPowerPendingMap(p => ({ ...p, [key]: action }));
-    try { return await onSwitchFeeds(fresh.targets, action, { stopOnFailure: action === "off" }); }
-    finally { setPowerPendingMap(p => { const next = { ...p }; delete next[key]; return next; }); }
-  }, [powerEnabled, onSwitchFeeds]);
-  // Every request on this page opens the in-app confirmation that names the outlets, Power on included: the account
-  // preference confirm_power ("Ask before Power off and Power cycle") is not a reason to switch a server unasked here.
+  const powerRequest = power?.request || null;
   const requestPower = useCallback((server, action, opener, { scope = "server", feedId = null } = {}) => {
-    const group = powerGroups.get(serverIdentity(server.name));
-    if (!group || !powerEnabled) return;
-    const feed = feedId || `${server.pduId}:${server.outlet}`;
-    setPowerDialog({ serverName: server.name, key: group.key, snapshot: group, action, scope, feedId: feed, allowScopeChoice: group.feeds.length > 1 && scope === "server" });
-  }, [powerGroups, powerEnabled]);
+    if (!powerEnabled || !powerRequest || !powerGroups.get(serverIdentity(server.name))) return;
+    powerRequest(server.name, action, opener, { scope, feedId: feedId || `${server.pduId}:${server.outlet}` });
+  }, [powerEnabled, powerRequest, powerGroups]);
 
   // ── scan unit barcodes onto a floor: the dialog saves each unit itself; the equipment list is then reloaded (or
   // replaced by the list an Undo saved), and itemsSeq drops any reload that was already on its way with the old list ──
+  // (a server's floor: the server window's "Units on this floor" scans there)
   const [scanTarget, setScanTarget] = useState(null);
-  const scanPlaceRef = useRef(null);
-  const openScanUnit = useCallback(({ server = null, rack = null, u = null, label = "", fixed = false } = {}) => {
-    if (server) {
-      const { rackStats: stats, rackOrder: order, rackSlots: slots, customItems: items } = scanPlaceRef.current || {};
-      const rs = stats?.find(x => x.rack === server.rack);
-      const shelf = rs ? serverShelf(buildRackRows(rs.servers, rs.rack, order, slots, items).uMap[server.id]) : null;
-      // A server in a storage rack: its units go on its shelf (1-STORAGE_SHELVES); without one, a shelf is chosen.
-      if (!rackHasFloors(server.rack)) {
-        const onShelf = validFloor(shelf, server.rack);
-        setScanTarget({ rack: server.rack, u: onShelf ? shelf : 0, position: "", label: "", chooseFloor: !onShelf });
-      } else setScanTarget({ rack: server.rack, u: shelf ?? 0, position: "", label: server.name, chooseFloor: shelf == null });
-    } else if (rack) {
-      // A storage rack starts on the whole unit unless a shelf was given; a rack on floor 1.
-      setScanTarget({ rack, u: Number.isInteger(u) ? u : !rackHasFloors(rack) ? 0 : 1, position: "", label,
-        chooseFloor: !(fixed && Number.isInteger(u)) });
-    }
+  const openScanUnit = useCallback(({ rack = null, u = null, label = "", fixed = false } = {}) => {
+    if (!rack) return;
+    // A storage rack starts on the whole unit unless a shelf was given; a rack on floor 1.
+    setScanTarget({ rack, u: Number.isInteger(u) ? u : !rackHasFloors(rack) ? 0 : 1, position: "", label,
+      chooseFloor: !(fixed && Number.isInteger(u)) });
   }, []);
   const scanItemsChanged = useCallback(async saved => {
     if (saved) { itemsSeq.current++; setCustomItems(saved); return; }
@@ -3102,6 +2173,8 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     catch { /* the next periodic reload tries again */ }
   }, []);
 
+  // Add server (Operator): the toolbar, a free floor in Edit mode and a rack's detail open it ({ rack, u } preselected).
+  const openAddServer = useCallback(({ rack: toRack = null, u = null } = {}) => setAddServerTarget({ rack: toRack, u }), []);
   const serverActions = useMemo(()=>({
     kvmFor: name => kvmByServer.get(serverIdentity(name)) || null,
     openConsole: onOpenConsole || null,
@@ -3114,74 +2187,50 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     renderSsh: (server, size) => <RackSshButton server={server} compact={size === "sm"}/>,
     // Scan unit barcodes onto a rack's floor ({ rack, u }) or a server's floor ({ server }); Operator and up.
     scanUnit: canOperate ? openScanUnit : null,
-  }),[kvmByServer,onOpenConsole,canOperate,powerEnabled,powerGroups,powerFor,powerPending,requestPower,waitingFor,openScanUnit]);
+    addServer: canOperate ? openAddServer : null,
+  }),[kvmByServer,onOpenConsole,canOperate,powerEnabled,powerGroups,powerFor,powerPending,requestPower,waitingFor,openScanUnit,openAddServer]);
 
-  // ── moving servers (Edit mode) ──
-  // Every Racks flow that moves or swaps a server (its U / shelf field, Move… in its panel, a drag onto another server
-  // in any rack, a drag onto a rack's card) opens the move dialog (ServerMoveDialog), which previews the move and saves
-  // it with applyServerMove. The PDU outlet and KVM port belong to the floor (the owner's rule): the server that lands
-  // on a floor takes over its outlet and port, so the port labels are rewritten with the rack layout and the units in
-  // one server step (POST /api/devices/move-server: all or nothing; the PDU and KVM devices never move). The units on
-  // the floor a server leaves go with it to its new floor unless the person turned that off ("everything moves with
-  // the server"; their owners follow the server). Servers the move does not touch keep their floor.
-  // placements: where every server is drawn now ({ rack, u, auto }), as the rack cards number the floors.
-  const placements = useMemo(() => {
-    const out = {};
-    rackStats.forEach(rs => {
-      const { uMap } = buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems);
-      rs.servers.forEach(s => { if (s.id in uMap) out[s.id] = { rack: rs.rack, u: serverShelf(uMap[s.id]), auto: (rackSlots[rs.rack] || {})[s.id] == null }; });
-    });
-    return out;
-  }, [rackStats, rackOrder, rackSlots, customItems]);
-  const placementsRef = useRef(placements);
-  placementsRef.current = placements;
-  const isFloor = useCallback((rackName, u) => validFloor(u, rackName), []);
-  const planUnits = useCallback(moves => unitsMovingWith(moves, placements, customItems, isFloor), [placements, customItems, isFloor]);
-  const nameOf = useCallback(id => servers.find(s => s.id === id)?.name || id, [servers]);
-  // The move dialog's preview is read again when the floors or any port label change (another session's move).
-  const moveDataKey = useMemo(() => JSON.stringify([placements, devices.filter(d => d.kind === "pdu" || d.kind === "kvm").map(d => d.labels_revision || "")]), [placements, devices]);
+  // ── the windows: a server opens its window, a unit its unit window, a PDU or KVM its device window ──
+  const openServer = lab.openServer, openWindow = lab.open;
+  const openServerWindow = useCallback(server => {
+    const key = windowKey(server?.name) || serverIdentity(server?.name);
+    if (key) openServer(key);
+  }, [openServer]);
+  const openUnitWindow = useCallback(unit => { if (unit?.id != null) openWindow({ kind: "unit", id: String(unit.id) }); }, [openWindow]);
+  const openDevice = useCallback(id => openWindow({ kind: "dev", id }), [openWindow]);
+  // ?item=<unit id> (an old link to a Racks unit): its unit window over Racks; the address keeps the window, not item.
+  useEffect(() => {
+    if (!item || section !== "racks") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("item");
+    window.history.replaceState(window.history.state, "", url);
+    openWindow({ kind: "unit", id: String(item) }, { replace: true });
+  }, [item, section, openWindow]);
 
-  // One move or swap as the dialog previewed it, in ONE server step: POST /api/devices/move-server with the preview's
-  // token (planRevision; anything changed since: 409, nothing saved) rewrites the floors' port labels and the rack
-  // layout and, with rack_items, moves the units that go along (unitMoves: by id, from the floor the preview showed),
-  // all or nothing; the server also leaves "empty" / "KVM Power" keys out of the layout. The equipment list is read
-  // fresh with its ETag for each attempt: only the units' own 409 (another unit changed meanwhile) is tried again, while
-  // every moving unit is still where the preview found it (applyUnitMoves refuses otherwise). A refused or failed move
-  // leaves nothing half done: the person sees one message and the dialog previews the latest again. The saved list
-  // (with each unit's "moved" history) and its revision become the page's copy.
-  const applyServerMove = useCallback(({ body, planRevision, unitMoves = [] }) => live.during(async () => {
-    setLayoutError("");
-    let result = null;
-    for (let attempt = 1; !result; attempt++) {
-      try {
-        const items = unitMoves.length ? await loadLayout("/api/rack-items") : null;
-        result = await api.moveServer(moveWithUnits(body, planRevision, items, unitMoves));
-      } catch (e) {
-        if (unitsConflict(e) && attempt < 3) continue;
-        await Promise.all([reloadLayouts(false, true), onRefresh?.()]);
-        if (e?.status === 409) throw new Error(e.conflict ? e.message : unitsConflict(e) ? e.detail
-          : "Something on these floors (a port label or a server's place) was changed in another session meanwhile, so nothing was saved. The dialog shows the latest now: check the move and confirm again.");
-        throw new Error(`Nothing was saved: ${e?.detail || e?.message || "the move failed."}`);
-      }
-    }
-    if (result.rack_items) {
-      const turn = ++itemsSeq.current;
-      const saved = rememberRackItems(result.rack_items, result.revisions?.rack_items);
-      if (saved && turn === itemsSeq.current) setCustomItems(saved);
-    }
-    await Promise.all([reloadLayouts(false, true), onRefresh?.()]);
-    return { unitMoves };
-  }), [live, reloadLayouts, onRefresh]);
-  // The move dialog (ServerMoveDialog): { id, rack, floor, swapWith, fixed, fromPanel }.
-  const [moveRequest, setMoveRequest] = useState(null);
+  // ── moving servers (Edit mode): a drag opens the server's window on its move dialog (server/MoveDialog.jsx) ──
+  // The PDU outlet and KVM port belong to the floor (the owner's rule): the dialog previews the swap or the move (POST
+  // /api/devices/move-server, a dry run) and saves it in one server step with units_follow, so the units on the floor go
+  // along; the PDU and KVM devices never move. serverById: the rows by their DCIM id (the drag ids).
+  const serverById = useMemo(() => new Map(servers.map(s => [s.id, s])), [servers]);
+  const serverByIdRef = useRef(serverById);
+  serverByIdRef.current = serverById;
+  // A server dropped onto another server (any rack): a swap with it; onto another rack's card: a move to that rack.
+  const requestMove = useCallback(({ id, rack: toRack = null, swapWith = null }) => {
+    const server = serverByIdRef.current.get(id);
+    const key = windowKey(server?.name);
+    if (!key) return;
+    const other = swapWith ? serverByIdRef.current.get(swapWith) : null;
+    if (swapWith && (!other || windowKey(other.name) === key)) return;   // the other feed of the same server
+    openServer(key, other ? { sec: "move", swapWith: other.name } : { sec: "move", moveTo: toRack ? { rack: toRack } : null });
+  }, [openServer]);
 
   // A drag inside a rack: dropped onto another server, the two swap floors (each with the other's outlet, KVM port and
   // floor units), asked first in the move dialog. A drop that names no server keeps the old rack order save.
   const handleReorder = useCallback((rackName,newIds,drop=null)=>{
     if (!editMode) return;
     setLayoutError("");
-    if (drop && drop.overId !== drop.activeId && placementsRef.current[drop.overId] && placementsRef.current[drop.activeId]) {
-      setMoveRequest({ id: drop.activeId, rack: placementsRef.current[drop.overId].rack, swapWith: drop.overId, fixed: true });
+    if (drop && drop.overId !== drop.activeId && serverByIdRef.current.has(drop.overId) && serverByIdRef.current.has(drop.activeId)) {
+      requestMove({ id: drop.activeId, swapWith: drop.overId });
       return;
     }
     const edit = doc => ({ ...doc, [rackName]: newIds });
@@ -3189,87 +2238,14 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     setRackOrder(edit(rackOrder));
     persistLayout("/api/rack-positions", edit, setRackOrder, previous)
       .catch(e => setLayoutError(`The new order was not saved: ${e.message}`));
-  },[rackOrder,editMode,persistLayout]);
+  },[rackOrder,editMode,persistLayout,requestMove]);
 
-  // The layout stores read again through the one guarded reload (layoutSeq), in Edit mode too: an older reload still on
-  // its way cannot put back the ids from before the rename, and a failed read keeps what is shown.
+  // The layout stores read again through the one guarded reload (layoutSeq), in Edit mode too (after Add server pinned
+  // the new server's floor): an older reload still on its way cannot put back an older place, and a failed read keeps
+  // what is shown.
   function _reloadPositions() {
     return reloadLayouts(false, true, new Set(["layout"]));
   }
-
-  // After any label change reload positions so renamed IDs stay in place
-  const handleLabelChange = useCallback(async (pduId, newLabels) => {
-    await onLabelChange(pduId, newLabels);
-    await _reloadPositions();
-  }, [onLabelChange]);
-
-  // Global rename via dedicated endpoint — one call updates all PDUs, KVMs and DCIM files
-  const handleRenameOpt = useCallback(async (oldName, newName) => {
-    if (!onRenameOpt) return;
-    await onRenameOpt(oldName, newName);
-    await _reloadPositions();
-  }, [onRenameOpt]);
-
-  // Inline rename server (double-click in rack)
-  const handleRenameServer = useCallback(async (server, newName) => {
-    const pdu = pdus.find(p => p.id === server.pduId);
-    if (!pdu) return;
-    await handleLabelChange(server.pduId, { ...pdu.labels, [String(server.outlet)]: newName });
-  }, [pdus, handleLabelChange]);
-
-  // Inline rename custom item
-  const handleRenameCustom = useCallback(async (item, newName) => {
-    const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
-    if (!rackName) return;
-    const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===item.id ? {...i, name: newName} : i) };
-    await saveItems(updated).catch(() => {});
-  }, [customItems, saveItems]);
-
-  // Save custom item edits: only the changed fields, merged into the latest record
-  const handleSaveCustom = useCallback(async (id, changes) => {
-    const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === id));
-    if (!rackName) return;
-    const updated = { ...customItems, [rackName]: customItems[rackName].map(i => i.id===id ? {...i, ...changes} : i) };
-    try {
-      // The panel shows a taken serial number or MAC address next to the field itself.
-      await saveItems(updated, { alertDuplicates: false });
-      setCustomPanel(p => ({...p, draft: null, notice: false}));
-    } catch (e) {
-      if (e.reloaded) setCustomPanel(p => ({...p, draft: changes}));
-      throw e;
-    }
-  }, [customItems, saveItems]);
-
-  // Delete custom item
-  const handleDeleteCustom = useCallback(async (item) => {
-    const rackName = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
-    if (!rackName) return;
-    const updated = { ...customItems, [rackName]: customItems[rackName].filter(i => i.id !== item.id) };
-    await saveItems(updated);
-  }, [customItems, saveItems]);
-
-  // Move custom item to a different rack: to its rack level (u 0), or in a storage rack onto the shelf chosen (0 = whole)
-  const handleMoveCustom = useCallback(async (item, targetRack, u = 0) => {
-    const srcRack = Object.keys(customItems).find(r => customItems[r].some(i => i.id === item.id));
-    if (!srcRack || srcRack === targetRack) return;
-    const latest = customItems[srcRack].find(i => i.id === item.id);
-    const updated = {
-      ...customItems,
-      [srcRack]: customItems[srcRack].filter(i => i.id !== item.id),
-      [targetRack]: [...(customItems[targetRack] || []), { ...latest, u: Number.isInteger(u) && u >= 0 ? u : 0, shelf_position: "" }],
-    };
-    await saveItems(updated);
-  }, [customItems, saveItems]);
-
-  // Derive live server data from servers list — no stale closure race possible
-  const selectedServer = selectedServerId ? servers.find(s => s.id === selectedServerId) ?? null : null;
-  // The units that go with the open server when it moves: its floor's units, when it has the floor to itself.
-  const selectedFloorUnits = useMemo(() => {
-    const p = selectedServer ? placements[selectedServer.id] : null;
-    if (!p || p.u == null || !validFloor(p.u, p.rack)) return [];
-    if (serversOnFloor(placements, p.rack, p.u).some(id => id !== selectedServer.id)) return [];
-    return unitsOnFloor(customItems, p.rack, p.u);
-  }, [selectedServer, placements, customItems]);
 
   const tabs=[
     {id:"racks",    label:"Racks",     icon:Icon.rack},
@@ -3278,32 +2254,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
     {id:"changelog",label:"Changelog", icon:Icon.log},
   ];
 
-  // The selected equipment and its rack, always from the latest list (no stale copy is ever edited or saved)
-  const selectedCustomRack = selectedCustomId
-    ? Object.keys(customItems).find(r => customItems[r].some(i => i.id === selectedCustomId)) ?? null
-    : null;
-  const selectedCustom = selectedCustomRack ? customItems[selectedCustomRack].find(i => i.id === selectedCustomId) : null;
-  // Deleted in another session (seen in a reloaded list): its panel is gone, so equipment reloads resume.
-  useEffect(() => { if (selectedCustomId != null && !selectedCustom) setSelectedCustomId(null); }, [selectedCustomId, selectedCustom]);
-
-  scanPlaceRef.current = { rackStats, rackOrder, rackSlots, customItems };
   const scanFloorChoices = useMemo(() => {
     if (!scanTarget?.chooseFloor) return null;
     const list = Array.from({ length: floorsFor(scanTarget.rack) + 1 }, (_, n) => n);
     return list.includes(scanTarget.u) ? list : [...list, scanTarget.u];
   }, [scanTarget]);
-  // The open server's shelf, as its rack draws it ("U03" or "U03 (auto)").
-  const selectedShelf = useMemo(() => {
-    if (!selectedServer) return "";
-    const rs = rackStats.find(x => x.rack === selectedServer.rack);
-    if (!rs) return "—";
-    const u = serverShelf(buildRackRows(rs.servers, rs.rack, rackOrder, rackSlots, customItems).uMap[selectedServer.id]);
-    if (u == null) return "—";
-    return `${!rackHasFloors(rs.rack) ? (u ? `Shelf ${u}` : "Whole storage") : shelfLabel(u)}${(rackSlots[rs.rack] || {})[selectedServer.id] == null ? " (auto)" : ""}`;
-  }, [selectedServer, rackStats, rackOrder, rackSlots, customItems]);
-  const selectedVisual = selectedServer ? visualFor(selectedServer) : null;
   const dialogUnit = coolingDialog?.mode === "create" ? { id: coolingDialog.newId, name: "", rack: coolingDialog.rack ?? racks.find(r => rackHasFloors(r)) ?? null, u: null } : coolingDialog ? unitById(coolingDialog.unitId) : null;
-  const powerGroupNow = powerDialog ? powerGroups.get(powerDialog.key) || powerDialog.snapshot : null;
   const loadBanner = (store, text, more = "") => loadErrors[store] && <div role="alert" className="racks-banner" data-store={store}>
     <span>{text} ({loadErrors[store]}).{more ? ` ${more}` : ""}</span> <button type="button" className="racks-link" onClick={() => reloadLayouts(false, true)}>Retry</button></div>;
 
@@ -3333,67 +2289,16 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
         <RacksView selectedRack={rack} onSelectRack={onRackChange}
           rackStats={rackStats} rackSlots={rackSlots} rackOrder={rackOrder}
           switchAssignments={switchAssignments} customItems={customItems}
-          onReorder={handleReorder} onRequestMove={setMoveRequest}
-          onSelect={s => setSelectedServerId(s.id)} onSelectCustom={selectCustom}
-          onLabelChange={handleLabelChange} onSlotsChange={setRackSlots}
-          onRenameServer={handleRenameServer} onRenameCustom={handleRenameCustom}
+          onReorder={handleReorder} onRequestMove={requestMove}
+          onSelect={openServerWindow} onSelectCustom={openUnitWindow}
           onSaveItems={saveItems} onRefresh={onRefresh}
-          pdus={pdus} rackDevices={rackDevices} optOwners={shownOwners}
+          rackDevices={rackDevices} kvmsByRack={kvmsByRack} onOpenDevice={openDevice}
+          onAddServer={canOperate ? openAddServer : null} optOwners={shownOwners}
           pduStatuses={pduStatuses} base={rackView} cooling={coolingApi}/>
       )}
       {section==="inventory"&&<InventoryView servers={servers} switchAssignments={switchAssignments} rackSlots={rackSlots} customItems={customItems} optOwners={optOwners} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}/>}
       {section==="power"&&<PowerView rackStats={rackStats}/>}
       {section==="changelog"&&<ChangelogView/>}
-
-      {selectedServer&&!editMode&&<Portal>
-        <ServerDetailsDialog server={selectedServer} visual={selectedVisual} owner={optOwners[selectedServer.id]} sw={switchAssignments[selectedServer.id]}
-          shelf={selectedShelf} watts={(selectedVisual.state === "on" || selectedVisual.state === "off") ? reading(selectedServer.watts, 0, " W") : "—"}
-          group={powerGroups.get(serverIdentity(selectedServer.name)) || null} pending={powerPending(selectedServer)} waiting={waitingFor(selectedServer)}
-          onRequestPower={powerEnabled ? (action, el, opts) => requestPower(selectedServer, action, el, opts) : null}
-          onClose={()=>setSelectedServerId(null)}
-          onScanUnit={canOperate ? () => openScanUnit({ server: selectedServer }) : null}
-          consoleButton={canOperate && onOpenConsole && kvmByServer.get(serverIdentity(selectedServer.name)) ? <KvmButton server={selectedServer}/> : null} sshSlot={<SshSlot server={selectedServer} size="md"/>}
-          twinButton={<ShowIn3dButton target={serverRef(selectedServer.name)} name={selectedServer.name}/>}
-          onRemove={canAdmin ? () => setRemoveTarget(selectedServer.name) : null}/>
-      </Portal>}
-      {selectedServer&&editMode&&(
-        <Portal>
-          <ServerEditPanel server={selectedServer} pdus={pdus} rackDevices={rackDevices} rackSlots={rackSlots}
-            switchAssignments={switchAssignments} optOwners={optOwners} ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}
-            floorUnits={selectedFloorUnits} floor={placements[selectedServer.id]?.u ?? null} onRequestMove={req => setMoveRequest({ ...req, fromPanel: true })}
-            onScanUnit={canOperate ? () => openScanUnit({ server: selectedServer }) : null}
-            onClose={()=>setSelectedServerId(null)}
-            onLabelChange={handleLabelChange} onRenameOpt={handleRenameOpt}
-            onSwitchSave={handleSwitchSave}
-            powerGroup={powerFor(selectedServer)} powerPending={powerPending(selectedServer)}
-            onRequestPower={powerEnabled ? (action, el, opts) => requestPower(selectedServer, action, el, opts) : null}
-            onRemoveFromLab={canAdmin ? () => setRemoveTarget(selectedServer.name) : null}/>
-        </Portal>
-      )}
-      {moveRequest && editMode && <Portal>
-        <ServerMoveDialog key={`${moveRequest.id}:${moveRequest.rack}:${moveRequest.floor ?? ""}:${moveRequest.swapWith || ""}`} request={moveRequest}
-          server={servers.find(s => s.id === moveRequest.id) || null} placements={placements} nameOf={nameOf} planUnits={planUnits}
-          rackNames={racks} pdus={pdus} dataKey={moveDataKey} loadLocations={api.getLocations} preview={body => api.moveServer({ ...body, dry_run: true })}
-          onMove={applyServerMove} onClose={() => setMoveRequest(null)}
-          readStatus={d => (d.kind === "kvm" ? api.getKvmStatus(d.device_id) : api.getPduStatus(d.device_id))}
-          onDone={text => { if (moveRequest.fromPanel) setSelectedServerId(null); setMoveRequest(null); showToast(text); }}/>
-      </Portal>}
-      {removeTarget && canAdmin && <Portal>
-        <RemoveServerDialog key={removeTarget} serverName={removeTarget} onRemoved={serverRemoved} onClose={() => setRemoveTarget(null)}/>
-      </Portal>}
-
-      {selectedCustom&&selectedCustomRack&&!editMode&&<Portal><ReadOnlyAsset item={{...selectedCustom,rack:selectedCustomRack}} owner={ownerOfUnit(shownOwners, selectedCustom.id)} ownerFrom={unitOwnerMap[selectedCustom.id]?.server || null} sshName={["computer","server"].includes(selectedCustom.type)?selectedCustom.name:null} onClose={()=>selectCustom(null)}/></Portal>}
-      {selectedCustom&&selectedCustomRack&&editMode&&(
-        <Portal>
-          <EditEquipmentPanel key={`${selectedCustom.id}:${customPanel.epoch}`} item={selectedCustom} rackName={selectedCustomRack}
-            draft={customPanel.draft} reloaded={customPanel.notice}
-            owner={ownerOfUnit(shownOwners, selectedCustom.id)} ownerFrom={unitOwnerMap[selectedCustom.id]?.server || null}
-            onOpenServer={unitOwnerMap[selectedCustom.id]?.server ? () => { const id = unitOwnerMap[selectedCustom.id].server.id; selectCustom(null); setSelectedServerId(id); } : null}
-            ownersLoaded={ownersLoaded} onOwnerChange={handleOwnerChange}
-            allRacks={racks} onClose={()=>selectCustom(null)} draftRef={customDraftRef}
-            onSave={handleSaveCustom} onDelete={handleDeleteCustom} onMove={handleMoveCustom}/>
-        </Portal>
-      )}
 
       {coolingDialog && dialogUnit && (() => {
         const mode = coolingDialog.mode === "edit" && !(editMode && coolingEditable) ? "view" : coolingDialog.mode;
@@ -3405,16 +2310,12 @@ export default function DcimView({devices,pduStatuses,kvmStatuses,onOutletAction
             onSave={saveCoolingDialog} onTakeOffShelf={takeOffShelf} onClose={() => setCoolingDialog(null)}/>
         </Portal>;
       })()}
-      {powerDialog && <Portal>
-        <PowerConfirmDialog serverName={powerDialog.serverName} group={powerGroupNow} action={powerDialog.action} scope={powerDialog.scope}
-          feedId={powerDialog.feedId} allowScopeChoice={powerDialog.allowScopeChoice}
-          onConfirm={({ action, scope, feedId, plan }) => runPower({ serverName: powerDialog.serverName, action, scope, feedId, plan })}
-          onClose={(done, results, action, scope) => { const name = powerDialog.serverName; setPowerDialog(null); if (done) powerToast(name, action, results, { scope, group: powerGroupNow }); }}/>
-      </Portal>}
       {scanTarget && canOperate && section === "racks" && <Portal>
         <ScanUnitDialog key={`${scanTarget.rack}:${scanTarget.u}:${scanTarget.label}`} target={scanTarget} floorChoices={scanFloorChoices}
           onClose={() => setScanTarget(null)} onItemsChanged={scanItemsChanged} onToast={showToast}/>
       </Portal>}
+      {addServerTarget && canOperate && <AddServerDialog rack={addServerTarget.rack} u={addServerTarget.u}
+        onClose={() => setAddServerTarget(null)} onAdded={() => { _reloadPositions(); }}/>}
       {section === "racks" && <UndoToast toast={toast} onDismiss={dismissToast}/>}
     </main></ServerActionsContext.Provider></EditContext.Provider></TwinLinkContext.Provider>
   );

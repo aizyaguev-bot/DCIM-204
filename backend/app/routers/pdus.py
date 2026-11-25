@@ -152,7 +152,7 @@ async def outlet_power(
     # The maintenance check and the switch share the shutdown lock, so an "on" cannot slip in after a shutdown.
     async with locked_pdu(device_id, db) as dev:
         if not dev.enabled:
-            raise HTTPException(status_code=409, detail="This PDU is disabled; enable it in Admin -> Devices first")
+            raise HTTPException(status_code=409, detail="This PDU is disabled; an Admin can enable it in the PDU window (Edit details).")
         if body.action in ("on", "cycle") and await db.get(PduMaintenance, device_id, populate_existing=True):
             raise HTTPException(status_code=409, detail="PDU is in maintenance mode; restore it first")
         if body.action in ("off", "cycle"):
@@ -167,7 +167,7 @@ async def outlet_power(
         try:
             username, password = get_creds(dev)
         except Exception:
-            raise HTTPException(status_code=502, detail="Stored PDU credentials could not be read; re-enter them in Admin -> Devices")
+            raise HTTPException(status_code=502, detail="Stored PDU credentials could not be read; re-enter them in the PDU window (Edit details).")
         driver = RaritanPduDriver(dev.ip, username, password)
         try:
             success = await driver.set_outlet_state(outlet_number, body.action)

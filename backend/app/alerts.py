@@ -128,6 +128,70 @@ async def forget_network(db, target, now, reason):
     db.expunge(state)
 
 
+CLOSED_DELETED = "Deleted from the lab by {who}; no longer checked."
+
+
+async def _conditions(db, keys):
+    """The AlertCondition rows of `keys`: exact keys, or prefixes ending in ":" ("power:<device id>:")."""
+    found = {}
+    for key in keys or ():
+        query = select(AlertCondition).where(AlertCondition.key.startswith(key) if key.endswith(":") else AlertCondition.key == key)
+        for state in (await db.execute(query)).scalars().all():
+            found.setdefault(state.key, state)
+    return [found[k] for k in sorted(found)]
+
+
+async def _open_title(db, state):
+    """The title of `state`'s alert when its email was sent and not yet closed (notified, and the newest email of the
+    condition is an "[DCIM alert]"); else None."""
+    if not state.notified:
+        return None
+    newest = (await db.execute(select(AlertEmail).where(AlertEmail.condition_key == state.key)
+                               .order_by(AlertEmail.created_at.desc(), AlertEmail.id.desc()).limit(1))).scalar_one_or_none()
+    if newest is None or not newest.subject.startswith("[DCIM alert] "):
+        return None
+    return newest.subject[len("[DCIM alert] "):].strip(), newest.recipient
+
+
+async def open_alert_titles(db, keys):
+    """{condition key: title} of the alerts close_deleted would close with an email (what a delete preview lists)."""
+    titles = {}
+    for state in await _conditions(db, keys):
+        found = await _open_title(db, state)
+        if found:
+            titles[state.key] = found[0]
+    return titles
+
+
+async def close_deleted(db, keys, who, now):
+    """Close the alerts of what a delete takes out of the lab (routers/lab_delete.py, and Remove from lab in
+    routers/removed_servers.py). `keys` are condition keys ("device-api:<id>", "network:<target id>") or prefixes ending
+    in ":" ("power:<device id>:" is every inlet rule of that PDU). Nothing observes these conditions again, so each one is
+    deleted. When its alert email was sent (notified, and the newest email of the condition is an "[DCIM alert]"), one
+    "[DCIM closed] <same title>" email says the alert is closed because the item was deleted and no recovery was observed:
+    never a "[DCIM recovered]" (the forget_network rule). It is queued even while email alerts are switched off: the lab
+    display reads open alerts from these emails (labDisplay.js openAlerts), and the recipient who got the alert gets its
+    closing message when sending resumes. Returns [{key, title}] of the alerts closed by an email. Call within the
+    delete's transaction."""
+    settings = get_settings()
+    closed = []
+    for state in await _conditions(db, keys):
+        found = await _open_title(db, state)
+        if found:
+            title, recipient = found
+            first = f"First failed observation: {local_time(state.started_at)}\n" if state.started_at is not None else ""
+            db.add(AlertEmail(id=uuid4().hex, condition_key=state.key, created_at=now,
+                              recipient=getattr(settings, "email_alerts_to", "") or recipient,
+                              subject=" ".join(f"[DCIM closed] {title}".split())[:240],
+                              body=f"{CLOSED_DELETED.format(who=who or 'someone')}\nClosed: {local_time(now)}\n{first}"
+                                   "No recovery was observed: the alert is closed because the item was deleted.",
+                              next_attempt_at=now))
+            closed.append({"key": state.key, "title": title})
+        await db.execute(delete(AlertCondition).where(AlertCondition.key == state.key))
+        db.expunge(state)
+    return closed
+
+
 def _configuration_key(settings):
     """The HMAC key for credential fingerprints, derived from the master key (crypto.py's dev fallback when unset)."""
     master = settings.lab_manager_master_key or base64.urlsafe_b64encode(hashlib.sha256(b"lab-manager-dev-key").digest())

@@ -9,7 +9,7 @@ export const BLOCK = {
   offline: "PDU is unreachable; outlet power actions are unavailable",
   noStatus: "Outlet states are not available",
   unknown: "Outlet state is unknown",
-  disabled: "This PDU is disabled; enable it in Admin -> Devices first",
+  disabled: "This PDU is disabled; an Admin can enable it in the PDU window (Edit details).",
   maintenance: "PDU is in maintenance mode; restore it first",
   protected: "This outlet is protected (POWER_PROTECTED_OUTLETS); it cannot be switched off here",
   protectionInvalid: "Protected outlets setting is invalid; power off is unavailable",

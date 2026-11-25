@@ -1,4 +1,4 @@
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, computed_field
 from typing import Optional
 
 from .inventory_store import revision
@@ -15,6 +15,23 @@ class DeviceBase(BaseModel):
 class DeviceCreate(DeviceBase):
     username: str = ""
     password: str = ""
+
+class DevicePatch(BaseModel):
+    """PATCH /api/devices/{id} (Edit details / Correct rack). Every field is optional; a field left out is unchanged.
+    kind is accepted only to refuse it with a clear 422 (a device's kind cannot change); other unknown fields are 422."""
+    model_config = ConfigDict(extra="forbid")
+    name: Optional[StrictStr] = None
+    ip: Optional[StrictStr] = None
+    username: Optional[StrictStr] = None
+    password: Optional[StrictStr] = None
+    model: Optional[StrictStr] = None
+    port_count: Optional[StrictInt] = Field(default=None, ge=0, le=512)
+    notes: Optional[StrictStr] = None
+    enabled: Optional[StrictBool] = None
+    rack: Optional[StrictStr] = None
+    kind: Optional[StrictStr] = None
+    confirm_name: Optional[StrictStr] = None
+    plan_revision: Optional[StrictStr] = None
 
 class DeviceOut(DeviceBase):
     id: str

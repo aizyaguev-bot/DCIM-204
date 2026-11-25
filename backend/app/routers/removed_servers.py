@@ -19,7 +19,8 @@ What a removal cleans (and Restore does not bring back; the UI says so):
     where they are, so nothing else moves;
   * its owner assignments (a tombstone, so the legacy owners file cannot bring the owner back).
 What it pauses (and Restore resumes when it was running): its ping monitor. The monitor and its history are kept;
-while the server is removed no monitor is created for it automatically.
+while the server is removed no monitor is created for it automatically. Its network alert is closed (alerts.close_deleted:
+when an alert email was sent, one "[DCIM closed]" email says it is closed without a recovery).
 Never touched: equipment units (rack items) on its shelf stay in the rack, SSH settings, PDU/KVM labels, devices.
 While it is removed, a server is never moved, swapped with or cleared (routers/devices.py move-server and clear-server
 answer 409 until it is restored), and GET /api/devices/locations marks its row "removed".
@@ -36,6 +37,12 @@ preview (dry_run) returns a plan_revision; applying with a plan_revision is refu
 The record and the layout files are written together or not at all (inventory_store.save_layouts, each file checked
 against the revision it was planned from); the owner and monitor changes commit right after, and if that commit fails
 the files are put back.
+
+Cores (the one delete path, routers/lab_delete.py, reuses them without the routes' locks or If-Match): plan_core(db, name)
+is the preview, apply_core(db, plan, target, existing, by, reason) makes the owner, monitor and alert changes and returns
+the record to store, restore_core(db, record) resumes the monitor. A record written by a lab delete carries "batch" (the
+id of its batch in deleted.json); Restore of that batch takes it out again, and this module's restore works on it as on
+any other record.
 """
 import json
 import logging
@@ -247,7 +254,7 @@ async def list_removed(request: Request, response: Response, db: AsyncSession = 
     return body
 
 
-async def _plan(db, name):
+async def plan_core(db, name):
     """What removing the server named `name` does, computed without writing: (plan, layouts, after_layouts, owners,
     target). Raises 400 for a name that is no server and 404 for a server the lab does not know."""
     identity = devices._identity(name)
@@ -334,6 +341,9 @@ async def _plan(db, name):
     return plan, layouts, after, target
 
 
+_plan = plan_core
+
+
 def _without_ids(fname, data, ids):
     """A copy of one layout file without the entries of `ids` (shapes as devices._renamed_ids reads them)."""
     if not isinstance(data, dict):
@@ -377,6 +387,61 @@ async def _commit_or_put_back(db, written):
         raise HTTPException(503, NOT_SAVED) from exc
 
 
+async def apply_core(db, plan, target, existing, by, reason="", now=None, batch=None) -> dict:
+    """The database part of a removal, from plan_core's plan: a tombstone per owner key (so the legacy owners file
+    cannot bring the owner back), the monitor paused (history kept) with its open incident closed, and its network
+    alert closed (alerts.close_deleted). Flushes, never commits. Returns the record to store under plan["key"];
+    `existing` is the store's earlier record of this key (a removal again after the name came back on another port)."""
+    now = time.time() if now is None else now
+    record = {"key": plan["key"], "name": plan["name"], "removed_at": now, "removed_by": by,
+              "reason": reason, "ports": [{k: p[k] for k in ("device_id", "device_name", "kind", "port", "label")}
+                                          for p in plan["ports"]],
+              "ports_ids": plan["ports_ids"], "position": plan["position"],
+              "cleaned": {"layout": len(plan["layout"]), "pinned": len(plan["pins"]),
+                          "owner": plan["owner"]["name"] if plan["owner"] else None},
+              "monitor": None}
+    if batch:
+        record["batch"] = batch
+    for asset in (plan["owner"] or {}).get("keys", []):
+        assignment = await db.get(AssetOwner, asset)
+        if assignment is None:
+            assignment = AssetOwner(asset_key=asset)
+            db.add(assignment)
+        assignment.engineer_id, assignment.legacy_name = None, ""
+    # Monitor: paused (history kept); restore resumes it only when it was running.
+    if target is not None:
+        # Removed again after its name came back on another port: the monitor that removal paused still counts
+        # as running, so a restore resumes it.
+        earlier = (existing or {}).get("monitor") if isinstance(existing, dict) else None
+        paused_by_us = isinstance(earlier, dict) and earlier.get("id") == target.id and earlier.get("was_enabled")
+        record["monitor"] = {"id": target.id, "was_enabled": bool(target.enabled or paused_by_us)}
+        if target.enabled:
+            from ..ping_monitor import close_incident
+            target.enabled = False
+            target.revision += 1   # a probe still in flight is ignored
+            await close_incident(db, target.id, now, "server removed")
+        from ..alerts import close_deleted
+        await close_deleted(db, ["network:" + target.id], by, now)
+    await db.flush()
+    return record
+
+
+async def restore_core(db, record) -> bool:
+    """The database part of a restore: the monitor resumes when the removal paused a running one (and it is still this
+    server's monitor). Flushes, never commits. True when it resumed."""
+    key = record.get("key")
+    monitor = record.get("monitor") or {}
+    resumed = False
+    if monitor.get("was_enabled") and isinstance(monitor.get("id"), str):
+        target = await db.get(PingTarget, monitor["id"])
+        if target is not None and not target.enabled and target.source_key == "server:" + str(key):
+            target.enabled = True
+            target.revision += 1
+            resumed = True
+    await db.flush()
+    return resumed
+
+
 @router.post("")
 async def remove_server(body: dict, request: Request, response: Response, db: AsyncSession = Depends(get_db),
                         if_match: str | None = Header(default=None)):
@@ -413,33 +478,7 @@ async def remove_server(body: dict, request: Request, response: Response, db: As
             raise HTTPException(409, PLAN_CHANGED)
 
         by = _who(request)
-        record = {"key": plan["key"], "name": plan["name"], "removed_at": time.time(), "removed_by": by,
-                  "reason": reason, "ports": [{k: p[k] for k in ("device_id", "device_name", "kind", "port", "label")}
-                                              for p in plan["ports"]],
-                  "ports_ids": plan["ports_ids"], "position": plan["position"],
-                  "cleaned": {"layout": len(plan["layout"]), "pinned": len(plan["pins"]),
-                              "owner": plan["owner"]["name"] if plan["owner"] else None},
-                  "monitor": None}
-        # Owner: a tombstone per key, so the legacy owners file cannot bring the owner back.
-        for asset in (plan["owner"] or {}).get("keys", []):
-            assignment = await db.get(AssetOwner, asset)
-            if assignment is None:
-                assignment = AssetOwner(asset_key=asset)
-                db.add(assignment)
-            assignment.engineer_id, assignment.legacy_name = None, ""
-        # Monitor: paused (history kept); restore resumes it only when it was running.
-        if target is not None:
-            # Removed again after its name came back on another port: the monitor that removal paused still counts
-            # as running, so a restore resumes it.
-            earlier = (existing or {}).get("monitor") if isinstance(existing, dict) else None
-            paused_by_us = isinstance(earlier, dict) and earlier.get("id") == target.id and earlier.get("was_enabled")
-            record["monitor"] = {"id": target.id, "was_enabled": bool(target.enabled or paused_by_us)}
-            if target.enabled:
-                from ..ping_monitor import close_incident
-                target.enabled = False
-                target.revision += 1   # a probe still in flight is ignored
-                await close_incident(db, target.id, time.time(), "server removed")
-        await db.flush()
+        record = await apply_core(db, plan, target, existing, by, reason)
 
         new_store = {"servers": {**store["servers"], plan["key"]: record}, "log": list(store.get("log") or [])}
         _log_entry(new_store, "removed", record, by, reason)
@@ -476,15 +515,7 @@ async def restore_server(body: dict, request: Request, response: Response, db: A
         if not isinstance(record, dict):
             raise HTTPException(404, NOT_REMOVED)
         by = _who(request)
-        resumed = False
-        monitor = record.get("monitor") or {}
-        if monitor.get("was_enabled") and isinstance(monitor.get("id"), str):
-            target = await db.get(PingTarget, monitor["id"])
-            if target is not None and not target.enabled and target.source_key == "server:" + key:
-                target.enabled = True
-                target.revision += 1
-                resumed = True
-        await db.flush()
+        resumed = await restore_core(db, record)
         new_store = {"servers": {k: v for k, v in store["servers"].items() if k != key}, "log": list(store.get("log") or [])}
         _log_entry(new_store, "restored", {"key": key, "name": record.get("name") or key}, by)
         try:
