@@ -37,7 +37,7 @@ import { floorServer, rowsUnitOwners, unitOwners, withUnitOwners, ownerOfUnit, o
 import useDialogFocus from "../components/racks/useDialogFocus.js";
 import { useStoredState, useMediaQuery, useDebounced, flash, prefersReducedMotion } from "../components/racks/hooks.js";
 import { mergeServerFeeds } from "../labDisplay.js";
-import { serverRef, itemRef, rackRef } from "../twinLinks.js";
+import { TWIN_ENABLED, serverRef, itemRef, rackRef } from "../twinLinks.js";
 
 const EditContext = createContext(false);
 // Server actions in the rack views: the KVM port of each server (by server identity), the console opener and SSH
@@ -89,6 +89,7 @@ import { CSS } from "@dnd-kit/utilities";
 const TwinLinkContext = createContext(null);
 const PANEL_ICON_BTN = "flex items-center justify-center w-7 h-7 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-100 transition border border-zinc-700/50 flex-shrink-0 aria-disabled:opacity-40 aria-disabled:cursor-not-allowed";
 function ShowIn3dButton({ target, name, text = false, className = "icon-btn show-3d", blocked = null, onBlocked = null }) {
+  if (!TWIN_ENABLED) return null;   // the 3D twin is switched off (twinLinks.js)
   const showIn3d = useContext(TwinLinkContext);
   if (!showIn3d || !target) return null;
   const label = `Show ${name} in 3D`;

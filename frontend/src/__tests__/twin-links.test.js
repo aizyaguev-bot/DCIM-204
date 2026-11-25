@@ -71,8 +71,18 @@ test("goTo('twin', { ref }) writes ?select= and shows the ref in the twin; other
   const calls = { navigate: [], rack: [], twin: [] };
   const source = slice(app, "  // navigate() plus the rack", "  useEffect(() => {\n    const onPop");
   const twinFocusRef = { current: false };
-  const { goTo } = fn(["window", "history", "setRackParam", "rackParam", "adminSection", "navigate", "navigateAdmin", "isTwinRef", "showInTwin", "twinFocusRef"], source, "{ goTo }")(
-    {}, {}, value => calls.rack.push(value), null, "devices", (...args) => calls.navigate.push(args), () => {}, isTwinRef, ref => calls.twin.push(ref), twinFocusRef);
+  const { goTo } = fn(["window", "history", "setRackParam", "rackParam", "adminSection", "navigate", "navigateAdmin", "isTwinRef", "showInTwin", "twinFocusRef", "TWIN_ENABLED"], source, "{ goTo }")(
+    {}, {}, value => calls.rack.push(value), null, "devices", (...args) => calls.navigate.push(args), () => {}, isTwinRef, ref => calls.twin.push(ref), twinFocusRef, true);
+  // The 3D twin switched off (twinLinks.js TWIN_ENABLED false): goTo("twin", ...) opens Racks and never reaches the twin.
+  {
+    const off = { navigate: [], twin: [] };
+    const { goTo: goToOff } = fn(["window", "history", "setRackParam", "rackParam", "adminSection", "navigate", "navigateAdmin", "isTwinRef", "showInTwin", "twinFocusRef", "TWIN_ENABLED"], source, "{ goTo }")(
+      {}, {}, () => {}, null, "devices", (...args) => off.navigate.push(args), () => {}, isTwinRef, ref => off.twin.push(ref), { current: false }, false);
+    goToOff("twin", { ref: "rack:Rack-03" });
+    goToOff("twin");
+    assert.deepEqual(off.navigate, [["racks"], ["racks"]]);
+    assert.deepEqual(off.twin, []);
+  }
   goTo("twin");
   goTo("twin", { ref: "bogus" });
   assert.equal(twinFocusRef.current, false, "the Twin tab itself leaves focus on its tab button");
@@ -122,7 +132,7 @@ test("a loaded twin gets a message; one still loading gets ?select= in its src",
   // and opens on ?tab=twin&select=
   assert.match(app, /\{twinFrameSrc && \(\n\s*<iframe ref=\{twinFrameRef\} title="3D Digital Twin" src=\{twinFrameSrc\} hidden=\{!twinShown\} onLoad=\{twinFrameLoaded\}/);
   assert.match(app, /postMessage\(twinSelectMessage\(twinPost\.ref\), location\.origin\)/);
-  assert.match(app, /useState\(\(\) => \(new URLSearchParams\(location\.search\)\.get\("tab"\) === "twin" \? twinSrc\(linkedTwinRef\(location\.search\)\) : null\)\)/);
+  assert.match(app, /useState\(\(\) => \(TWIN_ENABLED && new URLSearchParams\(location\.search\)\.get\("tab"\) === "twin" \? twinSrc\(linkedTwinRef\(location\.search\)\) : null\)\)/);
   assert.doesNotMatch(app, /postMessage\([^)]*["']\*["']\)/, "never to any origin");
 });
 
@@ -196,8 +206,8 @@ test("Back / Forward onto a Show in 3D address shows its ref in the twin again",
   const source = slice(app, "    const onPop = event => {", "    window.addEventListener(\"popstate\", onPop);");
   const run = (search, state, last) => {
     const shown = [];
-    const onPop = fn(["location", "linkedAdminSection", "mainTabRef", "setView", "setMainTab", "setAdminSection", "setEditMode", "twinRefToReplay", "twinRefRef", "showInTwin"], source, "onPop")(
-      { search }, () => "devices", { current: "racks" }, () => {}, () => {}, () => {}, () => {}, twinRefToReplay, { current: last }, ref => shown.push(ref));
+    const onPop = fn(["location", "linkedAdminSection", "mainTabRef", "setView", "setMainTab", "setAdminSection", "setEditMode", "twinRefToReplay", "twinRefRef", "showInTwin", "TWIN_ENABLED"], source, "onPop")(
+      { search }, () => "devices", { current: "racks" }, () => {}, () => {}, () => {}, () => {}, twinRefToReplay, { current: last }, ref => shown.push(ref), true);
     onPop({ state });
     return shown;
   };
@@ -226,4 +236,12 @@ test("DcimView offers Show in 3D on the rack card, the rack detail, the server d
   assert.match(dcim, /"aria-disabled": blocked \? "true" : undefined/);
   assert.match(dcim, /if \(blocked\) onBlocked\?\.\(\); else showIn3d\(target\);/);
   assert.match(dcim, /<TwinLinkContext\.Provider value=\{onShowIn3d\}>/);
+});
+test("the 3D twin is switched off: no 3D Twin tab, ?tab=twin opens Racks, Racks has no Show in 3D", () => {
+  assert.match(read("../twinLinks.js"), /export const TWIN_ENABLED = false;/);
+  const header = read("../components/Header.jsx");
+  assert.match(header, /const tabs = TWIN_ENABLED \? allTabs : allTabs\.filter\(\(\[id\]\) => id !== "twin"\);/);
+  assert.match(app, /tab === "dcim" \|\| \(tab === "twin" && !TWIN_ENABLED\) \? "racks"/);
+  assert.match(app, /const twinShown = TWIN_ENABLED && /);
+  assert.match(read("../pages/DcimView.jsx"), /if \(!TWIN_ENABLED\) return null;/);
 });

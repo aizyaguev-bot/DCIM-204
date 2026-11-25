@@ -5,6 +5,9 @@
 // page (same origin): Lab Manager puts it in its address (?select=, twinSelectedAddress). Change events go to the twin as
 // postMessage({ type: "twin:data-changed", domains }).
 export const TWIN_PATH = "/twin/index.html";
+// The 3D twin is switched off (the lab manager, 2026-11-25: "the 3D is bad, remove it for now"): no 3D Twin tab, no
+// "Show in 3D" button, ?tab=twin opens Racks. The twin's files stay in lab-twin/; true brings it all back.
+export const TWIN_ENABLED = false;
 export const TWIN_SELECT_MESSAGE = "twin:select";
 export const TWIN_SELECTED_MESSAGE = "twin:selected";
 export const TWIN_DATA_CHANGED_MESSAGE = "twin:data-changed";

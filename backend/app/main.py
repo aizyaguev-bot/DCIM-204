@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 import pathlib
@@ -421,8 +421,14 @@ async def save_twin_data(payload: dict, response: Response, if_match: str | None
 # Serve built React frontend if it exists
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
-    if TWIN_DIR.exists():
+    # The 3D twin is switched off (2026-11-25) unless TWIN_ENABLED=1: its address then opens Racks instead.
+    if TWIN_DIR.exists() and os.environ.get("TWIN_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"):
         app.mount("/twin", StaticFiles(directory=str(TWIN_DIR), html=True), name="twin")
+    else:
+        @app.get("/twin", include_in_schema=False)
+        @app.get("/twin/{rest:path}", include_in_schema=False)
+        async def twin_switched_off(rest: str = ""):
+            return RedirectResponse("/?tab=racks", status_code=307)
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
