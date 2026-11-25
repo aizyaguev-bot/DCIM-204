@@ -40,6 +40,48 @@ export function withoutRemovedTargets(targets, hidden) {
   return withoutRemoved(targets, hidden, t => (typeof t?.server_key === "string" && t.server_key ? t.server_key : t?.inventory_name || t?.name));
 }
 
+// Device screens (Dashboard and Power PDU cards, Consoles KVM cards, the PDU / KVM pages): the name of a removed server
+// that is still written on an outlet or port reads as that port's default name, so a removed server shows nowhere.
+// Saved labels become "" (the default); status readings become "Outlet N" / "Port N". Same object back when nothing
+// changes, so memoised pages do not re-render.
+export function maskRemovedLabels(labels, hidden) {
+  if (!labels || typeof labels !== "object" || !hidden || !hidden.size) return labels;
+  let changed = false;
+  const out = {};
+  for (const [port, label] of Object.entries(labels)) {
+    if (typeof label === "string" && isRemovedServer(label, hidden)) { out[port] = ""; changed = true; }
+    else out[port] = label;
+  }
+  return changed ? out : labels;
+}
+
+export function withoutRemovedDevice(device, hidden) {
+  if (!device) return device;
+  const labels = maskRemovedLabels(device.labels, hidden);
+  return labels === device.labels ? device : { ...device, labels };
+}
+
+export function withoutRemovedStatus(status, hidden) {
+  if (!status || typeof status !== "object" || !hidden || !hidden.size) return status;
+  let changed = false;
+  const mask = (list, word) => (Array.isArray(list) ? list.map(entry => {
+    if (typeof entry?.label === "string" && isRemovedServer(entry.label, hidden)) { changed = true; return { ...entry, label: `${word} ${entry.number}` }; }
+    return entry;
+  }) : list);
+  const outlets = mask(status.outlets, "Outlet");
+  const ports = mask(status.ports, "Port");
+  if (!changed) return status;
+  return { ...status, ...(Array.isArray(status.outlets) ? { outlets } : {}), ...(Array.isArray(status.ports) ? { ports } : {}) };
+}
+
+export function withoutRemovedStatuses(statuses, hidden) {
+  if (!statuses || !hidden || !hidden.size) return statuses;
+  let changed = false;
+  const out = {};
+  for (const [id, status] of Object.entries(statuses)) { out[id] = withoutRemovedStatus(status, hidden); if (out[id] !== status) changed = true; }
+  return changed ? out : statuses;
+}
+
 // Removed servers' monitors are paused, so the monitoring document without them (targets only; the rest unchanged).
 export function withoutRemovedMonitoring(monitoring, hidden) {
   if (!monitoring || !Array.isArray(monitoring.targets)) return monitoring;

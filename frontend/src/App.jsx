@@ -32,6 +32,8 @@ import AssistantPanel from "./components/assistant/AssistantPanel";
 import useAssistantUseful from "./components/assistant/useAssistantUseful";
 import SshAdmin from "./pages/SshAdmin";
 import RemovedServersView from "./pages/RemovedServersView";
+import { useRemovedServers } from "./removedServers.jsx";
+import { withoutRemovedDevice, withoutRemovedStatus, withoutRemovedStatuses } from "./api/removedServers.js";
 import { twinSrc, linkedTwinRef, isTwinRef, twinSelectMessage, twinRefToReplay, twinSelectedAddress, TWIN_SELECTED_MESSAGE, TWIN_DATA_CHANGED_MESSAGE, TWIN_HIDDEN_KEEP_MS } from "./twinLinks";
 // The terminal page (and xterm) loads only when an SSH tab is opened.
 const SshTerminal = lazy(() => import("./pages/SshTerminal"));
@@ -49,6 +51,7 @@ function LabManagerApp() {
   // The lab assistant appears only when a language model is connected or assistant actions are on.
   const assistantShown = useAssistantUseful();
   const [devices, setDevices] = useState([]);
+  const { hidden: removedHidden } = useRemovedServers();   // removed servers: hidden on the device cards and pages too
   const [pduStatuses, setPduStatuses] = useState({});   // { id: PduStatus }
   const [kvmStatuses, setKvmStatuses] = useState({});   // { id: KvmStatus }
   const [view, setView] = useState({ kind: "dashboard" });
@@ -627,6 +630,10 @@ function LabManagerApp() {
   };
 
   const stats = useMemo(() => dashboardStats(pdus, kvms, pduStatuses, kvmStatuses), [devices, pduStatuses, kvmStatuses]);
+  // A server removed from the lab shows nowhere: its name still written on an outlet or KVM port reads as the default
+  // name ("Outlet 22", "Port 8") on the PDU / KVM cards and pages.
+  const shownPduStatuses = useMemo(() => withoutRemovedStatuses(pduStatuses, removedHidden), [pduStatuses, removedHidden]);
+  const shownKvmStatuses = useMemo(() => withoutRemovedStatuses(kvmStatuses, removedHidden), [kvmStatuses, removedHidden]);
 
   if (loading) {
     return (
@@ -763,14 +770,14 @@ function LabManagerApp() {
           <div className={mainTab === "power" ? "flex flex-col xl:flex-row xl:items-start gap-x-4" : undefined}>
           <div className={mainTab === "power" ? "device-grid flex-1 min-w-0" : "device-grid"}>
             {(mainTab === "power" || (mainTab === "dashboard" && (filter === "all" || filter === "pdus"))) && visiblePdus.map(p =>
-              <PduCard key={p.id} device={p} status={pduStatuses[p.id]}
+              <PduCard key={p.id} device={withoutRemovedDevice(p, removedHidden)} status={shownPduStatuses[p.id]}
                 inMaintenance={!!maintenanceStateFor(maintenance, p.id)}
                 onOpen={() => openDetail({ kind: "pdu", id: p.id })}
                 onOutletAction={(n, a) => handleOutletAction(p, n, a)}
               />
             )}
             {(mainTab === "consoles" || (mainTab === "dashboard" && (filter === "all" || filter === "kvms"))) && visibleKvms.map(k =>
-              <KvmCard key={k.id} device={k} status={kvmStatuses[k.id]}
+              <KvmCard key={k.id} device={withoutRemovedDevice(k, removedHidden)} status={shownKvmStatuses[k.id]}
                 onOpen={() => openDetail({ kind: "kvm", id: k.id })}
                 onPortClick={(port) => openKvmConsole(k.id, port.number)}
                 onMarkFree={() => handleMarkKvmFree(k.id)}

@@ -2,6 +2,21 @@
 
 ---
 
+## v2.46.19 — 2026-11-24 — "Add server" on Racks; a removed server no longer shows on the PDU and KVM cards
+
+### Added
+- **Racks › Add server** (Operator and Admin, no Edit mode needed): choose the rack, the PDU and a
+  free outlet from a list, then type the name. Outlets that already carry a server, "KVM Power"
+  or "PDU" are listed but cannot be chosen, and a name that already exists is refused.
+
+### Fixed
+- **A server removed from the lab shows nowhere:** its name was still shown on the PDU outlet
+  and KVM port it used, on the Dashboard, Power and Consoles cards and on the PDU / KVM pages.
+  Those now show the outlet's or port's default name ("Outlet 22", "Port 8"). Restoring the
+  server shows its name again.
+
+---
+
 ## v2.46.18 — 2026-11-23 — Automatic updates on the lab VM no longer stop when the disk is nearly full
 
 ### Fixed
