@@ -2,6 +2,33 @@
 
 ---
 
+## v2.47.0 — 2026-11-25 — One place to manage everything: the Manage tab, a window per item, Delete and Restore
+
+### Added
+- **Manage tab** (was "Inventory"): one list of every server, PDU, KVM, unit, rack and cooling
+  unit, with search, filters (Needs a look, Maybe gone, Deleted, type, rack) and a big
+  **+ Add** button: Server, Unit, and for Admins PDU, KVM and Rack. Every row opens its window.
+- **A window for every item**, opened from anywhere (Manage, Racks, Dashboard, Monitoring):
+  - **Server:** Swap with… (type the other server, preview, confirm), Move to…, Take over,
+    Choose ports, Clear location, Rename…, owner (all feeds), switch port, units on its floor,
+    power (always asks first), console, SSH, monitor settings and its history.
+  - **Unit and cooling unit:** edit, move, history, delete.
+  - **PDU and KVM:** outlets and ports, names, maintenance, Delete (Admin).
+- **Delete and Restore for everything:** one Delete that first shows what it frees and what it
+  keeps. Deleting a server frees its PDU outlet and KVM port names, so it disappears from every
+  screen. Undo right away, or Restore later from Manage › Deleted. Servers removed before this
+  release can be deleted the same way.
+- **Racks:** a click on a server or unit opens its window; dragging a server opens the move
+  dialog; "+ Add server" in the toolbar.
+
+### Changed
+- **Admin menu:** only Users, Engineers, SSH, AI assistant and Help & About. Devices, Removed
+  servers, PDU–KVM mapping, Locations and Connections are now part of Manage; their old links
+  open the matching Manage view.
+- The 3D twin stays switched off (no 3D links anywhere).
+
+---
+
 ## v2.46.20 — 2026-11-25 — The 3D twin is switched off for now
 
 ### Changed
