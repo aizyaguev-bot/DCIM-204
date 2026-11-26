@@ -1,0 +1,28 @@
+/* Place & ports in the server window (WP-1): the move dialogs and the Place block. The dialogs reuse the Racks dialog
+   classes (.racks-dialog, .racks-field, .move-preview, .units-follow from index.css); only what they add is here. */
+
+.place-dialog { overflow-x: hidden; }
+.place-dialog-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 12px; }
+.place-dialog-fieldset { margin: 12px 0 0; padding: 0; border: 0; min-width: 0; }
+.place-dialog-fieldset > legend { padding: 0; font-size: 13px; font-weight: 700; color: #fff; }
+.place-dialog-fieldset .racks-field:first-of-type { margin-top: 6px; }
+.place-dialog-crowded { margin-top: 8px; }
+.place-dialog-swaps { justify-content: flex-start; margin-top: 8px; }
+
+.swap-picker { position: relative; }
+.swap-picker-list {
+  margin: 4px 0 0; padding: 4px; max-height: 240px; overflow-y: auto; list-style: none;
+  border: 1px solid #333; border-radius: 2px; background: #0c0c0c;
+}
+.swap-picker-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 7px 8px; font-size: 14px; color: #eee; cursor: pointer; overflow-wrap: anywhere; }
+.swap-picker-list li[aria-selected="true"] { background: #1f2a10; outline: 1px solid #3c5c10; }
+.swap-picker-name { font-weight: 600; }
+.swap-picker-place { font-size: 12px; color: #a7a7a7; }
+
+.place-ports { margin: 0; padding: 0; list-style: none; }
+.place-ports li + li { margin-top: 2px; }
+.place-in-use { color: #fcd34d; font-weight: 600; }
+
+@media (max-width: 640px) {
+  .place-dialog-row { grid-template-columns: minmax(0, 1fr); }
+}

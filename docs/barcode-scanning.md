@@ -169,6 +169,29 @@ the saved mapping and a new ETag, and records location changes. Missing versions
 return 428; stale versions return 409. Updated DCIM and Twin clients use this
 contract. Existing third-party writers must also send the version.
 
+A whole-list save is checked in this order, and nothing is written when a check
+fails:
+
+1. Version: a missing `If-Match` returns 428, a stale one returns 409.
+2. Shape and U slot: every new item, and every item whose `u` changed, needs a
+   whole-number `u` from 0 to 42. Otherwise the save returns 422 with
+   `U slot must be a whole number from 0 to 42.` Booleans, decimals (`1.5`, or
+   `1.0` for a stored `1`), text such as `"3"`, `null` and a missing `u` count as
+   invalid. An existing item whose `u` is sent back unchanged is accepted as it
+   is, even if that older value is outside the range, so editing another item
+   never fails because of it.
+3. Uniqueness: a barcode or serial number that already belongs to another item
+   returns 409.
+
+A linked barcode is kept. When an item already has a `barcode` and the saved
+copy omits it, sends it blank or `null`, or sends a different value, the stored
+barcode stays and the rest of the edit (for example a new `u`) is saved. This
+protects a barcode linked by Scan & Track from a DCIM or Twin copy that was
+loaded before the scan. Barcodes are linked only through
+`POST /api/inventory/{id}/barcode`, which also refuses to replace an existing
+one. A whole-list save can still give an item its first barcode. Serial numbers
+and shelf positions are not locked this way.
+
 Scanner endpoints are `GET /api/inventory?code=...`, `POST /api/inventory`,
 `POST /api/inventory/{id}/barcode`, and `POST /api/inventory/{id}/location`.
 All writes use `If-Match`. When the shared site password is configured, scanner

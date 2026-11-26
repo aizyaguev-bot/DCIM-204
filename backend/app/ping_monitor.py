@@ -18,10 +18,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
-from . import inventory_store
+from . import changes as change_feed, inventory_store
 from .config import get_settings
 from .database import AsyncSessionLocal
-from .models import Device, PingIncident, PingMonitorState, PingSample, PingTarget
+from .models import Device, PingIncident, PingMonitorState, PingSample, PingTarget, PingTargetName
 
 log = logging.getLogger(__name__)
 LEASE_SECONDS = 120
@@ -68,9 +68,16 @@ def iso(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat() if value is not None else None
 
 
+# Placeholder outlet labels ("Empty", "KVM Power", "--", and "OptXXX" / "OPTN-XX" for a server not known yet: "opt" or
+# "optn" followed only by x's) are not servers. "OPTX1" has a digit, so it is a server name. A local copy of DcimView.jsx
+# NON_SERVER_LABEL, lab-twin/app.js NON_SERVER_LABEL and routers/devices._NON_SERVER_LABEL, byte for byte (not imported
+# from routers).
+_NON_SERVER_LABEL = re.compile(r"^(empty|kvm[\s_-]*power|pdu|spare|free|n\/a|-+|optn?[\s_-]*x+)$", re.I)
+
+
 def server_identity(name):
     name = str(name or "").strip()
-    if not name or re.fullmatch(r"(?:outlet|port)\s*\d+", name, re.I):
+    if not name or re.fullmatch(r"(?:outlet|port)\s*\d+", name, re.I) or _NON_SERVER_LABEL.fullmatch(name):
         return None
     # Multiple power feeds and descriptive suffixes refer to the same OPT host.
     match = re.fullmatch(r"(optn?\d+)(?:\s*\([^)]*\))?", name, re.I)
@@ -82,8 +89,8 @@ def server_identity(name):
     return canonical.casefold(), canonical, host
 
 
-async def discover_targets(db):
-    """Import server labels and computer inventory; never use a PDU/KVM IP as a server IP."""
+async def inventory_sources(db):
+    """Read current server identities without writing targets or probing hardware."""
     from .routers import pdus, kvms
     devices = (await db.execute(select(Device).order_by(Device.id))).scalars().all()
     found = {}
@@ -115,6 +122,52 @@ async def discover_targets(db):
                     except ValueError:
                         host = ""
                 found[key] = (name, host, rack)
+    return found
+
+
+def is_placeholder_target(target):
+    """True for a monitor that discovery imported for a label that is no server under the current rule ("Empty",
+    "KVM Power", "OptXXX": server_identity is None for both its name and its key). Only inventory monitors with a
+    "server:" key qualify: a manual monitor (source "manual") is somebody's explicit choice and is never one."""
+    if target.source != "inventory" or not target.source_key.startswith("server:"):
+        return False
+    return server_identity(target.source_key.removeprefix("server:")) is None and server_identity(target.name) is None
+
+
+async def prune_placeholder_targets(db, now=None):
+    """Delete the inventory monitors of placeholder labels (is_placeholder_target). Discovery never creates them now,
+    but monitors imported before a label counted as a placeholder stayed forever ("empty: ping probe error" on the lab
+    display). Each one goes with every row that names it: its samples, its incidents (open ones too: an open incident
+    of a deleted monitor could never close), its name override and its network alert state (alerts.forget_network:
+    when a failure email was sent, one closing email says the alert is closed without a recovery). No orphan rows are
+    left: ping_samples, ping_incidents and ping_target_names reference ping_targets.id; alert_conditions holds the id in
+    its key. Runs in the caller's transaction (discover_targets commits it). Returns the names of the deleted monitors."""
+    from .alerts import forget_network
+    now = time.time() if now is None else now
+    removed = []
+    for target in (await db.execute(select(PingTarget).where(PingTarget.source == "inventory"))).scalars().all():
+        if not is_placeholder_target(target):
+            continue
+        await forget_network(db, target, now, "The monitor was removed: its name is a placeholder label, not a server.")
+        await db.execute(delete(PingSample).where(PingSample.target_id == target.id))
+        await db.execute(delete(PingIncident).where(PingIncident.target_id == target.id))
+        await db.execute(delete(PingTargetName).where(PingTargetName.target_id == target.id))
+        # Core delete: a second worker that deleted it first leaves 0 rows here, which is not an error.
+        await db.execute(delete(PingTarget).where(PingTarget.id == target.id).execution_options(synchronize_session=False))
+        db.expunge(target)
+        removed.append(target.name)
+    return removed
+
+
+async def discover_targets(db):
+    """Import current inventory while preserving addresses, pause and history. Monitors of placeholder labels are
+    deleted first (prune_placeholder_targets); open pages are told through the change feed (domain monitoring)."""
+    removed = await prune_placeholder_targets(db)
+    found = await inventory_sources(db)
+    # A server an Admin removed from the lab gets no new monitor (its existing one was paused, not deleted).
+    from .routers.removed_servers import hidden_keys
+    for key in await hidden_keys(db):
+        found.pop(key, None)
     existing = {t.source_key: t for t in (await db.execute(select(PingTarget))).scalars()}
     for key, (name, host, rack) in found.items():
         source_key = "server:" + key
@@ -128,7 +181,11 @@ async def discover_targets(db):
         elif existing[source_key].source == "inventory":
             # Preserve explicit host overrides, pause settings and historical identity.
             existing[source_key].rack = rack
+            existing[source_key].name = name
     await db.commit()
+    if removed:
+        log.info("Ping monitor: removed %d monitor(s) of placeholder labels: %s", len(removed), ", ".join(removed))
+        await change_feed.record(("monitoring",))   # live sync: open pages drop them now, not at the end of the round
 
 
 async def refresh_device_labels(session_factory):
@@ -238,6 +295,8 @@ async def record_result(db, target_id, revision, host, result, checked_at):
     # Local/DNS errors do not invent an outage or a recovery.
     target.checked_at, target.status = checked_at, result.status
     target.rtt_ms, target.detail = result.rtt_ms, result.detail
+    from .alerts import observe_network
+    await observe_network(db, target, result, checked_at)
 
 
 async def ensure_state(session_factory=AsyncSessionLocal):
@@ -335,6 +394,7 @@ async def monitor_loop(session_factory=AsyncSessionLocal):
                         PingMonitorState.id == 1, PingMonitorState.lease_owner == owner,
                     ).values(last_completed_at=time.time(), error=""))
                     await db.commit()
+                await change_feed.record(("monitoring",))   # live sync: open pages show the round's results now
         except asyncio.CancelledError:
             raise
         except Exception as exc:

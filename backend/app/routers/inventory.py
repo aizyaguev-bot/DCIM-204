@@ -1,4 +1,5 @@
 """Barcode lookup and equipment tracking; uses the same records as DCIM and Twin."""
+from copy import deepcopy
 from typing import Literal
 from uuid import uuid4
 
@@ -13,11 +14,12 @@ from .. import inventory_store as store
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 MAIN_STORAGE = "Storage-Main"
+STORAGE_SHELVES = 16   # Main storage is a storage unit of shelves 1-16 (u 0 = the whole unit)
 
 
 class Placement(BaseModel):
     rack: str = Field(min_length=1, max_length=120)
-    u: int = Field(ge=0, le=42, strict=True)
+    u: int = Field(ge=0, le=store.MAX_U, strict=True)
     position: str = Field(default="", max_length=80)
 
     @field_validator("rack", "position")
@@ -26,9 +28,11 @@ class Placement(BaseModel):
         return value.strip()
 
     @model_validator(mode="after")
-    def storage_is_one_unit(self):
-        if self.rack == MAIN_STORAGE and (self.u != 0 or self.position):
-            raise ValueError("Main storage is one location without individual shelves or positions")
+    def storage_shelves(self):
+        if self.rack == MAIN_STORAGE and self.u > STORAGE_SHELVES:
+            raise ValueError(f"Main storage has shelves 1-{STORAGE_SHELVES}; choose one of them or 0 for the whole storage unit")
+        if self.rack == MAIN_STORAGE and self.position:
+            raise ValueError("Main storage shelves have no positions; leave the position empty")
         return self
 
 
@@ -46,7 +50,33 @@ class Barcode(BaseModel):
         return value
 
 
-class RegisterItem(Placement, Barcode):
+class UnitDetails(BaseModel):
+    """Serial number, part number, model and MAC address of a unit, each optional. "serial" is also accepted as
+    "serial_number" (its stored name). Trimmed; blank means "none"; MAC stored as 00:1A:2B:3C:4D:5E."""
+    serial: str | None = Field(default=None, max_length=store.DETAIL_LIMITS["serial_number"])
+    part_number: str | None = Field(default=None, max_length=store.DETAIL_LIMITS["part_number"])
+    model: str | None = Field(default=None, max_length=store.DETAIL_LIMITS["model"])
+    mac: str | None = Field(default=None, max_length=store.DETAIL_LIMITS["mac"])
+
+    @model_validator(mode="before")
+    @classmethod
+    def serial_number_alias(cls, data):
+        if isinstance(data, dict) and "serial_number" in data and data.get("serial") is None:
+            data = {**data, "serial": data["serial_number"]}
+        return data
+
+    @field_validator("serial", "part_number", "model", "mac")
+    @classmethod
+    def clean(cls, value, info):
+        return None if value is None else store.clean_detail("serial_number" if info.field_name == "serial" else info.field_name, value)
+
+    def details(self):
+        """{stored field: cleaned value ('' = clear)} for the fields that were sent."""
+        sent = {"serial_number": self.serial, "part_number": self.part_number, "model": self.model, "mac": self.mac}
+        return {field: value for field, value in sent.items() if value is not None}
+
+
+class RegisterItem(Placement, Barcode, UnitDetails):
     name: str = Field(min_length=1, max_length=160)
     type: Literal["switch", "computer", "patchpanel", "cable", "pdu", "kvm", "ups", "other"] = "other"
 
@@ -92,8 +122,8 @@ async def inventory(response: Response, code: str | None = Query(default=None, m
     racks = await known_racks(db)
     data = store.read_items()
     items = [view_item(rack, item) for rack, group in data.items() for item in group]
-    key = code.strip().casefold() if code is not None else None
-    matches = [item for item in items if key in store.identifiers(item)] if key else []
+    keys = store.lookup_keys(code) if code is not None else set()
+    matches = [item for item in items if keys & store.identity_keys(item)] if keys else []
     set_headers(response, data)
     return {"items": items, "matches": matches, "racks": sorted(racks | set(data)), "history_limit": store.HISTORY_LIMIT}
 
@@ -106,6 +136,8 @@ async def register(body: RegisterItem, response: Response, if_match: str | None 
         validate_rack(body.rack, data, racks)
         store.ensure_unique(data, body.code)
         item = {"id": "ci-" + uuid4().hex, "name": body.name, "type": body.type, "barcode": body.code, "u": body.u, "shelf_position": body.position, "notes": ""}
+        store.apply_details(item, body.details())
+        store.ensure_unique_details(data, item)
         event = store.record(item, "registered", None, store.location(body.rack, item))
         item["last_seen_at"] = event["at"]
         data.setdefault(body.rack, []).append(item)
@@ -149,3 +181,31 @@ async def move(item_id: str, body: Placement, response: Response, if_match: str 
         store.write_items(data)
         set_headers(response, data)
         return view_item(body.rack, item)
+
+
+class DetailsUpdate(UnitDetails):
+    # True: only fields the unit does not have yet are filled (a scan of a known unit); a stored value is never changed.
+    only_missing: bool = False
+
+
+@router.post("/{item_id}/details")
+async def update_details(item_id: str, body: DetailsUpdate, response: Response, if_match: str | None = Header(default=None)):
+    """Set or clear a unit's serial number, part number, model and MAC; fields left out are kept. Its place is not changed."""
+    with store.locked_items() as data:
+        store.check_revision(data, if_match)
+        rack, item = find_item(data, item_id)
+        values = body.details()
+        if body.only_missing:
+            values = {field: value for field, value in values.items() if value and not str(item.get(field) or "").strip()}
+        updated = deepcopy(item)
+        changed = store.apply_details(updated, values)
+        if changed:
+            store.ensure_unique_details(data, updated, item_id, changed)
+            item.clear()
+            item.update(updated)
+            store.record(item, "details updated", store.location(rack, item), store.location(rack, item),
+                         ", ".join(store.DETAIL_LABELS[field] for field in changed))
+            store.write_items(data)
+        set_headers(response, data)
+        return view_item(rack, item)
+

@@ -1,12 +1,17 @@
 """
-Seed your real lab devices into the database.
-Run once after first install:  python seed.py
-Re-run any time to update labels or add devices (safe to run repeatedly).
+Seed your real lab devices into an empty database.
+Run once after first install:  python seed.py   (install.bat runs it)
+
+It adds the devices below only when the devices table is empty. Once the lab has devices it changes nothing: devices
+are added, edited and deleted in Lab Manager (Manage, and each device's window), so running it again never brings back
+a deleted device or overwrites a device's labels, name, address or rack.
 
 Reads PDU_USERNAME / PDU_PASSWORD / KVM_USERNAME / KVM_PASSWORD from .env
 """
 import asyncio, sys, os, json
 sys.path.insert(0, os.path.dirname(__file__))
+
+from sqlalchemy import func, select
 
 from app.database import init_db, AsyncSessionLocal
 from app.models import Device
@@ -79,6 +84,9 @@ DEVICES = [
 ]
 
 
+EXISTING = "Devices already exist: nothing seeded (seed.py only fills an empty database)"
+
+
 async def main():
     settings = get_settings()
     await init_db()
@@ -89,35 +97,31 @@ async def main():
     kvm_pass = settings.kvm_password
 
     async with AsyncSessionLocal() as db:
+        if await db.scalar(select(func.count()).select_from(Device)):
+            print(EXISTING)
+            return False
         for d in DEVICES:
             labels_str = json.dumps({str(k): v for k, v in d.get("labels", {}).items()})
-            existing = await db.get(Device, d["id"])
-            if existing:
-                existing.labels_json = labels_str
-                existing.name = d["name"]
-                existing.ip = d["ip"]
-                existing.rack = d.get("rack", "")
-                print(f"  updated: {d['name']} (labels refreshed)")
-            else:
-                is_pdu = d["kind"] == "pdu"
-                dev = Device(
-                    id=d["id"],
-                    kind=d["kind"],
-                    name=d["name"],
-                    model=d.get("model", ""),
-                    ip=d["ip"],
-                    rack=d.get("rack", ""),
-                    port_count=d.get("port_count", 0),
-                    labels_json=labels_str,
-                    username_enc=encrypt(pdu_user if is_pdu else kvm_user),
-                    password_enc=encrypt(pdu_pass if is_pdu else kvm_pass),
-                )
-                db.add(dev)
-                print(f"  added: {d['name']} ({d['ip']})")
+            is_pdu = d["kind"] == "pdu"
+            dev = Device(
+                id=d["id"],
+                kind=d["kind"],
+                name=d["name"],
+                model=d.get("model", ""),
+                ip=d["ip"],
+                rack=d.get("rack", ""),
+                port_count=d.get("port_count", 0),
+                labels_json=labels_str,
+                username_enc=encrypt(pdu_user if is_pdu else kvm_user),
+                password_enc=encrypt(pdu_pass if is_pdu else kvm_pass),
+            )
+            db.add(dev)
+            print(f"  added: {d['name']} ({d['ip']})")
 
         await db.commit()
 
     print("\nDone. All devices seeded.")
+    return True
 
 
 if __name__ == "__main__":

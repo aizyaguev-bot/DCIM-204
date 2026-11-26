@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient, BasicAuth
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app import ping_monitor as monitor
+from app import changes, ping_monitor as monitor
 from app.database import Base, get_db
 from app.models import Device, PingIncident, PingMonitorState, PingSample, PingTarget
 from app.routers import monitoring
@@ -313,3 +313,162 @@ async def test_background_loop_records_completion_and_releases_lease(monitor_db,
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_a_lab_servers_monitor_shows_the_rack_the_server_is_in_now(monitor_client, monitor_db, tmp_path, monkeypatch):
+    """Targets and incidents (list and CSV) show a lab server's current rack: its rack override, else its PDU's rack,
+    else its equipment unit's rack. A monitor of a server that is not in the lab keeps its stored rack. The stored copy
+    is never rewritten by a read."""
+    from app.routers import devices
+    monkeypatch.setattr(devices, "_BACKEND_DIR", tmp_path)
+    client = monitor_client
+    monitor.inventory_store.ITEMS_FILE.write_text(json.dumps({"Rack-05": [{"id": "s23", "type": "server", "name": "OPT23"}]}))
+    async with monitor_db() as db:
+        db.add(Device(id="pdu1", name="PDU-1", kind="pdu", ip="192.0.2.10", rack="Rack-01", port_count=8,
+                      labels_json=json.dumps({"1": "OPT21 (PSU1)", "2": "OPT22"})))
+        db.add_all([PingTarget(id="t21", source_key="server:opt21", name="OPT21", host="opt21", rack="Rack-01"),
+                    PingTarget(id="t22", source_key="server:opt22", name="OPT22", host="opt22", rack="Old", source="manual"),
+                    PingTarget(id="t23", source_key="server:opt23", name="OPT23", host="opt23", rack="Rack-01"),
+                    PingTarget(id="t99", source_key="server:bench-box", name="bench-box", host="10.0.0.9", rack="Bench",
+                               source="manual")])
+        db.add(PingIncident(target_id="t21", host="opt21", first_failed_at=time.time() - 60, last_failed_at=time.time()))
+        await db.commit()
+
+    async def shown():
+        targets = {t["id"]: t["rack"] for t in (await client.get("/api/monitoring")).json()["targets"]}
+        incidents = {i["target_id"]: i["rack"] for i in (await client.get("/api/monitoring/incidents")).json()}
+        return targets, incidents
+
+    assert await shown() == ({"t21": "Rack-01", "t22": "Rack-01", "t23": "Rack-05", "t99": "Bench"}, {"t21": "Rack-01"})
+    # The Racks page moves OPT21 (DCIM keys it by the lower-cased port label): every list follows at once.
+    (tmp_path / "rack_overrides.json").write_text(json.dumps({"opt21 (psu1)": "Rack-07"}))
+    assert await shown() == ({"t21": "Rack-07", "t22": "Rack-01", "t23": "Rack-05", "t99": "Bench"}, {"t21": "Rack-07"})
+    assert "OPT21,opt21,Rack-07" in (await client.get("/api/monitoring/incidents.csv")).text
+    edited = await client.put("/api/monitoring/targets/t21", json={"host": "opt21", "enabled": True, "revision": 0})
+    assert edited.status_code == 200 and edited.json()["rack"] == "Rack-07"
+    async with monitor_db() as db:
+        assert (await db.get(PingTarget, "t21")).rack == "Rack-01"
+    # The PDU moves to another rack: its servers (without an override) follow it.
+    (tmp_path / "rack_overrides.json").write_text("{}")
+    async with monitor_db() as db:
+        (await db.get(Device, "pdu1")).rack = "Rack-09"
+        await db.commit()
+    assert (await shown())[0] == {"t21": "Rack-09", "t22": "Rack-09", "t23": "Rack-05", "t99": "Bench"}
+
+
+async def test_a_finished_round_counts_for_live_sync(monitor_db, monkeypatch):
+    ran = asyncio.Event()
+
+    async def round(owner, factory):
+        ran.set()
+    monkeypatch.setattr(monitor, "run_round", round)
+    task = asyncio.create_task(monitor.monitor_loop(monitor_db))
+    try:
+        await asyncio.wait_for(ran.wait(), 2)
+        for _ in range(200):
+            if changes.current()["domains"]["monitoring"]:
+                break
+            await asyncio.sleep(0.01)
+        assert changes.current()["domains"]["monitoring"] == changes.current()["rev"] == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("OptXXX", None), ("OPTXX", None), ("optnxxx", None), ("OPT-XXX", None), (" optx ", None), ("empty", None),
+    ("KVM Power", None), ("Outlet 3", None),
+    ("OPT174", ("opt174", "OPT174", "opt174")), ("Optn45", ("optn45", "Optn45", "optn45")),
+    # A digit makes it a server name: "OPTX1" is not a placeholder.
+    ("OPTX1", ("optx1", "OPTX1", "optx1")), ("OPTN44 (PSU2)", ("optn44", "OPTN44", "optn44")),
+])
+def test_placeholder_names_are_not_servers(name, expected):
+    assert monitor.server_identity(name) == expected
+
+
+@pytest.mark.parametrize("email_alerts", [True, False])
+async def test_discovery_deletes_placeholder_monitors_with_their_history(monitor_db, monkeypatch, email_alerts):
+    """The live Lab Display showed "empty: ping probe error": monitors imported for placeholder labels before the rule
+    covered them stayed forever. Discovery deletes them (inventory monitors only) with every row that names them."""
+    from app import alerts
+    from app.config import Settings
+    from app.models import AlertCondition, AlertEmail, PingTargetName
+    settings = Settings(_env_file=None, email_alerts_enabled=email_alerts, smtp_host="mail.example.test",
+                        email_alerts_from="dcim@example.test")
+    monkeypatch.setattr(alerts, "get_settings", lambda: settings)
+    async with monitor_db() as db:
+        db.add(Device(id="pdu-prune", name="PDU 06", kind="pdu", ip="10.1.1.6", rack="Rack-06",
+                      labels_json=json.dumps({"1": "empty", "2": "KVM Power", "3": "OptXXX", "4": "OPT61"})))
+        db.add_all([
+            PingTarget(id="ghost-empty", source_key="server:empty", name="empty", host="empty", rack="Rack-06", status="error"),
+            PingTarget(id="ghost-kvm", source_key="server:kvm power", name="KVM Power", host="", rack="Rack-05"),
+            PingTarget(id="ghost-optx", source_key="server:optxxx", name="OptXXX", host="optxxx", rack="Rack-01", status="down"),
+            PingTarget(id="manual", source_key="server:optxx", name="OPTXX", host="192.0.2.9", source="manual"),
+            PingTarget(id="real", source_key="server:opt61", name="OPT61", host="opt61", rack="Rack-06"),
+            PingTarget(id="legacy", source_key="legacy", name="--", host=""),   # no "server:" key: not discovery's
+        ])
+        await db.flush()
+        db.add_all([
+            PingSample(target_id="ghost-optx", host="optxxx", checked_at=1000, status="down"),
+            PingSample(target_id="ghost-empty", host="empty", checked_at=1000, status="error"),
+            PingSample(target_id="real", host="opt61", checked_at=1000, status="down"),
+            PingIncident(target_id="ghost-optx", host="optxxx", first_failed_at=900, last_failed_at=1000),
+            PingIncident(target_id="ghost-optx", host="optxxx", first_failed_at=100, last_failed_at=200, ended_at=300,
+                         end_reason="recovered"),
+            PingIncident(target_id="real", host="opt61", first_failed_at=900, last_failed_at=1000),
+            PingIncident(target_id="manual", host="192.0.2.9", first_failed_at=900, last_failed_at=1000),
+            PingTargetName(target_id="ghost-kvm", override="KVM feed"),
+            PingTargetName(target_id="real", override="OPT61 build"),
+            AlertCondition(key="network:ghost-optx", configuration="[]", started_at=900, checked_at=1000, notified=True),
+            AlertCondition(key="network:ghost-empty", configuration="[]", started_at=None, checked_at=1000, notified=False),
+            AlertCondition(key="network:real", configuration="[]", started_at=900, checked_at=1000, notified=True),
+            AlertCondition(key="network:manual", configuration="[]", started_at=900, checked_at=1000, notified=True),
+        ])
+        await db.commit()
+
+    async def rows(model):
+        async with monitor_db() as db:
+            return (await db.execute(select(model))).scalars().all()
+
+    before = changes.current()["rev"]
+    async with monitor_db() as db:
+        await monitor.discover_targets(db)
+    assert sorted(t.id for t in await rows(PingTarget)) == ["legacy", "manual", "real"]
+    assert sorted(s.target_id for s in await rows(PingSample)) == ["real"]
+    incidents = await rows(PingIncident)
+    assert sorted(i.target_id for i in incidents) == ["manual", "real"]
+    assert all(i.ended_at is None for i in incidents), "real and manual incidents are untouched"
+    assert [(n.target_id, n.override) for n in await rows(PingTargetName)] == [("real", "OPT61 build")]
+    assert sorted(c.key for c in await rows(AlertCondition)) == ["network:manual", "network:real"]
+    mails = await rows(AlertEmail)
+    if email_alerts:
+        # The failure email sent for OptXXX is closed honestly: no "[DCIM recovered]" (no reply was observed).
+        assert [(m.condition_key, m.subject) for m in mails] == [("network:ghost-optx", "[DCIM closed] OptXXX: network reachability")]
+        assert "No recovery was observed" in mails[0].body and "placeholder" in mails[0].body
+    else:
+        assert mails == []
+    # Open pages are told: the monitoring domain moved.
+    after = changes.current()
+    assert after["rev"] == before + 1 and after["domains"]["monitoring"] == after["rev"]
+
+    # Idempotent: nothing is left to delete, nothing more is counted or sent, and no monitor is created again.
+    async with monitor_db() as db:
+        await monitor.discover_targets(db)
+    assert sorted(t.id for t in await rows(PingTarget)) == ["legacy", "manual", "real"]
+    assert len(await rows(AlertEmail)) == (1 if email_alerts else 0)
+    assert changes.current()["rev"] == after["rev"]
+
+
+async def test_a_round_never_probes_a_placeholder_monitor(monitor_db):
+    async with monitor_db() as db:
+        db.add_all([
+            PingTarget(id="ghost", source_key="server:optxxx", name="OptXXX", host="optxxx"),
+            PingTarget(id="one", source_key="server:opt1", name="Opt1", host="opt1"),
+        ])
+        await db.commit()
+        assert await monitor.claim_round(db, "worker", time.time(), ZoneInfo("Asia/Jerusalem"))
+    probe = AsyncMock(return_value=monitor.ProbeResult("up", 1.0))
+    await monitor.run_round("worker", monitor_db, probe)
+    probe.assert_awaited_once_with("opt1")
+    async with monitor_db() as db:
+        assert await db.get(PingTarget, "ghost") is None

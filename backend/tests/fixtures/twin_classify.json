@@ -1,0 +1,163 @@
+{
+  "about": "Hand-written cases of the 3D link rule (v2 spec section M.5). Each case: twin (a lab-data.json subset), live (what Lab Manager knows: servers, devices, rackItems, chillers, racks) and expected (linked: {twin id: Lab Manager uid}; only: the unlinked records with their reason, in any order). Read by frontend/src/__tests__/twin-classify.test.js (frontend/src/lab/twinRecords.js, and lab-twin/classify.js from WP-7) and by backend/tests/test_twin_classify.py (backend/app/lab_trash.py classify_twin, WP-D). Change a case only together with all three copies.",
+  "cases": [
+    {
+      "name": "pdu linked by device id; a second record with the same name as that device stays unlinked",
+      "twin": {
+        "items": [
+          {"id": "ITEM-A", "type": "pdu", "name": "PDU-Rack-01", "dcim": {"deviceId": "pdu1"}},
+          {"id": "ITEM-B", "type": "pdu", "name": "PDU 01", "dcim": {"deviceId": "pdu-old"}}
+        ]
+      },
+      "live": {"devices": [{"id": "pdu1", "kind": "pdu", "name": "PDU 01"}]},
+      "expected": {
+        "linked": {"ITEM-A": "dev:pdu1"},
+        "only": [{"id": "ITEM-B", "reason": "No PDU with id pdu-old or name PDU 01 in Lab Manager"}]
+      }
+    },
+    {
+      "name": "pdu linked by a unique normalized name (case and spaces ignored); a kvm id of the wrong kind does not link",
+      "twin": {
+        "items": [
+          {"id": "ITEM-0040", "type": "pdu", "name": "PDU-Rack-08", "dcim": {"deviceId": "pdu-rack08"}},
+          {"id": "ITEM-K", "type": "kvm", "name": "KVM  Spare", "dcim": {"deviceId": "pdu8"}}
+        ]
+      },
+      "live": {"devices": [{"id": "pdu8", "kind": "pdu", "name": "  pdu-rack-08 "}, {"id": "kvm9", "kind": "kvm", "name": "KVM spare"}]},
+      "expected": {
+        "linked": {"ITEM-0040": "dev:pdu8", "ITEM-K": "dev:kvm9"},
+        "only": []
+      }
+    },
+    {
+      "name": "two Lab Manager devices with the same name: the record is not linked; no device id gives the short reason",
+      "twin": {
+        "items": [
+          {"id": "ITEM-0041", "type": "kvm", "name": "KVM-Unit-1", "dcim": {"deviceId": "kvm-unit1"}},
+          {"id": "ITEM-N", "type": "kvm", "name": "KVM-Unit-9"}
+        ]
+      },
+      "live": {"devices": [{"id": "k1", "kind": "kvm", "name": "KVM-Unit-1"}, {"id": "k2", "kind": "kvm", "name": "kvm-unit-1"}]},
+      "expected": {
+        "linked": {},
+        "only": [
+          {"id": "ITEM-0041", "reason": "No KVM with id kvm-unit1 or name KVM-Unit-1 in Lab Manager"},
+          {"id": "ITEM-N", "reason": "No KVM named KVM-Unit-9 in Lab Manager"}
+        ]
+      }
+    },
+    {
+      "name": "opt: dcim.optKey first, then its identity, then the identity of the name",
+      "twin": {
+        "items": [
+          {"id": "ITEM-O1", "type": "opt", "name": "Optn85 (SSD)"},
+          {"id": "ITEM-O2", "type": "opt", "name": "Opt114 (VM)", "dcim": {"optKey": "opt114 (vm)"}},
+          {"id": "ITEM-O3", "type": "opt", "name": "Opt207", "dcim": {"optKey": "opt207"}},
+          {"id": "ITEM-O4", "type": "opt", "name": "anything", "dcim": {"optKey": "opt11"}}
+        ]
+      },
+      "live": {"servers": [{"key": "optn85", "name": "optn85"}, {"key": "opt114", "name": "OPT114"}, {"key": "opt11", "name": "OPT11"}]},
+      "expected": {
+        "linked": {"ITEM-O1": "server:optn85", "ITEM-O2": "server:opt114", "ITEM-O4": "server:opt11"},
+        "only": [{"id": "ITEM-O3", "reason": "No server named Opt207 in Lab Manager"}]
+      }
+    },
+    {
+      "name": "equipment: linked by a unique name, hidden by a Lab Manager unit on its shelf, else not in Lab Manager",
+      "twin": {
+        "dcim": {"uNumbering": "top-down"},
+        "setups": [{"id": "SETUP-001", "dcimRack": "Rack-01"}],
+        "shelves": [
+          {"id": "SHELF-01", "setup": "SETUP-001", "level": 1},
+          {"id": "SHELF-02", "setup": "SETUP-001", "level": 2},
+          {"id": "SHELF-03", "setup": "SETUP-001", "level": 3},
+          {"id": "SHELF-04", "setup": "SETUP-001", "level": 4}
+        ],
+        "items": [
+          {"id": "ITEM-E1", "type": "equip-switch", "name": "Switch 01", "setup": "SETUP-001", "shelf": "SHELF-04"},
+          {"id": "ITEM-E2", "type": "equip-other", "name": "SSD SA", "setup": "SETUP-001", "shelf": "SHELF-03"},
+          {"id": "ITEM-E3", "type": "equip-other", "name": "Rosalind", "setup": "SETUP-001", "shelf": "SHELF-01"},
+          {"id": "ITEM-E4", "type": "equip-other", "name": "twin box", "setup": "SETUP-001", "shelf": "SHELF-02"}
+        ]
+      },
+      "live": {
+        "rackItems": {"Rack-01": [{"id": "ci-1", "name": "switch  01", "u": 1}, {"id": "ci-x", "name": "Other box", "u": 2}],
+                      "Rack-02": [{"id": "ci-2", "name": "Twin Box", "u": 1}, {"id": "ci-3", "name": "twin box", "u": 2}]},
+        "racks": ["Rack-01", "Rack-02"]
+      },
+      "expected": {
+        "linked": {"ITEM-E1": "unit:ci-1", "SETUP-001": "rack:Rack-01"},
+        "only": [
+          {"id": "ITEM-E2", "reason": "Hidden in 3D: a Lab Manager unit is on its shelf"},
+          {"id": "ITEM-E3", "reason": "No unit named Rosalind in Lab Manager"},
+          {"id": "ITEM-E4", "reason": "No unit named twin box in Lab Manager"}
+        ]
+      }
+    },
+    {
+      "name": "chillers: each Lab Manager cooling unit takes the first 3D chiller on its rack's setup",
+      "twin": {
+        "setups": [{"id": "SETUP-001", "dcimRack": "Rack-01"}, {"id": "SETUP-002", "dcimRack": "Rack-02"}],
+        "items": [
+          {"id": "ITEM-C1", "type": "chiller", "name": "Cooling unit 1", "setup": "SETUP-001"},
+          {"id": "ITEM-C1B", "type": "chiller", "name": "Cooling unit 1b", "setup": "SETUP-001"},
+          {"id": "ITEM-C2", "type": "chiller", "name": "Cooling unit 2", "setup": "SETUP-002"}
+        ]
+      },
+      "live": {"chillers": [{"id": "ch1", "rack": "Rack-01"}], "racks": ["Rack-01", "Rack-02"]},
+      "expected": {
+        "linked": {"ITEM-C1": "cooling:ch1", "SETUP-001": "rack:Rack-01", "SETUP-002": "rack:Rack-02"},
+        "only": [
+          {"id": "ITEM-C1B", "reason": "No cooling unit on Rack-01 in Lab Manager"},
+          {"id": "ITEM-C2", "reason": "No cooling unit on Rack-02 in Lab Manager"}
+        ]
+      }
+    },
+    {
+      "name": "other item types are never linked",
+      "twin": {
+        "items": [
+          {"id": "ITEM-0044", "type": "cart", "name": "Blue mobile stand"},
+          {"id": "ITEM-0045", "type": "ladder", "name": "Yellow step ladder"},
+          {"id": "ITEM-0048", "type": "misc", "name": "Wall panel"}
+        ]
+      },
+      "live": {"servers": [{"key": "blue mobile stand", "name": "Blue mobile stand"}]},
+      "expected": {
+        "linked": {},
+        "only": [
+          {"id": "ITEM-0044", "reason": "3D only"},
+          {"id": "ITEM-0045", "reason": "3D only"},
+          {"id": "ITEM-0048", "reason": "3D only"}
+        ]
+      }
+    },
+    {
+      "name": "setups: linked when dcimRack is a Lab Manager rack row, else unmapped",
+      "twin": {
+        "setups": [
+          {"id": "SETUP-001", "name": "Rack L1", "dcimRack": "Rack-01"},
+          {"id": "SETUP-009", "name": "Rack X", "dcimRack": "Rack-09"},
+          {"id": "SETUP-010", "name": "Bench rack"}
+        ]
+      },
+      "live": {"racks": ["Rack-01", "Rack-02"]},
+      "expected": {
+        "linked": {"SETUP-001": "rack:Rack-01"},
+        "only": [
+          {"id": "SETUP-009", "reason": "Not mapped to a Lab Manager rack"},
+          {"id": "SETUP-010", "reason": "Not mapped to a Lab Manager rack"}
+        ]
+      }
+    },
+    {
+      "name": "storage cabinets are never linked",
+      "twin": {"storage": [{"id": "STORAGE-01", "name": "Grey cabinet"}, {"id": "STORAGE-02", "name": "Roller-tray stand"}]},
+      "live": {"racks": ["Storage-Main"]},
+      "expected": {
+        "linked": {},
+        "only": [{"id": "STORAGE-01", "reason": "3D only"}, {"id": "STORAGE-02", "reason": "3D only"}]
+      }
+    }
+  ]
+}

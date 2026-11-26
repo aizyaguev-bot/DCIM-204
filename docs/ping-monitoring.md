@@ -2,6 +2,15 @@
 
 Open **Ping Monitor**, or `/?tab=monitoring`, in Lab Manager.
 
+Click a server's name (or **Details**) to open its server window on **Activity**: the
+monitor's status, the PDU/KVM links with each device's check time, the settings, the
+last 60 checks and a timeline of its ping incidents (Admins also see when it was
+removed from the lab or restored, and the units on its floor show when they were
+moved). The same window opens from Racks and every other place that names the
+server, and `/?tab=monitoring&srv=opt11&sec=activity` links straight to it. A monitor
+that is not a server (no server name, for example a printer) opens a side panel
+with the same details and settings instead.
+
 ## Schedule and operation
 
 - Every day, 07:00 through 19:55: checks every 5 minutes.
@@ -27,31 +36,50 @@ the same host; descriptive OPT suffixes such as `(SSD)` are stripped. Default
 `Port 1` / `Outlet 1` labels are ignored. Names that cannot be DNS hostnames, such
 as `Opt (unlabeled)`, appear as **Needs address** and are not probed.
 
+Placeholder labels are not servers and get no monitor: `Empty`, `KVM Power`, `PDU`,
+`Spare`, `Free`, `N/A`, `--`, and `OptXXX` / `OPTN-XX` (opt or optn followed only by
+x's, for a server not known yet; `OPTX1` has a digit and is a server). A monitor that
+discovery imported for such a label earlier is deleted at the next discovery with its
+checks, incidents, display alias and alert state (one **[DCIM closed]** email when a
+failure email had been sent; it never claims a recovery). Monitors added with **Add
+server** are never deleted by this rule.
+
 Valid names are used as DNS hostnames by default. The Lab Manager host must resolve
-them to the intended server. Choose **Details**, enter an IP or hostname, and save
-to override any address. Computer inventory `ip`/`hostname` fields are imported
+them to the intended server. In the server window's **Activity**, enter an IP or
+hostname and choose **Save settings** to override any address (Operator; the save is
+refused with "Someone else changed this server" when another session saved first,
+and the form then offers the current values or keeps yours). A server without a
+monitor shows **Monitor this server** there, with its name as the address. Computer inventory `ip`/`hostname` fields are imported
 when a monitoring target is first created. Later discovery preserves overrides.
 Use **Add server** for machines without port labels or computer inventory entries.
 
 Discovery retains imported targets and history even if an inventory entry is
-removed or renamed. Pause an old target in **Details** when retiring/renaming it.
+removed. Renaming through Lab Manager's server rename or cascading port label
+editor retains the monitor ID, address, pause state, history and owner. A rename
+that would collide with another monitor or assigned owner is rejected.
+The displayed name follows the current inventory. In the settings, untick **Use the
+inventory name** to set a display alias, or tick it again to restore the inventory
+name. Aliases do not change probe addresses or port links.
 This prevents a failed device discovery from silently removing monitoring.
 Pausing or changing an address closes an open incident with that reason, without
-claiming the old address recovered. Old checks retain the address actually tested.
+claiming the old address recovered. Unticking **Monitor this server** asks first for
+that reason; the change applies with **Save settings**. Old checks retain the address actually tested.
 
 ## Results and retention
 
 ### PDU and KVM columns
 
 Each scheduled round also reads each enabled PDU/KVM once, with up to eight devices
-in parallel and a twelve-second deadline per device. **Check all now** refreshes
+in parallel and a 45-second deadline per PDU / 20-second deadline per KVM. A PDU
+read can require several waves of outlet requests; the former 12-second deadline
+could cut a healthy but slow device read short. **Check all now** refreshes
 these observations too. Port associations use the same normalized server names as
 discovery, with current saved labels taking precedence. A matching rack or a device
 management address alone never establishes a server-to-port association.
 
 All matching feeds/ports are displayed, including multiple PDU outlets for a server.
-Each entry identifies the device and outlet/port number. **Details** shows its check
-time and explanation. The **Needs attention** filter includes failed, missing,
+Each entry identifies the device and outlet/port number. The server window's
+**Activity** shows its check time and explanation. The **Needs attention** filter includes failed, missing,
 disabled, unverified and overdue connections even when the server answers ping.
 
 - PDU **Power on/off/cycling** describes the actual reported outlet state. It is not
@@ -61,7 +89,10 @@ disabled, unverified and overdue connections even when the server answers ping.
 - Older KVMs may expose only configured ports. **Configured · unverified** means
   the device responded and lists the port, but live console health is unknown.
   A static fallback list or an unknown state displays **Port unverified**, never green.
-- **Check failed** can mean a network, authentication or API failure. The previous
+- **Check failed** can mean a network, authentication or API failure. New checks
+  save a sanitized explanation (authentication, connection, timeout or unusable
+  API response), shown directly in the table and in the server window. Before the first
+  new check, old snapshots still show the generic message. The previous
   success is not reused. **Not linked** means no matching port label was found;
   configure the correct server name on its PDU/KVM port in the existing device UI.
 - After a missed schedule plus two minutes, a device observation becomes **Overdue**.
@@ -98,8 +129,10 @@ These are observations, not exact continuous downtime: an outage can start after
 the previous successful probe and end before the next one. Failures lasting a few
 minutes can fall entirely between probes, particularly during the 30-minute night
 schedule. An ICMP failure alone does not prove a server crashed; network or firewall
-changes can also prevent replies. There are no email/chat notifications in this
-version; incidents and current states are visible in the tab and CSV.
+changes can also prevent replies. Optional email notifications, including an
+additional one-minute probe mode, are described in [Email alerts](email-alerts.md).
+They are disabled until configured. Incidents and current states remain visible
+in the tab and CSV regardless of email configuration.
 
 ## Installation / update
 
@@ -135,6 +168,26 @@ an integrated release; do not reset the VM to an older version to bypass it.
 For a locally modified npm lockfile, the optional `--backup-frontend-lock` flag
 saves its exact contents in the private backup before installing the reviewed
 lockfile. Other local source edits still prevent installation.
+
+For the v3 design and real user accounts, also pass `--enable-accounts`. The
+installer verifies account-mode startup and sign-in with an isolated test admin
+before changing the running site. It then enables accounts using the existing
+site password for the first admin and checks version, inventory and monitoring
+through an authenticated session. The previous `.env` is restored on failure.
+The lab's deployment URL is http://ftlab.nvidia.com:8000/; open Dashboard after
+installation. See [user accounts](user-accounts.md) for roles and sign-in.
+
+If installation reports `The old backend has not stopped`, the graceful shutdown
+timed out before any application files changed. The optional
+`--finish-stuck-shutdown` takes a consistent online SQLite snapshot and copies the
+runtime configuration into the private backup's `before-stop/` directory before
+sending any shutdown signal. After a normal 20-second shutdown attempt, it
+rechecks process ownership, the project's backend directory, uvicorn arguments
+and process start time, and finishes stopping only that verified process. It
+still aborts if the snapshot fails, the process no longer matches, or port 8000
+remains occupied. Normal post-shutdown backups and rollback checks remain in use.
+Newly started backends limit uvicorn's wait for connections and background
+requests during shutdown to 10 seconds.
 
 ### Manual installation
 
@@ -189,8 +242,21 @@ cd backend
 python -m pytest tests/ --ignore=tests/test_kvm_regression.py
 ```
 
-`test_kvm_regression.py` requires the live lab; run it on the deployment host when
-applicable. After deployment, use **Check all now**, verify a known server, and
+`test_kvm_regression.py` drives the live lab, so it is opt-in: unless both
+`DCIM_LIVE_KVM_TESTS=1` and `DCIM_TEST_BASE_URL` are set, every test is skipped and no
+request is sent. Run it on the deployment host:
+
+```sh
+cd backend
+DCIM_LIVE_KVM_TESTS=1 DCIM_TEST_BASE_URL=http://localhost:8000 python -m pytest tests/test_kvm_regression.py -v
+```
+
+Credentials come only from the environment: `DCIM_TEST_USERNAME` and `DCIM_TEST_PASSWORD`
+(an Operator or Admin account) in accounts mode, or `LAB_MANAGER_PASSWORD` in
+shared-password mode. `deploy.sh` runs this command after the restart and passes only those
+three values from the repository `.env`; values already in the environment win.
+
+After deployment, use **Check all now**, verify a known server, and
 confirm there are no **Needs address**, **Probe error** or **Overdue** entries left
 unexplained. The implementation was tested locally; lab DNS/ICMP connectivity must
 be verified from the real monitoring host.
