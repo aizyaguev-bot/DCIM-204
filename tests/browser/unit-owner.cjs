@@ -167,10 +167,21 @@ const NOTE=(server,storage=false)=>`From ${server}, the server on this ${storage
   const editSync=Math.round((Date.now()-t2)/1000);
   assert.equal(await notes.inputValue(),'unsaved note','the unsaved edit is kept');
   assert.deepEqual(await ownerOf(RACK,u1,TRAY),[D,S1]);
+  // "Open <server>" with an unsaved edit asks first: Cancel keeps the unit window and the edit; OK opens the server.
+  const asked=[];
+  page.removeAllListeners('dialog');
+  page.on('dialog',d=>{asked.push(d.message());(asked.length===1?d.dismiss():d.accept()).catch(()=>{});});
+  await openServer.click();
+  await page.waitForTimeout(300);
+  assert.deepEqual(asked,[`Discard your unsaved changes to ${TRAY_NAME} and open ${S1}?`]);
+  assert.equal(await notes.inputValue(),'unsaved note','Cancel keeps the unit window and its unsaved edit');
   await openServer.click();
   const sw=page.locator('[data-window="server"]');
   await sw.locator('h2',{hasText:S1}).waitFor();
   await uw.waitFor({state:'detached'});
+  assert.equal(asked.length,2,'OK on the second ask opened the server');
+  page.removeAllListeners('dialog');
+  page.on('dialog',d=>{errors.push('native dialog: '+d.message());d.dismiss().catch(()=>{});});
   const serverOwner=sw.getByLabel(`Owner for ${S1}`,{exact:true});
   await serverOwner.waitFor();
   const t1=Date.now();
@@ -182,13 +193,10 @@ const NOTE=(server,storage=false)=>`From ${server}, the server on this ${storage
   await page.keyboard.press('Escape');await sw.waitFor({state:'detached'});
   await uw.locator('h2',{hasText:TRAY_NAME}).waitFor();
   await readOnlyOwner(A,S1);
-  // "Open <server>" with an unsaved edit: the old Racks panel hid it until the edit was saved or reset. Report what the
-  // window does with the draft instead of failing on it (UnitWindow.jsx is not this suite's file).
-  const draft=await notes.inputValue();
-  if(draft!=='unsaved note')known.push(`UO-4 "Open ${S1}" in the unit window replaced it while its Notes had an unsaved edit; closing the server window brought the unit window back with Notes "${draft}" (the unsaved "unsaved note" was dropped without a warning)`);
-  else await notes.fill('');
+  // the edit the user chose to discard is gone
+  assert.notEqual(await notes.inputValue(),'unsaved note','the discarded edit is not brought back');
   assert.ok(await same(),'no page reload');
-  passed.push(`UO-4 unit window: ${TRAY_NAME}'s owner ${C} is read-only, "${NOTE(S1)} Change it on the server.", no select, "Open ${S1}" reachable by keyboard; ${S1}'s owner set to ${D} in another session reaches the open window after ${editSync} s with its unsaved note kept; "Open ${S1}" → the server window's owner set to ${A}: the unit shows ${A} in ${ms} ms; closing the server window returns to the unit window (${A}); no reload`);
+  passed.push(`UO-4 unit window: ${TRAY_NAME}'s owner ${C} is read-only, "${NOTE(S1)} Change it on the server.", no select, "Open ${S1}" reachable by keyboard; ${S1}'s owner set to ${D} in another session reaches the open window after ${editSync} s with its unsaved note kept; "Open ${S1}" with the unsaved note asks first (Cancel keeps it, OK discards it) → the server window's owner set to ${A}: the unit shows ${A} in ${ms} ms; closing the server window returns to the unit window (${A}); no reload`);
 
   // ── UO-5 Move… to another server's floor: that server's owner; to the rack level: its own saved owner, editable ──
   const mv=page.locator('[data-dialog="unit-move"]');

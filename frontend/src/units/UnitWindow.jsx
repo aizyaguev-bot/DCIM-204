@@ -110,12 +110,15 @@ function MoveUnitDialog({ item, rack, data, act, onClose }) {
   </div>;
 }
 
-function OwnerBlock({ item, rack, owner, server, can, act, data }) {
+function OwnerBlock({ item, rack, owner, server, can, act, data, dirtyRef }) {
   const storage = !rackHasFloors(rack);
   if (server) return <div data-unit-owner="derived">
     <p dir="auto"><strong data-owner-value="">{owner || "No owner"}</strong></p>
     <p className="lab-window-muted mt-1" id="unit-owner-from" dir="auto">{ownerFromText(server, storage)}{can.operate ? " Change it on the server." : ""}</p>
-    <button type="button" className="lab-window-link mt-1" data-action="open-owner-server" onClick={() => act.openServer(server.key)}>Open <bdi>{server.name}</bdi></button>
+    <button type="button" className="lab-window-link mt-1" data-action="open-owner-server" onClick={() => {
+      if (dirtyRef?.current && !window.confirm(`Discard your unsaved changes to ${item.name || item.id} and open ${server.name}?`)) return;
+      act.openServer(server.key);
+    }}>Open <bdi>{server.name}</bdi></button>
   </div>;
   if (!can.operate) return <p dir="auto" data-unit-owner="own"><span data-owner-value="">{owner || "No owner"}</span></p>;
   return <div data-unit-owner="own">
@@ -135,6 +138,7 @@ const unitChoices = rackItems => Object.entries(rackItems && typeof rackItems ==
 export default function UnitWindow({ target, onClose }) {
   const { data, act, can, open } = useLabWindow();
   const busyRef = useRef(false);
+  const dirtyRef = useRef(false);   // UnitForm has unsaved edits
   const [dialog, setDialog] = useState(null);   // "move" | "scan" | null
   const seen = useRef(false);
   const rackOrder = useRackOrder();
@@ -184,10 +188,10 @@ export default function UnitWindow({ target, onClose }) {
     </>}
     deleteTarget={{ kind: "unit", id: String(item.id) }} deleteRole="operator" maybeGone={notSeen}>
     <WindowSection title="Owner" id="owner">
-      <OwnerBlock item={item} rack={rack} owner={owner} server={server} can={can} act={act} data={data}/>
+      <OwnerBlock item={item} rack={rack} owner={owner} server={server} can={can} act={act} data={data} dirtyRef={dirtyRef}/>
     </WindowSection>
     <WindowSection title="Details" id="details">
-      {can.operate ? <UnitForm item={item} rack={rack} data={data} act={act} busyRef={busyRef}/>
+      {can.operate ? <UnitForm item={item} rack={rack} data={data} act={act} busyRef={busyRef} dirtyRef={dirtyRef}/>
         : <UnitDetails item={item} rack={rack} owner={owner} server={server}/>}
     </WindowSection>
     <WindowSection title="History" id="history" collapsible defaultOpen={false}>

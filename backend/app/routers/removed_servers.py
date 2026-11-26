@@ -71,7 +71,7 @@ MAX_NAME = 200
 
 NOT_A_SERVER = "{} is not a server name."
 UNKNOWN = "No server named {} is in the lab."
-ALREADY = "{} is already removed. Restore it from the server window (Inventory › Removed)."
+ALREADY = "{} is already removed. Restore it from Manage › Deleted."
 NOT_REMOVED = "This server is not in the removed list any more. Reload the list."
 PLAN_CHANGED = "The server or the rack layout changed since the preview. Nothing was removed; preview again."
 RELOAD = "Reload the removed servers list before saving."

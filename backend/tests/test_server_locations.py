@@ -1391,7 +1391,7 @@ async def test_units_follow_keeps_the_units_of_a_shared_floor_and_moves_none_wit
 # ── One server window (WP-B): /locations floors and flags, removed servers, the switch in a move plan, clear-server
 #    and the rack a move to ports names ──────────────────────────────────────────────────────────────────────────────
 
-REMOVED_TEXT = "{} was removed from the lab. Restore it first (Inventory › Removed)."
+REMOVED_TEXT = "{} was removed from the lab. Restore it first (Manage › Deleted)."
 
 
 def write_removed(folder, key, name, ports):

@@ -136,6 +136,7 @@ const ALLOWED_WRITES = [
     const off = page.waitForResponse(r => new URL(r.url()).pathname === '/api/pdus/pdu1/outlets/3/power');
     await page.getByRole('button', { name: 'Power off OPT13' }).click();
     assert.equal((await off).status(), 200);
+    assert.equal(admin.dialogs.at(-1), 'Power off OPT13 (PDU 01 · outlet 3)?', 'the PDU window names the outlet before it switches');
     await page.getByRole('button', { name: 'Power on OPT13' }).waitFor();
     await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => /Turn on all outlets/.test(b.textContent) && !b.disabled));
     const posts = [];

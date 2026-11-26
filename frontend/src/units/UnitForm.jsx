@@ -63,7 +63,7 @@ const duplicateField = (error, changes = {}) => (!error?.duplicate ? "" : /MAC a
 
 // The editable unit (Operator). props: item and rack (the saved unit, latest), data (the window's lab data: rackItems
 // and its ETag), act (the window's actions), busyRef (the window waits for a running save before it closes).
-export function UnitForm({ item, rack, data, act, busyRef }) {
+export function UnitForm({ item, rack, data, act, busyRef, dirtyRef }) {
   // Only the fields edited here are in the draft; every other field shows the saved unit as it is now.
   const [draft, setDraft] = useState({});
   const [busy, setBusy] = useState(false);
@@ -113,6 +113,7 @@ export function UnitForm({ item, rack, data, act, busyRef }) {
   const barcodeError = taken?.field === "barcode" && barcode === taken.value ? taken.message : "";
   const detailError = Object.keys(detailErrors).length > 0 || !!barcodeError;
   const dirty = Object.keys(changes).length > 0;
+  if (dirtyRef) dirtyRef.current = dirty;   // the window asks before "Open <server>" drops these edits
   const changedSince = dirty && baseRef.current != null && baseRef.current !== JSON.stringify(item);
   const ready = data.rackItems != null && !!data.etags?.rackItems;
 

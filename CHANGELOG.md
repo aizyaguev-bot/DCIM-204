@@ -2,6 +2,18 @@
 
 ---
 
+## v2.47.1 — 2026-11-26 — Outlet switches in the PDU window always ask; no lost unit edits
+
+### Fixed
+- **PDU window:** every outlet On, Off and Cycle asks first and names the outlet (server name,
+  PDU and outlet number), like the server window and Racks power.
+- **Unit window:** "Open <server>" with unsaved changes asks before it discards them; Cancel
+  keeps the unit window and your edits.
+- Messages that pointed to pages that no longer exist now say where to go: "Restore it from
+  Manage › Deleted", and "To move a server, open it (click its name) and use Move".
+
+---
+
 ## v2.47.0 — 2026-11-25 — One place to manage everything: the Manage tab, a window per item, Delete and Restore
 
 ### Added

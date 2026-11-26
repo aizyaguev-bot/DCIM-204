@@ -200,7 +200,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
             <NameSyncNotice notice={nameSync.notice} />
-            {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these outlet labels on {device.name}; renaming a server to a new name asks whether its other feeds, KVM port and rack position follow. To move a server, use Admin → Locations → Move.</p>}
+            {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these outlet labels on {device.name}; renaming a server to a new name asks whether its other feeds, KVM port and rack position follow. To move a server, open it (click its name) and use Move.</p>}
             {outlets.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
                 {state === "offline" ? `Cannot reach device: ${status.error}` : state === "unavailable" ? `Status unavailable: ${status.error}` : "Loading…"}
@@ -329,7 +329,7 @@ export default function PduDetail({ device, status, maintenance, maintenanceMode
 function MoveHint({ id, hint, noun }) {
   return (
     <p id={id} className="text-[11px] leading-snug text-amber-300">
-      {hint.name} is already on {hint.where.join(", ")}. Saving changes only this {noun}. To move a server use Locations → Move.
+      {hint.name} is already on {hint.where.join(", ")}. Saving changes only this {noun}. To move a server, open it (click its name) and use Move.
     </p>
   );
 }

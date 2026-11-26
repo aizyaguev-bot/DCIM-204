@@ -341,7 +341,7 @@ async def test_names_that_are_no_server_unknown_or_already_removed(lab):
         assert (await remove(c)).status_code == 200
         r = await c.post("/api/removed-servers", json={"name": "optn45 (psu2)", "dry_run": True})
         assert r.status_code == 409 and r.json()["detail"] == (
-            "OPTN45 is already removed. Restore it from the server window (Inventory › Removed).")
+            "OPTN45 is already removed. Restore it from Manage › Deleted.")
         assert tag != await etag(c)
 
 
@@ -353,7 +353,7 @@ async def test_a_removed_server_is_marked_on_locations_and_never_moved_or_cleare
         rows = {s["key"]: s for s in (await c.get("/api/devices/locations")).json()["servers"]}
         assert (rows["optn45"]["removed"], rows["optn45"]["drawn"], rows["optn44"]["removed"]) == (True, None, False)
         state = await db_state(lab)
-        text = "OPTN45 was removed from the lab. Restore it first (Inventory › Removed)."
+        text = "OPTN45 was removed from the lab. Restore it first (Manage › Deleted)."
         for path, body in (("move-server", {"server": "optn45", "target_server": "optn44"}),
                            ("move-server", {"server": "optn44", "target_server": "OPTN45 (PSU2)", "swap": False}),
                            ("move-server", {"server": "optn45", "target_ports": [{"device_id": "pdu-a", "port": "6"}]}),

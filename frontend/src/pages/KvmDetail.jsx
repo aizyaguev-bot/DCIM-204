@@ -185,7 +185,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
             </div>
             {saveError && <p role="alert" className="mb-3 text-sm text-rose-300">Labels were not saved: {saveError}</p>}
             <NameSyncNotice notice={nameSync.notice} />
-            {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these port labels on {device.name}; renaming a server to a new name asks whether its other feeds, KVM port and rack position follow. To move a server, use Admin → Locations → Move.</p>}
+            {editMode && <p className="mb-3 text-xs text-zinc-400">Saving changes only these port labels on {device.name}; renaming a server to a new name asks whether its other feeds, KVM port and rack position follow. To move a server, open it (click its name) and use Move.</p>}
             {ports.length === 0 ? (
               <div className="text-zinc-600 text-sm text-center py-8">
                 {state === "offline" ? `Cannot reach device: ${status.error}` : state === "error" ? "The port list is unavailable." : state === "unavailable" ? `Status unavailable: ${status.error}` : "Loading…"}
@@ -208,7 +208,7 @@ export default function KvmDetail({ device, status, onBack, from, onPortClick, o
                         />
                         {moveHints[p.number] && (
                           <p id={`move-hint-kvm-${p.number}`} className="text-[11px] leading-snug text-amber-300">
-                            {moveHints[p.number].name} is already on {moveHints[p.number].where.join(", ")}. Saving changes only this port. To move a server use Locations → Move.
+                            {moveHints[p.number].name} is already on {moveHints[p.number].where.join(", ")}. Saving changes only this port. To move a server, open it (click its name) and use Move.
                           </p>
                         )}
                       </div>

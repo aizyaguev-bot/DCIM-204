@@ -675,7 +675,7 @@ _MOVE_NOT_RESTORED = ("The move failed and the rack layout could not be fully re
                       "Open the server and use Move to fix its rack place.")
 # A server an Admin removed from the lab (routers/removed_servers.py) is hidden everywhere: it is never moved, swapped
 # with or cleared until it is restored.
-REMOVED_SERVER = "{} was removed from the lab. Restore it first (Inventory › Removed)."
+REMOVED_SERVER = "{} was removed from the lab. Restore it first (Manage › Deleted)."
 _UNKNOWN_RACK = "There is no rack named {}. Choose one of the lab's racks."
 _RACK_CASES = "Several racks are named {} with different capitals ({}). Choose one of them exactly."
 

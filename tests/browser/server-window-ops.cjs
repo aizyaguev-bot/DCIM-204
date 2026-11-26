@@ -5,6 +5,9 @@
 // server keeps its side panel, and 3D selects srv:<DCIM id>. The console from the window is in kvm-launch.cjs.
 // Fixture: DCIM_TEST_ACCOUNTS=1 DCIM_FIXTURE_ONE_PLACE=1. It switches fixture outlets only (fake PDUs) and puts them back.
 const { chromium } = require('playwright');
+// The 3D twin is switched off (frontend/src/twinLinks.js TWIN_ENABLED false): the window then has no 3D tool, and the
+// 3D steps below run only while it is on.
+const TWIN = /export const TWIN_ENABLED = true;/.test(require('node:fs').readFileSync(require('node:path').join(__dirname, '../../frontend/src/twinLinks.js'), 'utf8'));
 const assert = require('node:assert/strict');
 const origin = process.env.DCIM_PREVIEW_URL || 'http://127.0.0.1:9730';
 const PASSWORD = 'test-password-123';
@@ -261,11 +264,13 @@ const PASSWORD = 'test-password-123';
     await openWindow(o, 'opt96', 'OPT96');
     assert.equal(await ow.locator('[data-tool="console"]').count(), 0, 'no KVM port: no Console');
     await openWindow(o, 'opt53', 'OPT53');
-    await ow.locator('[data-tool="3d"]').click();
-    await ow.waitFor({ state: 'detached' });
-    assert.equal(param(o, 'tab'), 'twin');
-    assert.equal(param(o, 'select'), 'srv:opt53 (psu1)', '3D selects srv:<first DCIM id>');
-    checks.push('Console and SSH for Operators (no Console without a KVM port); 3D opens the Twin on srv:opt53 (psu1)');
+    if (TWIN) {
+      await ow.locator('[data-tool="3d"]').click();
+      await ow.waitFor({ state: 'detached' });
+      assert.equal(param(o, 'tab'), 'twin');
+      assert.equal(param(o, 'select'), 'srv:opt53 (psu1)', '3D selects srv:<first DCIM id>');
+    } else assert.equal(await ow.locator('[data-tool="3d"]').count(), 0, 'no 3D tool while the 3D is off');
+    checks.push(`Console and SSH for Operators (no Console without a KVM port); ${TWIN ? '3D opens the Twin on srv:opt53 (psu1)' : 'no 3D tool (3D off)'}`);
 
     // 10. Viewer: read only in the window, and the API refuses power and monitor writes.
     const viewer = await login('viewer');
@@ -275,7 +280,7 @@ const PASSWORD = 'test-password-123';
     await vw.locator('[data-monitor-details]').waitFor();
     for (const selector of ['[data-power]', '[data-tool="console"]', '[data-tool="ssh"]', '.srv-feed-actions', '[data-monitor-settings]', '[data-monitor-add]'])
       assert.equal(await vw.locator(selector).count(), 0, `Viewer: no ${selector}`);
-    await vw.locator('[data-tool="3d"]').waitFor();
+    if (TWIN) await vw.locator('[data-tool="3d"]').waitFor();
     const refused = await v.evaluate(async () => {
       const post = (path, body, method = 'POST') => fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
       return [await post('/api/pdus/pdu1/outlets/1/power', { action: 'off' }), await post('/api/monitoring/targets/t11', { host: 'x', enabled: false, revision: 0 }, 'PUT')];
